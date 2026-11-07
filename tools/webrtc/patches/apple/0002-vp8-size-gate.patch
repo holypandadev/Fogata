@@ -1,0 +1,130 @@
+The size check of the C++ wrapper (//libwebrtc/src/internal/vp8_size_gate) in the
+Objective-C SDK: every VP8 decoder refuses keyframes larger than 8K before decoding them,
+and RTCI420Buffer.refusedSize tells the size a stand-in picture stands for.
+diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
+index 36d7422943..ebee27fc26 100644
+--- a/sdk/BUILD.gn
++++ b/sdk/BUILD.gn
+@@ -602,6 +602,27 @@ if (is_ios || is_mac) {
+       ]
+     }
+ 
++    # Fogata: VP8 keyframes larger than 8K are refused before they are decoded, by
++    # the size check of the C++ wrapper (copied in as //libwebrtc).
++    rtc_library("fogata_vp8_size_gate") {
++      visibility = [ "*" ]
++      include_dirs = [ "//libwebrtc" ]
++      sources = [
++        "//libwebrtc/src/internal/vp8_size_gate.cc",
++        "//libwebrtc/src/internal/vp8_size_gate.h",
++      ]
++      deps = [
++        "../api:make_ref_counted",
++        "../api/environment",
++        "../api/video:encoded_image",
++        "../api/video:video_frame",
++        "../api/video_codecs:video_codecs_api",
++        "../modules/video_coding:video_codec_interface",
++        "../rtc_base:logging",
++        "//third_party/abseil-cpp/absl/strings",
++      ]
++    }
++
+     rtc_library("videoframebuffer_objc") {
+       visibility = [ "*" ]
+       sources = [
+@@ -613,8 +634,10 @@ if (is_ios || is_mac) {
+         "objc/components/video_frame_buffer/RTCCVPixelBuffer.h",
+         "objc/components/video_frame_buffer/RTCCVPixelBuffer.mm",
+       ]
++      include_dirs = [ "//libwebrtc" ]
+       deps = [
+         ":base_objc",
++        ":fogata_vp8_size_gate",
+         "../rtc_base:logging",
+         "//api/video:video_frame",
+         "//api/video:video_rtp_headers",
+@@ -863,9 +886,11 @@ if (is_ios || is_mac) {
+         "objc/api/video_codec/RTCVideoEncoderVP8.mm",
+       ]
+ 
++      include_dirs = [ "//libwebrtc" ]
+       deps = [
+         ":base_native_additions_objc",
+         ":base_objc",
++        ":fogata_vp8_size_gate",
+         ":helpers_objc",
+         ":wrapped_native_codec_objc",
+         "../api/video_codecs:scalability_mode",
+diff --git a/sdk/objc/api/video_codec/RTCVideoDecoderVP8.mm b/sdk/objc/api/video_codec/RTCVideoDecoderVP8.mm
+index 6f3f11f1fb..4e85b18b8d 100644
+--- a/sdk/objc/api/video_codec/RTCVideoDecoderVP8.mm
++++ b/sdk/objc/api/video_codec/RTCVideoDecoderVP8.mm
+@@ -20,6 +20,7 @@
+ 
+ #include "api/video_codecs/sdp_video_format.h"
+ #include "modules/video_coding/codecs/vp8/include/vp8.h"
++#include "src/internal/vp8_size_gate.h"
+ 
+ @interface RTC_OBJC_TYPE (RTCVideoDecoderVP8Builder)
+     : RTC_OBJC_TYPE(RTCNativeVideoDecoder) <RTC_OBJC_TYPE (RTCNativeVideoDecoderBuilder)>
+@@ -29,13 +30,13 @@
+ 
+     - (std::unique_ptr<webrtc::VideoDecoder>)build:
+         (const webrtc::Environment &)env {
+-      return webrtc::CreateVp8Decoder(env);
++      return libwebrtc::CreateVp8SizeGate(webrtc::CreateVp8Decoder(env));
+     }
+ 
+     - (std::unique_ptr<webrtc::VideoDecoder>)
+         buildWithEnvironment:(const webrtc::Environment &)env
+                       format:(const webrtc::SdpVideoFormat &)format {
+-      return webrtc::CreateVp8Decoder(env);
++      return libwebrtc::CreateVp8SizeGate(webrtc::CreateVp8Decoder(env));
+     }
+ 
+     @end
+diff --git a/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.h b/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.h
+index 7b669fa8a8..3c202ce940 100644
+--- a/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.h
++++ b/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.h
+@@ -18,6 +18,12 @@ NS_ASSUME_NONNULL_BEGIN
+ /** RTCI420Buffer implements the RTCI420Buffer protocol */
+ RTC_OBJC_EXPORT
+ @interface RTC_OBJC_TYPE (RTCI420Buffer) : NSObject<RTC_OBJC_TYPE(RTCI420Buffer)>
++
++/** Fogata: when the VP8 decoder refused a picture as larger than any is let through
++ *  (no side over 8192 pixels, at most 7680 by 4320 of them), it hands on this buffer, a
++ *  black picture of 2 by 2, in its place: the size refused. Zero for any other buffer. */
++@property(nonatomic, readonly) CGSize refusedSize;
++
+ @end
+ 
+ NS_ASSUME_NONNULL_END
+diff --git a/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.mm b/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.mm
+index 4682bf810f..240a93f4b5 100644
+--- a/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.mm
++++ b/sdk/objc/api/video_frame_buffer/RTCNativeI420Buffer.mm
+@@ -11,9 +11,11 @@
+ #import "RTCNativeI420Buffer+Private.h"
+ 
+ #include <cstdint>
++#include <optional>
+ 
+ #include "api/video/i420_buffer.h"
+ #include "rtc_base/checks.h"
++#include "src/internal/vp8_size_gate.h"
+ 
+ #if !defined(NDEBUG) && defined(WEBRTC_IOS)
+ #import <UIKit/UIKit.h>
+@@ -166,4 +168,10 @@
+ }
+ #endif
+ 
++- (CGSize)refusedSize {
++  std::optional<libwebrtc::Vp8Size> size =
++      libwebrtc::TooLargeFrameBuffer::RefusedSize(*_i420Buffer);
++  return size ? CGSizeMake(size->width, size->height) : CGSizeZero;
++}
++
+ @end

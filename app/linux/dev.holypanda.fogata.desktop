@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Fogata
+Comment=Voice, video and chat with your people, straight between computers
+Keywords=chat;voice;video;call;screen;friends;group;
+Exec=fogata
+Icon=dev.holypanda.fogata
+Terminal=false
+Categories=Network;Chat;InstantMessaging;VideoConference;
+StartupWMClass=dev.holypanda.fogata
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true

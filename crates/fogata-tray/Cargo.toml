@@ -1,0 +1,19 @@
+[package]
+name = "fogata-tray"
+description = "The tray icon on Linux, a StatusNotifierItem with its menu, over D-Bus"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+# The same zbus the system keychain already uses (through keyring), with its own executor.
+[target.'cfg(target_os = "linux")'.dependencies]
+futures.workspace = true
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zbus = "5.19.0"
+
+[lints]
+workspace = true

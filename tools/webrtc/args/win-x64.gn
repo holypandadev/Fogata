@@ -1,0 +1,6 @@
+# Windows x64, cross-compiled from Linux with a packaged Visual Studio toolchain (see
+# ../WINDOWS.md): clang-cl and Microsoft's C++ library, as webrtc-sdk's own Windows build.
+target_os = "win"
+target_cpu = "x64"
+is_clang = true
+use_custom_libcxx = false

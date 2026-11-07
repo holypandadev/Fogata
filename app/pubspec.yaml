@@ -1,0 +1,87 @@
+name: fogata
+description: "Fogata: voice, video and text rooms for groups of friends, device to device."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.5
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # The interface in several languages (lib/l10n, see docs/translating.md).
+  flutter_localizations:
+    sdk: flutter
+  # BSD-3-Clause; the version flutter_localizations takes.
+  intl: 0.20.3
+  file_selector: ^1.0.3
+  flutter_rust_bridge: 2.13.0
+  path_provider: ^2.1.5
+  rust_lib_fogata:
+    path: rust_builder
+  window_manager: ^0.5.2
+  # The icon in Windows' notification area and macOS's menu bar; our copy of tray_manager
+  # 0.5.3 (MIT) without its Linux plugin (see its FOGATA.md).
+  tray_manager:
+    path: third_party/tray_manager
+  # Our copy of flutter_webrtc 1.6.2+hotfix.4 (MIT), changed where noted in its
+  # FOGATA.md.
+  flutter_webrtc:
+    path: third_party/flutter_webrtc
+  # Our copy of desktop_drop 0.8.0 (Apache-2.0) that takes only files on Linux (see its
+  # FOGATA.md); 0.8.1 and later depend on dbus (MPL-2.0).
+  desktop_drop:
+    path: third_party/desktop_drop
+  # Videos with each system's own player.
+  fogata_video:
+    path: packages/fogata_video
+dev_dependencies:
+  # BSD-3-Clause; flutter_test takes it too. Timers and their clock in fake time.
+  fake_async: ^1.3.3
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  integration_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  generate: true
+  assets:
+    - assets/images/logo.png
+    - assets/images/welcome.png
+    - assets/avatars/
+    - assets/tray/
+    - assets/emoji/
+    # The splash's animation, and twice its size for screens of high density.
+    - assets/splash/splash.webp
+  fonts:
+    # Off macOS, which uses its own SF Pro.
+    - family: Inter
+      fonts:
+        - asset: assets/fonts/Inter-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/Inter-Medium.ttf
+          weight: 500
+        - asset: assets/fonts/Inter-SemiBold.ttf
+          weight: 600
+        - asset: assets/fonts/Inter-Bold.ttf
+          weight: 700
+    # Fogata Ember, the app's own face, for the wordmark alone (theme.dart's wordmark).
+    - family: FogataEmber
+      fonts:
+        - asset: assets/fonts/FogataEmber-Heavy.ttf
+          weight: 800
+    # Phosphor's icons (MIT, Phosphor-LICENSE.txt), by code point in icons.dart.
+    - family: PhosphorRegular
+      fonts:
+        - asset: assets/fonts/Phosphor-Regular.ttf
+    - family: PhosphorBold
+      fonts:
+        - asset: assets/fonts/Phosphor-Bold.ttf
+    - family: GeistMono
+      fonts:
+        - asset: assets/fonts/GeistMono-Regular.ttf
+          weight: 400
+        - asset: assets/fonts/GeistMono-Medium.ttf
+          weight: 500

@@ -1,0 +1,22 @@
+name: fogata_video
+description: Plays videos and reads their first picture with each system's own player.
+version: 0.1.0
+publish_to: none
+
+environment:
+  sdk: ^3.13.5
+  flutter: '>=3.3.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+flutter:
+  plugin:
+    platforms:
+      linux:
+        pluginClass: FogataVideoPlugin
+      macos:
+        pluginClass: FogataVideoPlugin
+      windows:
+        pluginClass: FogataVideoPluginCApi

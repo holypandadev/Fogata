@@ -1,0 +1,93 @@
+What patch 0001 needs to build on M156, found on the Mac: the simulcast factory's
+media constants (M156 split rtc_media_base), no HAVE_NO_MEDIA branches (gone in M156),
+and the network thread in place of webrtc-sdk's worker thread, which M156 no longer has
+apart from it (the audio device module is made and driven on that thread).
+
+diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
+index ebee27f..2439a99 100644
+--- a/sdk/BUILD.gn
++++ b/sdk/BUILD.gn
+@@ -969,7 +969,7 @@ if (is_ios || is_mac) {
+       deps = [
+         ":base_objc",
+         ":wrapped_native_codec_objc",
+-        "../media:rtc_media_base",
++        "../media:media_constants",
+         "../media:rtc_simulcast_encoder_adapter",
+       ]
+     }
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+index 5421994..0e8de05 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -123,9 +123,6 @@ - (instancetype)init {
+     initWithEncoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)encoderFactory
+             decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
+                audioDevice:(nullable id<RTC_OBJC_TYPE(RTCAudioDevice)>)audioDevice {
+-#ifdef HAVE_NO_MEDIA
+-  return [self initWithNoMedia];
+-#else
+   webrtc::PeerConnectionFactoryDependencies dependencies;
+   dependencies.env = CreateDefaultEnvironment();
+   dependencies.audio_encoder_factory =
+@@ -157,9 +154,6 @@ - (instancetype)init {
+                    decoderFactory:(nullable id<RTC_OBJC_TYPE(RTCVideoDecoderFactory)>)decoderFactory
+             audioProcessingModule:
+                 (nullable id<RTC_OBJC_TYPE(RTCAudioProcessingModule)>)audioProcessingModule {
+-#ifdef HAVE_NO_MEDIA
+-  return [self initWithNoMedia];
+-#else
+   std::unique_ptr<webrtc::VideoEncoderFactory> native_encoder_factory;
+   std::unique_ptr<webrtc::VideoDecoderFactory> native_decoder_factory;
+   if (encoderFactory) {
+@@ -185,7 +179,6 @@ - (instancetype)init {
+                networkControllerFactory:nullptr
+                   audioDeviceModuleType:audioDeviceModuleType
+                   bypassVoiceProcessing:bypassVoiceProcessing];
+-#endif
+ }
+ 
+ - (instancetype)initWithNativeDependencies:
+@@ -320,11 +313,6 @@ - (instancetype)initNative {
+     BOOL result = _networkThread->Start();
+     RTC_DCHECK(result) << "Failed to start network thread.";
+ 
+-    _workerThread = webrtc::Thread::Create();
+-    _workerThread->SetName("worker_thread", _workerThread.get());
+-    result = _workerThread->Start();
+-    RTC_DCHECK(result) << "Failed to start worker thread.";
+-
+     _signalingThread = webrtc::Thread::Create();
+     _signalingThread->SetName("signaling_thread", _signalingThread.get());
+     result = _signalingThread->Start();
+@@ -355,19 +343,18 @@ - (instancetype)initWithNativeAudioEncoderFactory:
+     webrtc::PeerConnectionFactoryDependencies dependencies;
+     dependencies.env = CreateDefaultEnvironment();
+     dependencies.network_thread = _networkThread.get();
+-    dependencies.worker_thread = _workerThread.get();
+     dependencies.signaling_thread = _signalingThread.get();
+     dependencies.network_monitor_factory = webrtc::CreateNetworkMonitorFactory();
+ 
+     if (audioDeviceModule != nullptr) {
+       _nativeAudioDeviceModule = audioDeviceModule;
+     } else if (audioDeviceModuleType == RTC_OBJC_TYPE(RTCAudioDeviceModuleTypeAudioEngine)) {
+-      _nativeAudioDeviceModule = _workerThread->BlockingCall([&bypassVoiceProcessing, &dependencies]() {
++      _nativeAudioDeviceModule = _networkThread->BlockingCall([&bypassVoiceProcessing, &dependencies]() {
+         return webrtc::make_ref_counted<webrtc::AudioEngineDevice>(*dependencies.env, bypassVoiceProcessing == YES);
+       });
+     } else {
+       _nativeAudioDeviceModule =
+-          _workerThread->BlockingCall([&bypassVoiceProcessing, &dependencies]() {
++          _networkThread->BlockingCall([&bypassVoiceProcessing, &dependencies]() {
+             return webrtc::CreateAudioDeviceModule(
+                 *dependencies.env,
+                 webrtc::AudioDeviceModule::AudioLayer::kPlatformDefaultAudio,
+@@ -377,7 +364,7 @@ - (instancetype)initWithNativeAudioEncoderFactory:
+ 
+     _audioDeviceModule =
+         [[RTC_OBJC_TYPE(RTCAudioDeviceModule) alloc] initWithNativeModule:_nativeAudioDeviceModule
+-                                                             workerThread:_workerThread.get()
++                                                             workerThread:_networkThread.get()
+                                                     audioDeviceModuleType:audioDeviceModuleType];
+     dependencies.adm = _nativeAudioDeviceModule;
+     dependencies.audio_encoder_factory = std::move(audioEncoderFactory);

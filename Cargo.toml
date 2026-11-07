@@ -1,0 +1,173 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = ["fuzz", "vendor/*", "crates/fogata-state/before"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "AGPL-3.0-only"
+publish = false
+
+[workspace.dependencies]
+fogata-core = { path = "crates/fogata-core" }
+fogata-denoise = { path = "crates/fogata-denoise" }
+fogata-crypto = { path = "crates/fogata-crypto" }
+fogata-friends = { path = "crates/fogata-friends" }
+fogata-proto = { path = "crates/fogata-proto" }
+fogata-net = { path = "crates/fogata-net" }
+fogata-state = { path = "crates/fogata-state" }
+fogata-tray = { path = "crates/fogata-tray" }
+fogata-update = { path = "crates/fogata-update" }
+fogata-media = { path = "crates/fogata-media" }
+fogata-mls = { path = "crates/fogata-mls" }
+fogata-voice = { path = "crates/fogata-voice" }
+
+anyhow = "1.0.104"
+argon2 = { version = "0.6.0", default-features = false, features = ["alloc"] }
+async-trait = "0.1"
+base64 = "0.23.1"
+blake3 = { version = "1.8.7", default-features = false, features = ["std", "pure"] }
+chacha20poly1305 = { version = "0.11.0", features = ["zeroize"] }
+clap = { version = "4.6.7", features = ["derive", "env"] }
+cpal = "0.18.2"
+curve25519-dalek = "5.0.0"
+ed25519-dalek = "3.0.0"
+futures = "0.3.34"
+getrandom = "0.4.3"
+hex = "0.4.3"
+hickory-resolver = { version = "0.26", default-features = false, features = ["system-config"] }
+hkdf = "0.13.0"
+hmac = "0.13.0"
+# HPKE (RFC 9180) for the MLS provider, with only what its one ciphersuite uses.
+hpke = { version = "0.15.0", default-features = false, features = ["alloc", "x25519", "chacha"] }
+# The system keychain: Keychain Services on macOS, Credential Manager on Windows, the
+# Secret Service elsewhere.
+keyring = { version = "4.2.0", default-features = false, features = ["v1"] }
+libp2p-stream = "0.5.0-alpha"
+# MLS (RFC 9420). Its published crypto providers are MPL-2.0; fogata-mls has its own.
+openmls = { version = "0.9.2", default-features = false }
+openmls_memory_storage = { version = "0.6.0", default-features = false }
+openmls_traits = { version = "0.6.0", default-features = false }
+libp2p = { version = "0.57.1", default-features = false, features = [
+    "cbor",
+    "dcutr",
+    "dns",
+    "ed25519",
+    "identify",
+    "kad",
+    "macros",
+    "mdns",
+    "noise",
+    "ping",
+    "quic",
+    "relay",
+    "request-response",
+    "rsa",
+    "tcp",
+    "tokio",
+    "yamux",
+] }
+qrcode = { version = "0.14.1", default-features = false }
+rand_core = { version = "0.10.1", default-features = false }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_bytes = "0.11.19"
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+spake2 = "0.4.0"
+thiserror = "2.0.21"
+tokio = { version = "1.53.3", features = ["full"] }
+tracing = "0.1.44"
+turn = "0.17.2"
+webrtc-util = { version = "0.17.2", default-features = false, features = ["conn"] }
+x25519-dalek = { version = "3.0.0", features = ["static_secrets"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zeroize = { version = "1.9.1", features = ["derive"] }
+
+[workspace.lints.rust]
+# Denied here so that fogata-ffi can allow it where it calls the system; every other crate
+# forbids it in its own root, and tools/check.sh pins where unsafe code is used.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+# Set by flutter_rust_bridge while it reads fogata-ffi's code.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+# Every unsafe block says, in a SAFETY comment, why it holds.
+undocumented_unsafe_blocks = "deny"
+
+# libp2p-quic with QUIC datagrams enabled and exposed (see vendor/libp2p-quic/src/datagram.rs),
+# libp2p-mdns whose expiry timer cannot overflow (see vendor/libp2p-mdns/src/behaviour/timer.rs),
+# libp2p-identify that lists Fogata's protocols only to members and friends (see
+# vendor/libp2p-identify/FOGATA.md), and turn whose nonces never used do not pile up (see
+# vendor/turn/FOGATA.md).
+[patch.crates-io]
+libp2p-quic = { path = "vendor/libp2p-quic" }
+libp2p-mdns = { path = "vendor/libp2p-mdns" }
+libp2p-identify = { path = "vendor/libp2p-identify" }
+turn = { path = "vendor/turn" }
+spake2 = { path = "vendor/spake2" }
+
+# Smaller, faster binaries for what ships: whole-program optimisation and no symbols.
+# Panics stay unwinding, so the bridge turns a panic into an error for the application.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
+# Dependencies keep only line tables in debug builds and tests (backtraces still name their
+# lines): with full debug information of every dependency, a test linking the whole core
+# outgrew the Windows linker's program database (LNK1140), and builds took far more disk.
+[profile.dev.package."*"]
+debug = "line-tables-only"
+
+# Key stretching of short friend codes is slow on purpose; keep it fast enough in debug builds.
+# Every group entry is signed, and its boxes and keys are curve points: unoptimised, checking
+# them takes about a hundred times as long, and the group tests check thousands.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3
+
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3
+
+# Attachments are sealed and read in 64 KiB chunks as they arrive and play.
+[profile.dev.package.chacha20]
+opt-level = 3
+
+[profile.dev.package.poly1305]
+opt-level = 3
+
+# The microphone's noise suppression runs every 10 ms on the audio thread; unoptimised it
+# would take several times as long in debug builds and tests.
+[profile.dev.package.fogata-denoise]
+opt-level = 3
+
+# Voice messages are encoded, decoded and stretched as they record and play.
+[profile.dev.package.fogata-voice]
+opt-level = 3
+
+[profile.dev.package.opusic-sys]
+opt-level = 3
+
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.easyfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3

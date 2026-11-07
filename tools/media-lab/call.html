@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Media bridge lab</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #111; --muted: #666; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; --muted: #999; } }
+  body { background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; margin: 16px; }
+  pre { font: 12px/1.35 ui-monospace, monospace; white-space: pre-wrap; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: start; }
+  canvas, video { width: 240px; height: 135px; background: #000; }
+  small { color: var(--muted); }
+</style>
+</head>
+<body>
+<h1>Media bridge lab</h1>
+<p><small>Two WebRTC peers in one page. Each may only use its own local Fogata TURN endpoint
+(relay-only ICE), so every packet between them crosses the Fogata connection between the two
+bridges. Query: <code>?a=3478&amp;b=3479&amp;ua=…&amp;ub=…&amp;pass=fogata&amp;video=1</code>, where
+<code>ua</code> is the TURN user bridge a printed for the member b, and <code>ub</code> the one bridge b
+printed for a.</small></p>
+<button id="start">Start call</button>
+<div class="row">
+  <div><small>sent video</small><br><canvas id="src" width="320" height="180"></canvas></div>
+  <div><small>received video</small><br><video id="dst" autoplay playsinline muted></video></div>
+</div>
+<pre id="out">not started</pre>
+<script>
+const q = new URLSearchParams(location.search);
+const pass = q.get('pass') || 'fogata';
+const withVideo = q.get('video') !== '0';
+const turn = (port, user) => ({
+  iceServers: [{ urls: `turn:127.0.0.1:${port}?transport=udp`, username: user, credential: pass }],
+  iceTransportPolicy: 'relay',
+});
+window.result = { state: 'idle' };
+
+async function start() {
+  document.getElementById('start').disabled = true;
+  const pc1 = new RTCPeerConnection(turn(q.get('a') || 3478, q.get('ua')));
+  const pc2 = new RTCPeerConnection(turn(q.get('b') || 3479, q.get('ub')));
+  pc1.onicecandidate = e => e.candidate && pc2.addIceCandidate(e.candidate);
+  pc2.onicecandidate = e => e.candidate && pc1.addIceCandidate(e.candidate);
+
+  // A steady tone, so the receiver can check that real audio arrives.
+  const ctx = new AudioContext();
+  await ctx.resume();
+  const osc = ctx.createOscillator();
+  osc.frequency.value = 440;
+  const toPeer = ctx.createMediaStreamDestination();
+  osc.connect(toPeer);
+  osc.start();
+  pc1.addTrack(toPeer.stream.getAudioTracks()[0], toPeer.stream);
+
+  if (withVideo) {
+    const canvas = document.getElementById('src');
+    const g = canvas.getContext('2d');
+    let frame = 0;
+    setInterval(() => {
+      frame++;
+      g.fillStyle = `hsl(${frame * 3 % 360} 70% 40%)`;
+      g.fillRect(0, 0, 320, 180);
+      g.fillStyle = '#fff';
+      g.font = '28px sans-serif';
+      g.fillText(`frame ${frame}`, 20, 100);
+    }, 33);
+    const vs = canvas.captureStream(30);
+    pc1.addTrack(vs.getVideoTracks()[0], vs);
+  }
+
+  let level = 0;
+  pc2.ontrack = e => {
+    if (e.track.kind === 'video') {
+      document.getElementById('dst').srcObject = new MediaStream([e.track]);
+      return;
+    }
+    // Some browsers only feed remote audio into Web Audio while an element plays it.
+    const keep = new Audio();
+    keep.srcObject = new MediaStream([e.track]);
+    keep.muted = true;
+    keep.play().catch(() => {});
+    const analyser = ctx.createAnalyser();
+    ctx.createMediaStreamSource(new MediaStream([e.track])).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    setInterval(() => {
+      analyser.getFloatTimeDomainData(buf);
+      level = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
+    }, 200);
+  };
+
+  const offer = await pc1.createOffer();
+  await pc1.setLocalDescription(offer);
+  await pc2.setRemoteDescription(offer);
+  const answer = await pc2.createAnswer();
+  await pc2.setLocalDescription(answer);
+  await pc1.setRemoteDescription(answer);
+
+  const started = performance.now();
+  setInterval(async () => {
+    const stats = await pc2.getStats();
+    const r = {
+      seconds: Math.round((performance.now() - started) / 1000),
+      ice: pc2.iceConnectionState,
+      receivedAudioLevel: Number(level.toFixed(3)),
+    };
+    const byId = {};
+    stats.forEach(s => { byId[s.id] = s; });
+    stats.forEach(s => {
+      if (s.type === 'candidate-pair' && s.nominated && s.state === 'succeeded') {
+        const l = byId[s.localCandidateId], rem = byId[s.remoteCandidateId];
+        r.path = `${l?.candidateType} ${l?.address}:${l?.port} -> ${rem?.candidateType} ${rem?.address}:${rem?.port}`;
+        r.rttMs = s.currentRoundTripTime != null ? Math.round(s.currentRoundTripTime * 1000) : null;
+      }
+      if (s.type === 'inbound-rtp' && s.kind === 'audio') {
+        r.audio = {
+          packetsReceived: s.packetsReceived,
+          packetsLost: s.packetsLost,
+          jitterMs: Math.round((s.jitter || 0) * 1000),
+          concealedPct: s.totalSamplesReceived ? Number((100 * s.concealedSamples / s.totalSamplesReceived).toFixed(2)) : null,
+          jitterBufferMs: s.jitterBufferEmittedCount ? Math.round(1000 * s.jitterBufferDelay / s.jitterBufferEmittedCount) : null,
+        };
+      }
+      if (s.type === 'inbound-rtp' && s.kind === 'video') {
+        r.video = {
+          framesDecoded: s.framesDecoded,
+          fps: s.framesPerSecond,
+          size: `${s.frameWidth}x${s.frameHeight}`,
+          packetsLost: s.packetsLost,
+          freezes: s.freezeCount,
+          kbps: null,
+        };
+        if (window.lastVideoBytes != null) r.video.kbps = Math.round((s.bytesReceived - window.lastVideoBytes) * 8 / 1000);
+        window.lastVideoBytes = s.bytesReceived;
+      }
+    });
+    window.result = r;
+    document.getElementById('out').textContent = JSON.stringify(r, null, 2);
+  }, 1000);
+}
+document.getElementById('start').onclick = () => start().catch(e => {
+  window.result = { state: 'error', error: String(e) };
+  document.getElementById('out').textContent = String(e);
+});
+</script>
+</body>
+</html>

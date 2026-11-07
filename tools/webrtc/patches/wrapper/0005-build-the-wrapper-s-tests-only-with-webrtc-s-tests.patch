@@ -1,0 +1,84 @@
+Build the wrapper's tests only where WebRTC builds its own: the macOS framework is built
+without them and has no use of the wrapper.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 90a4423..c48523e 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -340,40 +340,44 @@ rtc_shared_library("libwebrtc") {
+   }
+ }
+ 
+-rtc_test("libwebrtc_cpp_api_unittests") {
+-  testonly = true
+-  include_dirs = [ "." ]
++# Only where WebRTC builds its tests (not for the macOS framework, which has no use of
++# this wrapper).
++if (rtc_include_tests) {
++  rtc_test("libwebrtc_cpp_api_unittests") {
++    testonly = true
++    include_dirs = [ "." ]
+ 
+-  sources = [
+-     "test/field_trials.test.cc",
+-     "test/peerconnection_factory.test.cc",
+-     "test/video_processor.test.cc",
+-     "test/vp8_size_gate.test.cc",
++    sources = [
++       "test/field_trials.test.cc",
++       "test/peerconnection_factory.test.cc",
++       "test/video_processor.test.cc",
++       "test/vp8_size_gate.test.cc",
+ 
+-     # Built in again: the library shows only its own API.
+-     "src/internal/vp8_size_gate.cc",
+-     "src/internal/vp8_size_gate.h",
+-  ]
++       # Built in again: the library shows only its own API.
++       "src/internal/vp8_size_gate.cc",
++       "src/internal/vp8_size_gate.h",
++    ]
+ 
+-  if (is_clang) {
+-    # See the comment in the "libwebrtc" target above.
+-    suppressed_configs = [ "//build/config/clang:unsafe_buffers" ]
+-    cflags = [ "-Wno-deprecated-declarations" ]
+-  }
++    if (is_clang) {
++      # See the comment in the "libwebrtc" target above.
++      suppressed_configs = [ "//build/config/clang:unsafe_buffers" ]
++      cflags = [ "-Wno-deprecated-declarations" ]
++    }
+ 
+-   deps = [
+-    ":libwebrtc",
+-    "../api:make_ref_counted",
+-    "../api/environment",
+-    "//test:create_test_environment",
+-    "../api/video:encoded_image",
+-    "../api/video:video_frame",
+-    "../api/video_codecs:video_codecs_api",
+-    "../modules/video_coding:video_codec_interface",
+-    "../rtc_base:logging",
+-    "//third_party/abseil-cpp/absl/strings",
+-    "//testing/gtest",
+-    "//test:test_support",
+-    "//test:test_main",
+-  ]
++     deps = [
++      ":libwebrtc",
++      "../api:make_ref_counted",
++      "../api/environment",
++      "//test:create_test_environment",
++      "../api/video:encoded_image",
++      "../api/video:video_frame",
++      "../api/video_codecs:video_codecs_api",
++      "../modules/video_coding:video_codec_interface",
++      "../rtc_base:logging",
++      "//third_party/abseil-cpp/absl/strings",
++      "//testing/gtest",
++      "//test:test_support",
++      "//test:test_main",
++    ]
++  }
+ }

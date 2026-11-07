@@ -1,0 +1,125 @@
+The desktop capturer captures at the rate asked, as the C++ wrapper's does
+(patches/wrapper/0008): the next capture waited the whole interval after the last one
+ended, so a capture that took 20 ms made 30 frames a second into 19. It is now due one
+interval after the last one began (at once when that is already past, never several to
+catch up). Screens are no longer compared frame by frame for an updated region nobody
+reads. Every 10 s, WebRTC's log says at the info level how many captures were made and
+what one cost.
+
+diff --git a/sdk/objc/native/src/objc_desktop_capture.h b/sdk/objc/native/src/objc_desktop_capture.h
+index fee081d..a01c4c0 100644
+--- a/sdk/objc/native/src/objc_desktop_capture.h
++++ b/sdk/objc/native/src/objc_desktop_capture.h
+@@ -62,6 +62,15 @@ class ObjCDesktopCapturer : public DesktopCapturer::Callback {
+   webrtc::DesktopCapturer::SourceId source_id_;
+   id<RTC_OBJC_TYPE(RTCDesktopCapturerPrivateDelegate)> delegate_;
+   uint32_t capture_delay_ = 1000; // 1s
++  // When the next capture is due (WebRTC's clock, microseconds); 0 before the
++  // first. Used on thread_ only.
++  int64_t next_capture_us_ = 0;
++  // What the captures cost since stats_since_us_, for the log.
++  int64_t stats_since_us_ = 0;
++  int64_t stats_frames_ = 0;
++  int64_t stats_total_us_ = 0;
++  int64_t stats_longest_us_ = 0;
++  void NoteCapture(int64_t took_us, int64_t now_us);
+   webrtc::DesktopCapturer::Result result_ = webrtc::DesktopCapturer::Result::SUCCESS;
+ };
+ 
+diff --git a/sdk/objc/native/src/objc_desktop_capture.mm b/sdk/objc/native/src/objc_desktop_capture.mm
+index 347d726..3425322 100644
+--- a/sdk/objc/native/src/objc_desktop_capture.mm
++++ b/sdk/objc/native/src/objc_desktop_capture.mm
+@@ -14,9 +14,12 @@
+  * limitations under the License.
+  */
+ 
++#include <algorithm>
++
+ #include "api/sequence_checker.h"
+ #include "rtc_base/checks.h"
+ #include "rtc_base/logging.h"
++#include "rtc_base/time_utils.h"
+ #include "sdk/objc/native/src/objc_desktop_capture.h"
+ #include "sdk/objc/native/src/objc_video_frame.h"
+ #include "third_party/libyuv/include/libyuv.h"
+@@ -36,7 +39,9 @@
+   type_ = type;
+   thread_->Start();
+   options_ = webrtc::DesktopCaptureOptions::CreateDefault();
+-  options_.set_detect_updated_region(true);
++  // No updated region is asked for: every frame goes whole to the encoder, so
++  // comparing each one with the last (DesktopCapturerDifferWrapper) only cost
++  // the capture thread time.
+   options_.set_allow_iosurface(true);
+   thread_->BlockingCall([this, type] {
+     std::unique_ptr<webrtc::DesktopCapturer> desktop =
+@@ -90,6 +95,7 @@
+ 
+   thread_->BlockingCall([this] {
+     capturer_->Start(this);
++    next_capture_us_ = 0;
+   });
+   capture_state_ = CS_RUNNING;
+ 
+@@ -197,14 +203,53 @@
+ 
+ void ObjCDesktopCapturer::CaptureFrame() {
+   RTC_DCHECK_RUN_ON(thread_.get());
+-  if (capture_state_ == CS_RUNNING) {
+-    capturer_->CaptureFrame();
+-    thread_->PostDelayedHighPrecisionTask(
+-      [this]() {
+-        CaptureFrame();
+-      },
+-      TimeDelta::Millis(capture_delay_));
++  if (capture_state_ != CS_RUNNING) {
++    return;
++  }
++  const int64_t started = TimeMicros();
++  capturer_->CaptureFrame();
++  const int64_t now = TimeMicros();
++  NoteCapture(now - started, now);
++  // The next capture is due one interval after this one began, not after it
++  // ended: waiting the whole interval after a capture that took 20 ms made 30
++  // frames a second into 19. A capture that took longer than the interval is
++  // followed by the next at once, never by several to catch up.
++  const int64_t interval = int64_t{capture_delay_} * 1000;
++  next_capture_us_ = next_capture_us_ == 0 ? started + interval
++                                           : next_capture_us_ + interval;
++  if (next_capture_us_ < now) {
++    next_capture_us_ = now;
++  }
++  thread_->PostDelayedHighPrecisionTask(
++      [this]() { CaptureFrame(); },
++      TimeDelta::Micros(next_capture_us_ - now));
++}
++
++void ObjCDesktopCapturer::NoteCapture(int64_t took_us, int64_t now_us) {
++  // What capturing a frame costs on this computer (the capturer, the cursor,
++  // the conversion and the hand-over to the encoder), told every 10 s to
++  // WebRTC's log at the info level.
++  if (stats_since_us_ == 0) {
++    stats_since_us_ = now_us;
++  }
++  stats_frames_++;
++  stats_total_us_ += took_us;
++  stats_longest_us_ = std::max(stats_longest_us_, took_us);
++  const int64_t span = now_us - stats_since_us_;
++  if (span < 10'000'000) {
++    return;
+   }
++  RTC_LOG(LS_INFO) << "ObjCDesktopCapturer: " << stats_frames_
++                   << " captures in " << span / 1000 << " ms ("
++                   << stats_frames_ * 1'000'000.0 / span
++                   << " a second, asked " << 1000.0 / capture_delay_
++                   << "), " << stats_total_us_ / 1000.0 / stats_frames_
++                   << " ms each on average, longest "
++                   << stats_longest_us_ / 1000.0 << " ms";
++  stats_since_us_ = now_us;
++  stats_frames_ = 0;
++  stats_total_us_ = 0;
++  stats_longest_us_ = 0;
+ }
+ 
+ }  // namespace webrtc

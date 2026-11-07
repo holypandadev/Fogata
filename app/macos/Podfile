@@ -1,0 +1,83 @@
+platform :osx, '12.0'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'ephemeral', 'Flutter-Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure \"flutter pub get\" is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Flutter-Generated.xcconfig, then run \"flutter pub get\""
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_macos_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  # Fogata's own WebRTC (tools/webrtc), in place of webrtc-sdk's pod of the same name.
+  pod 'WebRTC-SDK', :podspec => 'WebRTC-SDK.podspec'
+  flutter_install_all_macos_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+# WebRTC-SDK is a prebuilt framework: Fogata's own, from this computer's store, whose archive
+# WebRTC-SDK.podspec checks by SHA-256. Its files, as installed, must also match the SHA-256
+# recorded for its version in WebRTC-SDK.sha256 beside this file: every file's path and SHA-256 (a link's
+# target in place of its contents), in order, hashed together. A version not recorded yet
+# stops the install and prints the line to record, after checking the download some other
+# way (docs/native-components.md).
+require 'digest'
+
+def fogata_tree_digest(root)
+  digest = Digest::SHA256.new
+  Dir.glob('**/*', File::FNM_DOTMATCH, base: root).sort.each do |name|
+    path = File.join(root, name)
+    if File.symlink?(path)
+      digest << "#{name}\0link\0#{File.readlink(path)}\n"
+    elsif File.file?(path)
+      digest << "#{name}\0file\0#{Digest::SHA256.file(path).hexdigest}\n"
+    end
+  end
+  digest.hexdigest
+end
+
+def fogata_check_webrtc_sdk(installer)
+  target = installer.pod_targets.find { |t| t.pod_name == 'WebRTC-SDK' }
+  return if target.nil?
+  version = target.root_spec.version.to_s
+  actual = fogata_tree_digest(installer.sandbox.pod_dir('WebRTC-SDK').to_s)
+  list = File.join(File.dirname(File.realpath(__FILE__)), 'WebRTC-SDK.sha256')
+  recorded = File.exist?(list) ? File.readlines(list).map(&:split).find { |v, _| v == version } : nil
+  if recorded.nil?
+    raise "WebRTC-SDK #{version} has no SHA-256 recorded in #{list}. Once the download is " \
+          "checked, record it with: echo '#{version} #{actual}' >> #{list}"
+  end
+  if recorded[1] != actual
+    raise "WebRTC-SDK #{version} is not the one recorded in #{list} (#{actual}): do not build " \
+          "with it. Remove Pods/WebRTC-SDK and the CocoaPods cache of it, and install again."
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_macos_build_settings(target)
+  end
+  fogata_check_webrtc_sdk(installer)
+end

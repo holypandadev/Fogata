@@ -1,0 +1,42 @@
+[package]
+name = "fogata-net"
+description = "Peer discovery, NAT traversal and member protocols over libp2p"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blake3.workspace = true
+fogata-crypto.workspace = true
+fogata-friends.workspace = true
+fogata-proto.workspace = true
+fogata-state.workspace = true
+fogata-update.workspace = true
+futures.workspace = true
+hex.workspace = true
+hickory-resolver.workspace = true
+serde.workspace = true
+serde_bytes.workspace = true
+libp2p.workspace = true
+libp2p-stream.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+# A file's volume serial number and index on Windows (files.rs), which std keeps unstable,
+# through a safe call to GetFileInformationByHandle: this crate forbids unsafe code.
+[dev-dependencies]
+# What a test did, when asked with FOGATA_TRACE (an env filter, as RUST_LOG takes).
+tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+winapi-util = "0.1.11"
+
+[features]
+# Entry points for fuzzing what peers send (see fogata-core's `fuzzing`).
+fuzzing = []
+
+[lints]
+workspace = true

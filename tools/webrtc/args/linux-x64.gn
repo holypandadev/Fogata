@@ -1,0 +1,11 @@
+# Linux x64: the same as webrtc-sdk's own Linux build, with libc++ inside the library.
+target_os = "linux"
+target_cpu = "x64"
+use_custom_libcxx = true
+use_custom_libcxx_for_host = true
+use_clang_modules = false
+use_llvm_libatomic = false
+use_rtti = true
+enable_stripping = true
+rtc_use_pipewire = true
+rtc_use_x11 = true

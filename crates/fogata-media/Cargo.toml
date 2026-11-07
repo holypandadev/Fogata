@@ -1,0 +1,31 @@
+[package]
+name = "fogata-media"
+description = "Real-time media over member connections"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+bytes = "1"
+sha2.workspace = true
+turn.workspace = true
+webrtc-util.workspace = true
+fogata-net.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[features]
+# Entry points for fuzzing what reaches the media bridge (see fogata-core's `fuzzing`).
+fuzzing = []
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+fogata-crypto.workspace = true
+fogata-state.workspace = true

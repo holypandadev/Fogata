@@ -1,0 +1,19 @@
+# fogata-state as it was at level one, the level before the current judgment of what a group
+# log keeps and applies (see `Level` in ../src/state.rs). Only the tests of fogata-state
+# build it, to compare what the two levels keep and apply (src/log/tests/level.rs). The
+# sources under src/ are level one's, unchanged (tools/check.sh checks their digest); only this
+# manifest is new. The workspace leaves it out, so it inherits nothing, and neither lints
+# nor tests of its own run.
+[package]
+name = "fogata-state-before"
+description = "Group state as judged by the level before, for the tests of fogata-state"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "AGPL-3.0-only"
+publish = false
+
+[dependencies]
+fogata-crypto = { path = "../../fogata-crypto" }
+sha2 = "0.11.1"
+thiserror = "2.0.21"

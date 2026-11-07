@@ -1,0 +1,68 @@
+[package]
+name = "fogata-core"
+description = "What the Fogata application builds on: storage, one node for every group and friend, and views for the screens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+fogata-crypto.workspace = true
+fogata-friends.workspace = true
+fogata-media.workspace = true
+fogata-mls = { workspace = true, optional = true }
+fogata-net.workspace = true
+fogata-proto.workspace = true
+fogata-voice.workspace = true
+fogata-state.workspace = true
+fogata-update.workspace = true
+blake3.workspace = true
+futures.workspace = true
+hex.workspace = true
+keyring.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zeroize.workspace = true
+
+# `O_NOFOLLOW`, so that a recovery copy written straight into the file the person chose is
+# never written through a link put there (recovery.rs).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The Flatpak portal, which installs updates of the Flatpak (updates/install.rs). The same
+# version and features the keychain's Secret Service store already builds.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5.19.0"
+
+[features]
+# The network lab's ways of misbehaving (updates offered unchecked, damaged chunks): only
+# the command-line program turns them on; the application cannot.
+lab = []
+# Entry points for fuzzing the decoders of everything that comes from outside (`fuzzing`
+# module; `fuzz/` and `tools/fuzz.sh` run them).
+fuzzing = [
+    "dep:fogata-mls",
+    "fogata-friends/fuzzing",
+    "fogata-media/fuzzing",
+    "fogata-net/fuzzing",
+    "fogata-voice/fuzzing",
+]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+fogata-friends = { workspace = true, features = ["fuzzing"] }
+fogata-media = { workspace = true, features = ["fuzzing"] }
+fogata-mls.workspace = true
+fogata-net = { workspace = true, features = ["fuzzing"] }
+fogata-state = { workspace = true, features = ["counts"] }
+fogata-voice = { workspace = true, features = ["fuzzing"] }
+libp2p.workspace = true
+serde_bytes.workspace = true
+tracing-subscriber.workspace = true

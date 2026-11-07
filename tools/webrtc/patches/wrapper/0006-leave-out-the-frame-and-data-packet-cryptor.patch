@@ -1,0 +1,692 @@
+Leave out the frame and data packet cryptor, which nothing uses
+
+The end-to-end frame encryption of webrtc-sdk (its KeyProvider, FrameCryptor and
+DataPacketCryptor) needs WebRTC's frame cryptor patch; calls never use it.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index c48523e..d384f09 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -88,11 +88,9 @@ rtc_shared_library("libwebrtc") {
+     "include/rtc_audio_source.h",
+     "include/rtc_audio_track.h",
+     "include/rtc_data_channel.h",
+-    "include/rtc_data_packet_cryptor.h",
+     "include/rtc_dtls_transport.h",
+     "include/rtc_dtmf_sender.h",
+     "include/rtc_field_trials.h",
+-    "include/rtc_frame_cryptor.h",
+     "include/rtc_ice_candidate.h",
+     "include/rtc_media_stream.h",
+     "include/rtc_media_track.h",
+@@ -135,8 +133,6 @@ rtc_shared_library("libwebrtc") {
+     "src/rtc_audio_source_impl.h",
+     "src/rtc_audio_track_impl.cc",
+     "src/rtc_audio_track_impl.h",
+-    "src/rtc_data_packet_cryptor_impl.cc",
+-    "src/rtc_data_packet_cryptor_impl.h",
+     "src/rtc_data_channel_impl.cc",
+     "src/rtc_data_channel_impl.h",
+     "src/rtc_dtls_transport_impl.cc",
+@@ -145,8 +141,6 @@ rtc_shared_library("libwebrtc") {
+     "src/rtc_dtmf_sender_impl.h",
+     "src/rtc_field_trials.cc",
+     "src/rtc_field_trials_impl.h",
+-    "src/rtc_frame_cryptor_impl.cc",
+-    "src/rtc_frame_cryptor_impl.h",
+     "src/rtc_ice_candidate_impl.cc",
+     "src/rtc_ice_candidate_impl.h",
+     "src/rtc_media_stream_impl.cc",
+@@ -277,7 +271,6 @@ rtc_shared_library("libwebrtc") {
+     "../api/audio_codecs:audio_codecs_api",
+     "../api/audio_codecs/opus:audio_decoder_opus",
+     "../api/audio_codecs/opus:audio_encoder_opus",
+-    "../api/crypto:frame_crypto_transformer",
+     "../api/video:video_adapter",
+     "../api/video:video_broadcaster",
+     "../api/video:video_frame",
+diff --git a/include/rtc_data_packet_cryptor.h b/include/rtc_data_packet_cryptor.h
+deleted file mode 100644
+index 96db506..0000000
+--- a/include/rtc_data_packet_cryptor.h
++++ /dev/null
+@@ -1,38 +0,0 @@
+-#ifndef LIB_RTC_DATA_PACKET_CRYPTOR_H_
+-#define LIB_RTC_DATA_PACKET_CRYPTOR_H_
+-
+-#include "base/refcount.h"
+-#include "rtc_frame_cryptor.h"
+-#include "rtc_types.h"
+-
+-namespace libwebrtc {
+-
+-class EncryptedPacket : public RefCountInterface {
+- public:
+-  LIB_WEBRTC_API static scoped_refptr<EncryptedPacket> Create(
+-      vector<uint8_t> data, vector<uint8_t> iv, uint8_t key_index);
+-  virtual vector<uint8_t> data() = 0;
+-  virtual vector<uint8_t> iv() = 0;
+-  virtual uint8_t key_index() = 0;
+-};
+-
+-class RTCDataPacketCryptor : public RefCountInterface {
+- public:
+-  LIB_WEBRTC_API static scoped_refptr<RTCDataPacketCryptor> Create(
+-      scoped_refptr<KeyProvider> key_provider, FrameCryptorAlgorithm algorithm);
+-
+-  virtual scoped_refptr<EncryptedPacket> encrypt(string participant_id,
+-                                                 int key_index,
+-                                                 vector<uint8_t> data) = 0;
+-
+-  virtual vector<uint8_t> decrypt(
+-      string participant_id, int key_index,
+-      scoped_refptr<EncryptedPacket> encrypted_packet) = 0;
+-
+- protected:
+-  virtual ~RTCDataPacketCryptor() {}
+-};
+-
+-}  // namespace libwebrtc
+-
+-#endif  // LIB_RTC_DATA_PACKET_CRYPTOR_H_
+\ No newline at end of file
+diff --git a/include/rtc_frame_cryptor.h b/include/rtc_frame_cryptor.h
+deleted file mode 100644
+index 6eaa450..0000000
+--- a/include/rtc_frame_cryptor.h
++++ /dev/null
+@@ -1,148 +0,0 @@
+-#ifndef LIB_RTC_FRAME_CYRPTOR_H_
+-#define LIB_RTC_FRAME_CYRPTOR_H_
+-
+-#include "base/refcount.h"
+-#include "rtc_peerconnection_factory.h"
+-#include "rtc_rtp_receiver.h"
+-#include "rtc_rtp_sender.h"
+-#include "rtc_types.h"
+-
+-namespace libwebrtc {
+-
+-enum class FrameCryptorAlgorithm {
+-  kAesGcm = 0,
+-  kAesCbc,
+-};
+-
+-enum class KeyDerivationAlgorithm {
+-  kPBKDF2 = 0,
+-  kHKDF,
+-};
+-
+-#define DEFAULT_KEYRING_SIZE 16
+-#define MAX_KEYRING_SIZE 255
+-
+-struct KeyProviderOptions {
+-  bool shared_key;
+-  vector<uint8_t> ratchet_salt;
+-  vector<uint8_t> uncrypted_magic_bytes;
+-  int ratchet_window_size;
+-  int failure_tolerance;
+-  // The size of the key ring. between 1 and 255.
+-  int key_ring_size;
+-  bool discard_frame_when_cryptor_not_ready;
+-  KeyDerivationAlgorithm key_derivation_algorithm;
+-  KeyProviderOptions()
+-      : shared_key(false),
+-        ratchet_salt(vector<uint8_t>()),
+-        ratchet_window_size(0),
+-        failure_tolerance(-1),
+-        key_ring_size(DEFAULT_KEYRING_SIZE),
+-        discard_frame_when_cryptor_not_ready(false),
+-        key_derivation_algorithm(KeyDerivationAlgorithm::kPBKDF2) {}
+-  KeyProviderOptions(KeyProviderOptions& copy)
+-      : shared_key(copy.shared_key),
+-        ratchet_salt(copy.ratchet_salt),
+-        ratchet_window_size(copy.ratchet_window_size),
+-        failure_tolerance(copy.failure_tolerance),
+-        key_ring_size(copy.key_ring_size),
+-        discard_frame_when_cryptor_not_ready(copy.discard_frame_when_cryptor_not_ready),
+-        key_derivation_algorithm(copy.key_derivation_algorithm) {}
+-};
+-
+-/// Shared secret key for frame encryption.
+-class KeyProvider : public RefCountInterface {
+- public:
+-  LIB_WEBRTC_API static scoped_refptr<KeyProvider> Create(KeyProviderOptions*);
+-
+-  virtual bool SetSharedKey(int index, vector<uint8_t> key) = 0;
+-
+-  virtual vector<uint8_t> RatchetSharedKey(int key_index) = 0;
+-
+-  virtual vector<uint8_t> ExportSharedKey(int key_index) = 0;
+-
+-  /// Set the key at the given index.
+-  virtual bool SetKey(const string participant_id, int index,
+-                      vector<uint8_t> key) = 0;
+-
+-  virtual vector<uint8_t> RatchetKey(const string participant_id,
+-                                     int key_index) = 0;
+-
+-  virtual vector<uint8_t> ExportKey(const string participant_id,
+-                                    int key_index) = 0;
+-
+-  virtual void SetSifTrailer(vector<uint8_t> trailer) = 0;
+-
+- protected:
+-  virtual ~KeyProvider() {}
+-};
+-
+-enum RTCFrameCryptionState {
+-  kNew = 0,
+-  kOk,
+-  kEncryptionFailed,
+-  kDecryptionFailed,
+-  kMissingKey,
+-  kKeyRatcheted,
+-  kInternalError,
+-};
+-
+-class RTCFrameCryptorObserver : public RefCountInterface {
+- public:
+-  virtual void OnFrameCryptionStateChanged(const string participant_id,
+-                                           RTCFrameCryptionState state) = 0;
+-
+- protected:
+-  virtual ~RTCFrameCryptorObserver() {}
+-};
+-
+-/// Frame encryption/decryption.
+-///
+-class RTCFrameCryptor : public RefCountInterface {
+- public:
+-  /// Enable/Disable frame crypto for the sender or receiver.
+-  virtual bool SetEnabled(bool enabled) = 0;
+-
+-  /// Get the enabled state for the sender or receiver.
+-  virtual bool enabled() const = 0;
+-
+-  /// Set the key index for the sender or receiver.
+-  /// If the key index is not set, the key index will be set to 0.
+-  virtual bool SetKeyIndex(int index) = 0;
+-
+-  /// Get the key index for the sender or receiver.
+-  virtual int key_index() const = 0;
+-
+-  virtual const string participant_id() const = 0;
+-
+-  virtual void RegisterRTCFrameCryptorObserver(
+-      scoped_refptr<RTCFrameCryptorObserver> observer) = 0;
+-
+-  virtual void DeRegisterRTCFrameCryptorObserver() = 0;
+-
+- protected:
+-  virtual ~RTCFrameCryptor() {}
+-};
+-
+-class FrameCryptorFactory {
+- public:
+-  /// Create a frame cyrptor for [RTCRtpSender].
+-  LIB_WEBRTC_API static scoped_refptr<RTCFrameCryptor>
+-  frameCryptorFromRtpSender(scoped_refptr<RTCPeerConnectionFactory> factory,
+-                            const string participant_id,
+-                            scoped_refptr<RTCRtpSender> sender,
+-                            FrameCryptorAlgorithm algorithm,
+-                            scoped_refptr<KeyProvider> key_provider);
+-
+-  /// Create a frame cyrptor for [RTCRtpReceiver].
+-  LIB_WEBRTC_API static scoped_refptr<RTCFrameCryptor>
+-  frameCryptorFromRtpReceiver(scoped_refptr<RTCPeerConnectionFactory> factory,
+-                              const string participant_id,
+-                              scoped_refptr<RTCRtpReceiver> receiver,
+-                              FrameCryptorAlgorithm algorithm,
+-                              scoped_refptr<KeyProvider> key_provider);
+-};
+-
+-}  // namespace libwebrtc
+-
+-#endif  // LIB_RTC_FRAME_CYRPTOR_H_
+\ No newline at end of file
+diff --git a/src/rtc_data_packet_cryptor_impl.cc b/src/rtc_data_packet_cryptor_impl.cc
+deleted file mode 100644
+index e9423d7..0000000
+--- a/src/rtc_data_packet_cryptor_impl.cc
++++ /dev/null
+@@ -1,55 +0,0 @@
+-#include "rtc_data_packet_cryptor_impl.h"
+-
+-namespace libwebrtc {
+-
+-scoped_refptr<EncryptedPacket> RTCDataPacketCryptorImpl::encrypt(
+-    string participant_id, int key_index, vector<uint8_t> data) {
+-  webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::EncryptedPacket>> value =
+-      data_packet_cryptor_->Encrypt(participant_id.std_string(), key_index,
+-                                    data.std_vector());
+-  if (value.ok()) {
+-    return new RefCountedObject<EncryptedPacketImpl>(value.value());
+-  } else {
+-    return nullptr;
+-  }
+-}
+-
+-vector<uint8_t> RTCDataPacketCryptorImpl::decrypt(
+-    string participant_id, int key_index,
+-    scoped_refptr<EncryptedPacket> encrypted_packet) {
+-  EncryptedPacketImpl* encrypted_packet_impl =
+-      static_cast<EncryptedPacketImpl*>(encrypted_packet.get());
+-  webrtc::RTCErrorOr<std::vector<uint8_t>> value =
+-      data_packet_cryptor_->Decrypt(
+-          participant_id.std_string(),
+-          encrypted_packet_impl->rtc_encrypted_packet());
+-  if (value.ok()) {
+-    return vector<uint8_t>(value.value());
+-  } else {
+-    return vector<uint8_t>();
+-  }
+-}
+-
+-RTCDataPacketCryptorImpl::RTCDataPacketCryptorImpl(
+-    scoped_refptr<KeyProvider> key_provider,
+-    webrtc::FrameCryptorTransformer::Algorithm algorithm) {
+-  auto key_provider_impl =
+-      static_cast<DefaultKeyProviderImpl*>(key_provider.get());
+-  data_packet_cryptor_ = webrtc::make_ref_counted<webrtc::DataPacketCryptor>(
+-      algorithm, key_provider_impl->rtc_key_provider());
+-  key_provider_ = key_provider;
+-}
+-
+-scoped_refptr<EncryptedPacket> EncryptedPacket::Create(vector<uint8_t> data,
+-                                                       vector<uint8_t> iv,
+-                                                       uint8_t key_index) {
+-  return new RefCountedObject<EncryptedPacketImpl>(data, iv, key_index);
+-}
+-
+-scoped_refptr<RTCDataPacketCryptor> RTCDataPacketCryptor::Create(
+-    scoped_refptr<KeyProvider> key_provider, FrameCryptorAlgorithm algorithm) {
+-  return new RefCountedObject<RTCDataPacketCryptorImpl>(
+-      key_provider, AlgorithmToFrameCryptorAlgorithm(algorithm));
+-}
+-
+-}  // namespace libwebrtc
+\ No newline at end of file
+diff --git a/src/rtc_data_packet_cryptor_impl.h b/src/rtc_data_packet_cryptor_impl.h
+deleted file mode 100644
+index 9e45067..0000000
+--- a/src/rtc_data_packet_cryptor_impl.h
++++ /dev/null
+@@ -1,57 +0,0 @@
+-#ifndef LIB_RTC_DATA_PACKET_CRYPTOR_IMPL_H_
+-#define LIB_RTC_DATA_PACKET_CRYPTOR_IMPL_H_
+-
+-#include "api/crypto/frame_crypto_transformer.h"
+-#include "base/portable.h"
+-#include "rtc_data_packet_cryptor.h"
+-#include "rtc_frame_cryptor_impl.h"
+-
+-namespace libwebrtc {
+-
+-class EncryptedPacketImpl : public EncryptedPacket {
+- public:
+-  EncryptedPacketImpl(
+-      webrtc::scoped_refptr<webrtc::EncryptedPacket> encrypted_packet)
+-      : encrypted_packet_(encrypted_packet) {}
+-  EncryptedPacketImpl(vector<uint8_t> data, vector<uint8_t> iv,
+-                      uint8_t key_index)
+-      : encrypted_packet_(webrtc::make_ref_counted<webrtc::EncryptedPacket>(
+-            data.std_vector(), iv.std_vector(), key_index)) {}
+-  vector<uint8_t> data() override {
+-    return vector<uint8_t>(encrypted_packet_->data);
+-  }
+-  vector<uint8_t> iv() override {
+-    return vector<uint8_t>(encrypted_packet_->iv);
+-  }
+-  uint8_t key_index() override { return encrypted_packet_->key_index; }
+-
+-  webrtc::scoped_refptr<webrtc::EncryptedPacket> rtc_encrypted_packet() {
+-    return encrypted_packet_;
+-  }
+-
+- private:
+-  webrtc::scoped_refptr<webrtc::EncryptedPacket> encrypted_packet_;
+-};
+-
+-class RTCDataPacketCryptorImpl : public RTCDataPacketCryptor {
+- public:
+-  RTCDataPacketCryptorImpl(
+-      scoped_refptr<KeyProvider> key_provider,
+-      webrtc::FrameCryptorTransformer::Algorithm algorithm);
+-  ~RTCDataPacketCryptorImpl() {}
+-
+-  scoped_refptr<EncryptedPacket> encrypt(string participant_id, int key_index,
+-                                         vector<uint8_t> data) override;
+-
+-  vector<uint8_t> decrypt(
+-      string participant_id, int key_index,
+-      scoped_refptr<EncryptedPacket> encrypted_packet) override;
+-
+- private:
+-  webrtc::scoped_refptr<webrtc::DataPacketCryptor> data_packet_cryptor_;
+-  scoped_refptr<KeyProvider> key_provider_;
+-};
+-
+-}  // namespace libwebrtc
+-
+-#endif  // LIB_RTC_DATA_PACKET_CRYPTOR_IMPL_H_
+\ No newline at end of file
+diff --git a/src/rtc_frame_cryptor_impl.cc b/src/rtc_frame_cryptor_impl.cc
+deleted file mode 100644
+index 1bbbb06..0000000
+--- a/src/rtc_frame_cryptor_impl.cc
++++ /dev/null
+@@ -1,168 +0,0 @@
+-#include "rtc_frame_cryptor_impl.h"
+-
+-#include "rtc_peerconnection_factory_impl.h"
+-
+-namespace libwebrtc {
+-
+-scoped_refptr<RTCFrameCryptor> FrameCryptorFactory::frameCryptorFromRtpSender(
+-    scoped_refptr<RTCPeerConnectionFactory> factory,
+-    const string participant_id, scoped_refptr<RTCRtpSender> sender,
+-    FrameCryptorAlgorithm algorithm, scoped_refptr<KeyProvider> key_provider) {
+-  return new RefCountedObject<RTCFrameCryptorImpl>(
+-      factory, participant_id, algorithm, key_provider, sender);
+-}
+-
+-/// Create a frame cyrptor from a [RTCRtpReceiver].
+-scoped_refptr<RTCFrameCryptor> FrameCryptorFactory::frameCryptorFromRtpReceiver(
+-    scoped_refptr<RTCPeerConnectionFactory> factory,
+-    const string participant_id, scoped_refptr<RTCRtpReceiver> receiver,
+-    FrameCryptorAlgorithm algorithm, scoped_refptr<KeyProvider> key_provider) {
+-  return new RefCountedObject<RTCFrameCryptorImpl>(
+-      factory, participant_id, algorithm, key_provider, receiver);
+-}
+-
+-webrtc::FrameCryptorTransformer::Algorithm AlgorithmToFrameCryptorAlgorithm(
+-    FrameCryptorAlgorithm algorithm) {
+-  switch (algorithm) {
+-    case FrameCryptorAlgorithm::kAesGcm:
+-      return webrtc::FrameCryptorTransformer::Algorithm::kAesGcm;
+-    case FrameCryptorAlgorithm::kAesCbc:
+-      return webrtc::FrameCryptorTransformer::Algorithm::kAesCbc;
+-    default:
+-      return webrtc::FrameCryptorTransformer::Algorithm::kAesGcm;
+-  }
+-}
+-
+-RTCFrameCryptorImpl::RTCFrameCryptorImpl(
+-    scoped_refptr<RTCPeerConnectionFactory> factory,
+-    const string participant_id, FrameCryptorAlgorithm algorithm,
+-    scoped_refptr<KeyProvider> key_provider, scoped_refptr<RTCRtpSender> sender)
+-    : participant_id_(participant_id),
+-      enabled_(false),
+-      key_index_(0),
+-      key_provider_(key_provider),
+-      sender_(sender),
+-      observer_(webrtc::make_ref_counted<RTCFrameCryptorObserverAdapter>()) {
+-  auto factoryImpl = static_cast<RTCPeerConnectionFactoryImpl*>(factory.get());
+-  auto keyImpl = static_cast<DefaultKeyProviderImpl*>(key_provider.get());
+-  RTCRtpSenderImpl* impl = static_cast<RTCRtpSenderImpl*>(sender.get());
+-  auto mediaType =
+-      impl->rtc_rtp_sender()->track()->kind() == "audio"
+-          ? webrtc::FrameCryptorTransformer::MediaType::kAudioFrame
+-          : webrtc::FrameCryptorTransformer::MediaType::kVideoFrame;
+-  e2ee_transformer_ = webrtc::scoped_refptr<webrtc::FrameCryptorTransformer>(
+-      new webrtc::FrameCryptorTransformer(
+-          factoryImpl->signaling_thread(), participant_id_.std_string(),
+-          mediaType, AlgorithmToFrameCryptorAlgorithm(algorithm),
+-          keyImpl->rtc_key_provider()));
+-  e2ee_transformer_->RegisterFrameCryptorTransformerObserver(observer_);
+-  impl->rtc_rtp_sender()->SetFrameTransformer(e2ee_transformer_);
+-  e2ee_transformer_->SetEnabled(false);
+-}
+-
+-RTCFrameCryptorImpl::RTCFrameCryptorImpl(
+-    scoped_refptr<RTCPeerConnectionFactory> factory,
+-    const string participant_id, FrameCryptorAlgorithm algorithm,
+-    scoped_refptr<KeyProvider> key_provider,
+-    scoped_refptr<RTCRtpReceiver> receiver)
+-    : participant_id_(participant_id),
+-      enabled_(false),
+-      key_index_(0),
+-      key_provider_(key_provider),
+-      receiver_(receiver),
+-      observer_(webrtc::make_ref_counted<
+-                libwebrtc::RTCFrameCryptorObserverAdapter>()) {
+-  auto factoryImpl = static_cast<RTCPeerConnectionFactoryImpl*>(factory.get());
+-  auto keyImpl = static_cast<DefaultKeyProviderImpl*>(key_provider.get());
+-  RTCRtpReceiverImpl* impl = static_cast<RTCRtpReceiverImpl*>(receiver.get());
+-  auto mediaType =
+-      impl->rtp_receiver()->track()->kind() == "audio"
+-          ? webrtc::FrameCryptorTransformer::MediaType::kAudioFrame
+-          : webrtc::FrameCryptorTransformer::MediaType::kVideoFrame;
+-  e2ee_transformer_ = webrtc::scoped_refptr<webrtc::FrameCryptorTransformer>(
+-      new webrtc::FrameCryptorTransformer(
+-          factoryImpl->signaling_thread(), participant_id_.std_string(),
+-          mediaType, AlgorithmToFrameCryptorAlgorithm(algorithm),
+-          keyImpl->rtc_key_provider()));
+-  e2ee_transformer_->RegisterFrameCryptorTransformerObserver(observer_);
+-  impl->rtp_receiver()->SetFrameTransformer(e2ee_transformer_);
+-  e2ee_transformer_->SetEnabled(false);
+-}
+-
+-RTCFrameCryptorImpl::~RTCFrameCryptorImpl() {}
+-
+-bool RTCFrameCryptorImpl::SetEnabled(bool enabled) {
+-  webrtc::MutexLock lock(&mutex_);
+-  enabled_ = enabled;
+-  e2ee_transformer_->SetEnabled(enabled_);
+-  return true;
+-}
+-
+-void RTCFrameCryptorImpl::RegisterRTCFrameCryptorObserver(
+-    scoped_refptr<RTCFrameCryptorObserver> observer) {
+-  webrtc::MutexLock lock(&mutex_);
+-  observer_->RegisterObserver(observer);
+-}
+-
+-void RTCFrameCryptorImpl::DeRegisterRTCFrameCryptorObserver() {
+-  webrtc::MutexLock lock(&mutex_);
+-  observer_->DeRegisterObserver();
+-  e2ee_transformer_->UnRegisterFrameCryptorTransformerObserver();
+-}
+-
+-void RTCFrameCryptorObserverAdapter::OnFrameCryptionStateChanged(
+-    const std::string participant_id, webrtc::FrameCryptionState error) {
+-  {
+-    RTCFrameCryptionState state = RTCFrameCryptionState::kNew;
+-    switch (error) {
+-      case webrtc::FrameCryptionState::kNew:
+-        state = RTCFrameCryptionState::kNew;
+-        break;
+-      case webrtc::FrameCryptionState::kOk:
+-        state = RTCFrameCryptionState::kOk;
+-        break;
+-      case webrtc::FrameCryptionState::kDecryptionFailed:
+-        state = RTCFrameCryptionState::kDecryptionFailed;
+-        break;
+-      case webrtc::FrameCryptionState::kEncryptionFailed:
+-        state = RTCFrameCryptionState::kEncryptionFailed;
+-        break;
+-      case webrtc::FrameCryptionState::kMissingKey:
+-        state = RTCFrameCryptionState::kMissingKey;
+-        break;
+-      case webrtc::FrameCryptionState::kKeyRatcheted:
+-        state = RTCFrameCryptionState::kKeyRatcheted;
+-        break;
+-      case webrtc::FrameCryptionState::kInternalError:
+-        state = RTCFrameCryptionState::kInternalError;
+-        break;
+-    }
+-    webrtc::MutexLock lock(&mutex_);
+-    if (observer_) {
+-      observer_->OnFrameCryptionStateChanged(participant_id, state);
+-    }
+-  }
+-}
+-
+-bool RTCFrameCryptorImpl::enabled() const {
+-  webrtc::MutexLock lock(&mutex_);
+-  return enabled_;
+-}
+-
+-bool RTCFrameCryptorImpl::SetKeyIndex(int index) {
+-  webrtc::MutexLock lock(&mutex_);
+-  key_index_ = index;
+-  e2ee_transformer_->SetKeyIndex(key_index_);
+-  return true;
+-}
+-
+-int RTCFrameCryptorImpl::key_index() const {
+-  webrtc::MutexLock lock(&mutex_);
+-  return key_index_;
+-}
+-
+-scoped_refptr<KeyProvider> KeyProvider::Create(KeyProviderOptions* options) {
+-  return new RefCountedObject<DefaultKeyProviderImpl>(options);
+-}
+-
+-}  // namespace libwebrtc
+diff --git a/src/rtc_frame_cryptor_impl.h b/src/rtc_frame_cryptor_impl.h
+deleted file mode 100644
+index 6839663..0000000
+--- a/src/rtc_frame_cryptor_impl.h
++++ /dev/null
+@@ -1,138 +0,0 @@
+-#ifndef LIB_RTC_FRAME_CYRPTOR_IMPL_H_
+-#define LIB_RTC_FRAME_CYRPTOR_IMPL_H_
+-
+-#include "api/crypto/frame_crypto_transformer.h"
+-#include "api/rtp_receiver_interface.h"
+-#include "api/rtp_sender_interface.h"
+-#include "rtc_frame_cryptor.h"
+-#include "rtc_rtp_receiver_impl.h"
+-#include "rtc_rtp_sender_impl.h"
+-
+-namespace libwebrtc {
+-
+-webrtc::FrameCryptorTransformer::Algorithm AlgorithmToFrameCryptorAlgorithm(
+-    FrameCryptorAlgorithm algorithm);
+-
+-class DefaultKeyProviderImpl : public KeyProvider {
+- public:
+-  DefaultKeyProviderImpl(KeyProviderOptions* options) {
+-    webrtc::KeyProviderOptions rtc_options;
+-    rtc_options.shared_key = options->shared_key;
+-    rtc_options.ratchet_salt = options->ratchet_salt.std_vector();
+-    rtc_options.uncrypted_magic_bytes =
+-        options->uncrypted_magic_bytes.std_vector();
+-    rtc_options.ratchet_window_size = options->ratchet_window_size;
+-    rtc_options.failure_tolerance = options->failure_tolerance;
+-    rtc_options.key_ring_size = options->key_ring_size;
+-    rtc_options.discard_frame_when_cryptor_not_ready =
+-        options->discard_frame_when_cryptor_not_ready;
+-    rtc_options.key_derivation_algorithm =
+-        (webrtc::KeyDerivationAlgorithm)options->key_derivation_algorithm;
+-    impl_ = new webrtc::RefCountedObject<webrtc::DefaultKeyProviderImpl>(
+-        rtc_options);
+-  }
+-  ~DefaultKeyProviderImpl() {}
+-
+-  bool SetSharedKey(int index, vector<uint8_t> key) override {
+-    return impl_->SetSharedKey(index, key.std_vector());
+-  }
+-
+-  vector<uint8_t> RatchetSharedKey(int key_index) override {
+-    return impl_->RatchetSharedKey(key_index);
+-  }
+-
+-  vector<uint8_t> ExportSharedKey(int key_index) override {
+-    return impl_->ExportSharedKey(key_index);
+-  }
+-
+-  /// Set the key at the given index.
+-  bool SetKey(const string participant_id, int index,
+-              vector<uint8_t> key) override {
+-    return impl_->SetKey(participant_id.std_string(), index, key.std_vector());
+-  }
+-
+-  vector<uint8_t> RatchetKey(const string participant_id,
+-                             int key_index) override {
+-    return impl_->RatchetKey(participant_id.std_string(), key_index);
+-  }
+-
+-  vector<uint8_t> ExportKey(const string participant_id,
+-                            int key_index) override {
+-    return impl_->ExportKey(participant_id.std_string(), key_index);
+-  }
+-
+-  void SetSifTrailer(vector<uint8_t> trailer) override {
+-    impl_->SetSifTrailer(trailer.std_vector());
+-  }
+-
+-  webrtc::scoped_refptr<webrtc::KeyProvider> rtc_key_provider() {
+-    return impl_;
+-  }
+-
+- private:
+-  webrtc::scoped_refptr<webrtc::DefaultKeyProviderImpl> impl_;
+-};
+-
+-class RTCFrameCryptorObserverAdapter
+-    : public webrtc::FrameCryptorTransformerObserver {
+- public:
+-  RTCFrameCryptorObserverAdapter() = default;
+-  void OnFrameCryptionStateChanged(const std::string participant_id,
+-                                   webrtc::FrameCryptionState error) override;
+-
+-  void RegisterObserver(scoped_refptr<RTCFrameCryptorObserver> observer) {
+-    webrtc::MutexLock lock(&mutex_);
+-    observer_ = observer;
+-  }
+-
+-  void DeRegisterObserver() {
+-    webrtc::MutexLock lock(&mutex_);
+-    observer_ = nullptr;
+-  }
+-
+- private:
+-  mutable webrtc::Mutex mutex_;
+-  scoped_refptr<RTCFrameCryptorObserver> observer_;
+-};
+-
+-class RTCFrameCryptorImpl : public RTCFrameCryptor {
+- public:
+-  RTCFrameCryptorImpl(scoped_refptr<RTCPeerConnectionFactory> factory,
+-                      const string participant_id,
+-                      FrameCryptorAlgorithm algorithm,
+-                      scoped_refptr<KeyProvider> key_provider,
+-                      scoped_refptr<RTCRtpSender> sender);
+-
+-  RTCFrameCryptorImpl(scoped_refptr<RTCPeerConnectionFactory> factory,
+-                      const string participant_id,
+-                      FrameCryptorAlgorithm algorithm,
+-                      scoped_refptr<KeyProvider> key_provider,
+-                      scoped_refptr<RTCRtpReceiver> receiver);
+-  ~RTCFrameCryptorImpl();
+-
+-  void RegisterRTCFrameCryptorObserver(
+-      scoped_refptr<RTCFrameCryptorObserver> observer) override;
+-
+-  void DeRegisterRTCFrameCryptorObserver() override;
+-
+-  bool SetEnabled(bool enabled) override;
+-  bool enabled() const override;
+-  bool SetKeyIndex(int index) override;
+-  int key_index() const override;
+-  const string participant_id() const override { return participant_id_; }
+-
+- private:
+-  string participant_id_;
+-  mutable webrtc::Mutex mutex_;
+-  bool enabled_;
+-  int key_index_;
+-  webrtc::scoped_refptr<webrtc::FrameCryptorTransformer> e2ee_transformer_;
+-  scoped_refptr<KeyProvider> key_provider_;
+-  scoped_refptr<RTCRtpSender> sender_;
+-  scoped_refptr<RTCRtpReceiver> receiver_;
+-  webrtc::scoped_refptr<RTCFrameCryptorObserverAdapter> observer_;
+-};
+-
+-}  // namespace libwebrtc
+-
+-#endif  // LIB_RTC_FRAME_CYRPTOR_IMPL_H_
+\ No newline at end of file

@@ -1,0 +1,386 @@
+#include "pipewire_apps_capturer.h"
+
+#ifdef HAVE_PIPEWIRE
+
+#include <pipewire/pipewire.h>
+#include <spa/param/audio/format-utils.h>
+#include <unistd.h>
+
+#include <climits>
+#include <cstdlib>
+#include <cstring>
+#include <map>
+#include <memory>
+#include <string>
+#include <utility>
+#include <vector>
+
+namespace flutter_webrtc_plugin {
+
+namespace {
+
+constexpr int kRate = 48000;
+constexpr int kChannels = 2;
+// WebRTC takes sound in 10 ms frames.
+constexpr size_t kFrame = kRate / 100;
+
+// This application's executable name, as PipeWire reports it: its own sound,
+// and that of any other copy of it, is left out.
+std::string OwnBinary() {
+  char path[PATH_MAX];
+  const ssize_t n = readlink("/proc/self/exe", path, sizeof(path) - 1);
+  if (n <= 0) return "";
+  path[n] = 0;
+  const char* slash = std::strrchr(path, '/');
+  return slash != nullptr ? slash + 1 : path;
+}
+
+// For tests: FOGATA_SCREEN_SOUND_FROM names the one program whose sound is taken,
+// so a test never takes the sound of the person's own applications. Debug builds only.
+std::string OnlyFrom() {
+#ifdef NDEBUG
+  return "";
+#else
+  const char* only = std::getenv("FOGATA_SCREEN_SOUND_FROM");
+  return only != nullptr ? only : "";
+#endif
+}
+
+struct Node {
+  bool app_output = false;
+  // Whose it is comes from the node's full properties, a moment after it appears;
+  // until then it is not linked.
+  bool known = false;
+  bool own = false;
+};
+
+struct Port {
+  uint32_t node = 0;
+  bool output = false;
+  std::string channel;
+};
+
+struct Watched;
+
+}  // namespace
+
+struct PipeWireAppsCapturer::State {
+  scoped_refptr<RTCAudioSource> source;
+  std::string own_binary = OwnBinary();
+  std::string only_from = OnlyFrom();
+  pid_t own_pid = getpid();
+
+  pw_thread_loop* loop = nullptr;
+  pw_context* context = nullptr;
+  pw_core* core = nullptr;
+  pw_registry* registry = nullptr;
+  spa_hook registry_listener{};
+  pw_stream* stream = nullptr;
+  spa_hook stream_listener{};
+  uint32_t node = SPA_ID_INVALID;
+
+  std::map<uint32_t, Node> nodes;
+  std::map<uint32_t, std::unique_ptr<Watched>> watched;
+  std::map<uint32_t, Port> ports;
+  // The links this capture made, by the output and input port they join; each
+  // goes when either port does, so a long share does not pile them up.
+  std::map<std::pair<uint32_t, uint32_t>, pw_proxy*> links;
+
+  std::vector<int16_t> pending;
+};
+
+namespace {
+
+using State = PipeWireAppsCapturer::State;
+
+// An application's output, bound to read its full properties.
+struct Watched {
+  State* state = nullptr;
+  uint32_t id = 0;
+  pw_proxy* proxy = nullptr;
+  spa_hook listener{};
+
+  ~Watched() {
+    spa_hook_remove(&listener);
+    pw_proxy_destroy(proxy);
+  }
+};
+
+void Relink(State* s);
+
+void OnNodeInfo(void* data, const pw_node_info* info) {
+  auto w = static_cast<Watched*>(data);
+  State* s = w->state;
+  if (info == nullptr || info->props == nullptr) return;
+  auto node = s->nodes.find(w->id);
+  if (node == s->nodes.end()) return;
+  const char* pid = spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_ID);
+  const char* binary = spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_BINARY);
+  node->second.known = true;
+  node->second.own =
+      (pid != nullptr && std::atoi(pid) == s->own_pid) ||
+      (binary != nullptr && !s->own_binary.empty() && s->own_binary == binary) ||
+      (!s->only_from.empty() && (binary == nullptr || s->only_from != binary));
+  Relink(s);
+}
+
+// Links every port of every other application's output to this stream's input
+// of the same channel; a mono output goes to both.
+void Relink(State* s) {
+  if (s->node == SPA_ID_INVALID) return;
+  std::map<std::string, uint32_t> inputs;
+  for (const auto& [id, port] : s->ports) {
+    if (port.node == s->node && !port.output) inputs[port.channel] = id;
+  }
+  if (inputs.empty()) return;
+  for (const auto& [id, port] : s->ports) {
+    if (!port.output) continue;
+    auto node = s->nodes.find(port.node);
+    if (node == s->nodes.end() || !node->second.app_output ||
+        !node->second.known || node->second.own) {
+      continue;
+    }
+    std::vector<uint32_t> targets;
+    auto same = inputs.find(port.channel);
+    if (same != inputs.end()) {
+      targets.push_back(same->second);
+    } else {
+      for (const auto& [_, input] : inputs) targets.push_back(input);
+    }
+    for (uint32_t input : targets) {
+      if (s->links.count({id, input}) != 0) continue;
+      const std::string out_node = std::to_string(port.node);
+      const std::string out_port = std::to_string(id);
+      const std::string in_node = std::to_string(s->node);
+      const std::string in_port = std::to_string(input);
+      pw_properties* props = pw_properties_new(
+          PW_KEY_LINK_OUTPUT_NODE, out_node.c_str(), PW_KEY_LINK_OUTPUT_PORT,
+          out_port.c_str(), PW_KEY_LINK_INPUT_NODE, in_node.c_str(),
+          PW_KEY_LINK_INPUT_PORT, in_port.c_str(), PW_KEY_OBJECT_LINGER, "false",
+          nullptr);
+      auto link = static_cast<pw_proxy*>(pw_core_create_object(
+          s->core, "link-factory", PW_TYPE_INTERFACE_Link, PW_VERSION_LINK,
+          &props->dict, 0));
+      pw_properties_free(props);
+      // Kept even when it could not be made, so it is not asked for again
+      // and again while the ports stay.
+      s->links[{id, input}] = link;
+    }
+  }
+}
+
+void OnGlobal(void* data, uint32_t id, uint32_t, const char* type, uint32_t,
+              const spa_dict* props) {
+  auto s = static_cast<State*>(data);
+  if (props == nullptr) return;
+  if (std::strcmp(type, PW_TYPE_INTERFACE_Node) == 0) {
+    static pw_node_events node_events = [] {
+      pw_node_events e{};
+      e.version = PW_VERSION_NODE_EVENTS;
+      e.info = OnNodeInfo;
+      return e;
+    }();
+    const char* media_class = spa_dict_lookup(props, PW_KEY_MEDIA_CLASS);
+    Node node;
+    node.app_output =
+        media_class != nullptr && std::strcmp(media_class, "Stream/Output/Audio") == 0;
+    s->nodes[id] = node;
+    if (node.app_output) {
+      auto proxy = static_cast<pw_proxy*>(
+          pw_registry_bind(s->registry, id, PW_TYPE_INTERFACE_Node,
+                           PW_VERSION_NODE, 0));
+      if (proxy != nullptr) {
+        auto w = std::make_unique<Watched>();
+        w->state = s;
+        w->id = id;
+        w->proxy = proxy;
+        pw_node_add_listener(reinterpret_cast<pw_node*>(proxy), &w->listener,
+                             &node_events, w.get());
+        s->watched[id] = std::move(w);
+      }
+    }
+  } else if (std::strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
+    const char* node = spa_dict_lookup(props, PW_KEY_NODE_ID);
+    const char* direction = spa_dict_lookup(props, PW_KEY_PORT_DIRECTION);
+    const char* monitor = spa_dict_lookup(props, PW_KEY_PORT_MONITOR);
+    const char* channel = spa_dict_lookup(props, PW_KEY_AUDIO_CHANNEL);
+    if (node == nullptr || direction == nullptr) return;
+    if (monitor != nullptr && std::strcmp(monitor, "true") == 0) return;
+    Port port;
+    port.node = uint32_t(std::atoi(node));
+    port.output = std::strcmp(direction, "out") == 0;
+    port.channel = channel != nullptr ? channel : "MONO";
+    s->ports[id] = port;
+  } else {
+    return;
+  }
+  Relink(s);
+}
+
+void OnGlobalRemove(void* data, uint32_t id) {
+  auto s = static_cast<State*>(data);
+  s->nodes.erase(id);
+  s->watched.erase(id);
+  s->ports.erase(id);
+  // The server already dropped a link whose port went away; its proxy stays
+  // until it is destroyed.
+  for (auto it = s->links.begin(); it != s->links.end();) {
+    if (it->first.first == id || it->first.second == id) {
+      if (it->second != nullptr) pw_proxy_destroy(it->second);
+      it = s->links.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void OnStateChanged(void* data, pw_stream_state, pw_stream_state state,
+                    const char*) {
+  auto s = static_cast<State*>(data);
+  if (state == PW_STREAM_STATE_PAUSED || state == PW_STREAM_STATE_STREAMING) {
+    const uint32_t node = pw_stream_get_node_id(s->stream);
+    if (node != SPA_ID_INVALID && node != s->node) {
+      s->node = node;
+      Relink(s);
+    }
+  }
+}
+
+void OnProcess(void* data) {
+  auto s = static_cast<State*>(data);
+  pw_buffer* buffer = pw_stream_dequeue_buffer(s->stream);
+  if (buffer == nullptr) return;
+  spa_data* d = &buffer->buffer->datas[0];
+  // The samples must lie within the buffer, and start where a sample can.
+  const bool inside = d->chunk->offset <= d->maxsize &&
+                      d->chunk->size <= d->maxsize - d->chunk->offset &&
+                      d->chunk->offset % sizeof(int16_t) == 0;
+  if (d->data != nullptr && d->chunk->size > 0 && inside) {
+    auto samples = reinterpret_cast<const int16_t*>(
+        static_cast<const uint8_t*>(d->data) + d->chunk->offset);
+    const size_t count = d->chunk->size / sizeof(int16_t);
+    s->pending.insert(s->pending.end(), samples, samples + count);
+    size_t used = 0;
+    while (s->pending.size() - used >= kFrame * kChannels) {
+      s->source->CaptureFrame(s->pending.data() + used, 16, kRate, kChannels,
+                              kFrame);
+      used += kFrame * kChannels;
+    }
+    s->pending.erase(s->pending.begin(), s->pending.begin() + used);
+  }
+  pw_stream_queue_buffer(s->stream, buffer);
+}
+
+void Teardown(State* s) {
+  if (s->loop == nullptr) return;
+  pw_thread_loop_lock(s->loop);
+  for (const auto& [_, link] : s->links) {
+    if (link != nullptr) pw_proxy_destroy(link);
+  }
+  s->links.clear();
+  s->watched.clear();
+  if (s->stream != nullptr) {
+    pw_stream_disconnect(s->stream);
+    pw_stream_destroy(s->stream);
+    s->stream = nullptr;
+  }
+  if (s->registry != nullptr) {
+    pw_proxy_destroy(reinterpret_cast<pw_proxy*>(s->registry));
+    s->registry = nullptr;
+  }
+  if (s->core != nullptr) {
+    pw_core_disconnect(s->core);
+    s->core = nullptr;
+  }
+  pw_thread_loop_unlock(s->loop);
+  pw_thread_loop_stop(s->loop);
+  if (s->context != nullptr) {
+    pw_context_destroy(s->context);
+    s->context = nullptr;
+  }
+  pw_thread_loop_destroy(s->loop);
+  s->loop = nullptr;
+}
+
+}  // namespace
+
+PipeWireAppsCapturer::PipeWireAppsCapturer() : state_(std::make_unique<State>()) {}
+
+PipeWireAppsCapturer::~PipeWireAppsCapturer() {
+  Stop();
+}
+
+bool PipeWireAppsCapturer::Start(scoped_refptr<RTCAudioSource> source) {
+  static const bool initialized = (pw_init(nullptr, nullptr), true);
+  (void)initialized;
+  static pw_registry_events registry_events = [] {
+    pw_registry_events e{};
+    e.version = PW_VERSION_REGISTRY_EVENTS;
+    e.global = OnGlobal;
+    e.global_remove = OnGlobalRemove;
+    return e;
+  }();
+  static pw_stream_events stream_events = [] {
+    pw_stream_events e{};
+    e.version = PW_VERSION_STREAM_EVENTS;
+    e.state_changed = OnStateChanged;
+    e.process = OnProcess;
+    return e;
+  }();
+  State* s = state_.get();
+  s->source = source;
+  s->loop = pw_thread_loop_new("fogata-screen-sound", nullptr);
+  if (s->loop == nullptr) return false;
+  s->context = pw_context_new(pw_thread_loop_get_loop(s->loop), nullptr, 0);
+  if (s->context == nullptr || pw_thread_loop_start(s->loop) < 0) {
+    Teardown(s);
+    return false;
+  }
+  pw_thread_loop_lock(s->loop);
+  s->core = pw_context_connect(s->context, nullptr, 0);
+  if (s->core == nullptr) {
+    pw_thread_loop_unlock(s->loop);
+    Teardown(s);
+    return false;
+  }
+  // Not linked by the session manager: this capture links itself to each
+  // application's output.
+  s->stream = pw_stream_new(
+      s->core, "Fogata screen sound",
+      pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY,
+                        "Capture", PW_KEY_MEDIA_ROLE, "Screen",
+                        PW_KEY_NODE_NAME, "fogata-screen-sound", nullptr));
+  pw_stream_add_listener(s->stream, &s->stream_listener, &stream_events, s);
+  uint8_t buffer[512];
+  spa_pod_builder b = SPA_POD_BUILDER_INIT(buffer, sizeof(buffer));
+  spa_audio_info_raw info{};
+  info.format = SPA_AUDIO_FORMAT_S16;
+  info.rate = kRate;
+  info.channels = kChannels;
+  info.position[0] = SPA_AUDIO_CHANNEL_FL;
+  info.position[1] = SPA_AUDIO_CHANNEL_FR;
+  const spa_pod* params[1] = {
+      spa_format_audio_raw_build(&b, SPA_PARAM_EnumFormat, &info)};
+  const int connected = pw_stream_connect(
+      s->stream, PW_DIRECTION_INPUT, PW_ID_ANY,
+      static_cast<pw_stream_flags>(PW_STREAM_FLAG_MAP_BUFFERS |
+                                   PW_STREAM_FLAG_RT_PROCESS),
+      params, 1);
+  s->registry = pw_core_get_registry(s->core, PW_VERSION_REGISTRY, 0);
+  pw_registry_add_listener(s->registry, &s->registry_listener, &registry_events,
+                           s);
+  pw_thread_loop_unlock(s->loop);
+  if (connected < 0) {
+    Teardown(s);
+    return false;
+  }
+  return true;
+}
+
+void PipeWireAppsCapturer::Stop() {
+  Teardown(state_.get());
+}
+
+}  // namespace flutter_webrtc_plugin
+
+#endif  // HAVE_PIPEWIRE

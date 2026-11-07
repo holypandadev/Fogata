@@ -1,0 +1,114 @@
+Build in VP8 and Opus only, the codecs calls use
+
+
+diff --git a/BUILD.gn b/BUILD.gn
+index f1984a3..3cbedee 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -260,21 +260,25 @@ rtc_shared_library("libwebrtc") {
+     cflags += [ "-Wno-deprecated-declarations" ]
+   }
+ 
++  # Fogata: only the codecs calls use, VP8 and Opus.
+   deps = [
+     "../api:create_peerconnection_factory",
+     "../api:field_trials",
+     "../api:peer_connection_interface",
+-    "../api/audio_codecs:builtin_audio_decoder_factory",
+-    "../api/audio_codecs:builtin_audio_encoder_factory",
++    "../api/audio_codecs:audio_codecs_api",
++    "../api/audio_codecs/opus:audio_decoder_opus",
++    "../api/audio_codecs/opus:audio_encoder_opus",
+     "../api/crypto:frame_crypto_transformer",
+     "../api/video:video_adapter",
+     "../api/video:video_broadcaster",
+     "../api/video:video_frame",
+-    "../api/video_codecs:builtin_video_decoder_factory",
+-    "../api/video_codecs:builtin_video_encoder_factory",
++    "../api/video_codecs:video_codecs_api",
++    "../api/video_codecs:video_decoder_factory_template",
++    "../api/video_codecs:video_decoder_factory_template_libvpx_vp8_adapter",
++    "../api/video_codecs:video_encoder_factory_template",
++    "../api/video_codecs:video_encoder_factory_template_libvpx_vp8_adapter",
+     "../common_video",
+     "../media:rtc_audio_video",
+-    "../media:rtc_internal_video_codecs",
+     "../media:rtc_media",
+     "../modules/audio_device:audio_device",
+     "../modules/audio_processing:api",
+@@ -284,6 +288,7 @@ rtc_shared_library("libwebrtc") {
+     "../rtc_base:threading",
+     "../sdk:media_constraints",
+     "//third_party/abseil-cpp/absl/memory",
++    "//third_party/abseil-cpp/absl/strings",
+     "//third_party/boringssl:boringssl",
+     "//third_party/libyuv",
+   ]
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index f4a78db..b4292dc 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -1,12 +1,16 @@
+ #include "rtc_peerconnection_factory_impl.h"
+ 
+-#include "api/audio_codecs/builtin_audio_decoder_factory.h"
+-#include "api/audio_codecs/builtin_audio_encoder_factory.h"
++#include "api/audio_codecs/audio_decoder_factory_template.h"
++#include "api/audio_codecs/audio_encoder_factory_template.h"
++#include "api/audio_codecs/opus/audio_decoder_opus.h"
++#include "api/audio_codecs/opus/audio_encoder_opus.h"
+ #include "api/audio/create_audio_device_module.h"
+ #include "api/create_peerconnection_factory.h"
+ #include "api/media_stream_interface.h"
+-#include "api/video_codecs/builtin_video_decoder_factory.h"
+-#include "api/video_codecs/builtin_video_encoder_factory.h"
++#include "api/video_codecs/video_decoder_factory_template.h"
++#include "api/video_codecs/video_decoder_factory_template_libvpx_vp8_adapter.h"
++#include "api/video_codecs/video_encoder_factory_template.h"
++#include "api/video_codecs/video_encoder_factory_template_libvpx_vp8_adapter.h"
+ #include "modules/audio_device/audio_device_impl.h"
+ #include "rtc_audio_source_impl.h"
+ #include "rtc_field_trials_impl.h"
+@@ -48,6 +52,18 @@ std::unique_ptr<webrtc::VideoDecoderFactory> CreateIntelVideoDecoderFactory() {
+ 
+ namespace {
+ 
++// Fogata: calls use VP8 and Opus only, so no other codec is built in: one less
++// decoder for what peers send.
++std::unique_ptr<webrtc::VideoEncoderFactory> CreateCallVideoEncoderFactory() {
++  return std::make_unique<webrtc::VideoEncoderFactoryTemplate<
++      webrtc::LibvpxVp8EncoderTemplateAdapter>>();
++}
++
++std::unique_ptr<webrtc::VideoDecoderFactory> CreateCallVideoDecoderFactory() {
++  return std::make_unique<webrtc::VideoDecoderFactoryTemplate<
++      webrtc::LibvpxVp8DecoderTemplateAdapter>>();
++}
++
+ // Builds the environment shared by everything this factory creates, applying
+ // the field trials configured through RTCFieldTrials, if any.
+ webrtc::Environment CreateEnvironmentWithFieldTrials() {
+@@ -96,19 +112,10 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
+   if (!rtc_peerconnection_factory_) {
+     rtc_peerconnection_factory_ = CreatePeerConnectionFactory(
+         network_thread_.get(), worker_thread_.get(), signaling_thread_.get(),
+-        audio_device_module_, webrtc::CreateBuiltinAudioEncoderFactory(),
+-        webrtc::CreateBuiltinAudioDecoderFactory(),
+-#if defined(USE_INTEL_MEDIA_SDK)
+-        CreateIntelVideoEncoderFactory(), CreateIntelVideoDecoderFactory(),
+-#elif defined(WEBRTC_WIN) && defined(RTC_ENABLE_H265)
+-        webrtc::CreateWmfH265EncoderFactory(
+-            webrtc::CreateBuiltinVideoEncoderFactory()),
+-        webrtc::CreateWmfH265DecoderFactory(
+-            webrtc::CreateBuiltinVideoDecoderFactory()),
+-#else
+-        webrtc::CreateBuiltinVideoEncoderFactory(),
+-        webrtc::CreateBuiltinVideoDecoderFactory(),
+-#endif
++        audio_device_module_,
++        webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>(),
++        webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>(),
++        CreateCallVideoEncoderFactory(), CreateCallVideoDecoderFactory(),
+         nullptr, audio_processing_impl_->GetAudioProcessing(), nullptr,
+         // The field trials configured through RTCFieldTrials, e.g. WARP's
+         // `WebRTC-IceHandshakeDtls`. Passing nullptr here makes the factory

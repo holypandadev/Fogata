@@ -1,0 +1,70 @@
+PODS:
+  - desktop_drop (0.0.1):
+    - FlutterMacOS
+  - file_selector_macos (0.0.1):
+    - FlutterMacOS
+  - flutter_webrtc (1.6.2):
+    - FlutterMacOS
+    - WebRTC-SDK (= 156.8078.5)
+  - FlutterMacOS (1.0.0)
+  - fogata_video (0.1.0):
+    - FlutterMacOS
+  - rust_lib_fogata (0.1.0):
+    - FlutterMacOS
+  - screen_retriever_macos (0.0.1):
+    - FlutterMacOS
+  - tray_manager (0.0.1):
+    - FlutterMacOS
+  - WebRTC-SDK (156.8078.5)
+  - window_manager (0.5.0):
+    - FlutterMacOS
+
+DEPENDENCIES:
+  - desktop_drop (from `Flutter/ephemeral/.symlinks/plugins/desktop_drop/macos`)
+  - file_selector_macos (from `Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos`)
+  - flutter_webrtc (from `Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos`)
+  - FlutterMacOS (from `Flutter/ephemeral`)
+  - fogata_video (from `Flutter/ephemeral/.symlinks/plugins/fogata_video/macos`)
+  - rust_lib_fogata (from `Flutter/ephemeral/.symlinks/plugins/rust_lib_fogata/macos`)
+  - screen_retriever_macos (from `Flutter/ephemeral/.symlinks/plugins/screen_retriever_macos/macos`)
+  - tray_manager (from `Flutter/ephemeral/.symlinks/plugins/tray_manager/macos`)
+  - WebRTC-SDK (from `WebRTC-SDK.podspec`)
+  - window_manager (from `Flutter/ephemeral/.symlinks/plugins/window_manager/macos`)
+
+EXTERNAL SOURCES:
+  desktop_drop:
+    :path: Flutter/ephemeral/.symlinks/plugins/desktop_drop/macos
+  file_selector_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/file_selector_macos/macos
+  flutter_webrtc:
+    :path: Flutter/ephemeral/.symlinks/plugins/flutter_webrtc/macos
+  FlutterMacOS:
+    :path: Flutter/ephemeral
+  fogata_video:
+    :path: Flutter/ephemeral/.symlinks/plugins/fogata_video/macos
+  rust_lib_fogata:
+    :path: Flutter/ephemeral/.symlinks/plugins/rust_lib_fogata/macos
+  screen_retriever_macos:
+    :path: Flutter/ephemeral/.symlinks/plugins/screen_retriever_macos/macos
+  tray_manager:
+    :path: Flutter/ephemeral/.symlinks/plugins/tray_manager/macos
+  WebRTC-SDK:
+    :podspec: WebRTC-SDK.podspec
+  window_manager:
+    :path: Flutter/ephemeral/.symlinks/plugins/window_manager/macos
+
+SPEC CHECKSUMS:
+  desktop_drop: 10a3e6a7fa9dbe350541f2574092fecfa345a07b
+  file_selector_macos: 9e9e068e90ebee155097d00e89ae91edb2374db7
+  flutter_webrtc: 841aa9aacaf757677ba5d7ed7560b214b823833c
+  FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
+  fogata_video: 89e3192743b16158d379d0090f4140328c4f34c6
+  rust_lib_fogata: 7aa5873c9ebf2611ee60b6befc45dc719b64572f
+  screen_retriever_macos: c5508cc3c66ff0d4db650480cf0ab691e220d933
+  tray_manager: 19c369010e59c073f13b82354d78a35f7972d609
+  WebRTC-SDK: 1b6aa0db16dbe0b5055c41c4480a0778b8b1b5e2
+  window_manager: b729e31d38fb04905235df9ea896128991cad99e
+
+PODFILE CHECKSUM: fb1a609e553a817edb2e5a6588e6f2637c50e506
+
+COCOAPODS: 1.16.2

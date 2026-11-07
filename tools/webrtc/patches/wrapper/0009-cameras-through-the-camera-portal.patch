@@ -1,0 +1,476 @@
+List and open cameras through the Camera portal and PipeWire on Linux
+
+The video device opened cameras through V4L2 alone (/dev/video*), which a sandbox such
+as a Flatpak's has only with every device of the computer. SetCameraPortal makes it take
+WebRTC's other way instead, VideoCaptureOptions with PipeWire: RequestCameraAccess asks
+xdg-desktop-portal's Camera interface (the person, or the permission they gave before)
+once, and the cameras of the PipeWire connection it gives are listed and opened from then
+on, coming and going as they are plugged in and out. GetCameraAccess tells whether they
+were granted, refused or cannot be reached (no portal, no Camera interface, no PipeWire);
+V4L2 stands in then if asked to (SetCameraPortal's direct_fallback), never after a
+refusal. A camera PipeWire reaches through V4L2 keeps the id V4L2 gives it (its bus), so a
+camera chosen before stays chosen. PipeWire is asked for exactly one of the formats the
+camera offers, the nearest to the size and rate wanted (V4L2 picks its own). The device
+name of a camera gone since it was counted is an error, not an empty name. Elsewhere,
+and on Linux by default, nothing changes.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index d384f09..26918e1 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -295,6 +295,12 @@ rtc_shared_library("libwebrtc") {
+     "//third_party/libyuv",
+   ]
+ 
++  # Fogata: cameras through the Camera portal and PipeWire on Linux
++  # (src/rtc_video_device_impl.cc), which also gives WEBRTC_USE_PIPEWIRE.
++  if (is_linux) {
++    deps += [ "../modules/video_capture:video_capture_internal_impl" ]
++  }
++
+   # screen capture device
+   if (libwebrtc_desktop_capture) {
+     sources += [
+diff --git a/include/rtc_video_device.h b/include/rtc_video_device.h
+index 1308497..4ccda60 100644
+--- a/include/rtc_video_device.h
++++ b/include/rtc_video_device.h
+@@ -18,6 +18,24 @@ class RTCVideoCapturer : public RefCountInterface {
+ 
+ class RTCVideoDevice : public RefCountInterface {
+  public:
++  // How the cameras are reached. Opened directly (V4L2 on Linux, as on Windows)
++  // there is nothing to ask. On Linux they can instead be reached through
++  // xdg-desktop-portal's Camera interface and PipeWire, which asks the person
++  // (or the permissions they gave before) once for all of them: the only way out
++  // of a sandbox that has no /dev/video*, such as a Flatpak's.
++  enum CameraAccess {
++    kCameraAccessDirect = 0,
++    // Through the portal, not asked yet: no camera is listed.
++    kCameraAccessNotAsked = 1,
++    kCameraAccessAsking = 2,
++    kCameraAccessGranted = 3,
++    // The person said no (now or before).
++    kCameraAccessDenied = 4,
++    // No portal, a portal without the Camera interface, or no PipeWire.
++    kCameraAccessUnavailable = 5,
++  };
++  typedef fixed_size_function<void(CameraAccess)> CameraAccessCallback;
++
+   virtual uint32_t NumberOfDevices() = 0;
+ 
+   virtual int32_t GetDeviceName(uint32_t deviceNumber, char* deviceNameUTF8,
+@@ -32,6 +50,20 @@ class RTCVideoDevice : public RefCountInterface {
+                                                  size_t height,
+                                                  size_t target_fps) = 0;
+ 
++  // Linux: lists and opens the cameras through the Camera portal and PipeWire
++  // ([portal]) or through V4L2 (the default). With [direct_fallback] too, V4L2
++  // stands in while the portal is unavailable, never when it was denied.
++  // Elsewhere it does nothing. Call it before anything is listed.
++  virtual void SetCameraPortal(bool portal, bool direct_fallback) = 0;
++
++  virtual CameraAccess GetCameraAccess() = 0;
++
++  // Asks the portal for the cameras, unless they were granted or are being
++  // asked for; asked again after a denial, the system may answer without asking
++  // the person. [done] runs once with the outcome, on the thread that learns it:
++  // GLib's main loop (the portal's answers) or PipeWire's, or at once.
++  virtual void RequestCameraAccess(CameraAccessCallback done) = 0;
++
+  protected:
+   virtual ~RTCVideoDevice() {}
+ };
+diff --git a/src/internal/vcm_capturer.cc b/src/internal/vcm_capturer.cc
+index a72bc63..8e2143a 100644
+--- a/src/internal/vcm_capturer.cc
++++ b/src/internal/vcm_capturer.cc
+@@ -25,9 +25,14 @@ VcmCapturer::VcmCapturer(webrtc::Thread* worker_thread)
+     : vcm_(nullptr), worker_thread_(worker_thread) {}
+ 
+ bool VcmCapturer::Init(size_t width, size_t height, size_t target_fps,
+-                       size_t capture_device_index) {
++                       size_t capture_device_index,
++                       VideoCaptureOptions* options) {
+   std::unique_ptr<VideoCaptureModule::DeviceInfo> device_info(
+-      VideoCaptureFactory::CreateDeviceInfo());
++      options ? VideoCaptureFactory::CreateDeviceInfo(options)
++              : VideoCaptureFactory::CreateDeviceInfo());
++  if (!device_info) {
++    return false;
++  }
+ 
+   char device_name[256];
+   char unique_name[256];
+@@ -38,31 +43,45 @@ bool VcmCapturer::Init(size_t width, size_t height, size_t target_fps,
+     return false;
+   }
+ 
+-  vcm_ = webrtc::VideoCaptureFactory::Create(unique_name);
+-
++  vcm_ = options ? webrtc::VideoCaptureFactory::Create(options, unique_name)
++                 : webrtc::VideoCaptureFactory::Create(unique_name);
+   if (!vcm_) {
+     return false;
+   }
+-
+   vcm_->RegisterCaptureDataCallback(this);
+ 
++  VideoCaptureCapability wanted;
++  wanted.width = static_cast<int32_t>(width);
++  wanted.height = static_cast<int32_t>(height);
++  wanted.maxFPS = static_cast<int32_t>(target_fps);
++  wanted.videoType = VideoType::kI420;
++  if (options) {
++    // PipeWire is asked for exactly one of the formats the camera offers (V4L2
++    // picks its own from the size and rate): the nearest to what was wanted.
++    if (device_info->GetBestMatchedCapability(vcm_->CurrentDeviceName(), wanted,
++                                              capability_) < 0) {
++      RTC_LOG(LS_WARNING) << "The camera offers no format";
++      Destroy();
++      return false;
++    }
++    return true;
++  }
+   device_info->GetCapability(vcm_->CurrentDeviceName(), 0, capability_);
+-
+-  capability_.width = static_cast<int32_t>(width);
+-  capability_.height = static_cast<int32_t>(height);
+-  capability_.maxFPS = static_cast<int32_t>(target_fps);
+-  capability_.videoType = VideoType::kI420;
+-
++  capability_.width = wanted.width;
++  capability_.height = wanted.height;
++  capability_.maxFPS = wanted.maxFPS;
++  capability_.videoType = wanted.videoType;
+   return true;
+ }
+ 
+-std::shared_ptr<VcmCapturer> VcmCapturer::Create(webrtc::Thread* worker_thread,
+-                                                 size_t width, size_t height,
+-                                                 size_t target_fps,
+-                                                 size_t capture_device_index) {
++std::shared_ptr<VcmCapturer> VcmCapturer::Create(
++    webrtc::Thread* worker_thread, size_t width, size_t height,
++    size_t target_fps, size_t capture_device_index,
++    VideoCaptureOptions* options) {
+   std::shared_ptr<VcmCapturer> vcm_capturer(
+       std::make_shared<VcmCapturer>(worker_thread));
+-  if (!vcm_capturer->Init(width, height, target_fps, capture_device_index)) {
++  if (!vcm_capturer->Init(width, height, target_fps, capture_device_index,
++                          options)) {
+     RTC_LOG(LS_WARNING) << "Failed to create VcmCapturer(w = " << width
+                         << ", h = " << height << ", fps = " << target_fps
+                         << ")";
+diff --git a/src/internal/vcm_capturer.h b/src/internal/vcm_capturer.h
+index 57b3f6e..e0cb036 100644
+--- a/src/internal/vcm_capturer.h
++++ b/src/internal/vcm_capturer.h
+@@ -19,15 +19,22 @@
+ #include "src/internal/video_capturer.h"
+ 
+ namespace webrtc {
++
++// The cameras' options (the Camera portal's on Linux), declared only: on Windows its
++// header meets <wingdi.h>'s ERROR macro.
++class VideoCaptureOptions;
++
+ namespace internal {
+ 
+ class VcmCapturer : public VideoCapturer,
+                     public webrtc::VideoSinkInterface<VideoFrame> {
+  public:
+-  static std::shared_ptr<VcmCapturer> Create(webrtc::Thread* worker_thread,
+-                                             size_t width, size_t height,
+-                                             size_t target_fps,
+-                                             size_t capture_device_index);
++  // [options]: the cameras' (the portal's on Linux), or null for those opened
++  // directly.
++  static std::shared_ptr<VcmCapturer> Create(
++      webrtc::Thread* worker_thread, size_t width, size_t height,
++      size_t target_fps, size_t capture_device_index,
++      VideoCaptureOptions* options = nullptr);
+   VcmCapturer(webrtc::Thread* worker_thread);
+ 
+   virtual ~VcmCapturer();
+@@ -42,7 +49,7 @@ class VcmCapturer : public VideoCapturer,
+ 
+  private:
+   bool Init(size_t width, size_t height, size_t target_fps,
+-            size_t capture_device_index);
++            size_t capture_device_index, VideoCaptureOptions* options);
+   void Destroy();
+ 
+   webrtc::scoped_refptr<VideoCaptureModule> vcm_;
+diff --git a/src/rtc_video_device_impl.cc b/src/rtc_video_device_impl.cc
+index 9f059a3..31c0831 100644
+--- a/src/rtc_video_device_impl.cc
++++ b/src/rtc_video_device_impl.cc
+@@ -1,6 +1,11 @@
+ #include "rtc_video_device_impl.h"
+ 
++#include <cstring>
++#include <string>
++#include <utility>
++
+ #include "modules/video_capture/video_capture_factory.h"
++#include "rtc_base/logging.h"
+ 
+ namespace libwebrtc {
+ 
+@@ -8,11 +13,115 @@ RTCVideoDeviceImpl::RTCVideoDeviceImpl(webrtc::Thread* worker_thread)
+     : device_info_(webrtc::VideoCaptureFactory::CreateDeviceInfo()),
+       worker_thread_(worker_thread) {}
+ 
++RTCVideoDeviceImpl::~RTCVideoDeviceImpl() {
++#if defined(WEBRTC_USE_PIPEWIRE)
++  // The portal's session tells no one any more.
++  portal_info_ = nullptr;
++  options_ = nullptr;
++#endif
++}
++
++void RTCVideoDeviceImpl::SetCameraPortal(bool portal, bool direct_fallback) {
++#if defined(WEBRTC_USE_PIPEWIRE)
++  webrtc::MutexLock lock(&mutex_);
++  if (options_) return;  // Asked for already: kept as it is.
++  portal_ = portal;
++  direct_fallback_ = direct_fallback;
++  access_ = portal ? kCameraAccessNotAsked : kCameraAccessDirect;
++#endif
++}
++
++RTCVideoDevice::CameraAccess RTCVideoDeviceImpl::GetCameraAccess() {
++#if defined(WEBRTC_USE_PIPEWIRE)
++  return static_cast<CameraAccess>(access_.load());
++#else
++  return kCameraAccessDirect;
++#endif
++}
++
++void RTCVideoDeviceImpl::RequestCameraAccess(CameraAccessCallback done) {
++#if defined(WEBRTC_USE_PIPEWIRE)
++  webrtc::VideoCaptureOptions* asking = nullptr;
++  CameraAccess now;
++  {
++    webrtc::MutexLock lock(&mutex_);
++    now = static_cast<CameraAccess>(access_.load());
++    if (now != kCameraAccessDirect && now != kCameraAccessGranted) {
++      waiting_.push_back(std::move(done));
++      if (now == kCameraAccessAsking) return;
++      // A session that was not granted has finished: it can go.
++      options_ = std::make_unique<webrtc::VideoCaptureOptions>();
++      options_->set_allow_pipewire(true);
++      options_->set_allow_v4l2(false);
++      asking = options_.get();
++      access_ = kCameraAccessAsking;
++    }
++  }
++  if (!asking) {
++    done(now);
++    return;
++  }
++  // Answers in OnInitialized, never from within Init: the portal answers from
++  // the main loop, PipeWire from its own thread.
++  asking->Init(this);
++#else
++  done(kCameraAccessDirect);
++#endif
++}
++
++#if defined(WEBRTC_USE_PIPEWIRE)
++void RTCVideoDeviceImpl::OnInitialized(
++    webrtc::VideoCaptureOptions::Status status) {
++  using Status = webrtc::VideoCaptureOptions::Status;
++  const CameraAccess access = status == Status::SUCCESS ? kCameraAccessGranted
++                              : status == Status::DENIED
++                                  ? kCameraAccessDenied
++                                  : kCameraAccessUnavailable;
++  RTC_LOG(LS_INFO) << "Camera portal: " << static_cast<int>(status);
++  std::vector<CameraAccessCallback> waiting;
++  {
++    webrtc::MutexLock lock(&mutex_);
++    if (access == kCameraAccessGranted) {
++      portal_info_ =
++          std::make_unique<webrtc::videocapturemodule::DeviceInfoPipeWire>(
++              options_.get());
++    }
++    // After the device info, which those who read it see granted.
++    access_ = access;
++    waiting.swap(waiting_);
++  }
++  for (auto& done : waiting) done(access);
++}
++#endif
++
++webrtc::VideoCaptureModule::DeviceInfo* RTCVideoDeviceImpl::Current(
++    webrtc::VideoCaptureOptions** options) {
++  *options = nullptr;
++#if defined(WEBRTC_USE_PIPEWIRE)
++  switch (access_.load()) {
++    case kCameraAccessDirect:
++      break;
++    case kCameraAccessGranted:
++      // Neither changes once granted.
++      *options = options_.get();
++      return portal_info_.get();
++    case kCameraAccessUnavailable:
++      if (direct_fallback_) break;
++      return nullptr;
++    default:
++      return nullptr;
++  }
++#endif
++  return device_info_.get();
++}
++
+ uint32_t RTCVideoDeviceImpl::NumberOfDevices() {
+-  if (!device_info_) {
++  webrtc::VideoCaptureOptions* options;
++  webrtc::VideoCaptureModule::DeviceInfo* info = Current(&options);
++  if (!info) {
+     return 0;
+   }
+-  return device_info_->NumberOfDevices();
++  return info->NumberOfDevices();
+ }
+ 
+ int32_t RTCVideoDeviceImpl::GetDeviceName(
+@@ -20,15 +129,26 @@ int32_t RTCVideoDeviceImpl::GetDeviceName(
+     char* deviceUniqueIdUTF8, uint32_t deviceUniqueIdUTF8Length,
+     char* productUniqueIdUTF8 /*= 0*/,
+     uint32_t productUniqueIdUTF8Length /*= 0*/) {
+-  if (!device_info_) {
++  webrtc::VideoCaptureOptions* options;
++  webrtc::VideoCaptureModule::DeviceInfo* info = Current(&options);
++  if (!info) {
+     return -1;
+   }
+-
+-  if (device_info_->GetDeviceName(deviceNumber, deviceNameUTF8,
+-                                  deviceNameLength, deviceUniqueIdUTF8,
+-                                  deviceUniqueIdUTF8Length) != -1) {
+-    return 0;
++  if (info->GetDeviceName(deviceNumber, deviceNameUTF8, deviceNameLength,
++                          deviceUniqueIdUTF8, deviceUniqueIdUTF8Length) == -1) {
++    return -1;
+   }
++#if defined(WEBRTC_USE_PIPEWIRE)
++  // A camera PipeWire reaches through V4L2 keeps the id V4L2 gives it (its
++  // bus), so a camera chosen while cameras were opened directly stays chosen.
++  if (options) {
++    const std::string bus = portal_info_->V4l2BusInfo(deviceUniqueIdUTF8);
++    if (!bus.empty() && bus.size() < deviceUniqueIdUTF8Length) {
++      memset(deviceUniqueIdUTF8, 0, deviceUniqueIdUTF8Length);
++      memcpy(deviceUniqueIdUTF8, bus.data(), bus.size());
++    }
++  }
++#endif
+   return 0;
+ }
+ 
+@@ -37,15 +157,17 @@ scoped_refptr<RTCVideoCapturer> RTCVideoDeviceImpl::Create(const char* name,
+                                                            size_t width,
+                                                            size_t height,
+                                                            size_t target_fps) {
+-  auto vcm = worker_thread_->BlockingCall([&, width, height, target_fps]{
++  webrtc::VideoCaptureOptions* options;
++  if (!Current(&options)) {
++    return nullptr;
++  }
++  auto vcm = worker_thread_->BlockingCall([&, width, height, target_fps] {
+     return webrtc::internal::VcmCapturer::Create(worker_thread_, width, height,
+-                                                 target_fps, index);
+-   });
+-
++                                                 target_fps, index, options);
++  });
+   if (vcm == nullptr) {
+     return nullptr;
+   }
+-
+   return worker_thread_->BlockingCall([vcm] {
+     return scoped_refptr<RTCVideoCapturerImpl>(
+         new RefCountedObject<RTCVideoCapturerImpl>(vcm));
+diff --git a/src/rtc_video_device_impl.h b/src/rtc_video_device_impl.h
+index 2f28cb5..595d0dd 100644
+--- a/src/rtc_video_device_impl.h
++++ b/src/rtc_video_device_impl.h
+@@ -1,14 +1,23 @@
+ #ifndef LIB_WEBRTC_VIDEO_DEVICE_IMPL_HXX
+ #define LIB_WEBRTC_VIDEO_DEVICE_IMPL_HXX
+ 
++#include <atomic>
+ #include <memory>
++#include <vector>
+ 
+ #include "modules/video_capture/video_capture.h"
++#include "rtc_base/synchronization/mutex.h"
++#include "rtc_base/thread_annotations.h"
+ #include "rtc_base/thread.h"
+ #include "rtc_video_device.h"
+ #include "src/internal/vcm_capturer.h"
+ #include "src/internal/video_capturer.h"
+ 
++#if defined(WEBRTC_USE_PIPEWIRE)
++#include "modules/video_capture/linux/device_info_pipewire.h"
++#include "modules/video_capture/video_capture_options.h"
++#endif
++
+ namespace libwebrtc {
+ 
+ class RTCVideoCapturerImpl : public RTCVideoCapturer {
+@@ -36,9 +45,15 @@ class RTCVideoCapturerImpl : public RTCVideoCapturer {
+   std::shared_ptr<webrtc::internal::VideoCapturer> video_capturer_;
+ };
+ 
+-class RTCVideoDeviceImpl : public RTCVideoDevice {
++class RTCVideoDeviceImpl : public RTCVideoDevice
++#if defined(WEBRTC_USE_PIPEWIRE)
++    ,
++                           public webrtc::VideoCaptureOptions::Callback
++#endif
++{
+  public:
+   RTCVideoDeviceImpl(webrtc::Thread* worker_thread);
++  ~RTCVideoDeviceImpl();
+ 
+  public:
+   uint32_t NumberOfDevices() override;
+@@ -53,9 +68,36 @@ class RTCVideoDeviceImpl : public RTCVideoDevice {
+                                          size_t width, size_t height,
+                                          size_t target_fps) override;
+ 
++  void SetCameraPortal(bool portal, bool direct_fallback) override;
++
++  CameraAccess GetCameraAccess() override;
++
++  void RequestCameraAccess(CameraAccessCallback done) override;
++
+  private:
++  // What lists the cameras now: V4L2's (or Windows') device info, the portal's
++  // once granted, or none (the portal not granted, without V4L2 standing in).
++  // [options] is the portal's, for the cameras it lists, else null.
++  webrtc::VideoCaptureModule::DeviceInfo* Current(
++      webrtc::VideoCaptureOptions** options);
++
+   std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> device_info_;
+   webrtc::Thread* worker_thread_ = nullptr;
++
++#if defined(WEBRTC_USE_PIPEWIRE)
++  void OnInitialized(webrtc::VideoCaptureOptions::Status status) override;
++
++  bool portal_ = false;
++  bool direct_fallback_ = false;
++  std::atomic<int> access_{kCameraAccessDirect};
++  webrtc::Mutex mutex_;
++  std::vector<CameraAccessCallback> waiting_ RTC_GUARDED_BY(mutex_);
++  // The portal's session, asked for or granted; kept once granted, replaced only
++  // when asked again after it was not.
++  std::unique_ptr<webrtc::VideoCaptureOptions> options_;
++  // The cameras the portal gives, once granted (then never replaced).
++  std::unique_ptr<webrtc::videocapturemodule::DeviceInfoPipeWire> portal_info_;
++#endif
+ };
+ 
+ }  // namespace libwebrtc

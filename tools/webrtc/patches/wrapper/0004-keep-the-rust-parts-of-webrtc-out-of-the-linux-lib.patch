@@ -1,0 +1,34 @@
+Keep the Rust parts of WebRTC out of the Linux library's exports
+
+
+diff --git a/BUILD.gn b/BUILD.gn
+index b7c7e3d..90a4423 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -66,6 +66,12 @@ rtc_shared_library("libwebrtc") {
+     ]
+   }
+ 
++  if (is_linux) {
++    # Fogata: the library shows only its own API, as webrtc-sdk's builds do.
++    inputs = [ "libwebrtc_linux.map" ]
++    ldflags = [ "-Wl,--version-script=" +
++                rebase_path("libwebrtc_linux.map", root_build_dir) ]
++  }
+ 
+   public_configs = [ ":external_config" ]
+ 
+diff --git a/libwebrtc_linux.map b/libwebrtc_linux.map
+new file mode 100644
+index 0000000..f7990fe
+--- /dev/null
++++ b/libwebrtc_linux.map
+@@ -0,0 +1,8 @@
++/* Fogata: keeps the Rust parts of WebRTC (and the cxx bridge to them) inside the
++   library; everything else is exported as the compiler marked it. */
++{
++  local:
++    cxxbridge1$*;
++    *$cxxbridge1$*;
++    _RNv*;
++};

@@ -1,0 +1,665 @@
+Refuse VP8 pictures larger than 8K before they are decoded
+
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 3cbedee..b7c7e3d 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -66,6 +66,7 @@ rtc_shared_library("libwebrtc") {
+     ]
+   }
+ 
++
+   public_configs = [ ":external_config" ]
+ 
+   sources = [
+@@ -117,6 +118,8 @@ rtc_shared_library("libwebrtc") {
+     "src/internal/vcm_capturer.h",
+     "src/internal/video_capturer.cc",
+     "src/internal/video_capturer.h",
++    "src/internal/vp8_size_gate.cc",
++    "src/internal/vp8_size_gate.h",
+     "src/libwebrtc.cc",
+     "src/rtc_audio_device_impl.cc",
+     "src/rtc_audio_device_impl.h",
+@@ -260,7 +263,7 @@ rtc_shared_library("libwebrtc") {
+     cflags += [ "-Wno-deprecated-declarations" ]
+   }
+ 
+-  # Fogata: only the codecs calls use, VP8 and Opus.
++  # Fogata: only the codecs calls use, VP8 and Opus (see src/internal/vp8_size_gate.h).
+   deps = [
+     "../api:create_peerconnection_factory",
+     "../api:field_trials",
+@@ -339,6 +342,11 @@ rtc_test("libwebrtc_cpp_api_unittests") {
+      "test/field_trials.test.cc",
+      "test/peerconnection_factory.test.cc",
+      "test/video_processor.test.cc",
++     "test/vp8_size_gate.test.cc",
++
++     # Built in again: the library shows only its own API.
++     "src/internal/vp8_size_gate.cc",
++     "src/internal/vp8_size_gate.h",
+   ]
+ 
+   if (is_clang) {
+@@ -349,6 +357,15 @@ rtc_test("libwebrtc_cpp_api_unittests") {
+ 
+    deps = [
+     ":libwebrtc",
++    "../api:make_ref_counted",
++    "../api/environment",
++    "//test:create_test_environment",
++    "../api/video:encoded_image",
++    "../api/video:video_frame",
++    "../api/video_codecs:video_codecs_api",
++    "../modules/video_coding:video_codec_interface",
++    "../rtc_base:logging",
++    "//third_party/abseil-cpp/absl/strings",
+     "//testing/gtest",
+     "//test:test_support",
+     "//test:test_main",
+diff --git a/include/rtc_video_frame.h b/include/rtc_video_frame.h
+index a69023f..f299e19 100644
+--- a/include/rtc_video_frame.h
++++ b/include/rtc_video_frame.h
+@@ -47,6 +47,12 @@ class RTCVideoFrame : public RefCountInterface {
+   virtual int ConvertToARGB(Type type, uint8_t* dst_argb, int dst_stride_argb,
+                             int dest_width, int dest_height) = 0;
+ 
++  // Whether this frame stands for a received picture that was not decoded, as
++  // it is larger than any is let through (no side over 8192 pixels, at most
++  // 7680 by 4320 of them); then `width` and `height` are set to its size. The
++  // frame itself is a black picture of 2 by 2.
++  virtual bool TooLarge(int* width, int* height) const { return false; }
++
+  protected:
+   virtual ~RTCVideoFrame() {}
+ };
+diff --git a/src/internal/vp8_size_gate.cc b/src/internal/vp8_size_gate.cc
+new file mode 100644
+index 0000000..0202e4f
+--- /dev/null
++++ b/src/internal/vp8_size_gate.cc
+@@ -0,0 +1,199 @@
++#include "src/internal/vp8_size_gate.h"
++
++#include <cstdio>
++#include <cstring>
++#include <string>
++#include <utility>
++
++#include "absl/strings/match.h"
++#include "api/make_ref_counted.h"
++#include "api/video/encoded_image.h"
++#include "api/video/video_frame.h"
++#include "modules/video_coding/include/video_error_codes.h"
++#include "rtc_base/logging.h"
++
++namespace libwebrtc {
++
++namespace {
++
++constexpr char kTooLargeTag[] = "fogata-too-large ";
++
++class Vp8SizeGate : public webrtc::VideoDecoder {
++ public:
++  explicit Vp8SizeGate(std::unique_ptr<webrtc::VideoDecoder> inner)
++      : inner_(std::move(inner)) {}
++
++  bool Configure(const Settings& settings) override {
++    waiting_for_keyframe_ = false;
++    return inner_->Configure(settings);
++  }
++
++  using webrtc::VideoDecoder::Decode;
++  int32_t Decode(const webrtc::EncodedImage& input,
++                 int64_t render_time_ms) override {
++    std::optional<Vp8Size> size = Vp8KeyframeSize(input.data(), input.size());
++    if (size) {
++      if (!DecodedSizeAllowed(size->width, size->height)) {
++        waiting_for_keyframe_ = true;
++        if (!told_) {
++          RTC_LOG(LS_WARNING) << "Refusing VP8 keyframes of " << size->width
++                              << "x" << size->height << ": too large to decode";
++          told_ = true;
++        }
++        if (callback_ != nullptr) {
++          webrtc::VideoFrame frame =
++              webrtc::VideoFrame::Builder()
++                  .set_video_frame_buffer(
++                      webrtc::make_ref_counted<TooLargeFrameBuffer>(
++                          size->width, size->height))
++                  .set_rtp_timestamp(input.RtpTimestamp())
++                  .set_timestamp_ms(render_time_ms)
++                  .build();
++          callback_->Decoded(frame, std::nullopt, std::nullopt);
++        }
++        return WEBRTC_VIDEO_CODEC_OK;
++      }
++      waiting_for_keyframe_ = false;
++    } else if (waiting_for_keyframe_) {
++      // It would be decoded on what came before the refused keyframe; asking
++      // for another keyframe is what an error here does.
++      return WEBRTC_VIDEO_CODEC_ERROR;
++    }
++    return inner_->Decode(input, render_time_ms);
++  }
++
++  int32_t RegisterDecodeCompleteCallback(
++      webrtc::DecodedImageCallback* callback) override {
++    callback_ = callback;
++    return inner_->RegisterDecodeCompleteCallback(callback);
++  }
++
++  int32_t Release() override { return inner_->Release(); }
++
++  DecoderInfo GetDecoderInfo() const override {
++    return inner_->GetDecoderInfo();
++  }
++
++  const char* ImplementationName() const override {
++    return inner_->ImplementationName();
++  }
++
++ private:
++  std::unique_ptr<webrtc::VideoDecoder> inner_;
++  webrtc::DecodedImageCallback* callback_ = nullptr;
++  bool waiting_for_keyframe_ = false;
++  bool told_ = false;
++};
++
++}  // namespace
++
++std::optional<Vp8Size> Vp8KeyframeSize(const uint8_t* data, size_t size) {
++  if (data == nullptr || size < 1 || (data[0] & 0x01) != 0) {
++    return std::nullopt;  // An interframe (or nothing at all).
++  }
++  if (size < 10 || data[3] != 0x9d || data[4] != 0x01 || data[5] != 0x2a) {
++    return Vp8Size{0, 0};
++  }
++  return Vp8Size{(data[6] | (data[7] << 8)) & 0x3fff,
++                 (data[8] | (data[9] << 8)) & 0x3fff};
++}
++
++bool DecodedSizeAllowed(int width, int height) {
++  return width <= kMaxDecodedSide && height <= kMaxDecodedSide &&
++         int64_t{width} * height <= kMaxDecodedPixels;
++}
++
++TooLargeFrameBuffer::TooLargeFrameBuffer(int refused_width, int refused_height)
++    : refused_width_(refused_width), refused_height_(refused_height) {
++  memset(y_, 0, sizeof(y_));
++  memset(u_, 128, sizeof(u_));
++  memset(v_, 128, sizeof(v_));
++}
++
++std::optional<Vp8Size> TooLargeFrameBuffer::RefusedSize(
++    const webrtc::VideoFrameBuffer& buffer) {
++  if (buffer.type() != Type::kI420 || buffer.width() != 2 ||
++      buffer.height() != 2) {
++    return std::nullopt;
++  }
++  const std::string what = buffer.storage_representation();
++  if (!absl::StartsWith(what, kTooLargeTag)) {
++    return std::nullopt;
++  }
++  Vp8Size size{0, 0};
++  if (sscanf(what.c_str() + sizeof(kTooLargeTag) - 1, "%dx%d", &size.width,
++             &size.height) != 2) {
++    return std::nullopt;
++  }
++  return size;
++}
++
++int TooLargeFrameBuffer::width() const {
++  return 2;
++}
++int TooLargeFrameBuffer::height() const {
++  return 2;
++}
++const uint8_t* TooLargeFrameBuffer::DataY() const {
++  return y_;
++}
++const uint8_t* TooLargeFrameBuffer::DataU() const {
++  return u_;
++}
++const uint8_t* TooLargeFrameBuffer::DataV() const {
++  return v_;
++}
++int TooLargeFrameBuffer::StrideY() const {
++  return 2;
++}
++int TooLargeFrameBuffer::StrideU() const {
++  return 1;
++}
++int TooLargeFrameBuffer::StrideV() const {
++  return 1;
++}
++std::string TooLargeFrameBuffer::storage_representation() const {
++  return kTooLargeTag + std::to_string(refused_width_) + "x" +
++         std::to_string(refused_height_);
++}
++
++SizeGateDecoderFactory::SizeGateDecoderFactory(
++    std::unique_ptr<webrtc::VideoDecoderFactory> inner)
++    : inner_(std::move(inner)) {}
++
++std::vector<webrtc::SdpVideoFormat> SizeGateDecoderFactory::GetSupportedFormats()
++    const {
++  return inner_->GetSupportedFormats();
++}
++
++webrtc::VideoDecoderFactory::CodecSupport
++SizeGateDecoderFactory::QueryCodecSupport(
++    const webrtc::SdpVideoFormat& format,
++    bool reference_scaling,
++    std::optional<webrtc::Resolution> resolution) const {
++  return inner_->QueryCodecSupport(format, reference_scaling, resolution);
++}
++
++std::unique_ptr<webrtc::VideoDecoder> SizeGateDecoderFactory::Create(
++    const webrtc::Environment& env,
++    const webrtc::SdpVideoFormat& format) {
++  if (!absl::EqualsIgnoreCase(format.name, "VP8")) {
++    return inner_->Create(env, format);
++  }
++  // VP8 takes no parameters for decoding; a factory made of templates finds a
++  // format only with exactly the parameters it lists, and the ones a description
++  // carries (such as x-google-max-bitrate) would leave the stream with none.
++  std::unique_ptr<webrtc::VideoDecoder> decoder =
++      inner_->Create(env, webrtc::SdpVideoFormat::VP8());
++  if (decoder == nullptr) {
++    return nullptr;
++  }
++  return CreateVp8SizeGate(std::move(decoder));
++}
++
++std::unique_ptr<webrtc::VideoDecoder> CreateVp8SizeGate(
++    std::unique_ptr<webrtc::VideoDecoder> inner) {
++  return std::make_unique<Vp8SizeGate>(std::move(inner));
++}
++
++}  // namespace libwebrtc
+diff --git a/src/internal/vp8_size_gate.h b/src/internal/vp8_size_gate.h
+new file mode 100644
+index 0000000..4c83ede
+--- /dev/null
++++ b/src/internal/vp8_size_gate.h
+@@ -0,0 +1,98 @@
++#ifndef LIB_WEBRTC_VP8_SIZE_GATE_H_
++#define LIB_WEBRTC_VP8_SIZE_GATE_H_
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <vector>
++
++#include "api/environment/environment.h"
++#include "api/video/video_frame_buffer.h"
++#include "api/video_codecs/sdp_video_format.h"
++#include "api/video_codecs/video_decoder.h"
++#include "api/video_codecs/video_decoder_factory.h"
++
++namespace libwebrtc {
++
++// Largest picture a VP8 decoder is given: no side over 8192 pixels and at most
++// 8K (7680 by 4320) of them, the largest screen shared as captured. A peer can
++// send keyframes of up to 16383 by 16383 pixels, which libvpx makes room for
++// (about a gigabyte) before anything else sees the frame.
++constexpr int kMaxDecodedSide = 8192;
++constexpr int64_t kMaxDecodedPixels = int64_t{7680} * 4320;
++
++struct Vp8Size {
++  int width;
++  int height;
++};
++
++// The picture size a VP8 keyframe's header announces (RFC 6386, 9.1: a 3-byte
++// frame tag, the start code 9d 01 2a, then 14 bits of width and of height,
++// each followed by 2 bits of scaling, little endian). Nothing for an
++// interframe, which keeps the size of the keyframe before it. A keyframe too
++// short to hold its header announces 0 by 0.
++std::optional<Vp8Size> Vp8KeyframeSize(const uint8_t* data, size_t size);
++
++// Whether a picture of that size is given to a decoder.
++bool DecodedSizeAllowed(int width, int height);
++
++// What a VP8 decoder hands on in place of a keyframe larger than
++// DecodedSizeAllowed lets through, without decoding it: a black 2 by 2 picture
++// that carries the size refused, so whoever shows the track can tell.
++// Everything in between sees an ordinary small picture.
++class TooLargeFrameBuffer : public webrtc::I420BufferInterface {
++ public:
++  TooLargeFrameBuffer(int refused_width, int refused_height);
++
++  // The refused size, when `buffer` is one of these; checked by what it says of
++  // its storage, as the library is built without run-time type information.
++  static std::optional<Vp8Size> RefusedSize(
++      const webrtc::VideoFrameBuffer& buffer);
++
++  int width() const override;
++  int height() const override;
++  const uint8_t* DataY() const override;
++  const uint8_t* DataU() const override;
++  const uint8_t* DataV() const override;
++  int StrideY() const override;
++  int StrideU() const override;
++  int StrideV() const override;
++  std::string storage_representation() const override;
++
++ private:
++  int refused_width_;
++  int refused_height_;
++  uint8_t y_[4];
++  uint8_t u_[1];
++  uint8_t v_[1];
++};
++
++// Wraps a decoder factory: every VP8 decoder it makes refuses keyframes larger
++// than DecodedSizeAllowed lets through before the decoder sees them, and the
++// interframes after them until the next keyframe it lets through.
++class SizeGateDecoderFactory : public webrtc::VideoDecoderFactory {
++ public:
++  explicit SizeGateDecoderFactory(
++      std::unique_ptr<webrtc::VideoDecoderFactory> inner);
++
++  std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override;
++  CodecSupport QueryCodecSupport(
++      const webrtc::SdpVideoFormat& format,
++      bool reference_scaling,
++      std::optional<webrtc::Resolution> resolution) const override;
++  std::unique_ptr<webrtc::VideoDecoder> Create(
++      const webrtc::Environment& env,
++      const webrtc::SdpVideoFormat& format) override;
++
++ private:
++  std::unique_ptr<webrtc::VideoDecoderFactory> inner_;
++};
++
++// The decoder SizeGateDecoderFactory makes for VP8 (exposed for its tests).
++std::unique_ptr<webrtc::VideoDecoder> CreateVp8SizeGate(
++    std::unique_ptr<webrtc::VideoDecoder> inner);
++
++}  // namespace libwebrtc
++
++#endif  // LIB_WEBRTC_VP8_SIZE_GATE_H_
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index b4292dc..3588ad4 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -20,6 +20,7 @@
+ #include "rtc_rtp_capabilities_impl.h"
+ #include "rtc_video_device_impl.h"
+ #include "rtc_video_source_impl.h"
++#include "src/internal/vp8_size_gate.h"
+ #if defined(USE_INTEL_MEDIA_SDK)
+ #include "src/win/mediacapabilities.h"
+ #include "src/win/msdkvideodecoderfactory.h"
+@@ -53,15 +54,17 @@ std::unique_ptr<webrtc::VideoDecoderFactory> CreateIntelVideoDecoderFactory() {
+ namespace {
+ 
+ // Fogata: calls use VP8 and Opus only, so no other codec is built in: one less
+-// decoder for what peers send.
++// decoder for what peers send. Every VP8 decoder refuses pictures larger than
++// any copy sends before decoding them (see src/internal/vp8_size_gate.h).
+ std::unique_ptr<webrtc::VideoEncoderFactory> CreateCallVideoEncoderFactory() {
+   return std::make_unique<webrtc::VideoEncoderFactoryTemplate<
+       webrtc::LibvpxVp8EncoderTemplateAdapter>>();
+ }
+ 
+ std::unique_ptr<webrtc::VideoDecoderFactory> CreateCallVideoDecoderFactory() {
+-  return std::make_unique<webrtc::VideoDecoderFactoryTemplate<
+-      webrtc::LibvpxVp8DecoderTemplateAdapter>>();
++  return std::make_unique<SizeGateDecoderFactory>(
++      std::make_unique<webrtc::VideoDecoderFactoryTemplate<
++          webrtc::LibvpxVp8DecoderTemplateAdapter>>());
+ }
+ 
+ // Builds the environment shared by everything this factory creates, applying
+diff --git a/src/rtc_video_frame_impl.cc b/src/rtc_video_frame_impl.cc
+index a692ec1..a0e985a 100644
+--- a/src/rtc_video_frame_impl.cc
++++ b/src/rtc_video_frame_impl.cc
+@@ -1,5 +1,9 @@
+ #include "rtc_video_frame_impl.h"
+ 
++#include <optional>
++
++#include "src/internal/vp8_size_gate.h"
++
+ #include "api/video/i420_buffer.h"
+ #include "libyuv/convert_argb.h"
+ #include "libyuv/convert_from.h"
+@@ -27,6 +31,16 @@ scoped_refptr<RTCVideoFrame> VideoFrameBufferImpl::Copy() {
+ 
+ int VideoFrameBufferImpl::width() const { return buffer_->width(); }
+ 
++bool VideoFrameBufferImpl::TooLarge(int* width, int* height) const {
++  std::optional<Vp8Size> size = TooLargeFrameBuffer::RefusedSize(*buffer_);
++  if (!size) {
++    return false;
++  }
++  *width = size->width;
++  *height = size->height;
++  return true;
++}
++
+ int VideoFrameBufferImpl::height() const { return buffer_->height(); }
+ 
+ const uint8_t* VideoFrameBufferImpl::DataY() const {
+diff --git a/src/rtc_video_frame_impl.h b/src/rtc_video_frame_impl.h
+index cf40b73..e35f8b0 100644
+--- a/src/rtc_video_frame_impl.h
++++ b/src/rtc_video_frame_impl.h
+@@ -39,6 +39,8 @@ class VideoFrameBufferImpl : public RTCVideoFrame {
+   int ConvertToARGB(Type type, uint8_t* dst_argb, int dst_stride_argb,
+                     int dest_width, int dest_height) override;
+ 
++  bool TooLarge(int* width, int* height) const override;
++
+   webrtc::scoped_refptr<webrtc::VideoFrameBuffer> buffer() { return buffer_; }
+ 
+   // System monotonic clock, same timebase as webrtc::TimeMicros().
+diff --git a/test/vp8_size_gate.test.cc b/test/vp8_size_gate.test.cc
+new file mode 100644
+index 0000000..de826f2
+--- /dev/null
++++ b/test/vp8_size_gate.test.cc
+@@ -0,0 +1,195 @@
++#include "src/internal/vp8_size_gate.h"
++
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <vector>
++
++#include "api/environment/environment.h"
++#include "api/make_ref_counted.h"
++#include "api/video/encoded_image.h"
++#include "api/video/i420_buffer.h"
++#include "api/video/video_frame.h"
++#include "api/video/video_frame_type.h"
++#include "api/video_codecs/sdp_video_format.h"
++#include "api/video_codecs/video_decoder_factory.h"
++#include "modules/video_coding/include/video_error_codes.h"
++#include "test/create_test_environment.h"
++#include "test/gtest.h"
++
++namespace {
++
++using libwebrtc::CreateVp8SizeGate;
++using libwebrtc::TooLargeFrameBuffer;
++using libwebrtc::Vp8KeyframeSize;
++using libwebrtc::Vp8Size;
++
++// The first bytes of a VP8 keyframe of `width` by `height` (RFC 6386, 9.1),
++// followed by some payload.
++std::vector<uint8_t> Keyframe(int width, int height) {
++  return {0x50, 0x2a, 0x00, 0x9d, 0x01, 0x2a,
++          static_cast<uint8_t>(width & 0xff),
++          static_cast<uint8_t>(width >> 8),
++          static_cast<uint8_t>(height & 0xff),
++          static_cast<uint8_t>(height >> 8),
++          0x00, 0x00, 0x00, 0x00};
++}
++
++std::vector<uint8_t> Interframe() {
++  return {0x51, 0x2a, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55};
++}
++
++webrtc::EncodedImage Image(const std::vector<uint8_t>& bytes,
++                           uint32_t rtp_timestamp) {
++  webrtc::EncodedImage image;
++  image.SetEncodedData(
++      webrtc::EncodedImageBuffer::Create(bytes.data(), bytes.size()));
++  image.SetRtpTimestamp(rtp_timestamp);
++  image._frameType = (bytes[0] & 1) ? webrtc::VideoFrameType::kVideoFrameDelta
++                                    : webrtc::VideoFrameType::kVideoFrameKey;
++  return image;
++}
++
++// Counts what reaches it.
++class CountingDecoder : public webrtc::VideoDecoder {
++ public:
++  explicit CountingDecoder(int* decoded) : decoded_(decoded) {}
++  bool Configure(const Settings&) override { return true; }
++  int32_t Decode(const webrtc::EncodedImage&, int64_t) override {
++    ++*decoded_;
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++  int32_t RegisterDecodeCompleteCallback(
++      webrtc::DecodedImageCallback*) override {
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++  int32_t Release() override { return WEBRTC_VIDEO_CODEC_OK; }
++
++ private:
++  int* decoded_;
++};
++
++class Collector : public webrtc::DecodedImageCallback {
++ public:
++  using webrtc::DecodedImageCallback::Decoded;
++  int32_t Decoded(webrtc::VideoFrame& frame) override {
++    frames.push_back(frame);
++    return 0;
++  }
++  std::vector<webrtc::VideoFrame> frames;
++};
++
++TEST(Vp8SizeGate, ReadsTheKeyframeHeader) {
++  std::vector<uint8_t> giant = Keyframe(16383, 16383);
++  std::optional<Vp8Size> size = Vp8KeyframeSize(giant.data(), giant.size());
++  ASSERT_TRUE(size.has_value());
++  EXPECT_EQ(size->width, 16383);
++  EXPECT_EQ(size->height, 16383);
++
++  // The two scaling bits above each side are not part of it.
++  std::vector<uint8_t> scaled = Keyframe(0xc000 | 640, 0x4000 | 480);
++  size = Vp8KeyframeSize(scaled.data(), scaled.size());
++  ASSERT_TRUE(size.has_value());
++  EXPECT_EQ(size->width, 640);
++  EXPECT_EQ(size->height, 480);
++
++  std::vector<uint8_t> inter = Interframe();
++  EXPECT_FALSE(Vp8KeyframeSize(inter.data(), inter.size()).has_value());
++
++  std::vector<uint8_t> cut = Keyframe(640, 480);
++  size = Vp8KeyframeSize(cut.data(), 9);
++  ASSERT_TRUE(size.has_value());
++  EXPECT_EQ(size->width, 0);
++}
++
++TEST(Vp8SizeGate, AllowsUpTo8K) {
++  EXPECT_TRUE(libwebrtc::DecodedSizeAllowed(1920, 1080));
++  EXPECT_TRUE(libwebrtc::DecodedSizeAllowed(7680, 4320));
++  EXPECT_TRUE(libwebrtc::DecodedSizeAllowed(8192, 1080));
++  EXPECT_FALSE(libwebrtc::DecodedSizeAllowed(8193, 1080));
++  EXPECT_FALSE(libwebrtc::DecodedSizeAllowed(8192, 8192));
++  EXPECT_FALSE(libwebrtc::DecodedSizeAllowed(16383, 16383));
++}
++
++TEST(Vp8SizeGate, RefusesALargeKeyframeAndWhatFollowsIt) {
++  int decoded = 0;
++  Collector collector;
++  std::unique_ptr<webrtc::VideoDecoder> gate =
++      CreateVp8SizeGate(std::make_unique<CountingDecoder>(&decoded));
++  gate->RegisterDecodeCompleteCallback(&collector);
++
++  EXPECT_EQ(gate->Decode(Image(Keyframe(640, 480), 1), 0),
++            WEBRTC_VIDEO_CODEC_OK);
++  EXPECT_EQ(gate->Decode(Image(Interframe(), 2), 0), WEBRTC_VIDEO_CODEC_OK);
++  EXPECT_EQ(decoded, 2);
++  EXPECT_TRUE(collector.frames.empty());
++
++  // Not decoded: a small picture standing for it goes on instead.
++  EXPECT_EQ(gate->Decode(Image(Keyframe(8192, 8192), 3), 0),
++            WEBRTC_VIDEO_CODEC_OK);
++  EXPECT_EQ(decoded, 2);
++  ASSERT_EQ(collector.frames.size(), 1u);
++  const webrtc::VideoFrame& stand_in = collector.frames[0];
++  EXPECT_EQ(stand_in.width(), 2);
++  EXPECT_EQ(stand_in.height(), 2);
++  EXPECT_EQ(stand_in.rtp_timestamp(), 3u);
++  std::optional<Vp8Size> refused =
++      TooLargeFrameBuffer::RefusedSize(*stand_in.video_frame_buffer());
++  ASSERT_TRUE(refused.has_value());
++  EXPECT_EQ(refused->width, 8192);
++  EXPECT_EQ(refused->height, 8192);
++
++  // Interframes after it would be decoded on the picture before it.
++  EXPECT_EQ(gate->Decode(Image(Interframe(), 4), 0), WEBRTC_VIDEO_CODEC_ERROR);
++  EXPECT_EQ(decoded, 2);
++
++  EXPECT_EQ(gate->Decode(Image(Keyframe(1280, 720), 5), 0),
++            WEBRTC_VIDEO_CODEC_OK);
++  EXPECT_EQ(gate->Decode(Image(Interframe(), 6), 0), WEBRTC_VIDEO_CODEC_OK);
++  EXPECT_EQ(decoded, 4);
++  EXPECT_EQ(collector.frames.size(), 1u);
++}
++
++// Makes decoders only for formats exactly as it lists them, as a factory made of
++// templates does.
++class ExactFactory : public webrtc::VideoDecoderFactory {
++ public:
++  std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
++    return {webrtc::SdpVideoFormat::VP8()};
++  }
++  std::unique_ptr<webrtc::VideoDecoder> Create(
++      const webrtc::Environment&,
++      const webrtc::SdpVideoFormat& format) override {
++    if (!(format == webrtc::SdpVideoFormat::VP8())) {
++      return nullptr;
++    }
++    return std::make_unique<CountingDecoder>(&decoded);
++  }
++  int decoded = 0;
++};
++
++TEST(Vp8SizeGate, MakesDecodersForVp8WithParameters) {
++  auto inner = std::make_unique<ExactFactory>();
++  ExactFactory* exact = inner.get();
++  libwebrtc::SizeGateDecoderFactory factory(std::move(inner));
++  const webrtc::Environment env = webrtc::CreateTestEnvironment();
++  std::unique_ptr<webrtc::VideoDecoder> decoder = factory.Create(
++      env, webrtc::SdpVideoFormat("VP8", {{"x-google-max-bitrate", "1500"}}));
++  ASSERT_NE(decoder, nullptr);
++  decoder->Decode(Image(Keyframe(640, 480), 1), 0);
++  EXPECT_EQ(exact->decoded, 1);
++  decoder->Decode(Image(Keyframe(16383, 16383), 2), 0);
++  EXPECT_EQ(exact->decoded, 1);
++  EXPECT_EQ(factory.Create(env, webrtc::SdpVideoFormat("VP9")), nullptr);
++}
++
++TEST(Vp8SizeGate, OrdinaryBuffersAreNotRefused) {
++  webrtc::scoped_refptr<TooLargeFrameBuffer> refused =
++      webrtc::make_ref_counted<TooLargeFrameBuffer>(16383, 16383);
++  EXPECT_TRUE(TooLargeFrameBuffer::RefusedSize(*refused).has_value());
++  webrtc::scoped_refptr<webrtc::I420Buffer> small =
++      webrtc::I420Buffer::Create(2, 2);
++  EXPECT_FALSE(TooLargeFrameBuffer::RefusedSize(*small).has_value());
++}
++
++}  // namespace

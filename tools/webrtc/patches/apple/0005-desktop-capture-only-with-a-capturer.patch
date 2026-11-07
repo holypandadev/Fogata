@@ -1,0 +1,142 @@
+The desktop media list and the desktop capturer start, list and capture only with a
+capturer WebRTC made, as the C++ wrapper's do (patches/wrapper/0007): WebRTC makes none
+where it cannot capture that kind of source, and the list started the missing one on its
+own thread and the capturer handed it to the cursor composer, which ended the program.
+RTCDesktopCapturer's startCapture and startCaptureWithFPS: answer whether the capture
+started, and its delegate hears that it did only once it has (startCapture told it before).
+
+diff --git a/sdk/objc/native/src/objc_desktop_capture.mm b/sdk/objc/native/src/objc_desktop_capture.mm
+index 1f3cf6e..347d726 100644
+--- a/sdk/objc/native/src/objc_desktop_capture.mm
++++ b/sdk/objc/native/src/objc_desktop_capture.mm
+@@ -16,6 +16,7 @@
+ 
+ #include "api/sequence_checker.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
+ #include "sdk/objc/native/src/objc_desktop_capture.h"
+ #include "sdk/objc/native/src/objc_video_frame.h"
+ #include "third_party/libyuv/include/libyuv.h"
+@@ -38,13 +39,17 @@
+   options_.set_detect_updated_region(true);
+   options_.set_allow_iosurface(true);
+   thread_->BlockingCall([this, type] {
+-    if (type == kScreen) {
+-      capturer_ = std::make_unique<DesktopAndCursorComposer>(
+-          webrtc::DesktopCapturer::CreateScreenCapturer(options_), options_);
+-    } else {
+-      capturer_ = std::make_unique<DesktopAndCursorComposer>(
+-          webrtc::DesktopCapturer::CreateWindowCapturer(options_), options_);
++    std::unique_ptr<webrtc::DesktopCapturer> desktop =
++        type == kScreen ? webrtc::DesktopCapturer::CreateScreenCapturer(options_)
++                        : webrtc::DesktopCapturer::CreateWindowCapturer(options_);
++    // WebRTC makes no capturer where it cannot capture this kind of source;
++    // the cursor composer would use it without looking. Start() then fails.
++    if (!desktop) {
++      RTC_LOG(LS_WARNING) << "No capturer for this "
++                          << (type == kScreen ? "screen" : "window");
++      return;
+     }
++    capturer_ = std::make_unique<DesktopAndCursorComposer>(std::move(desktop), options_);
+   });
+ }
+ 
+@@ -59,7 +64,7 @@
+     return capture_state_;
+   }
+ 
+-  if(fps == 0) {
++  if(fps == 0 || !capturer_) {
+     capture_state_ = CS_FAILED;
+     return capture_state_;
+   }
+diff --git a/sdk/objc/native/src/objc_desktop_media_list.mm b/sdk/objc/native/src/objc_desktop_media_list.mm
+index 1fb6ad6..c22fe1d 100644
+--- a/sdk/objc/native/src/objc_desktop_media_list.mm
++++ b/sdk/objc/native/src/objc_desktop_media_list.mm
+@@ -16,6 +16,7 @@
+ 
+ #include "sdk/objc/native/src/objc_desktop_media_list.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
+ #include "sdk/objc/native/src/objc_video_frame.h"
+ #include "third_party/libyuv/include/libyuv.h"
+ 
+@@ -52,6 +53,14 @@
+     } else {
+       capturer_ = webrtc::DesktopCapturer::CreateWindowCapturer(options_);
+     }
++    // WebRTC makes no capturer where it cannot capture this kind of source.
++    // The list then stays empty.
++    if (!capturer_) {
++      RTC_LOG(LS_WARNING) << "No capturer to list "
++                          << (type == kScreen ? "screens" : "windows")
++                          << " with here";
++      return;
++    }
+     capturer_->Start(callback_.get());
+   });
+ }
+@@ -73,7 +82,9 @@
+   webrtc::DesktopCapturer::SourceList new_sources;
+ 
+   thread_->BlockingCall([this, &new_sources] {
+-    capturer_->GetSourceList(&new_sources);
++    if (capturer_) {
++      capturer_->GetSourceList(&new_sources);
++    }
+   });
+ 
+   typedef std::set<DesktopCapturer::SourceId> SourceSet;
+@@ -145,6 +156,10 @@
+ }
+ 
+ bool ObjCDesktopMediaList::GetThumbnail(MediaSource *source, bool notify) {
++  // Set once, by the constructor, before anything else runs.
++  if (!capturer_) {
++    return false;
++  }
+   thread_->PostTask([this, source, notify] {
+       if(capturer_->SelectSource(source->id())){
+         callback_->SetCallback([&](webrtc::DesktopCapturer::Result result,
+diff --git a/sdk/objc/components/capturer/RTCDesktopCapturer.h b/sdk/objc/components/capturer/RTCDesktopCapturer.h
+index 48c7631..a9c426f 100644
+--- a/sdk/objc/components/capturer/RTCDesktopCapturer.h
++++ b/sdk/objc/components/capturer/RTCDesktopCapturer.h
+@@ -47,9 +47,11 @@ RTC_OBJC_EXPORT
+ 
+ - (instancetype)initWithDefaultScreen:(__weak id<RTC_OBJC_TYPE(RTCDesktopCapturerDelegate)>)delegate captureDelegate:(__weak id<RTC_OBJC_TYPE(RTCVideoCapturerDelegate)>)captureDelegate;
+ 
+-- (void)startCapture;
++// Whether the capture started: it does not where WebRTC could make no capturer for the
++// source, or the source could not be selected (a window that has closed).
++- (BOOL)startCapture;
+ 
+-- (void)startCaptureWithFPS:(NSInteger)fps;
++- (BOOL)startCaptureWithFPS:(NSInteger)fps;
+ 
+ - (void)stopCapture;
+ 
+diff --git a/sdk/objc/components/capturer/RTCDesktopCapturer.mm b/sdk/objc/components/capturer/RTCDesktopCapturer.mm
+index fc92448..910b3a8 100644
+--- a/sdk/objc/components/capturer/RTCDesktopCapturer.mm
++++ b/sdk/objc/components/capturer/RTCDesktopCapturer.mm
+@@ -60,13 +60,13 @@ -(void)dealloc {
+     _nativeCapturer = nullptr;
+ }
+ 
+-- (void)startCapture {
+-    [self didSourceCaptureStart];
+-    _nativeCapturer->Start(30);
++- (BOOL)startCapture {
++    return [self startCaptureWithFPS:30];
+ }
+ 
+-- (void)startCaptureWithFPS:(NSInteger)fps {
+-    _nativeCapturer->Start(fps);
++// The delegate hears didSourceCaptureStart from the native capturer, once it has started.
++- (BOOL)startCaptureWithFPS:(NSInteger)fps {
++    return _nativeCapturer->Start(fps) == webrtc::ObjCDesktopCapturer::CS_RUNNING;
+ }
+ 
+ - (void)didCaptureVideoFrame

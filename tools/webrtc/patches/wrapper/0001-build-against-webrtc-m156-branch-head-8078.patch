@@ -1,0 +1,140 @@
+Build against WebRTC M156 (branch-head 8078)
+
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 33a8a63..f1984a3 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -263,10 +263,12 @@ rtc_shared_library("libwebrtc") {
+   deps = [
+     "../api:create_peerconnection_factory",
+     "../api:field_trials",
+-    "../api:libjingle_peerconnection_api",
++    "../api:peer_connection_interface",
+     "../api/audio_codecs:builtin_audio_decoder_factory",
+     "../api/audio_codecs:builtin_audio_encoder_factory",
+     "../api/crypto:frame_crypto_transformer",
++    "../api/video:video_adapter",
++    "../api/video:video_broadcaster",
+     "../api/video:video_frame",
+     "../api/video_codecs:builtin_video_decoder_factory",
+     "../api/video_codecs:builtin_video_encoder_factory",
+@@ -274,12 +276,11 @@ rtc_shared_library("libwebrtc") {
+     "../media:rtc_audio_video",
+     "../media:rtc_internal_video_codecs",
+     "../media:rtc_media",
+-    "../media:rtc_media_base",
+     "../modules/audio_device:audio_device",
+     "../modules/audio_processing:api",
+     "../modules/audio_processing:audio_processing",
+     "../modules/video_capture:video_capture_module",
+-    "../pc:libjingle_peerconnection",
++    "../pc:peer_connection_factory",
+     "../rtc_base:threading",
+     "../sdk:media_constraints",
+     "//third_party/abseil-cpp/absl/memory",
+@@ -327,6 +328,7 @@ rtc_shared_library("libwebrtc") {
+ 
+ rtc_test("libwebrtc_cpp_api_unittests") {
+   testonly = true
++  include_dirs = [ "." ]
+ 
+   sources = [
+      "test/field_trials.test.cc",
+diff --git a/src/internal/desktop_capturer.h b/src/internal/desktop_capturer.h
+index be024c8..5506153 100644
+--- a/src/internal/desktop_capturer.h
++++ b/src/internal/desktop_capturer.h
+@@ -13,8 +13,8 @@
+ #include "api/video/video_frame.h"
+ #include "api/video/video_source_interface.h"
+ #include "include/base/refcount.h"
+-#include "media/base/video_adapter.h"
+-#include "media/base/video_broadcaster.h"
++#include "api/video/video_adapter.h"
++#include "api/video/video_broadcaster.h"
+ #include "modules/video_capture/video_capture.h"
+ #include "modules/video_capture/video_capture_factory.h"
+ #include "pc/video_track_source.h"
+diff --git a/src/internal/video_capturer.h b/src/internal/video_capturer.h
+index 4f951a3..4c0c414 100644
+--- a/src/internal/video_capturer.h
++++ b/src/internal/video_capturer.h
+@@ -17,8 +17,8 @@
+ 
+ #include "api/video/video_frame.h"
+ #include "api/video/video_source_interface.h"
+-#include "media/base/video_adapter.h"
+-#include "media/base/video_broadcaster.h"
++#include "api/video/video_adapter.h"
++#include "api/video/video_broadcaster.h"
+ #include "modules/video_capture/video_capture.h"
+ #include "modules/video_capture/video_capture_factory.h"
+ #include "pc/video_track_source.h"
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index cf524b6..f4a78db 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -144,8 +144,7 @@ void RTCPeerConnectionFactoryImpl::CreateAudioDeviceModule_w() {
+   if (!audio_device_module_) {
+     audio_device_module_ = webrtc::CreateAudioDeviceModule(
+         env_,
+-        webrtc::AudioDeviceModule::kPlatformDefaultAudio,
+-        false);
++        webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+     // Initialize the ADM eagerly so device enumeration (RecordingDevices/
+     // PlayoutDevices) works before a PeerConnection has been created. On
+     // desktop these queries return early unless the module is initialized,
+diff --git a/src/rtc_rtp_capabilities_impl.cc b/src/rtc_rtp_capabilities_impl.cc
+index 0f1594e..fbd3237 100644
+--- a/src/rtc_rtp_capabilities_impl.cc
++++ b/src/rtc_rtp_capabilities_impl.cc
+@@ -167,11 +167,13 @@ RTCRtpHeaderExtensionCapabilityImpl::rtp_header_extension_capability() {
+ }
+ 
+ int RTCRtpHeaderExtensionCapabilityImpl::preferred_id() {
+-  return rtp_header_extension_capability_.preferred_id.value_or(-1);
++  const auto& id = rtp_header_extension_capability_.preferred_id;
++  return id ? id->value() : -1;
+ }
+ 
+ void RTCRtpHeaderExtensionCapabilityImpl::set_preferred_id(int value) {
+-  rtp_header_extension_capability_.preferred_id = value;
++  rtp_header_extension_capability_.preferred_id =
++      webrtc::RtpHeaderExtensionId::Create(value);
+ }
+ 
+ bool RTCRtpHeaderExtensionCapabilityImpl::preferred_encrypt() {
+diff --git a/src/rtc_rtp_parameters_impl.cc b/src/rtc_rtp_parameters_impl.cc
+index 127129a..c5016ec 100644
+--- a/src/rtc_rtp_parameters_impl.cc
++++ b/src/rtc_rtp_parameters_impl.cc
+@@ -321,9 +321,12 @@ void RTCRtpExtensionImpl::set_uri(const string uri) {
+   rtp_extension_.uri = to_std_string(uri);
+ }
+ 
+-int RTCRtpExtensionImpl::id() { return rtp_extension_.id; }
++int RTCRtpExtensionImpl::id() { return rtp_extension_.id.value(); }
+ 
+-void RTCRtpExtensionImpl::set_id(int value) { rtp_extension_.id = value; }
++void RTCRtpExtensionImpl::set_id(int value) {
++  rtp_extension_.id = webrtc::RtpHeaderExtensionId::Create(value).value_or(
++      webrtc::RtpHeaderExtensionId::NotSet());
++}
+ 
+ bool RTCRtpExtensionImpl::encrypt() { return rtp_extension_.encrypt; }
+ 
+diff --git a/src/rtc_video_source_impl.h b/src/rtc_video_source_impl.h
+index 9b684d7..ba01241 100644
+--- a/src/rtc_video_source_impl.h
++++ b/src/rtc_video_source_impl.h
+@@ -4,8 +4,7 @@
+ #include <memory>
+ 
+ #include "api/media_stream_interface.h"
+-#include "media/base/video_broadcaster.h"
+-#include "media/base/video_source_base.h"
++#include "api/video/video_broadcaster.h"
+ #include "rtc_peerconnection_factory_impl.h"
+ #include "rtc_video_frame.h"
+ #include "rtc_video_source.h"

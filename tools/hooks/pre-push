@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+# Refuses to push a commit that tools/ci.sh has not passed on this computer: each commit pushed
+# (the tip of each branch or tag) needs <git dir>/fogata-ci/<commit> saying "result: pass",
+# written by the commit's own tools/ci.sh. A run that skipped something (a system, a check)
+# says "result: incomplete"; it is let through only when every part it skipped is named in
+# FOGATA_CI_ALLOW_SKIPPED (say FOGATA_CI_ALLOW_SKIPPED="macos windows" git push), for a
+# system (or the integration tests) checked some other way. A leg of macOS or Windows that
+# ran a command that did not say it checked the commit is "incomplete" too, and a record that
+# says "pass" for one without the command's exit status 0 and its output digest is refused.
+# The record is a file anyone may write: this stops an oversight, not a tamperer. Installed by
+# tools/install-hooks.sh.
+set -euo pipefail
+records="$(git rev-parse --git-common-dir)/fogata-ci"
+zero=0000000000000000000000000000000000000000
+allow=${FOGATA_CI_ALLOW_SKIPPED:-}
+allowed=" ${allow//,/ } "
+refused=0
+sha256() { { sha256sum 2> /dev/null || shasum -a 256; } | cut -d' ' -f1; }
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [[ $local_sha == "$zero" ]] && continue # a deletion pushes no commit
+    sha=$(git rev-parse --verify "$local_sha^{commit}" 2> /dev/null) || continue
+    record="$records/$sha"
+    if [[ ! -f $record ]]; then
+        echo "pre-push: $local_ref ($sha) has not passed tools/ci.sh; run tools/ci.sh $sha first" >&2
+        refused=1
+        continue
+    fi
+    field() { sed -n "s/^$1: //p" "$record" | head -n 1; }
+    # A record of another tools/ci.sh than the commit's may have checked less.
+    script=$(git show "$sha:tools/ci.sh" 2> /dev/null | sha256)
+    if [[ "$(field ci.sh)" != "$script" ]]; then
+        echo "pre-push: $local_ref ($sha) was checked by another tools/ci.sh than its own;" \
+            "run its tools/ci.sh $sha again" >&2
+        refused=1
+        continue
+    fi
+    skipped=$(grep -E '^(linux|macos|windows|advisories|codegen|notices|integration): (skipped|incomplete)|^pairs: (skipped|incomplete|not run)' "$record" |
+        cut -d: -f1 | tr '\n' ' ' || true)
+    case "$(field result)" in
+        pass)
+            # A leg of another system that passed must show what ran and how it ended.
+            for system in macos windows; do
+                if [[ "$(field "$system")" == pass ]] &&
+                    { [[ "$(field "$system exit")" != 0 ]] || [[ -z "$(field "$system output")" ]] ||
+                        [[ "$(field "$system output")" == none ]]; }; then
+                    echo "pre-push: $local_ref ($sha): the record says $system passed without" \
+                        "the command's exit status 0 and the digest of its output; run" \
+                        "tools/ci.sh $sha again" >&2
+                    refused=1
+                fi
+            done
+            echo "pre-push: $local_ref ($sha) passed tools/ci.sh:" \
+                "$(grep -E '^(linux|macos|windows):' "$record" | tr '\n' ' ')" \
+                "(legs not run: $(field 'legs not run'))" >&2
+            ;;
+        incomplete)
+            missing=
+            for part in $skipped; do
+                [[ $allowed == *" $part "* ]] || missing+="$part "
+            done
+            if [[ -n $missing ]]; then
+                echo "pre-push: $local_ref ($sha) passed tools/ci.sh without: $skipped;" \
+                    "check them and run tools/ci.sh again, or name what was checked some other" \
+                    "way: FOGATA_CI_ALLOW_SKIPPED=\"${missing% }\" git push" >&2
+                refused=1
+            else
+                echo "pre-push: $local_ref ($sha) passed tools/ci.sh without: $skipped(allowed" \
+                    "by FOGATA_CI_ALLOW_SKIPPED)" >&2
+            fi
+            ;;
+        *)
+            echo "pre-push: $local_ref ($sha) did not pass tools/ci.sh (see $record.log)" >&2
+            refused=1
+            ;;
+    esac
+done
+exit $refused

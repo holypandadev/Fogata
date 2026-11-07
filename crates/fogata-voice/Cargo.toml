@@ -1,0 +1,22 @@
+[package]
+name = "fogata-voice"
+description = "Voice messages: recording to Opus in Ogg, reading them back and playing them faster"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# libopus (BSD-3-Clause) through opusic-sys, whose default `bundled` feature builds the copy
+# of libopus it carries with CMake and always links it statically: a libopus installed on the
+# computer is never taken.
+opus = "=0.4.0"
+
+[features]
+# Entry points for fuzzing what reads and plays a friend's message (see fogata-core's
+# `fuzzing`).
+fuzzing = []
+
+[lints]
+workspace = true

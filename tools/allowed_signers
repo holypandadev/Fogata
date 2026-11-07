@@ -1,0 +1,10 @@
+# The public keys that sign Fogata's releases (SHA256SUMS) and release tags, in the format of
+# ssh-keygen's ALLOWED SIGNERS:
+#   fogata-release namespaces="file,git" ssh-ed25519 AAAA...     the SSH key of public releases
+#                                                                 (docs/releasing.md)
+#   fogata-prerelease namespaces="file" ssh-ed25519 AAAA...      a pre-release key, as
+#                                                                 `fogata release keygen` prints it
+#                                                                 (docs/releasing-beta.md)
+# The two names keep them apart: `ssh-keygen -Y verify -I fogata-release` takes no pre-release
+# key. `python3 tools/release.py verify <folder>` checks SHA256SUMS.sig against the
+# fogata-release lines here, and `verify --prerelease` against the fogata-prerelease ones.

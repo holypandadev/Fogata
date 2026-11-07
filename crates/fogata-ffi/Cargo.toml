@@ -1,0 +1,66 @@
+[package]
+name = "fogata-ffi"
+description = "The Fogata application core as the Flutter interface sees it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "fogata_ffi"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+anyhow.workspace = true
+cpal.workspace = true
+flutter_rust_bridge = "=2.13.0"
+fogata-core.workspace = true
+fogata-crypto.workspace = true
+fogata-denoise.workspace = true
+fogata-friends.workspace = true
+fogata-net.workspace = true
+fogata-voice.workspace = true
+hex.workspace = true
+qrcode.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zeroize.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# The tray icon, served on the session bus; the desktop's idle time over the same bus
+# (idle.rs), with the zbus the core already builds; and ALSA, already under cpal, to record
+# a voice message from the microphone the sound server names.
+[target.'cfg(target_os = "linux")'.dependencies]
+fogata-tray.workspace = true
+zbus = "5.19.0"
+alsa = "0.11.0"
+# The compositor's idle notifications on Wayland (idle.rs), over the protocol's pure-Rust
+# implementation: no system library is linked or loaded.
+wayland-client = { version = "0.31.15", default-features = false }
+wayland-protocols = { version = "0.32.13", default-features = false, features = [
+    "client",
+    "staging",
+] }
+
+# Free space on a disk (disk.rs), with the features other crates already turn on, and the
+# time since the last input (idle.rs).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
+    "Win32_UI_Input_KeyboardAndMouse",
+] }
+
+# The workspace's lints. The bridge code is generated and needs `unsafe`, which the workspace
+# denies: it is allowed on that module and on each function with an unsafe block (each with
+# its SAFETY comment), and tools/check.sh refuses an allowance anywhere else.
+[lints]
+workspace = true
+
+[dev-dependencies]
+fogata-proto.workspace = true

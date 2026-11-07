@@ -1,0 +1,63 @@
+Adds the libwebrtc wrapper (copied in as libwebrtc/) to the default build, and builds
+the Wayland screen capture with an older libstdc++. From webrtc-sdk/libwebrtc's
+patches/add_libwebrtc_build_target.patch and fix_desktop_capture_compile.patch.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 0ebb09302a..0bb78c34d0 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -44,7 +44,7 @@ if (!build_with_chromium) {
+   # 'ninja default' and then 'ninja all', the second build should do no work.
+   group("default") {
+     testonly = true
+-    deps = [ ":webrtc" ]
++    deps = [ ":webrtc","//libwebrtc", ]
+     if (rtc_build_examples) {
+       deps += [ "examples" ]
+     }
+diff --git a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
+index 831ba77e01..68c46c423b 100644
+--- a/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
++++ b/modules/desktop_capture/linux/wayland/shared_screencast_stream.cc
+@@ -75,12 +75,15 @@ constexpr int CursorMetaSize(int w, int h) {
+           w * h * kBytesPerPixel);
+ }
+ 
+-constexpr PipeWireVersion kDmaBufModifierMinVersion = {.major = 0,
+-                                                       .minor = 3,
+-                                                       .micro = 33};
+-constexpr PipeWireVersion kDropSingleModifierMinVersion = {.major = 0,
+-                                                           .minor = 3,
+-                                                           .micro = 40};
++// Not constexpr constants: PipeWireVersion holds a std::string, so it is only
++// a literal type with a C++20 standard library (libstdc++ >= 12), and
++// namespace-scope instances would need static initializers.
++PipeWireVersion DmaBufModifierMinVersion() {
++  return {.major = 0, .minor = 3, .micro = 33};
++}
++PipeWireVersion DropSingleModifierMinVersion() {
++  return {.major = 0, .minor = 3, .micro = 40};
++}
+ 
+ class SharedScreenCastStreamPrivate {
+  public:
+@@ -626,8 +629,8 @@ bool SharedScreenCastStreamPrivate::StartScreenCastStream(
+ 
+     // Modifiers can be used with PipeWire >= 0.3.33
+     const bool has_dmabuf_support =
+-        egl_dmabuf_ && pw_client_version_ >= kDmaBufModifierMinVersion &&
+-        pw_server_version_ >= kDmaBufModifierMinVersion;
++        egl_dmabuf_ && pw_client_version_ >= DmaBufModifierMinVersion() &&
++        pw_server_version_ >= DmaBufModifierMinVersion();
+ 
+     struct spa_fraction default_frame_rate = SPA_FRACTION(frame_rate_, 1);
+     struct spa_rectangle resolution;
+@@ -1170,7 +1173,7 @@ bool SharedScreenCastStreamPrivate::ProcessDMABuffer(
+                                     spa_video_format_.format)
+         << "), marking as failed and renegotiating stream parameters";
+ 
+-    if (pw_server_version_ >= kDropSingleModifierMinVersion) {
++    if (pw_server_version_ >= DropSingleModifierMinVersion()) {
+       render_device->MarkModifierFailed(spa_video_format_.format, modifier_);
+     } else {
+       // For older PipeWire versions, mark all modifiers as failed for this

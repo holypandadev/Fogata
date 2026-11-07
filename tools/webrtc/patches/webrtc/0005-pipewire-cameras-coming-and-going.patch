@@ -1,0 +1,241 @@
+PipeWire's cameras (the Camera portal's path) listed and opened safely while cameras come
+and go, each with the id V4L2 gives it.
+
+PipeWire's own thread adds and removes the cameras as they are plugged in and out, while
+the device info and the capture module read the list from another thread without a lock:
+they now read it with PipeWire's loop locked. A camera whose formats are not known yet
+(just plugged in) is not listed until they are, as the first listing already left out
+cameras without one. A camera PipeWire reaches through V4L2 carries its V4L2 bus
+(api.v4l2.cap.bus_info), which the device info tells (V4l2BusInfo) so that the wrapper
+can keep the id V4L2's own device info gives the camera. Without PipeWire's library the
+session said so and then went on to use it; it now stops there.
+
+diff --git a/modules/video_capture/linux/device_info_pipewire.cc b/modules/video_capture/linux/device_info_pipewire.cc
+index 7eaf5fbd70..86e693ea17 100644
+--- a/modules/video_capture/linux/device_info_pipewire.cc
++++ b/modules/video_capture/linux/device_info_pipewire.cc
+@@ -14,6 +14,7 @@
+ #include <cstdlib>
+ #include <cstring>
+ 
++#include "modules/portal/pipewire_utils.h"
+ #include "modules/video_capture/device_info_impl.h"
+ #include "modules/video_capture/linux/pipewire_session.h"
+ #include "modules/video_capture/video_capture_impl.h"
+@@ -31,10 +32,34 @@ int32_t DeviceInfoPipeWire::Init() {
+ 
+ DeviceInfoPipeWire::~DeviceInfoPipeWire() = default;
+ 
+-uint32_t DeviceInfoPipeWire::NumberOfDevices() {
++pw_thread_loop* DeviceInfoPipeWire::Loop() const {
+   RTC_CHECK(pipewire_session_);
+ 
+-  return pipewire_session_->nodes().size();
++  return pipewire_session_->pw_main_loop_;
++}
++
++const PipeWireNode* DeviceInfoPipeWire::Camera(uint32_t deviceNumber) {
++  uint32_t n = 0;
++  for (const auto& node : pipewire_session_->nodes()) {
++    if (node->capabilities().empty())
++      continue;
++    if (n++ == deviceNumber)
++      return node.get();
++  }
++  return nullptr;
++}
++
++uint32_t DeviceInfoPipeWire::NumberOfDevices() {
++  if (!Loop())
++    return 0;
++
++  PipeWireThreadLoopLock thread_loop_lock(Loop());
++  uint32_t n = 0;
++  for (const auto& node : pipewire_session_->nodes()) {
++    if (!node->capabilities().empty())
++      n++;
++  }
++  return n;
+ }
+ 
+ int32_t DeviceInfoPipeWire::GetDeviceName(uint32_t deviceNumber,
+@@ -44,12 +69,13 @@ int32_t DeviceInfoPipeWire::GetDeviceName(uint32_t deviceNumber,
+                                           uint32_t deviceUniqueIdUTF8Length,
+                                           char* productUniqueIdUTF8,
+                                           uint32_t productUniqueIdUTF8Length) {
+-  RTC_CHECK(pipewire_session_);
+-
+-  if (deviceNumber >= NumberOfDevices())
++  if (!Loop())
+     return -1;
+ 
+-  const auto& node = pipewire_session_->nodes().at(deviceNumber);
++  PipeWireThreadLoopLock thread_loop_lock(Loop());
++  const PipeWireNode* node = Camera(deviceNumber);
++  if (!node)
++    return -1;
+ 
+   if (deviceNameLength <= node->display_name().length()) {
+     RTC_LOG(LS_INFO) << "deviceNameUTF8 buffer passed is too small";
+@@ -79,12 +105,27 @@ int32_t DeviceInfoPipeWire::GetDeviceName(uint32_t deviceNumber,
+   return 0;
+ }
+ 
++std::string DeviceInfoPipeWire::V4l2BusInfo(const char* deviceUniqueIdUTF8) {
++  if (!Loop())
++    return std::string();
++
++  PipeWireThreadLoopLock thread_loop_lock(Loop());
++  for (const auto& node : pipewire_session_->nodes()) {
++    if (node->unique_id().compare(deviceUniqueIdUTF8) == 0)
++      return node->v4l2_bus_info();
++  }
++  return std::string();
++}
++
+ int32_t DeviceInfoPipeWire::CreateCapabilityMap(
+     const char* deviceUniqueIdUTF8) {
+-  RTC_CHECK(pipewire_session_);
++  if (!Loop())
++    return -1;
+ 
++  PipeWireThreadLoopLock thread_loop_lock(Loop());
+   for (auto& node : pipewire_session_->nodes()) {
+-    if (node->unique_id().compare(deviceUniqueIdUTF8) != 0)
++    if (node->unique_id().compare(deviceUniqueIdUTF8) != 0 ||
++        node->capabilities().empty())
+       continue;
+ 
+     _captureCapabilities = node->capabilities();
+diff --git a/modules/video_capture/linux/device_info_pipewire.h b/modules/video_capture/linux/device_info_pipewire.h
+index 5d0fc6740a..78617f54a1 100644
+--- a/modules/video_capture/linux/device_info_pipewire.h
++++ b/modules/video_capture/linux/device_info_pipewire.h
+@@ -12,6 +12,7 @@
+ #define MODULES_VIDEO_CAPTURE_LINUX_DEVICE_INFO_PIPEWIRE_H_
+ 
+ #include <cstdint>
++#include <string>
+ 
+ #include "api/scoped_refptr.h"
+ #include "modules/video_capture/device_info_impl.h"
+@@ -20,6 +21,8 @@
+ 
+ namespace webrtc {
+ namespace videocapturemodule {
++class PipeWireNode;
++
+ class DeviceInfoPipeWire : public DeviceInfoImpl {
+  public:
+   explicit DeviceInfoPipeWire(VideoCaptureOptions* options);
+@@ -45,7 +48,17 @@ class DeviceInfoPipeWire : public DeviceInfoImpl {
+                                           uint32_t /*positionY*/) override;
+   int32_t Init() override;
+ 
++  // The V4L2 bus of camera [deviceUniqueIdUTF8] when PipeWire reaches it
++  // through V4L2 (the unique id DeviceInfoV4l2 gives it), else empty.
++  std::string V4l2BusInfo(const char* deviceUniqueIdUTF8);
++
+  private:
++  // The cameras are PipeWire's nodes as its own thread keeps them, cameras
++  // coming and going: they are read with that thread's loop locked. A camera is
++  // listed once its formats are known.
++  const PipeWireNode* Camera(uint32_t deviceNumber);
++  pw_thread_loop* Loop() const;
++
+   webrtc::scoped_refptr<PipeWireSession> pipewire_session_;
+ };
+ }  // namespace videocapturemodule
+diff --git a/modules/video_capture/linux/pipewire_session.cc b/modules/video_capture/linux/pipewire_session.cc
+index e17bab807c..8f9697d7c0 100644
+--- a/modules/video_capture/linux/pipewire_session.cc
++++ b/modules/video_capture/linux/pipewire_session.cc
+@@ -150,6 +150,11 @@ void PipeWireNode::OnNodeInfo(void* data, const pw_node_info* info) {
+                pid.value());
+       that->model_id_ = model_str;
+     }
++
++    const char* bus_info =
++        spa_dict_lookup(info->props, "api.v4l2.cap.bus_info");
++    if (bus_info)
++      that->v4l2_bus_info_ = bus_info;
+   }
+ 
+   if (info->change_mask & PW_NODE_CHANGE_MASK_PARAMS) {
+@@ -336,8 +341,11 @@ void PipeWireSession::Init(VideoCaptureOptions::Callback* callback, int fd) {
+ }
+ 
+ void PipeWireSession::InitPipeWire(int fd) {
+-  if (!InitializePipeWire())
++  // Without PipeWire's library nothing below can run.
++  if (!InitializePipeWire()) {
+     Finish(VideoCaptureOptions::Status::UNAVAILABLE);
++    return;
++  }
+ 
+   if (!StartPipeWire(fd))
+     Finish(VideoCaptureOptions::Status::ERROR);
+diff --git a/modules/video_capture/linux/pipewire_session.h b/modules/video_capture/linux/pipewire_session.h
+index 934933402f..b6dcc95742 100644
+--- a/modules/video_capture/linux/pipewire_session.h
++++ b/modules/video_capture/linux/pipewire_session.h
+@@ -56,6 +56,9 @@ class PipeWireNode {
+   const std::string& display_name() const { return display_name_; }
+   const std::string& unique_id() const { return unique_id_; }
+   const std::string& model_id() const { return model_id_; }
++  // The V4L2 bus the camera is on ("usb-0000:00:14.0-1"), as V4L2's own device
++  // info names a camera, when PipeWire reaches it through V4L2; else empty.
++  const std::string& v4l2_bus_info() const { return v4l2_bus_info_; }
+   const std::vector<VideoCaptureCapability>& capabilities() const {
+     return capabilities_;
+   }
+@@ -82,6 +85,7 @@ class PipeWireNode {
+   std::string display_name_;
+   std::string unique_id_;
+   std::string model_id_;
++  std::string v4l2_bus_info_;
+   struct pw_node_info* info_ = nullptr;
+   int sync_seq_ = 0;
+   std::vector<VideoCaptureCapability> capabilities_;
+@@ -112,6 +116,7 @@ class PipeWireSession : public webrtc::RefCountedNonVirtual<PipeWireSession> {
+   }
+ 
+   friend class CameraPortalNotifier;
++  friend class DeviceInfoPipeWire;
+   friend class PipeWireNode;
+   friend class VideoCaptureModulePipeWire;
+ 
+diff --git a/modules/video_capture/linux/video_capture_pipewire.cc b/modules/video_capture/linux/video_capture_pipewire.cc
+index 3a953995ca..2f4eb55322 100644
+--- a/modules/video_capture/linux/video_capture_pipewire.cc
++++ b/modules/video_capture/linux/video_capture_pipewire.cc
+@@ -113,15 +113,22 @@ int32_t VideoCaptureModulePipeWire::Init(const char* deviceUniqueId) {
+   RTC_CHECK_RUNS_SERIALIZED(&capture_checker_);
+   RTC_DCHECK_RUN_ON(&api_checker_);
+ 
+-  auto node =
+-      std::find_if(session_->nodes_.begin(), session_->nodes_.end(),
+-                   [deviceUniqueId](const PipeWireNode::PipeWireNodePtr& node) {
+-                     return node->unique_id() == deviceUniqueId;
+-                   });
+-  if (node == session_->nodes_.end())
++  if (!session_->pw_main_loop_)
+     return -1;
+ 
+-  node_id_ = (*node)->id();
++  {
++    // PipeWire's thread keeps the nodes, cameras coming and going.
++    PipeWireThreadLoopLock thread_loop_lock(session_->pw_main_loop_);
++    auto node = std::find_if(
++        session_->nodes_.begin(), session_->nodes_.end(),
++        [deviceUniqueId](const PipeWireNode::PipeWireNodePtr& node) {
++          return node->unique_id() == deviceUniqueId;
++        });
++    if (node == session_->nodes_.end())
++      return -1;
++
++    node_id_ = (*node)->id();
++  }
+ 
+   const int len = strlen(deviceUniqueId);
+   _deviceUniqueId = new (std::nothrow) char[len + 1];

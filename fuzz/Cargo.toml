@@ -1,0 +1,198 @@
+# libFuzzer targets for the decoders of everything that comes from outside; see
+# docs/fuzzing.md. A workspace of its own, with its own Cargo.lock, so the main workspace's
+# builds, checks and dependency audit never see libfuzzer-sys or the nightly toolchain.
+[package]
+name = "fogata-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fogata-core = { path = "../crates/fogata-core", features = ["fuzzing"] }
+
+[workspace]
+
+# The same patches as the main workspace's (tools/check.sh compares both lists), so the targets
+# fuzz the code that ships.
+[patch.crates-io]
+libp2p-quic = { path = "../vendor/libp2p-quic" }
+libp2p-mdns = { path = "../vendor/libp2p-mdns" }
+libp2p-identify = { path = "../vendor/libp2p-identify" }
+turn = { path = "../vendor/turn" }
+spake2 = { path = "../vendor/spake2" }
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "entry"
+path = "fuzz_targets/entry.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log"
+path = "fuzz_targets/log.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proof"
+path = "fuzz_targets/proof.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "member_wire"
+path = "fuzz_targets/member_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_request"
+path = "fuzz_targets/node_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_join"
+path = "fuzz_targets/node_join.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_friend"
+path = "fuzz_targets/node_friend.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "friend_wire"
+path = "fuzz_targets/friend_wire.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "friend_sealed"
+path = "fuzz_targets/friend_sealed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "room_event"
+path = "fuzz_targets/room_event.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parts"
+path = "fuzz_targets/parts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "turn"
+path = "fuzz_targets/turn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "direct_payload"
+path = "fuzz_targets/direct_payload.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "typing"
+path = "fuzz_targets/typing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sealed_name"
+path = "fuzz_targets/sealed_name.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "invite"
+path = "fuzz_targets/invite.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "records"
+path = "fuzz_targets/records.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "at_rest"
+path = "fuzz_targets/at_rest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "mls"
+path = "fuzz_targets/mls.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ogg_read"
+path = "fuzz_targets/ogg_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "voice_play"
+path = "fuzz_targets/voice_play.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wsola_step"
+path = "fuzz_targets/wsola_step.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "resample"
+path = "fuzz_targets/resample.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recorder"
+path = "fuzz_targets/recorder.rs"
+test = false
+doc = false
+bench = false

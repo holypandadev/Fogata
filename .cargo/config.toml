@@ -1,0 +1,7 @@
+# Control Flow Guard for everything Rust builds for Windows (fogata_ffi.dll, the
+# command-line fogata.exe), as the runner and the plugins have it (app/windows/CMakeLists.txt).
+# The app's build runs cargo from the workspace (app/rust_builder/cargo_build.cmake), so this
+# file is found, and without RUSTFLAGS, which would replace these flags, or variables that add
+# to them.
+[target.'cfg(all(windows, target_env = "msvc"))']
+rustflags = ["-C", "control-flow-guard"]

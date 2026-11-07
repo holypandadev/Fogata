@@ -1,0 +1,366 @@
+Opus and VP8 only, as the Linux and Windows library: the audio codec factories make Opus
+alone (no G.711, G.722, iLBC, L16 or multichannel Opus), the default video codec
+factories VP8 alone, and the framework holds no VideoToolbox H.264 encoder or decoder, no
+VP9 and no AV1. No other codec can be negotiated, and none is there to decode what others
+send.
+diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
+index 324f297b7f..236edc2822 100644
+--- a/sdk/BUILD.gn
++++ b/sdk/BUILD.gn
+@@ -832,9 +832,7 @@ if (is_ios || is_mac) {
+         ":helpers_objc",
+         ":native_video",
+         ":videocodec_objc",
+-        ":videotoolbox_objc",
+         ":vp8",
+-        ":vp9",
+         ":vpx_codec_constants",
+         "../api/video_codecs:scalability_mode",
+         "../api/video_codecs:scalability_mode_helper",
+@@ -1249,7 +1247,6 @@ if (is_ios || is_mac) {
+         ":videorendereradapter_objc",
+         ":audiorendereradapter_objc",
+         ":videosource_objc",
+-        ":videotoolbox_objc",
+         "../api:create_modular_peer_connection_factory",
+         "../api:data_channel_interface",
+         "../api:dtmf_sender_interface",
+@@ -1274,8 +1271,8 @@ if (is_ios || is_mac) {
+         "../api/audio:audio_processing_options_resolver",
+         "../api/audio:builtin_audio_processing_builder",
+         "../api/audio_codecs:audio_codecs_api",
+-        "../api/audio_codecs:builtin_audio_decoder_factory",
+-        "../api/audio_codecs:builtin_audio_encoder_factory",
++        "../api/audio_codecs/opus:audio_decoder_opus",
++        "../api/audio_codecs/opus:audio_encoder_opus",
+         "../api/crypto:frame_decryptor_interface",
+         "../api/crypto:frame_encryptor_interface",
+         "../api/environment",
+@@ -1692,12 +1689,8 @@ if (is_ios || is_mac) {
+           "objc/api/peerconnection/RTCVideoSource.h",
+           "objc/api/peerconnection/RTCVideoTrack.h",
+           "objc/api/video_codec/RTCVideoCodecConstants.h",
+-          "objc/api/video_codec/RTCVideoDecoderAV1.h",
+           "objc/api/video_codec/RTCVideoDecoderVP8.h",
+-          "objc/api/video_codec/RTCVideoDecoderVP9.h",
+-          "objc/api/video_codec/RTCVideoEncoderAV1.h",
+           "objc/api/video_codec/RTCVideoEncoderVP8.h",
+-          "objc/api/video_codec/RTCVideoEncoderVP9.h",
+           "objc/api/video_frame_buffer/RTCNativeI420Buffer.h",
+           "objc/api/video_frame_buffer/RTCNativeMutableI420Buffer.h",
+           "objc/base/RTCCodecSpecificInfo.h",
+@@ -1733,10 +1726,6 @@ if (is_ios || is_mac) {
+           "objc/components/video_codec/RTCDefaultVideoDecoderFactory.h",
+           "objc/components/video_codec/RTCDefaultVideoEncoderFactory.h",
+           "objc/components/video_codec/RTCH264ProfileLevelId.h",
+-          "objc/components/video_codec/RTCVideoDecoderFactoryH264.h",
+-          "objc/components/video_codec/RTCVideoDecoderH264.h",
+-          "objc/components/video_codec/RTCVideoEncoderFactoryH264.h",
+-          "objc/components/video_codec/RTCVideoEncoderH264.h",
+           "objc/components/video_frame_buffer/RTCCVPixelBuffer.h",
+           "objc/helpers/RTCDispatcher.h",
+           "objc/helpers/RTCYUVHelper.h",
+@@ -1767,7 +1756,6 @@ if (is_ios || is_mac) {
+           ":videocapture_objc",
+           ":desktopcapture_objc",
+           ":videocodec_objc",
+-          ":videotoolbox_objc",
+         ]
+         if (!build_with_chromium) {
+           deps += [
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+index 0e8de054bf..c11c67398d 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -42,8 +42,11 @@
+ #include "api/audio/create_audio_device_module.h"
+ #include "api/environment/environment_factory.h"
+ #include "api/field_trials.h"
+-#include "api/audio_codecs/builtin_audio_decoder_factory.h"
+-#include "api/audio_codecs/builtin_audio_encoder_factory.h"
++// Fogata: calls use Opus and VP8 only, so no other codec is offered or decoded.
++#include "api/audio_codecs/audio_decoder_factory_template.h"
++#include "api/audio_codecs/audio_encoder_factory_template.h"
++#include "api/audio_codecs/opus/audio_decoder_opus.h"
++#include "api/audio_codecs/opus/audio_encoder_opus.h"
+ #include "api/create_modular_peer_connection_factory.h"
+ #include "api/enable_media.h"
+ #include "api/environment/environment.h"
+@@ -51,8 +54,6 @@
+ #include "api/media_stream_interface.h"
+ #include "api/rtc_event_log/rtc_event_log_factory.h"
+ #include "api/scoped_refptr.h"
+-#import "components/video_codec/RTCVideoDecoderFactoryH264.h"
+-#import "components/video_codec/RTCVideoEncoderFactoryH264.h"
+ #include "media/base/media_constants.h"
+ #include "modules/audio_device/include/audio_device.h"
+ #include "modules/audio_device/audio_engine_device.h"
+@@ -99,13 +100,12 @@ static webrtc::Environment CreateDefaultEnvironment() {
+ - (instancetype)init {
+   webrtc::PeerConnectionFactoryDependencies dependencies;
+   dependencies.audio_encoder_factory =
+-      webrtc::CreateBuiltinAudioEncoderFactory();
++      webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>();
+   dependencies.audio_decoder_factory =
+-      webrtc::CreateBuiltinAudioDecoderFactory();
+-  dependencies.video_encoder_factory = webrtc::ObjCToNativeVideoEncoderFactory(
+-      [[RTC_OBJC_TYPE(RTCVideoEncoderFactoryH264) alloc] init]);
+-  dependencies.video_decoder_factory = webrtc::ObjCToNativeVideoDecoderFactory(
+-      [[RTC_OBJC_TYPE(RTCVideoDecoderFactoryH264) alloc] init]);
++      webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
++  // Fogata: no video codec factories (VideoToolbox's H.264 ones are not built); a
++  // factory for video is given VP8's, RTCDefaultVideoEncoderFactory and
++  // RTCDefaultVideoDecoderFactory, as the plugin does.
+   dependencies.env = CreateDefaultEnvironment();
+ #ifdef WEBRTC_IOS
+   dependencies.adm = webrtc::CreateAudioDeviceModule(*dependencies.env);
+@@ -126,9 +126,9 @@ static webrtc::Environment CreateDefaultEnvironment() {
+   webrtc::PeerConnectionFactoryDependencies dependencies;
+   dependencies.env = CreateDefaultEnvironment();
+   dependencies.audio_encoder_factory =
+-      webrtc::CreateBuiltinAudioEncoderFactory();
++      webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>();
+   dependencies.audio_decoder_factory =
+-      webrtc::CreateBuiltinAudioDecoderFactory();
++      webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
+   if (encoderFactory) {
+     dependencies.video_encoder_factory = webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory);
+   }
+@@ -170,8 +170,8 @@ static webrtc::Environment CreateDefaultEnvironment() {
+   }
+ 
+   return [self
+-      initWithNativeAudioEncoderFactory:webrtc::CreateBuiltinAudioEncoderFactory()
+-              nativeAudioDecoderFactory:webrtc::CreateBuiltinAudioDecoderFactory()
++      initWithNativeAudioEncoderFactory:webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>()
++              nativeAudioDecoderFactory:webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>()
+               nativeVideoEncoderFactory:std::move(native_encoder_factory)
+               nativeVideoDecoderFactory:std::move(native_decoder_factory)
+                       audioDeviceModule:nullptr
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactoryBuilder+DefaultComponents.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactoryBuilder+DefaultComponents.mm
+index 1b7038bc20..aea2f3301e 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactoryBuilder+DefaultComponents.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactoryBuilder+DefaultComponents.mm
+@@ -11,12 +11,11 @@
+ #import "RTCPeerConnectionFactory+Native.h"
+ #import "RTCPeerConnectionFactoryBuilder+DefaultComponents.h"
+ 
+-#include "api/audio_codecs/builtin_audio_decoder_factory.h"
+-#include "api/audio_codecs/builtin_audio_encoder_factory.h"
+-#import "components/video_codec/RTCVideoDecoderFactoryH264.h"
+-#import "components/video_codec/RTCVideoEncoderFactoryH264.h"
+-#include "sdk/objc/native/api/video_decoder_factory.h"
+-#include "sdk/objc/native/api/video_encoder_factory.h"
++// Fogata: calls use Opus and VP8 only, so no other codec is offered or decoded.
++#include "api/audio_codecs/audio_decoder_factory_template.h"
++#include "api/audio_codecs/audio_encoder_factory_template.h"
++#include "api/audio_codecs/opus/audio_decoder_opus.h"
++#include "api/audio_codecs/opus/audio_encoder_opus.h"
+ 
+ #if defined(WEBRTC_IOS)
+ #include "api/environment/environment.h"
+@@ -27,19 +26,14 @@
+ 
+ + (RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) *)defaultBuilder {
+   RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) *builder = [[RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) alloc] init];
+-  auto audioEncoderFactory = webrtc::CreateBuiltinAudioEncoderFactory();
++  auto audioEncoderFactory = webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>();
+   [builder setAudioEncoderFactory:audioEncoderFactory];
+ 
+-  auto audioDecoderFactory = webrtc::CreateBuiltinAudioDecoderFactory();
++  auto audioDecoderFactory = webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
+   [builder setAudioDecoderFactory:audioDecoderFactory];
+ 
+-  auto videoEncoderFactory = webrtc::ObjCToNativeVideoEncoderFactory(
+-      [[RTC_OBJC_TYPE(RTCVideoEncoderFactoryH264) alloc] init]);
+-  [builder setVideoEncoderFactory:std::move(videoEncoderFactory)];
+-
+-  auto videoDecoderFactory = webrtc::ObjCToNativeVideoDecoderFactory(
+-      [[RTC_OBJC_TYPE(RTCVideoDecoderFactoryH264) alloc] init]);
+-  [builder setVideoDecoderFactory:std::move(videoDecoderFactory)];
++  // Fogata: no video codec factories (VideoToolbox's H.264 ones are not built); a
++  // builder for video is given VP8's.
+ 
+ #if defined(WEBRTC_IOS)
+   [builder setAudioDeviceModuleBuilder:^(const webrtc::Environment &env) {
+diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m b/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m
+index 0b6e625192..4ec6b0d4f5 100644
+--- a/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m
++++ b/sdk/objc/components/video_codec/RTCDefaultVideoDecoderFactory.m
+@@ -10,54 +10,28 @@
+ 
+ #import "RTCDefaultVideoDecoderFactory.h"
+ 
+-#import "RTCH264ProfileLevelId.h"
+-#import "RTCVideoDecoderH264.h"
+ #import "api/video_codec/RTCVideoCodecConstants.h"
+ #import "api/video_codec/RTCVideoDecoderVP8.h"
+-#import "api/video_codec/RTCVideoDecoderVP9.h"
+ #import "base/RTCVideoCodecInfo.h"
+ 
+-#if defined(RTC_DAV1D_IN_INTERNAL_DECODER_FACTORY)
+-#import "api/video_codec/RTCVideoDecoderAV1.h"  // nogncheck
+-#endif
+-
++// Fogata: calls use VP8 only, so no decoder of another codec is offered or made: one
++// less decoder for what peers send.
+ @implementation RTC_OBJC_TYPE (RTCDefaultVideoDecoderFactory)
+ 
+ - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
+   NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *result =
+       [NSMutableArray array];
+ 
+-  [result
+-      addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoDecoderH264) supportedCodecs]];
+   [result
+       addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoDecoderVP8) supportedCodecs]];
+ 
+-  [result
+-      addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoDecoderVP9) supportedCodecs]];
+-
+-#if defined(RTC_DAV1D_IN_INTERNAL_DECODER_FACTORY)
+-  [result
+-      addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoDecoderAV1) supportedCodecs]];
+-#endif
+-
+   return result;
+ }
+ 
+ - (id<RTC_OBJC_TYPE(RTCVideoDecoder)>)createDecoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
+-  if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecH264Name)]) {
+-    return [[RTC_OBJC_TYPE(RTCVideoDecoderH264) alloc] init];
+-  } else if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecVp8Name)]) {
++  if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecVp8Name)]) {
+     return [RTC_OBJC_TYPE(RTCVideoDecoderVP8) vp8Decoder];
+-  } else if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecVp9Name)] &&
+-             [RTC_OBJC_TYPE(RTCVideoDecoderVP9) isSupported]) {
+-    return [RTC_OBJC_TYPE(RTCVideoDecoderVP9) vp9Decoder];
+-  }
+-
+-#if defined(RTC_DAV1D_IN_INTERNAL_DECODER_FACTORY)
+-  if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecAv1Name)]) {
+-    return [RTC_OBJC_TYPE(RTCVideoDecoderAV1) av1Decoder];
+   }
+-#endif
+ 
+   return nil;
+ }
+diff --git a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm
+index 056a887e9b..216546ece3 100644
+--- a/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm
++++ b/sdk/objc/components/video_codec/RTCDefaultVideoEncoderFactory.mm
+@@ -10,22 +10,16 @@
+ 
+ #import "RTCDefaultVideoEncoderFactory.h"
+ 
+-#import "RTCH264ProfileLevelId.h"
+-#import "RTCVideoEncoderH264.h"
+ #import "api/peerconnection/RTCVideoCodecInfo+Private.h"
+ #import "api/video_codec/RTCVideoCodecConstants.h"
+ #import "api/video_codec/RTCVideoEncoderVP8.h"
+-#import "api/video_codec/RTCVideoEncoderVP9.h"
+ #import "base/RTCVideoCodecInfo.h"
+ #import "helpers/NSString+StdString.h"
+ 
+ #include "absl/algorithm/container.h"
+ #include "api/video_codecs/scalability_mode_helper.h"
+ 
+-#if defined(RTC_USE_LIBAOM_AV1_ENCODER)
+-#import "api/video_codec/RTCVideoEncoderAV1.h"  // nogncheck
+-#endif
+-
++// Fogata: calls use VP8 only, so no encoder of another codec is offered or made.
+ @implementation RTC_OBJC_TYPE (RTCDefaultVideoEncoderFactory)
+ 
+ @synthesize preferredCodec;
+@@ -34,37 +28,16 @@
+   NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *result =
+       [NSMutableArray array];
+ 
+-  [result
+-      addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoEncoderH264) supportedCodecs]];
+   [result
+       addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoEncoderVP8) supportedCodecs]];
+ 
+-  [result
+-      addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoEncoderVP9) supportedCodecs]];
+-
+-#if defined(RTC_USE_LIBAOM_AV1_ENCODER)
+-  [result
+-      addObjectsFromArray:[RTC_OBJC_TYPE(RTCVideoEncoderAV1) supportedCodecs]];
+-#endif
+-
+   return result;
+ }
+ 
+ - (id<RTC_OBJC_TYPE(RTCVideoEncoder)>)createEncoder:(RTC_OBJC_TYPE(RTCVideoCodecInfo) *)info {
+-  if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecH264Name)]) {
+-    return [[RTC_OBJC_TYPE(RTCVideoEncoderH264) alloc] initWithCodecInfo:info];
+-  } else if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecVp8Name)]) {
++  if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecVp8Name)]) {
+     return [RTC_OBJC_TYPE(RTCVideoEncoderVP8) vp8Encoder];
+-  } else if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecVp9Name)] &&
+-             [RTC_OBJC_TYPE(RTCVideoEncoderVP9) isSupported]) {
+-    return [RTC_OBJC_TYPE(RTCVideoEncoderVP9) vp9Encoder];
+-  }
+-
+-#if defined(RTC_USE_LIBAOM_AV1_ENCODER)
+-  if ([info.name isEqualToString:RTC_CONSTANT_TYPE(RTCVideoCodecAv1Name)]) {
+-    return [RTC_OBJC_TYPE(RTCVideoEncoderAV1) av1Encoder];
+   }
+-#endif
+ 
+   return nil;
+ }
+diff --git a/sdk/objc/components/video_codec/RTCVideoEncoderFactorySimulcast.mm b/sdk/objc/components/video_codec/RTCVideoEncoderFactorySimulcast.mm
+index 023d0d2a65..75eb3eb2b5 100644
+--- a/sdk/objc/components/video_codec/RTCVideoEncoderFactorySimulcast.mm
++++ b/sdk/objc/components/video_codec/RTCVideoEncoderFactorySimulcast.mm
+@@ -1,19 +1,11 @@
+ #import <Foundation/Foundation.h>
+ 
+-#import "RTCH264ProfileLevelId.h"
+ #import "RTCMacros.h"
+ #import "RTCVideoCodecInfo.h"
+ #import "RTCVideoEncoderFactorySimulcast.h"
+ #import "api/video_codec/RTCVideoEncoderSimulcast.h"
+ #import "api/peerconnection/RTCVideoCodecInfo+Private.h"
+ 
+-#include "absl/container/inlined_vector.h"
+-#include "api/video_codecs/video_codec.h"
+-#include "api/video_codecs/sdp_video_format.h"
+-#include "api/video_codecs/video_codec.h"
+-#include "modules/video_coding/codecs/av1/av1_svc_config.h"
+-#include "modules/video_coding/codecs/vp9/include/vp9.h"
+-#include "media/base/media_constants.h"
+ 
+ @interface RTC_OBJC_TYPE (RTCVideoEncoderFactorySimulcast) ()
+ 
+@@ -42,25 +34,9 @@
+     return [RTC_OBJC_TYPE(RTCVideoEncoderSimulcast) simulcastEncoderWithPrimary: _primary fallback: _fallback videoCodecInfo: info];
+ }
+ 
++// Fogata: only what the two factories offer (VP8 alone); VP9 and AV1 are not added.
+ - (NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *)supportedCodecs {
+-    NSArray *supportedCodecs = [[_primary supportedCodecs] arrayByAddingObjectsFromArray: [_fallback supportedCodecs]];
+-
+-    NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *addingCodecs = [[NSMutableArray alloc] init];
+-
+-    for (const webrtc::SdpVideoFormat& format : webrtc::SupportedVP9Codecs(true)) {
+-        RTC_OBJC_TYPE(RTCVideoCodecInfo) *codec = [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithNativeSdpVideoFormat: format];
+-        [addingCodecs addObject: codec];
+-    }
+-
+-#if defined(RTC_USE_LIBAOM_AV1_ENCODER)
+-    auto av1Format = webrtc::SdpVideoFormat(
+-         webrtc::kAv1CodecName, webrtc::CodecParameterMap(),
+-         webrtc::LibaomAv1EncoderSupportedScalabilityModes());
+-    RTC_OBJC_TYPE(RTCVideoCodecInfo) *av1Codec = [[RTC_OBJC_TYPE(RTCVideoCodecInfo) alloc] initWithNativeSdpVideoFormat: av1Format];
+-    [addingCodecs addObject: av1Codec];
+-#endif
+-
+-    return [supportedCodecs arrayByAddingObjectsFromArray: addingCodecs];
++    return [[_primary supportedCodecs] arrayByAddingObjectsFromArray: [_fallback supportedCodecs]];
+ }
+ 
+ 

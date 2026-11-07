@@ -1,0 +1,284 @@
+//! Noise suppression for the microphone's sound in calls: RNNoise, in its Rust form
+//! (nnnoiseless). A small neural network looks at each 10 ms of sound in 22 bands, tells
+//! speech from noise and lowers the bands that hold noise, so a fan, a hum, typing or
+//! traffic fade while the voice stays as loud as it was.
+//!
+//! WebRTC hands over its processed microphone sound in 10 ms frames at 16, 32 or 48 kHz;
+//! RNNoise works on 10 ms frames at 48 kHz, so the other two rates are resampled on the
+//! way in and out (about 1 ms more delay each way). RNNoise itself gives each frame back
+//! one frame (10 ms) later: the price of looking at 20 ms at a time.
+//!
+//! [`Denoiser::process`] is told on every frame whether to suppress, so the setting
+//! applies from the next frame. While off it only keeps the last frames, so that turning
+//! it on starts from a network that has already heard them; either way the change
+//! cross-fades over one frame.
+
+#![forbid(unsafe_code)]
+
+use nnnoiseless::DenoiseState;
+
+mod resample;
+
+use resample::Resampler;
+
+/// Samples in one 10 ms frame at 48 kHz, what RNNoise takes at a time.
+const FRAME: usize = DenoiseState::FRAME_SIZE;
+
+/// Frames kept while off and replayed when turned on: RNNoise's pitch analysis looks
+/// 36 ms back.
+const HISTORY: usize = 4;
+
+/// The rates WebRTC processes the microphone's sound at.
+const RATES: [usize; 3] = [16000, 32000, 48000];
+
+/// One channel of microphone sound being cleaned. Not shared between channels.
+pub struct Denoiser {
+    rnn: Box<DenoiseState<'static>>,
+    /// Samples a second of the frames, 0 before the first.
+    rate: usize,
+    /// The last frame went through RNNoise.
+    running: bool,
+    /// The last [`HISTORY`] frames as they came in, oldest first.
+    history: Vec<f32>,
+    /// To 48 kHz and back, for 16 and 32 kHz.
+    up: Option<Resampler>,
+    down: Option<Resampler>,
+    wide_in: [f32; FRAME],
+    wide_out: [f32; FRAME],
+    /// What RNNoise gave back for the last frame, at the frame's rate.
+    clean: Vec<f32>,
+    /// A frame as it came in, while fading out of RNNoise.
+    raw: Vec<f32>,
+}
+
+impl std::fmt::Debug for Denoiser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Denoiser")
+            .field("rate", &self.rate)
+            .field("running", &self.running)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for Denoiser {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Denoiser {
+    pub fn new() -> Self {
+        Denoiser {
+            rnn: DenoiseState::new(),
+            rate: 0,
+            running: false,
+            history: Vec::new(),
+            up: None,
+            down: None,
+            wide_in: [0.0; FRAME],
+            wide_out: [0.0; FRAME],
+            clean: Vec::new(),
+            raw: Vec::new(),
+        }
+    }
+
+    /// Whether `process` takes `frames` samples at `rate`: 10 ms at 16, 32 or 48 kHz.
+    pub fn accepts(rate: i32, frames: usize) -> bool {
+        usize::try_from(rate).is_ok_and(|rate| RATES.contains(&rate) && frames == rate / 100)
+    }
+
+    /// Cleans one 10 ms frame in place when `on`, samples as 16-bit values in floats
+    /// (−32768 to 32767, as WebRTC keeps them). A frame of any other rate or length is
+    /// left as it is.
+    pub fn process(&mut self, on: bool, rate: usize, frame: &mut [f32]) {
+        if !RATES.contains(&rate) || frame.len() != rate / 100 {
+            self.running = false;
+            return;
+        }
+        if rate != self.rate {
+            self.start(rate);
+        }
+        match (on, self.running) {
+            (false, false) => self.remember(frame),
+            (true, true) => {
+                self.denoise(frame);
+                frame.copy_from_slice(&self.clean);
+            }
+            (true, false) => {
+                // The frames heard while off, so the network, its pitch analysis and its
+                // overlap start where the sound is; what they give back is not used.
+                self.reset_resamplers();
+                let history = std::mem::take(&mut self.history);
+                for old in history.chunks(frame.len()) {
+                    self.denoise(old);
+                }
+                self.history = history;
+                self.denoise(frame);
+                cross_fade(frame, &self.clean);
+                self.running = true;
+            }
+            (false, true) => {
+                self.raw.copy_from_slice(frame);
+                self.denoise(frame);
+                frame.copy_from_slice(&self.clean);
+                cross_fade(frame, &self.raw);
+                let raw = std::mem::take(&mut self.raw);
+                self.remember(&raw);
+                self.raw = raw;
+                self.running = false;
+            }
+        }
+    }
+
+    /// Forgets everything heard: a new rate.
+    fn start(&mut self, rate: usize) {
+        self.rate = rate;
+        self.running = false;
+        self.history = vec![0.0; HISTORY * rate / 100];
+        self.clean = vec![0.0; rate / 100];
+        self.raw = vec![0.0; rate / 100];
+        self.up = (rate != 48000).then(|| Resampler::new(rate, 48000));
+        self.down = (rate != 48000).then(|| Resampler::new(48000, rate));
+    }
+
+    fn reset_resamplers(&mut self) {
+        if let Some(up) = &mut self.up {
+            up.reset();
+        }
+        if let Some(down) = &mut self.down {
+            down.reset();
+        }
+    }
+
+    fn remember(&mut self, frame: &[f32]) {
+        let len = frame.len();
+        self.history.copy_within(len.., 0);
+        let end = self.history.len();
+        self.history[end - len..].copy_from_slice(frame);
+    }
+
+    /// RNNoise over one frame at the frame's rate; the result, one frame late, goes to
+    /// `clean`.
+    fn denoise(&mut self, frame: &[f32]) {
+        match &mut self.up {
+            Some(up) => up.process(frame, &mut self.wide_in),
+            None => self.wide_in.copy_from_slice(frame),
+        }
+        self.rnn.process_frame(&mut self.wide_out, &self.wide_in);
+        match &mut self.down {
+            Some(down) => down.process(&self.wide_out, &mut self.clean),
+            None => self.clean.copy_from_slice(&self.wide_out),
+        }
+    }
+}
+
+/// Goes from what `frame` holds to `to` over the frame, along a raised cosine.
+fn cross_fade(frame: &mut [f32], to: &[f32]) {
+    let n = frame.len() as f32;
+    for (i, (a, b)) in frame.iter_mut().zip(to).enumerate() {
+        let w = 0.5 - 0.5 * (std::f32::consts::PI * (i as f32 + 0.5) / n).cos();
+        *a = *a * (1.0 - w) + *b * w;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A noise that is the same on every run.
+    fn noise(n: usize, seed: &mut u64, level: f32) -> Vec<f32> {
+        (0..n)
+            .map(|_| {
+                *seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((*seed >> 33) as f32 / (1u64 << 31) as f32 - 0.5) * 2.0 * level
+            })
+            .collect()
+    }
+
+    fn rms(xs: &[f32]) -> f32 {
+        (xs.iter().map(|x| x * x).sum::<f32>() / xs.len() as f32).sqrt()
+    }
+
+    fn db(ratio: f32) -> f32 {
+        20.0 * ratio.log10()
+    }
+
+    /// Steady noise alone, at every rate: much lower once RNNoise has heard a second of it.
+    #[test]
+    fn steady_noise_is_lowered() {
+        for rate in RATES {
+            let mut d = Denoiser::new();
+            let mut seed = 7;
+            let len = rate / 100;
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for i in 0..300 {
+                let mut frame = noise(len, &mut seed, 1000.0);
+                if i >= 100 {
+                    before.extend_from_slice(&frame);
+                }
+                d.process(true, rate, &mut frame);
+                assert!(frame.iter().all(|x| x.is_finite()));
+                if i >= 100 {
+                    after.extend_from_slice(&frame);
+                }
+            }
+            let lowered = db(rms(&before) / rms(&after));
+            assert!(lowered > 10.0, "{rate} Hz: only {lowered:.1} dB lower");
+        }
+    }
+
+    /// Off, nothing changes, at any rate, and odd frames are left alone.
+    #[test]
+    fn off_leaves_the_sound_alone() {
+        let mut d = Denoiser::new();
+        let mut seed = 3;
+        for rate in RATES {
+            for _ in 0..20 {
+                let frame = noise(rate / 100, &mut seed, 3000.0);
+                let mut out = frame.clone();
+                d.process(false, rate, &mut out);
+                assert_eq!(out, frame);
+            }
+        }
+        let frame = noise(441, &mut seed, 3000.0);
+        let mut out = frame.clone();
+        d.process(true, 44100, &mut out);
+        assert_eq!(out, frame);
+    }
+
+    /// Turning it on and off in the middle of a tone: no jump bigger than the tone's own
+    /// steps, so no click.
+    #[test]
+    fn switching_does_not_click() {
+        for rate in RATES {
+            let mut d = Denoiser::new();
+            let len = rate / 100;
+            let mut out = Vec::new();
+            let mut t = 0usize;
+            for i in 0..200 {
+                let mut frame: Vec<f32> = (0..len)
+                    .map(|k| {
+                        let s = (t + k) as f32 / rate as f32;
+                        8000.0 * (2.0 * std::f32::consts::PI * 220.0 * s).sin()
+                    })
+                    .collect();
+                t += len;
+                d.process((i / 25) % 2 == 1, rate, &mut frame);
+                out.extend_from_slice(&frame);
+            }
+            // The largest step of a 220 Hz tone at 8000 is 8000 · 2π · 220 / rate.
+            let tone_step = 8000.0 * 2.0 * std::f32::consts::PI * 220.0 / rate as f32;
+            let worst = out
+                .windows(2)
+                .map(|w| (w[1] - w[0]).abs())
+                .fold(0.0, f32::max);
+            assert!(
+                worst < 2.5 * tone_step,
+                "{rate} Hz: step {worst} vs {tone_step}"
+            );
+        }
+    }
+}
