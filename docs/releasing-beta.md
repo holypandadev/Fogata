@@ -145,7 +145,9 @@ refuses a folder that holds any key already.
      `build\windows\x64\runner\Release` (`Compress-Archive -Path Release\* -DestinationPath
      Fogata-windows-x64.zip`).
    - macOS: `flutter build macos --release`, `tools/beta/macos-updater.sh --team <team>`
-     (the ten characters in brackets at the end of the identity's name: the updater takes
+     (the team ID, the OU of the certificate: `security find-certificate -c "<identity>" -p |
+     openssl x509 -noout -subject` shows it as `OU=`; not the ten characters in brackets at the
+     end of the identity's name, which name the certificate, not the team: the updater takes
      new versions signed by that team only), `tools/sign-macos.sh "<identity>"` (online: every
      signature gets Apple's timestamp, so it stays valid after the certificate expires),
      then

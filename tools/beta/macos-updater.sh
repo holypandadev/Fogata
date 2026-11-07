@@ -6,8 +6,10 @@
 #
 # Usage: tools/beta/macos-updater.sh [--team <id>] [--container <path>] [Fogata.app]
 #   --team       the team id the new version's signature must carry, pinned into the
-#                helper (`security find-identity -v -p codesigning` shows it in brackets at
-#                the end of the identity's name); without it the helper requires its own
+#                helper: the OU of the signing certificate (`security find-certificate -c
+#                "<identity>" -p | openssl x509 -noout -subject` shows it as OU=), not the
+#                ten characters in brackets at the end of the identity's name, which
+#                name the certificate); without it the helper requires its own
 #                signature's team. Give it for a release.
 #   --container  where the helper looks for the new version: Fogata's container, as a path
 #                under the home of the user running (the default,

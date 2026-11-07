@@ -117,9 +117,10 @@ Linux
   to install). Then open Fogata from your applications menu.
 
 Updates
-  New versions come by themselves from friends who have them. Fogata takes only versions
-  signed by Holy Panda's release key, checks every byte of them, and asks before it
-  installs one. Your profile, friends, groups and chats stay.
+  Fogata keeps itself up to date. It looks for new versions on its releases page and among
+  your friends, takes only versions signed by Holy Panda's release key, and checks every
+  byte of them. A new version installs when Fogata starts; one that arrives while it runs
+  waits for you to restart it. Your profile, friends, groups and chats stay.
 
 What to expect from this early version
   - Things will go wrong now and then. When they do, Settings, "Report a problem" shows
