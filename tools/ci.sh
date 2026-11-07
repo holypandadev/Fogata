@@ -55,6 +55,9 @@
 # them past FOGATA_CI_CACHE_GB (40 by default) is emptied before the run, which then builds
 # afresh.
 set -euo pipefail
+# The copies the checks start take releases from one another only, never from the
+# releases page on GitHub.
+export FOGATA_UPDATE_WEB=off
 
 skips=()
 full=0

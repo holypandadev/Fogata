@@ -559,8 +559,9 @@ pub async fn fetch(
 }
 
 /// Opens `part` to add to, keeping only its whole chunks that hash right; returns it with
-/// the hash of what it holds so far and how many bytes that is.
-async fn resume(
+/// the hash of what it holds so far and how many bytes that is. Made new, owner only, never
+/// through a link, when there is nothing to go on from.
+pub async fn resume(
     part: &Path,
     artifact: &Artifact,
 ) -> io::Result<(tokio::fs::File, blake3::Hasher, u64)> {

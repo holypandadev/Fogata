@@ -29,6 +29,13 @@ pub const THIS_VERSION: &str = "0.1.0-beta.1";
 pub const PRODUCT: &str = "dev.holypanda.fogata";
 pub const CHANNEL: &str = "beta";
 
+/// Where releases are published besides spreading from friend to friend: the project's
+/// releases page on GitHub, read through its API. A release there carries `release.json`,
+/// `release.sig` and the packages under their file names; a copy takes only what the
+/// release key signed, as from a friend.
+pub const RELEASES_API: &str = "https://api.github.com";
+pub const RELEASES_REPO: &str = "holypandadev/Fogata";
+
 /// What a release key is for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyRole {
@@ -67,7 +74,18 @@ impl ReleaseKey {
 /// The keys this build trusts: the public halves of the Ed25519 keys that sign releases
 /// (`fogata release keygen` prints the line for one, `--rescue` for the rescue key). Either
 /// none, and no release is ever taken, or at least one of each role.
-pub const RELEASE_KEYS: &[ReleaseKey] = &[];
+pub const RELEASE_KEYS: &[ReleaseKey] = &[
+    ReleaseKey::release([
+        0xef, 0xc7, 0x19, 0xe0, 0xf9, 0xec, 0xbd, 0xc2, 0x55, 0x88, 0xcc, 0x44, 0xd4, 0x29, 0x61,
+        0x0e, 0x9b, 0x2b, 0xf6, 0xaa, 0x97, 0x85, 0xad, 0x3f, 0x38, 0x9a, 0x63, 0x17, 0x41, 0xe3,
+        0x58, 0x48,
+    ]),
+    ReleaseKey::rescue([
+        0x1d, 0xe8, 0xa0, 0xd4, 0xfa, 0x4e, 0xb9, 0x68, 0x91, 0xdd, 0x85, 0x76, 0x62, 0x41, 0x56,
+        0x4c, 0x42, 0x78, 0xb8, 0x2d, 0xd9, 0x56, 0x66, 0xe1, 0x58, 0x6f, 0xf2, 0x9c, 0xb0, 0x80,
+        0xb6, 0xa0,
+    ]),
+];
 
 /// How far above the build a copy runs a release signed by a release key may go: a key that
 /// leaked can make copies hold a release at most this far ahead, never one no later release

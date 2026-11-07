@@ -14,8 +14,16 @@ import 'window.dart' show quitApplication;
 /// Where updates of Fogata stand, as the core says (architecture.md, 5f): asked again
 /// whenever it says they changed.
 class Updates extends Piece {
+  Updates({this.onArrived});
+
+  /// Called once for each newer version that becomes ready to install.
+  final void Function(api.UiUpdate status)? onArrived;
+
   /// Null until the core runs and says.
   api.UiUpdate? status;
+
+  /// The build last announced through [onArrived].
+  int? _announced;
 
   /// An install was asked for and has not ended.
   bool installing = false;
@@ -23,12 +31,21 @@ class Updates extends Piece {
   /// Reads where updates stand now.
   Future<void> refresh() async {
     try {
-      final now = await api.updateStatus();
-      if (now != status) {
-        status = now;
-        changed();
-      }
+      take(await api.updateStatus());
     } catch (_) {}
+  }
+
+  /// Takes what the core says now.
+  @visibleForTesting
+  void take(api.UiUpdate? now) {
+    if (now == status) return;
+    status = now;
+    changed();
+    final build = now?.releaseBuild?.toInt();
+    if (now != null && ready && build != null && build != _announced) {
+      _announced = build;
+      onArrived?.call(now);
+    }
   }
 
   /// A newer version is here, checked, and can be installed.

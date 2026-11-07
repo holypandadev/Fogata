@@ -199,8 +199,8 @@ refuses a folder that holds any key already.
    target/release/fogata release verify-sums ~/fogata-releases/0.1.0-beta.2/drive
    ```
 
-5. Publish it into the data folder of a copy of yours that stays online (close that copy
-   first):
+5. Optionally, publish it into the data folder of a copy of yours that stays online
+   (close that copy first):
 
    ```sh
    target/release/fogata --data-dir <data folder> release publish ~/fogata-releases/0.1.0-beta.2/release
@@ -208,7 +208,12 @@ refuses a folder that holds any key already.
 
    Start the copy again: it offers the release to its friends and members, they to theirs.
    For the Flatpak the data folder is `~/.var/app/dev.holypanda.fogata/data/fogata`.
-6. Upload the files of `drive/` to the pre-release, for new testers. They check
+6. Make the pre-release on GitHub (tag `v0.1.0-beta.2`, marked as a pre-release, not a
+   draft) and upload every file of `release/` to it, under the same names: `release.json`,
+   `release.sig` and the `.pack` of each system. Every copy looks at the newest releases
+   there at its start and every six hours and takes the newest one the release key signed
+   (docs/architecture.md, 5f), so this is what updates everyone; friends give it on as
+   well. Upload the files of `drive/` to the same pre-release, for new testers. They check
    `SHA256SUMS.sig` with the key lines of `tools/allowed_signers` from the source code, then
    compare the checksum of their file with what their computer works out before they open
    anything (the README tells them how).

@@ -93,8 +93,20 @@ class AppState extends ChangeNotifier {
   /// The small window shown while Fogata starts.
   final splash = Splash();
 
-  /// Where updates of Fogata stand.
-  final updates = Updates();
+  /// Where updates of Fogata stand. A version that becomes ready while the main window shows is
+  /// announced once, with the title bar's pill to restart into it; at start the splash
+  /// installs it instead.
+  late final updates = Updates(
+    onArrived: (status) {
+      if (splash.showing) return;
+      final version = status.releaseVersion ?? '';
+      say(
+        status.required_
+            ? l10n.updateRequiredTip
+            : l10n.updateReadyTip(version),
+      );
+    },
+  );
 
   bool hasProfile = false;
   bool started = false;

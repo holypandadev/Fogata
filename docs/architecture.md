@@ -4061,12 +4061,14 @@ tried on such a processor. On Linux the runner is a position-independent executa
 where its corners are see-through when the desktop composites windows; macOS and Windows
 round the window themselves) with the animated logo (`assets/splash/`, twice the size for
 screens of high density) and what is happening under it: starting, connecting (the core
-starts), checking for updates (friends and members are asked; the splash waits up to four
-seconds for one to have a newer release, less once those asked said they have none, none
-when there is nobody to ask), downloading (a bar, how much, from whom), installing and
-restarting. A release that is ready, or whose download would end within 20 s at its pace so
-far, is installed there and Fogata starts again as the new version; otherwise the download
-goes on behind the main window. The splash shows at least 0.6 s. The runners make the
+starts), checking for updates (friends, members and the releases page are asked; the splash
+waits up to six seconds for a newer release, less once those asked said there is none),
+downloading (a bar, how much, from whom), installing and restarting. A release that is
+ready, or whose download moves, is installed there and Fogata starts again as the new
+version; a download that stops for 15 s, or that would take more than three minutes at its
+pace so far (unless this copy must update), goes on behind the main window. A release that
+becomes ready while the main window shows is announced once in a toast, and the title bar's
+pill (green, amber when this copy must update) restarts into it. The splash shows at least 0.6 s. The runners make the
 window the splash before anything shows (Linux in `my_application.cc`, macOS in
 `MainFlutterWindow.swift`, Windows in `setUpWindow`, around the middle of the window made
 for the main one), and `becomeMainWindow` (`window.dart`) gives it back its frame, window
@@ -4199,9 +4201,29 @@ puts a release into a data folder of his (`fogata release publish`, which checks
 first and refuses a release its own build would let go at its next start: older, too far
 above, expired), and the copy running there gives it like any other.
 
+**From the releases page.** Besides friends and members, a copy reads the newest releases of
+the project's repository on GitHub (`RELEASES_API`, `RELEASES_REPO` in `fogata-update`; the
+API's list of releases, drafts left out) soon after it starts, when the splash asks, and every
+six hours (every fifteen minutes after the page could not be read): of the first three that
+carry `release.json` and `release.sig` it fetches those two files (256 KiB and 1 KiB at most,
+4 MiB for the list) and takes the newest by exactly the rules above, as from a friend: the
+page decides nothing a friend could not. Its package for this platform is the asset with the
+file name the manifest gives, fetched over HTTPS (rustls, the system's certificate
+authorities) into the same `<platform>.pack.part`, each 1 MiB chunk checked against its hash
+as it arrives, a stopped download going on from the last whole chunk with a range request;
+a damaged chunk ends it, and that release is fetched from friends and members after that.
+The page is used before friends and members when it has the package, which spares their
+uploads; a package from there is given on like any other. A copy that trusts no release key
+does not read the page (nothing could pass), nor do the network lab's copies
+(`FOGATA_UPDATE_WEB=off`, which `fogata update run --web` also takes, or another API's address
+and repository, for tests). GitHub learns the device's address, that it runs Fogata (the
+`User-Agent` names the version) and when it looks: the only server Fogata talks to of its own.
+
 Only the newest release is kept, with its packages; one older than the running build goes at
 start. Nothing installs without the application asking `install_update`: at start, while
-its splash shows, when a release is ready or comes within a few seconds (5d, The splash);
+its splash shows, when a release is ready or comes while it waits (5d, The splash: a few
+seconds for friends and the releases page to answer, then the download as long as it moves,
+three minutes at most unless this copy must update);
 later, when the person presses Restart in the title bar's pill. The state the screens read (`update_status`): up to date,
 checking, downloading (bytes), verifying, ready, installing, failed (no package for this
 platform, disk, cannot install here, install failed, an install that did not take) and

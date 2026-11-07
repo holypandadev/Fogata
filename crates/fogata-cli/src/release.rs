@@ -228,6 +228,11 @@ fn public_keys(release: &[String], rescue: &[String]) -> Result<Vec<ReleaseKey>>
 pub struct ThisArgs {
     #[command(flatten)]
     keys: KeyArgs,
+    /// Where new versions are looked for besides friends and members: `off`, or the address
+    /// of an API like GitHub's followed by the repository (`https://api.github.com
+    /// owner/name`). The project's releases page by default.
+    #[arg(long, env = "FOGATA_UPDATE_WEB", value_name = "off|API REPO")]
+    web: Option<String>,
     #[cfg(feature = "lab")]
     #[arg(long, hide = true, env = "FOGATA_TEST_BUILD")]
     build: Option<u64>,
@@ -240,6 +245,19 @@ impl ThisArgs {
     fn options(&self) -> Result<UpdateOptions> {
         let mut options = UpdateOptions::compiled_in();
         options.keys = self.keys.keys()?;
+        match self.web.as_deref().map(str::trim) {
+            None => {}
+            Some("off") => options.web = None,
+            Some(other) => {
+                let Some((api, repo)) = other.split_once(char::is_whitespace) else {
+                    bail!("--web takes `off`, or an address and a repository: {other}");
+                };
+                options.web = Some(fogata_core::updates::WebSource {
+                    api: api.to_string(),
+                    repo: repo.trim().to_string(),
+                });
+            }
+        }
         #[cfg(feature = "lab")]
         {
             if let Some(build) = self.build {

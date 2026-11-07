@@ -398,6 +398,8 @@ release_setup() {
     # The lab's key is sealed like a real one; its passphrase comes from the environment
     # (release --lab).
     export FOGATA_RELEASE_PASSPHRASE=network-lab-release-key
+    # The copies here take releases from one another only, never from the releases page.
+    export FOGATA_UPDATE_WEB=off
     "$BIN" release --lab keygen --dir "$WORK/key" > "$WORK/keygen.out"
     FOGATA_RELEASE_KEY=$(cat "$WORK/key/release-key.pub")
     export FOGATA_RELEASE_KEY

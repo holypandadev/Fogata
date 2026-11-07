@@ -66,6 +66,11 @@ Fogata is in pre-release. Builds for Linux (Flatpak), macOS and Windows will be 
 page; until then, build it from source. Nothing is signed with a paid certificate, so your system
 asks you to confirm the first start once.
 
+Fogata keeps itself up to date. At every start it looks for a new version on the Releases page
+and among your friends, and installs it before it opens; one that comes while it runs waits for
+a restart, offered in the title bar. A version is installed only if its signature is the one the
+copy you run was built to trust.
+
 ## Privacy
 
 - No account, no sign-in, no phone number or e-mail address.
@@ -75,7 +80,8 @@ asks you to confirm the first start once.
   leaves the room; direct chats are kept on the two devices, encrypted on disk.
 - What leaves the device besides your friends' and groups' traffic: lookups in the public IPFS
   distributed hash table, which see this device's network addresses, as any peer you connect to
-  does.
+  does, and a look at this repository's releases on GitHub at every start and every few hours,
+  for a new version. GitHub sees the device's address and that it runs Fogata.
 - Fogata has not yet been reviewed by an outside security auditor. Do not rely on it for anything
   that would put you in danger.
 

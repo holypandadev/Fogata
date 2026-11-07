@@ -22,6 +22,8 @@
 # FOGATA_CI_LEG_SKIP names steps (check, analyze, test) to leave out, for what cannot run on
 # that computer; they are named in the line, and tools/ci.sh then records the leg as incomplete.
 set -euo pipefail
+# The copies the checks start never read the releases page on GitHub.
+export FOGATA_UPDATE_WEB=off
 system=${1:?usage: FOGATA_CI_SHA=<commit> tools/ci-leg.sh <system>}
 sha=${FOGATA_CI_SHA:?FOGATA_CI_SHA names the commit to check}
 cd "$(dirname "$0")/.."

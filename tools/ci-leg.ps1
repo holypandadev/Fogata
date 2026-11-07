@@ -25,6 +25,8 @@
 # Every native command is checked by its exit status ($ErrorActionPreference does not cover
 # them), and a command that cannot even start fails the step.
 $ErrorActionPreference = 'Stop'
+# The copies the checks start never read the releases page on GitHub.
+$env:FOGATA_UPDATE_WEB = 'off'
 $sha = $env:FOGATA_CI_SHA
 if (-not $sha) {
   Write-Host 'FOGATA_CI_SHA names the commit to check'

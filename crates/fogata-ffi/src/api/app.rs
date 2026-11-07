@@ -354,9 +354,12 @@ pub async fn start(data_dir: String) -> Result<UiProfile> {
             let me = core.me();
             {
                 let _runtime = RUNTIME.enter();
-                if let Err(e) =
-                    core.start_updates(fogata_core::updates::UpdateOptions::compiled_in())
-                {
+                let mut updates = fogata_core::updates::UpdateOptions::compiled_in();
+                // Tests and labs: friends and members only, never the releases page.
+                if std::env::var("FOGATA_UPDATE_WEB").is_ok_and(|v| v.trim() == "off") {
+                    updates.web = None;
+                }
+                if let Err(e) = core.start_updates(updates) {
                     tracing::warn!("updates do not run: {e:#}");
                 }
             }

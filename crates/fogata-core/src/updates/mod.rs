@@ -13,10 +13,15 @@
 //! package at a time, let go once nobody has asked for it in two days (the publisher's own
 //! copy keeps every platform's).
 //!
+//! A copy also reads the project's releases page every few hours ([`web`]), and takes a
+//! release it finds there by the same rules, its package fetched from there; from then on
+//! it gives it on like one from a friend.
+//!
 //! Nothing is installed by itself: [`crate::Core::install_update`] does it when asked.
 
 mod install;
 pub(crate) mod store;
+pub mod web;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -36,6 +41,7 @@ use tokio::sync::mpsc;
 
 pub use install::{Installer, installer};
 pub use store::publish;
+pub use web::WebSource;
 
 use crate::CoreEvent;
 
@@ -68,6 +74,12 @@ const OTHER_YIELDS: Duration = Duration::from_secs(60 * 60);
 /// The most bytes the packages kept may take together: a package of another platform is
 /// fetched only while this platform's and it stay under this.
 const DISK_CAP: u64 = 600 * 1024 * 1024;
+/// The releases page is read this often, and once soon after the start.
+const WEB_EVERY: Duration = Duration::from_secs(6 * 3600);
+/// A releases page that could not be read is tried again after this long.
+const WEB_RETRY: Duration = Duration::from_secs(15 * 60);
+/// A package from the releases page that stopped is tried again after this long.
+const WEB_FETCH_RETRY: Duration = Duration::from_secs(2 * 60);
 
 /// How the updater runs.
 #[derive(Clone, Debug)]
@@ -79,6 +91,8 @@ pub struct UpdateOptions {
     pub version: String,
     /// The platform whose package this copy fetches and installs.
     pub platform: Option<String>,
+    /// The releases page read besides friends and members, if any.
+    pub web: Option<WebSource>,
     /// Network lab only: the server misbehaves, and the release on disk is given on without
     /// checking it ([`UpdateOptions::lab`]).
     misbehave: Misbehave,
@@ -93,6 +107,7 @@ impl UpdateOptions {
             build: fogata_update::THIS_BUILD,
             version: fogata_update::THIS_VERSION.to_string(),
             platform: fogata_update::this_platform().map(str::to_string),
+            web: Some(WebSource::compiled_in()),
             misbehave: Misbehave::default(),
             unchecked: false,
         }
@@ -182,6 +197,8 @@ pub(crate) struct Updater {
     commands: mpsc::UnboundedSender<Command>,
     /// The release held was published from this data folder: every package stays.
     publisher: std::sync::atomic::AtomicBool,
+    /// The releases page, when it is read.
+    web: Option<web::Web>,
 }
 
 impl std::fmt::Debug for Updater {
@@ -215,8 +232,10 @@ enum Command {
 /// What the tasks the updater starts give back.
 enum Done {
     Asked(PeerId, Result<Option<Offer>, FetchError>),
+    /// The releases page was read.
+    Listed(Result<Vec<web::WebOffer>, FetchError>),
     Fetched {
-        peer: PeerId,
+        source: Source,
         build: u64,
         platform: String,
         result: Result<(), FetchError>,
@@ -244,6 +263,20 @@ impl Updater {
         let (heard_tx, heard_rx) = mpsc::unbounded_channel();
         wire::serve(node.clone(), shelf.clone(), heard_tx, options.misbehave)?;
         let (commands, commands_rx) = mpsc::unbounded_channel();
+        // A copy that trusts no key could take nothing from the page, and the network lab's
+        // copies that give unchecked releases take nothing at all.
+        let web = match &options.web {
+            Some(source) if !options.keys.is_empty() && !options.unchecked => {
+                match web::Web::new(source.clone(), &options.version) {
+                    Ok(web) => Some(web),
+                    Err(e) => {
+                        tracing::warn!("the releases page is not read: {e:#}");
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
         let updater = Arc::new(Updater {
             dir,
             data: data.to_path_buf(),
@@ -255,6 +288,7 @@ impl Updater {
             events,
             commands,
             publisher: std::sync::atomic::AtomicBool::new(false),
+            web,
         });
         let weak = Arc::downgrade(&updater);
         tokio::spawn(async move {
@@ -401,14 +435,15 @@ impl Updater {
         self.changed();
     }
 
-    /// Takes a release offered by `peer` if it is good and newer; returns whether it is the
-    /// one held now (taken now or before).
-    async fn offered(&self, peer: PeerId, from: &str, offer: &Offer) -> bool {
+    /// Takes a release offered by `from` (a friend or member, through `via`, or the releases
+    /// page) if it is good and newer; returns whether it is the one held now (taken now or
+    /// before).
+    async fn offered(&self, via: &str, from: &str, signed: &Signed) -> bool {
         // A copy that gives what it holds unchecked (the network lab's) takes nothing.
         if self.options.unchecked {
             return false;
         }
-        let checked = offer.signed.verify(&self.options.keys);
+        let checked = signed.verify(&self.options.keys);
         let manifest = match checked {
             Ok(manifest) => manifest,
             Err(refusal) => {
@@ -427,10 +462,7 @@ impl Updater {
             ));
             return false;
         }
-        let role = offer
-            .signed
-            .role(&self.options.keys)
-            .unwrap_or(KeyRole::Release);
+        let role = signed.role(&self.options.keys).unwrap_or(KeyRole::Release);
         if let Err(refusal) = manifest.taken_by(role, self.options.build, held.as_ref()) {
             self.note(format!(
                 "refused build {} from {from}: {refusal}",
@@ -438,8 +470,8 @@ impl Updater {
             ));
             return false;
         }
-        let (dir, signed) = (self.dir.clone(), offer.signed.clone());
-        let kept = tokio::task::spawn_blocking(move || store::keep(&dir, &signed))
+        let (dir, to_keep) = (self.dir.clone(), signed.clone());
+        let kept = tokio::task::spawn_blocking(move || store::keep(&dir, &to_keep))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
         if let Err(e) = kept {
@@ -448,15 +480,13 @@ impl Updater {
             return false;
         }
         self.note(format!(
-            "build {} ({}) from {from}, through {}",
-            manifest.build,
-            manifest.version,
-            fogata_net::short_peer(&peer)
+            "build {} ({}) from {from}{via}",
+            manifest.build, manifest.version
         ));
         self.publisher
             .store(false, std::sync::atomic::Ordering::Relaxed);
         self.shelf.set(Some(Held {
-            signed: offer.signed.clone(),
+            signed: signed.clone(),
             manifest: manifest.clone(),
             packages: HashMap::new(),
         }));
@@ -590,8 +620,8 @@ struct Book {
     heard: HashMap<PeerId, Instant>,
     /// Who is a friend or member, by peer, for the notes.
     devices: HashMap<PeerId, DevicePublicKey>,
-    /// Packages on their way, by platform, and from whom.
-    fetching: HashMap<String, PeerId>,
+    /// Packages on their way, by platform, and from where.
+    fetching: HashMap<String, Source>,
     /// Packages of other platforms friends or members asked for.
     wanted: HashSet<String>,
     /// When a friend or member last asked for each other platform's package.
@@ -599,6 +629,22 @@ struct Book {
     /// When a peer last failed a download, to wait before the next.
     failed: HashMap<PeerId, Instant>,
     last_nudge: Option<Instant>,
+    /// The releases page: when it was last read (or tried), whether it is being read, and
+    /// where the packages of the release held are on it, by file name.
+    web_read: Option<Instant>,
+    web_reading: bool,
+    web_packages: Option<(u64, HashMap<String, String>)>,
+    /// When a package from the page last stopped, and whether one arrived damaged (the
+    /// page is then not used for that release).
+    web_failed: Option<Instant>,
+    web_damaged: Option<u64>,
+}
+
+/// Where a package comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    Peer(PeerId),
+    Web,
 }
 
 async fn run(
@@ -647,7 +693,10 @@ async fn run(
                     }
                 }
             }
-            Some(Command::CheckNow) = commands.recv() => book.asked.clear(),
+            Some(Command::CheckNow) = commands.recv() => {
+                book.asked.clear();
+                book.web_read = None;
+            }
             Some(done) = done_rx.recv() => {
                 let Some(updater) = weak.upgrade() else { return };
                 updater.done(&mut book, done, &done_tx).await;
@@ -712,8 +761,31 @@ impl Updater {
                 let _ = done.send(Done::Asked(peer, result));
             });
         }
+        self.read_web(book, done, now);
         self.tidy_others(book, now);
         self.start_fetches(book, done, now);
+    }
+
+    /// Reads the releases page when it is time.
+    fn read_web(&self, book: &mut Book, done: &mpsc::UnboundedSender<Done>, now: Instant) {
+        let Some(web) = self.web.clone() else {
+            return;
+        };
+        if book.web_reading
+            || book
+                .web_read
+                .is_some_and(|at| now.duration_since(at) < WEB_EVERY)
+        {
+            return;
+        }
+        book.web_reading = true;
+        book.web_read = Some(now);
+        self.lock().asking += 1;
+        self.changed();
+        let done = done.clone();
+        tokio::spawn(async move {
+            let _ = done.send(Done::Listed(web.releases().await));
+        });
     }
 
     fn is_publisher(&self) -> bool {
@@ -823,6 +895,37 @@ impl Updater {
             if book.fetching.contains_key(&platform) {
                 continue;
             }
+            let Some(artifact) = held.manifest.artifacts.get(&platform).cloned() else {
+                continue;
+            };
+            // The releases page first, when it has the package: it spares friends' uploads.
+            let web_url =
+                self.web
+                    .as_ref()
+                    .and(book.web_packages.as_ref())
+                    .and_then(|(build, packages)| {
+                        (*build == held.manifest.build
+                            && book.web_damaged != Some(*build)
+                            && book
+                                .web_failed
+                                .is_none_or(|at| now.duration_since(at) > WEB_FETCH_RETRY))
+                        .then(|| packages.get(&artifact.file).cloned())
+                        .flatten()
+                    });
+            if let (Some(url), Some(web)) = (web_url, self.web.clone()) {
+                self.fetch(
+                    book,
+                    done,
+                    &held,
+                    &platform,
+                    artifact,
+                    Source::Web,
+                    move |part, artifact, progress| async move {
+                        web.fetch(&url, &artifact, &part, progress).await
+                    },
+                );
+                continue;
+            }
             let usable = |p: &PeerId| !book.shunned.contains_key(p) && !book.failed.contains_key(p);
             let source = book
                 .holders
@@ -847,50 +950,84 @@ impl Updater {
                 }
                 None => continue,
             };
-            let Some(artifact) = held.manifest.artifacts.get(&platform).cloned() else {
-                continue;
+            let (node, build, name) = (self.node.clone(), held.manifest.build, platform.clone());
+            self.fetch(
+                book,
+                done,
+                &held,
+                &platform,
+                artifact,
+                Source::Peer(source),
+                move |part, artifact, progress| async move {
+                    wire::fetch(&node, source, build, &name, &artifact, &part, progress).await
+                },
+            );
+        }
+    }
+
+    /// Starts fetching the package of `platform` with `get`, which writes it into the part
+    /// file it is given, calling the progress function it is given.
+    #[allow(clippy::too_many_arguments)]
+    fn fetch<F, Fut>(
+        &self,
+        book: &mut Book,
+        done: &mpsc::UnboundedSender<Done>,
+        held: &Held,
+        platform: &str,
+        artifact: fogata_update::Artifact,
+        source: Source,
+        get: F,
+    ) where
+        F: FnOnce(PathBuf, fogata_update::Artifact, Box<dyn FnMut(u64) + Send>) -> Fut
+            + Send
+            + 'static,
+        Fut: std::future::Future<Output = Result<(), FetchError>> + Send,
+    {
+        book.fetching.insert(platform.to_string(), source);
+        let part = store::part_path(&self.dir, platform);
+        let build = held.manifest.build;
+        let done = done.clone();
+        let progress =
+            (platform == self.platform()).then(|| (self.events.clone(), self.phase.clone()));
+        if let Some((_, phase)) = &progress {
+            let mut phase = locked(phase);
+            phase.downloading = Some((0, artifact.size));
+            phase.from = match source {
+                Source::Peer(peer) => book.devices.get(&peer).copied(),
+                Source::Web => None,
             };
-            book.fetching.insert(platform.clone(), source);
-            let part = store::part_path(&self.dir, &platform);
-            let build = held.manifest.build;
-            let (node, done) = (self.node.clone(), done.clone());
-            let progress = (platform == own).then(|| (self.events.clone(), self.phase.clone()));
-            if let Some((_, phase)) = &progress {
-                let mut phase = locked(phase);
-                phase.downloading = Some((0, artifact.size));
-                phase.from = book.devices.get(&source).copied();
-            }
-            let dir = self.dir.clone();
-            tokio::spawn(async move {
-                if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-                    let _ = done.send(Done::Fetched {
-                        peer: source,
-                        build,
-                        platform,
-                        result: Err(FetchError::Io(e)),
-                    });
-                    return;
-                }
-                let mut last = Instant::now();
-                let result =
-                    wire::fetch(&node, source, build, &platform, &artifact, &part, |got| {
-                        if let Some((events, phase)) = &progress
-                            && (last.elapsed() > Duration::from_millis(500) || got == artifact.size)
-                        {
-                            last = Instant::now();
-                            locked(phase).downloading = Some((got, artifact.size));
-                            let _ = events.send(CoreEvent::UpdateChanged);
-                        }
-                    })
-                    .await;
+        }
+        let dir = self.dir.clone();
+        let platform = platform.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = tokio::fs::create_dir_all(&dir).await {
                 let _ = done.send(Done::Fetched {
-                    peer: source,
+                    source,
                     build,
                     platform,
-                    result,
+                    result: Err(FetchError::Io(e)),
                 });
+                return;
+            }
+            let size = artifact.size;
+            let mut last = Instant::now();
+            let report: Box<dyn FnMut(u64) + Send> = Box::new(move |got| {
+                if let Some((events, phase)) = &progress
+                    && (last.elapsed() > Duration::from_millis(500) || got == size)
+                {
+                    last = Instant::now();
+                    locked(phase).downloading = Some((got, size));
+                    let _ = events.send(CoreEvent::UpdateChanged);
+                }
             });
-        }
+            let result = get(part, artifact, report).await;
+            let _ = done.send(Done::Fetched {
+                source,
+                build,
+                platform,
+                result,
+            });
+        });
     }
 
     async fn done(&self, book: &mut Book, done: Done, tasks: &mpsc::UnboundedSender<Done>) {
@@ -903,7 +1040,8 @@ impl Updater {
                 let from = self.who(book, &peer);
                 match result {
                     Ok(Some(offer)) => {
-                        if self.offered(peer, &from, &offer).await {
+                        let via = format!(", through {}", fogata_net::short_peer(&peer));
+                        if self.offered(&via, &from, &offer.signed).await {
                             book.holders
                                 .insert(peer, offer.platforms.into_iter().collect());
                             // A new release: those who had the old one are asked again.
@@ -927,8 +1065,24 @@ impl Updater {
                 }
                 self.changed();
             }
+            Done::Listed(result) => {
+                {
+                    let mut phase = self.lock();
+                    phase.asking = phase.asking.saturating_sub(1);
+                }
+                book.web_reading = false;
+                match result {
+                    Ok(offers) => self.listed(book, offers).await,
+                    Err(e) => {
+                        tracing::debug!("reading the releases page: {e}");
+                        // Tried again sooner than the next regular read.
+                        book.web_read = Instant::now().checked_sub(WEB_EVERY - WEB_RETRY);
+                    }
+                }
+                self.changed();
+            }
             Done::Fetched {
-                peer,
+                source,
                 build,
                 platform,
                 result,
@@ -941,24 +1095,19 @@ impl Updater {
                     phase.from = None;
                 }
                 let current = self.shelf.get().is_some_and(|h| h.manifest.build == build);
+                let peer = match source {
+                    Source::Peer(peer) => peer,
+                    Source::Web => {
+                        self.fetched_from_web(book, build, &platform, result, current, tasks)
+                            .await;
+                        self.changed();
+                        return;
+                    }
+                };
                 let from = self.who(book, &peer);
                 match result {
                     Ok(()) if current => {
-                        let (part, path) = (
-                            store::part_path(&self.dir, &platform),
-                            store::package_path(&self.dir, &platform),
-                        );
-                        if let Err(e) = tokio::fs::rename(&part, &path).await {
-                            self.lock().failed = Some((FailKind::Disk, e.to_string()));
-                        } else {
-                            self.shelf.add_package(build, &platform, path);
-                            book.wanted.remove(&platform);
-                            self.note(format!("package {platform} of build {build} from {from}"));
-                            if own {
-                                self.lock().ready = true;
-                            }
-                            self.tell_everyone(book, build, tasks);
-                        }
+                        self.arrived(book, build, &platform, &from, tasks).await;
                     }
                     Ok(()) => {}
                     Err(FetchError::Damaged) => {
@@ -992,6 +1141,104 @@ impl Updater {
                 self.changed();
             }
             Done::Told => {}
+        }
+    }
+
+    /// The package of `platform` in release `build` is whole in its part file: it becomes
+    /// the package, and friends and members hear of it.
+    async fn arrived(
+        &self,
+        book: &mut Book,
+        build: u64,
+        platform: &str,
+        from: &str,
+        tasks: &mpsc::UnboundedSender<Done>,
+    ) {
+        let (part, path) = (
+            store::part_path(&self.dir, platform),
+            store::package_path(&self.dir, platform),
+        );
+        if let Err(e) = tokio::fs::rename(&part, &path).await {
+            self.lock().failed = Some((FailKind::Disk, e.to_string()));
+            return;
+        }
+        self.shelf.add_package(build, platform, path);
+        book.wanted.remove(platform);
+        self.note(format!("package {platform} of build {build} from {from}"));
+        if platform == self.platform() {
+            self.lock().ready = true;
+        }
+        self.tell_everyone(book, build, tasks);
+    }
+
+    /// A package from the releases page came, or stopped.
+    async fn fetched_from_web(
+        &self,
+        book: &mut Book,
+        build: u64,
+        platform: &str,
+        result: Result<(), FetchError>,
+        current: bool,
+        tasks: &mpsc::UnboundedSender<Done>,
+    ) {
+        match result {
+            Ok(()) if current => {
+                self.arrived(book, build, platform, "the releases page", tasks)
+                    .await;
+            }
+            Ok(()) => {}
+            Err(FetchError::Damaged) => {
+                self.note(format!(
+                    "a chunk of {platform} from the releases page arrived damaged; \
+                     fetching it from friends and members instead"
+                ));
+                book.web_damaged = Some(build);
+            }
+            Err(FetchError::Io(e))
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::StorageFull
+                        | std::io::ErrorKind::PermissionDenied
+                        | std::io::ErrorKind::ReadOnlyFilesystem
+                ) =>
+            {
+                self.lock().failed = Some((FailKind::Disk, e.to_string()));
+            }
+            Err(e) => {
+                tracing::debug!("fetching {platform} from the releases page: {e}");
+                book.web_failed = Some(Instant::now());
+            }
+        }
+    }
+
+    /// Takes the newest good release the page lists that is newer than what is here, and
+    /// notes where its packages are.
+    async fn listed(&self, book: &mut Book, offers: Vec<web::WebOffer>) {
+        let mut offers: Vec<(u64, web::WebOffer)> = offers
+            .into_iter()
+            .filter_map(|offer| {
+                let build = offer.signed.verify(&self.options.keys).ok()?.build;
+                Some((build, offer))
+            })
+            .collect();
+        offers.sort_by_key(|(build, _)| std::cmp::Reverse(*build));
+        let held = self.shelf.get().map(|h| h.manifest.build);
+        for (build, offer) in offers {
+            // The release held already: only where its packages are is new.
+            if Some(build) == held {
+                book.web_packages = Some((build, offer.packages));
+                return;
+            }
+            if build <= self.best() {
+                return;
+            }
+            if self.offered("", "the releases page", &offer.signed).await {
+                book.web_packages = Some((build, offer.packages));
+                book.web_failed = None;
+                // A new release: those who had the old one are asked again.
+                book.holders.clear();
+                return;
+            }
         }
     }
 
@@ -1190,23 +1437,27 @@ mod tests {
         ];
         options.build = 5;
         options.platform = Some(PLATFORM.into());
+        options.web = None;
         let (events, _events) = crate::events::queue(None);
         let updater = Updater::start(&data, node.clone(), options, events).unwrap();
-        let peer = node.local_peer();
         let now = now_secs();
         let held = || updater.lock().release.as_ref().map(|r| r.build);
         let last_note = || updater.notes().last().cloned().unwrap_or_default();
 
         let far = offer(&key, 5 + MAX_BUILD_STEP + 1, now);
-        assert!(!updater.offered(peer, "Bea", &far).await);
+        assert!(!updater.offered("", "Bea", &far.signed).await);
         assert!(last_note().contains("further ahead"), "{}", last_note());
         assert_eq!(held(), None);
 
-        assert!(updater.offered(peer, "Bea", &offer(&key, 7, now)).await);
+        assert!(
+            updater
+                .offered("", "Bea", &offer(&key, 7, now).signed)
+                .await
+        );
         assert_eq!(held(), Some(7));
 
         let older_made = offer(&key, 8, now - 3600);
-        assert!(!updater.offered(peer, "Bea", &older_made).await);
+        assert!(!updater.offered("", "Bea", &older_made.signed).await);
         assert!(last_note().contains("made before"), "{}", last_note());
         assert_eq!(held(), Some(7));
         // What is kept on disk is still build 7.
@@ -1215,10 +1466,292 @@ mod tests {
 
         // The rescue key's release goes further and is not held to the time.
         let rescued = offer(&rescue, 5 + MAX_BUILD_STEP + 1, now - 7200);
-        assert!(updater.offered(peer, "Bea", &rescued).await);
+        assert!(updater.offered("", "Bea", &rescued.signed).await);
         assert_eq!(held(), Some(5 + MAX_BUILD_STEP + 1));
 
         node.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A releases page on this computer, like GitHub's: the list of releases, and each
+    /// release's files, with ranges. `damaged` flips a byte of the package past its first
+    /// chunk.
+    async fn releases_page(
+        releases: Vec<(Signed, &'static str, Vec<u8>)>,
+        damaged: bool,
+    ) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let mut files: HashMap<String, Vec<u8>> = HashMap::new();
+        let mut list = Vec::new();
+        for (n, (signed, name, mut package)) in releases.into_iter().enumerate() {
+            if damaged {
+                package[fogata_update::manifest::CHUNK as usize + 10] ^= 1;
+            }
+            files.insert(format!("/d/{n}/release.json"), signed.body.clone());
+            files.insert(
+                format!("/d/{n}/release.sig"),
+                signed.signature_file().into_bytes(),
+            );
+            files.insert(format!("/d/{n}/{name}"), package);
+            let asset = |f: &str| serde_json::json!({"name": f, "browser_download_url": format!("{base}/d/{n}/{f}")});
+            list.push(serde_json::json!({
+                "draft": false,
+                "prerelease": true,
+                "assets": [asset("release.json"), asset("release.sig"), asset(name)],
+            }));
+        }
+        list.insert(0, serde_json::json!({"draft": true, "assets": []}));
+        files.insert(
+            "/repos/holypandadev/Fogata/releases".into(),
+            serde_json::to_vec(&list).unwrap(),
+        );
+        let files = Arc::new(files);
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut socket, _)) = listener.accept().await else {
+                    return;
+                };
+                let files = files.clone();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buf = [0u8; 1024];
+                    while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        match socket.read(&mut buf).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&request).to_string();
+                    let path = request.split(' ').nth(1).unwrap_or("").to_string();
+                    let path = path.split('?').next().unwrap_or("").to_string();
+                    let from = request
+                        .lines()
+                        .find_map(|l| {
+                            l.to_ascii_lowercase()
+                                .strip_prefix("range: bytes=")
+                                .map(str::to_string)
+                        })
+                        .and_then(|r| r.trim_end_matches('-').parse::<usize>().ok());
+                    let response = match (files.get(&path), from) {
+                        (Some(body), Some(from)) => {
+                            let part = &body[from.min(body.len())..];
+                            let mut out = format!(
+                                "HTTP/1.1 206 Partial Content\r\ncontent-length: {}\r\ncontent-range: bytes {from}-{}/{}\r\nconnection: close\r\n\r\n",
+                                part.len(),
+                                body.len().saturating_sub(1),
+                                body.len()
+                            )
+                            .into_bytes();
+                            out.extend_from_slice(part);
+                            out
+                        }
+                        (Some(body), None) => {
+                            let mut out = format!(
+                                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                body.len()
+                            )
+                            .into_bytes();
+                            out.extend_from_slice(body);
+                            out
+                        }
+                        (None, _) => b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".to_vec(),
+                    };
+                    let _ = socket.write_all(&response).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        base
+    }
+
+    /// A release of `size` bytes of package, signed by `key`.
+    fn web_release(
+        key: &DeviceIdentity,
+        build: u64,
+        size: usize,
+    ) -> (Signed, &'static str, Vec<u8>) {
+        let package: Vec<u8> = (0..size).map(|i| (i * 7 % 251) as u8).collect();
+        let now = now_secs();
+        let manifest = Manifest {
+            format: FORMAT,
+            product: PRODUCT.into(),
+            channel: CHANNEL.into(),
+            build,
+            version: format!("0.{build}"),
+            min_build: 1,
+            published: now,
+            expires: now + fogata_update::manifest::DEFAULT_LIFETIME,
+            notes: String::new(),
+            artifacts: BTreeMap::from([(
+                PLATFORM.to_string(),
+                Artifact::of("Fogata-linux.pack", &package),
+            )]),
+        };
+        (
+            Signed::sign(&manifest, key).unwrap(),
+            "Fogata-linux.pack",
+            package,
+        )
+    }
+
+    /// An updater with no friends, reading the page at `base`, as build 5.
+    async fn web_updater(
+        name: &str,
+        key: &DeviceIdentity,
+        base: &str,
+    ) -> (Arc<Updater>, NodeHandle, PathBuf) {
+        let data = std::env::temp_dir().join(format!("fogata-web-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (node, _node_events) = fogata_net::start(fogata_net::NodeConfig {
+            identity: Arc::new(DeviceIdentity::generate().unwrap()),
+            groups: Vec::new(),
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let mut options = UpdateOptions::compiled_in();
+        options.keys = vec![
+            ReleaseKey::release(*key.public_key().as_bytes()),
+            ReleaseKey::rescue(*DeviceIdentity::generate().unwrap().public_key().as_bytes()),
+        ];
+        options.build = 5;
+        options.platform = Some(PLATFORM.into());
+        options.web = Some(WebSource {
+            api: base.to_string(),
+            repo: "holypandadev/Fogata".into(),
+        });
+        let (events, _events) = crate::events::queue(None);
+        let updater = Updater::start(&data, node.clone(), options, events).unwrap();
+        (updater, node, data)
+    }
+
+    async fn until(what: impl Fn() -> bool) -> bool {
+        for _ in 0..200 {
+            if what() {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    /// The newest release the page has that the key signed is taken, a draft and one signed
+    /// by another key are not, and its package comes from the page, ready to install.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_on_the_releases_page_is_taken_and_its_package_fetched() {
+        let key = DeviceIdentity::generate().unwrap();
+        let stranger = DeviceIdentity::generate().unwrap();
+        let size = 2 * fogata_update::manifest::CHUNK as usize + 1234;
+        let good = web_release(&key, 7, size);
+        let package = good.2.clone();
+        let base = releases_page(
+            vec![
+                web_release(&stranger, 9, 100),
+                good,
+                web_release(&key, 6, 100),
+            ],
+            false,
+        )
+        .await;
+        let (updater, node, data) = web_updater("good", &key, &base).await;
+        assert!(
+            until(|| updater.status().state == UpdateState::Ready).await,
+            "{:?} {:?}",
+            updater.status(),
+            updater.notes()
+        );
+        let status = updater.status();
+        assert_eq!(status.release.unwrap().build, 7);
+        assert_eq!(status.from, None);
+        let kept = std::fs::read(store::package_path(&store::dir(&data), PLATFORM)).unwrap();
+        assert_eq!(kept, package);
+        assert!(
+            updater
+                .notes()
+                .iter()
+                .any(|n| n.contains("from the releases page")),
+            "{:?}",
+            updater.notes()
+        );
+        node.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A package from the page that does not match the signed manifest is refused at the
+    /// damaged chunk, keeping the good chunks before it, and the page is not used again for
+    /// that release.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_damaged_package_on_the_releases_page_is_refused() {
+        let key = DeviceIdentity::generate().unwrap();
+        let size = 3 * fogata_update::manifest::CHUNK as usize;
+        let base = releases_page(vec![web_release(&key, 7, size)], true).await;
+        let (updater, node, data) = web_updater("damaged", &key, &base).await;
+        assert!(
+            until(|| updater
+                .notes()
+                .iter()
+                .any(|n| n.contains("arrived damaged")))
+            .await,
+            "{:?}",
+            updater.notes()
+        );
+        let status = updater.status();
+        assert_eq!(status.release.unwrap().build, 7);
+        assert_ne!(status.state, UpdateState::Ready);
+        let dir = store::dir(&data);
+        assert!(!store::package_path(&dir, PLATFORM).exists());
+        let part = std::fs::metadata(store::part_path(&dir, PLATFORM)).unwrap();
+        assert_eq!(part.len(), fogata_update::manifest::CHUNK);
+        node.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A download from the page that stopped goes on from its last whole chunk, asking
+    /// the page for the rest only.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_download_from_the_releases_page_goes_on_where_it_stopped() {
+        let key = DeviceIdentity::generate().unwrap();
+        let size = 3 * fogata_update::manifest::CHUNK as usize + 99;
+        let (signed, name, package) = web_release(&key, 7, size);
+        let artifact = signed
+            .verify(&[ReleaseKey::release(*key.public_key().as_bytes())])
+            .unwrap()
+            .artifacts[PLATFORM]
+            .clone();
+        let base = releases_page(vec![(signed, name, package.clone())], false).await;
+        let dir = std::env::temp_dir().join(format!("fogata-web-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let part = dir.join("p.part");
+        // Two whole chunks and a bit of the third were here.
+        let chunk = fogata_update::manifest::CHUNK as usize;
+        std::fs::write(&part, &package[..2 * chunk + 500]).unwrap();
+        let web = web::Web::new(
+            WebSource {
+                api: base.clone(),
+                repo: "holypandadev/Fogata".into(),
+            },
+            "test",
+        )
+        .unwrap();
+        let mut first = None;
+        web.fetch(&format!("{base}/d/0/{name}"), &artifact, &part, |got| {
+            first.get_or_insert(got);
+        })
+        .await
+        .unwrap();
+        assert_eq!(first, Some(2 * chunk as u64));
+        assert_eq!(std::fs::read(&part).unwrap(), package);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

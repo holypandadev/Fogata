@@ -57,16 +57,25 @@ class Splash extends Piece {
 /// At least this long, so the splash is seen rather than flashing.
 const _shortest = Duration(milliseconds: 600);
 
-/// The longest the splash waits for friends to say whether they have a newer version.
-const _askFor = Duration(seconds: 4);
+/// The longest the splash waits for friends and the releases page to say whether there is
+/// a newer version.
+const _askFor = Duration(seconds: 6);
 
-/// A download that would take longer than this is left to go on behind the main window.
-const _quickDownload = Duration(seconds: 20);
+/// With nobody to ask, the core says it is checking (the releases page) within this long,
+/// or it does not check at all.
+const _checkStarts = Duration(milliseconds: 1500);
 
-/// After Fogata started (or found nothing to start): asks friends for a newer version a
-/// few seconds at most, and installs one that is here or comes quickly, which restarts
-/// Fogata; otherwise, once the splash showed long enough, it becomes the main window.
-/// Returns false when Fogata is restarting into a new version.
+/// A download that would take longer than this is left to go on behind the main window,
+/// unless this version must update.
+const _longDownload = Duration(minutes: 3);
+
+/// A download that stops moving for this long is left to go on behind the main window.
+const _stalled = Duration(seconds: 15);
+
+/// After Fogata started (or found nothing to start): asks friends and the releases page
+/// for a newer version a few seconds at most, and installs one that is here or comes,
+/// which restarts Fogata; otherwise, once the splash showed long enough, it becomes the
+/// main window. Returns false when Fogata is restarting into a new version.
 Future<bool> finishSplash({
   required Splash splash,
   required Updates updates,
@@ -128,19 +137,26 @@ Future<String?> _updateAtStart(
     api.UiUpdateState.verifying,
     api.UiUpdateState.ready,
   };
-  // Friends answer as they connect: until one has a newer version, or those asked said
-  // they have none, a few seconds at most.
-  if (askFriends && !on(coming)) {
-    final until = DateTime.now().add(_askFor);
-    var asked = false;
+  // Friends answer as they connect, and the releases page in a moment: until a newer
+  // version is found, or those asked said there is none, a few seconds at most.
+  if (!on(coming)) {
+    final start = DateTime.now();
+    final until = start.add(_askFor);
+    var asked = on({api.UiUpdateState.checking});
     while (DateTime.now().isBefore(until)) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
       await updates.refresh();
       if (on({api.UiUpdateState.checking})) asked = true;
       if (on(coming) || (asked && on({api.UiUpdateState.upToDate}))) break;
+      if (!asked &&
+          !askFriends &&
+          DateTime.now().difference(start) > _checkStarts) {
+        break;
+      }
     }
   }
-  // A download that goes quickly is waited for.
+  // The download is waited for while it moves, as long as it takes when this version
+  // must update.
   if (on({api.UiUpdateState.downloading, api.UiUpdateState.verifying})) {
     splash.show(SplashStep.downloading);
     final start = DateTime.now();
@@ -164,12 +180,11 @@ Future<String?> _updateAtStart(
       }
       final spent = now.difference(start);
       // Its pace so far says when it would end; one that stalls is not waited for.
-      final ends = done > 0 && total > 0 && spent > const Duration(seconds: 2)
+      final ends = done > 0 && total > 0 && spent > const Duration(seconds: 5)
           ? spent * (total / done)
-          : _quickDownload;
-      if (ends > _quickDownload ||
-          spent > _quickDownload * 1.5 ||
-          now.difference(progressAt) > const Duration(seconds: 6)) {
+          : Duration.zero;
+      if (now.difference(progressAt) > _stalled ||
+          (!status.required_ && ends > _longDownload)) {
         return '';
       }
       await Future<void>.delayed(const Duration(milliseconds: 250));

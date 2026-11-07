@@ -117,7 +117,18 @@ async fn invite_join_and_talk() {
         |e| matches!(e, CoreEvent::Joined { group: g, .. } if *g == group),
     )
     .await;
-    assert!(ana.join_asks().await.unwrap().is_empty());
+    // Ana's own list of asks changes when her node has the answer, which may come after
+    // Bea already joined.
+    let answered = timeout(Duration::from_secs(30), async {
+        while !ana.join_asks().await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await;
+    assert!(
+        answered.is_ok(),
+        "Ana still lists Bea's ask after she joined"
+    );
     let groups = bea.groups().await.unwrap();
     assert_eq!((groups[0].name.as_str(), groups[0].icon), ("crew", 3));
 
