@@ -606,8 +606,13 @@ Remove-Item -LiteralPath $env:FOGATA_UPDATE_LOCK -Force -ErrorAction SilentlyCon
 exit [int]($code | Select-Object -Last 1)
 "#;
 
-    /// The step that waits for the process `pid` to end and swaps the folders (SWAP).
+    /// The step that waits for the process `pid` to end and swaps the folders (SWAP), started
+    /// with no window. Not as a detached process: PowerShell started with no console at all
+    /// (`DETACHED_PROCESS`) ends before it runs anything, so the swap never happened. A child
+    /// goes on after its parent ends on Windows without it. The tests start it the same way.
     fn swap(pid: u32, app: &Path, new: &Path, old: &Path, lock: &Path) -> std::process::Command {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let powershell = std::env::var_os("SystemRoot")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
@@ -628,7 +633,8 @@ exit [int]($code | Select-Object -Last 1)
             .env("FOGATA_UPDATE_DIR", app)
             .env("FOGATA_UPDATE_NEW", new)
             .env("FOGATA_UPDATE_OLD", old)
-            .env("FOGATA_UPDATE_LOCK", lock);
+            .env("FOGATA_UPDATE_LOCK", lock)
+            .creation_flags(CREATE_NO_WINDOW);
         command
     }
 
@@ -668,9 +674,6 @@ exit [int]($code | Select-Object -Last 1)
         manifest: &Manifest,
         app: &Path,
     ) -> Result<()> {
-        use std::os::windows::process::CommandExt as _;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
         let parent = app.parent().context("the install folder has no parent")?;
         let new = parent.join("Fogata.new");
         let old = parent.join("Fogata.old");
@@ -697,9 +700,7 @@ exit [int]($code | Select-Object -Last 1)
         }
         store::note_installing(&store::dir(data), manifest.build)?;
         super::leave_restart_note(data)?;
-        let spawned = swap(std::process::id(), app, &new, &old, &lock)
-            .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-            .spawn();
+        let spawned = swap(std::process::id(), app, &new, &old, &lock).spawn();
         if let Err(e) = spawned {
             let _ = std::fs::remove_file(&lock);
             return Err(e).context("cannot start the step that puts the new version in place");
@@ -761,7 +762,8 @@ exit [int]($code | Select-Object -Last 1)
                 .unwrap()
         }
 
-        /// Runs the swap as Fogata would after ending; its exit code.
+        /// Runs the swap as Fogata would after ending, started as Fogata starts it; its exit
+        /// code.
         fn run(f: &Folders) -> i32 {
             let mut ended = std::process::Command::new("cmd")
                 .args(["/C", "exit"])

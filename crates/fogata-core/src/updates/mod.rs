@@ -313,6 +313,20 @@ impl Updater {
             UpdateState::Downloading { done, total }
         } else if phase.ready && phase.release.as_ref().is_some_and(|r| r.build > build) {
             UpdateState::Ready
+        } else if let Some(size) = phase
+            .release
+            .as_ref()
+            .filter(|r| r.build > build)
+            .and_then(|r| r.artifacts.get(self.platform()))
+            .map(|a| a.size)
+        {
+            // A newer release is held and its package is not here yet: it is on its way,
+            // even in the moment before its download starts. Saying "up to date" then made
+            // the splash stop waiting and open the old version.
+            UpdateState::Downloading {
+                done: 0,
+                total: size,
+            }
         } else if phase.asking > 0 {
             UpdateState::Checking
         } else {
@@ -1455,6 +1469,16 @@ mod tests {
                 .await
         );
         assert_eq!(held(), Some(7));
+        // Held, its package not here and no download started yet: the screens hear that it is
+        // on its way, never that this copy is up to date.
+        assert!(
+            matches!(
+                updater.status().state,
+                UpdateState::Downloading { done: 0, .. }
+            ),
+            "{:?}",
+            updater.status().state
+        );
 
         let older_made = offer(&key, 8, now - 3600);
         assert!(!updater.offered("", "Bea", &older_made.signed).await);
