@@ -3,7 +3,11 @@
 // (Contents/Library/Helpers) and signed by the same team without the sandbox, is opened by
 // Launch Services as an application of its own.
 //
-// Arguments: <pid of Fogata> <new Fogata.app>
+// Arguments: <pid of Fogata> <new Fogata.app>, or none. A sandboxed application cannot pass
+// arguments to an application it opens (Launch Services drops them), so Fogata's own copy
+// arrives with none: the helper then takes the new bundle from the one place Fogata unpacks
+// it in its container, and Fogata's process from the running applications of the installed
+// bundle. Tests outside the sandbox give both.
 //
 // Anyone can open the helper with arguments of their choosing, so it believes them only as
 // far as it can check them. The installed bundle is the one this helper is inside of, never
@@ -68,8 +72,8 @@ else {
 }
 
 let arguments = CommandLine.arguments
-guard arguments.count == 3, let pid = pid_t(arguments[1]), pid > 0 else {
-  refuse("usage: <pid> <new Fogata.app>")
+guard arguments.count == 1 || arguments.count == 3 else {
+  refuse("usage: [<pid> <new Fogata.app>]")
 }
 
 // The new bundle: inside Fogata's container, at the place Fogata unpacks it, no link on
@@ -85,7 +89,10 @@ let containerRoot =
 guard let realContainer = real(containerRoot) else {
   refuse("Fogata's container \(containerRoot) is not there")
 }
-let stagedGiven = URL(fileURLWithPath: arguments[2]).standardizedFileURL.path
+let stagedGiven =
+  arguments.count == 3
+  ? URL(fileURLWithPath: arguments[2]).standardizedFileURL.path
+  : realContainer + "/Library/Application Support/Fogata/updates/Fogata.app"
 
 /// Whether the new bundle is at Fogata's place for it: a folder, as given is as resolved (no
 /// link anywhere on the way, nothing relative). Checked again once Fogata has quit, since
@@ -103,13 +110,28 @@ guard stagedInPlace() else {
 }
 let staged = URL(fileURLWithPath: stagedGiven)
 
-// The pid: a running process of the installed bundle.
-var pathBuffer = [CChar](repeating: 0, count: Int(PATH_MAX) * 4)
-let pathLength = proc_pidpath(pid, &pathBuffer, UInt32(pathBuffer.count))
-guard pathLength > 0, let processPath = real(String(cString: pathBuffer)),
-  let targetReal = real(target.path), inside(processPath, targetReal)
-else {
-  refuse("process \(pid) is not the installed Fogata")
+// The pid: a running process of the installed bundle. With no arguments, the installed
+// bundle's running copy, if any: none running means Fogata has quit already.
+guard let targetReal = real(target.path) else {
+  refuse("cannot tell where the installed Fogata is")
+}
+let pid: pid_t?
+if arguments.count == 3 {
+  guard let given = pid_t(arguments[1]), given > 0 else {
+    refuse("usage: [<pid> <new Fogata.app>]")
+  }
+  var pathBuffer = [CChar](repeating: 0, count: Int(PATH_MAX) * 4)
+  let pathLength = proc_pidpath(given, &pathBuffer, UInt32(pathBuffer.count))
+  guard pathLength > 0, let processPath = real(String(cString: pathBuffer)),
+    inside(processPath, targetReal)
+  else {
+    refuse("process \(given) is not the installed Fogata")
+  }
+  pid = given
+} else {
+  pid = NSRunningApplication.runningApplications(withBundleIdentifier: "dev.holypanda.fogata")
+    .first { app in app.bundleURL.flatMap { real($0.path) } == targetReal }?
+    .processIdentifier
 }
 
 /// Opens `app` as a new instance, with this helper's FOGATA_* settings (a test copy's).
@@ -171,14 +193,16 @@ func team(of url: URL) -> String? {
 }
 
 // Fogata quits right after opening this helper; two minutes at most.
-var waited = 0
-while kill(pid, 0) == 0 && waited < 1200 {
-  usleep(100_000)
-  waited += 1
-}
-if kill(pid, 0) == 0 {
-  say("Fogata did not quit; nothing changed")
-  exit(1)
+if let pid {
+  var waited = 0
+  while kill(pid, 0) == 0 && waited < 1200 {
+    usleep(100_000)
+    waited += 1
+  }
+  if kill(pid, 0) == 0 {
+    say("Fogata did not quit; nothing changed")
+    exit(1)
+  }
 }
 guard stagedInPlace() else {
   giveUp("the new version is not at Fogata's place for it")

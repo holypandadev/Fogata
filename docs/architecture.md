@@ -4276,7 +4276,10 @@ that lead out, and writes into a folder made new, owner only, never through a li
 - *macOS*: the sandboxed application cannot replace its own bundle, so it unpacks the new
   `Fogata.app` into `updates/` in its container and opens
   `Contents/Library/Helpers/Fogata Updater.app`, signed by the same team without the
-  sandbox, with its process id and the new bundle's path. Anyone can open the helper with
+  sandbox. A sandboxed application cannot pass arguments to an application it opens (Launch
+  Services drops them), so the helper finds both itself: the new bundle at the one place Fogata
+  unpacks it, and Fogata among the running copies of the installed bundle; tests run outside
+  the sandbox may name both as arguments, checked the same way. Anyone can open the helper with
   arguments, so it believes them only as far as it checks them: the installed bundle is
   the one it is inside of; the new bundle must be at `.../updates/Fogata.app` inside
   Fogata's container (`~/Library/Containers/dev.holypanda.fogata/Data`, pinned in at build
