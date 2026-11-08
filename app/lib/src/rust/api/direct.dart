@@ -139,6 +139,24 @@ Future<void> forgetDirectFileCopy({required String path}) =>
 Future<void> clearDirectFiles({required String deviceId}) =>
     RustLib.instance.api.crateApiDirectClearDirectFiles(deviceId: deviceId);
 
+/// Deletes one message of the chat from this device, with its files; the friend keeps its
+/// copy.
+Future<void> deleteDirectMessage({
+  required String deviceId,
+  required String itemId,
+}) => RustLib.instance.api.crateApiDirectDeleteDirectMessage(
+  deviceId: deviceId,
+  itemId: itemId,
+);
+
+/// Deletes this device's own message for both: here at once, on the friend's device when
+/// the deletion gets there.
+Future<void> unsendDirect({required String deviceId, required String itemId}) =>
+    RustLib.instance.api.crateApiDirectUnsendDirect(
+      deviceId: deviceId,
+      itemId: itemId,
+    );
+
 /// Deletes a chat with someone who is no longer a friend, here only.
 Future<void> deleteDirectChat({required String deviceId}) =>
     RustLib.instance.api.crateApiDirectDeleteDirectChat(deviceId: deviceId);

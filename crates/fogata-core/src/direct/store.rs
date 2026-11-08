@@ -281,14 +281,14 @@ pub struct Split {
 impl Split {
     /// `records`, of which `chat` already holds what they say.
     pub fn of(records: &[Record], chat: &Chat) -> Self {
-        let is_pin = |id: &ItemId| chat.get(id).is_some_and(|i| i.pin_target().is_some());
+        let is_pin = |id: &ItemId| chat.get(id).is_some_and(Item::is_aside);
         let mut split = Split {
             items: chat.items().len(),
             ..Default::default()
         };
         for record in records {
             match record {
-                Record::Item { item } if item.pin_target().is_some() => {
+                Record::Item { item } if item.is_aside() => {
                     split.pins.push(record.clone());
                 }
                 Record::Delivered { ids } if ids.iter().any(is_pin) => {
@@ -797,10 +797,8 @@ impl DirectStore {
     ) -> Result<()> {
         let dir = self.chat_dir(friend);
         self.make_dir(&dir)?;
-        let (pins, items): (Vec<&Item>, Vec<&Item>) = chat
-            .items()
-            .iter()
-            .partition(|item| item.pin_target().is_some());
+        let (pins, items): (Vec<&Item>, Vec<&Item>) =
+            chat.items().iter().partition(|item| item.is_aside());
         let mut records: Vec<Record> = items
             .into_iter()
             .map(|item| Record::Item { item: item.clone() })

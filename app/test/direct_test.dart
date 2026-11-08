@@ -582,6 +582,49 @@ void main() {
     },
   );
 
+  testWidgets(
+    'deleting asks: for both only for one\'s own message in a chat with a friend',
+    (tester) async {
+      await show(
+        tester,
+        page([
+          message('theirs', 'Their line', at: yesterday),
+          message('mine', 'My line', mine: true),
+        ], online: true),
+      );
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      addTearDown(mouse.removePointer);
+      Future<void> ask(String id, String text) async {
+        await mouse.moveTo(tester.getCenter(find.text(text).first));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(ValueKey('direct-delete:$id')));
+        await tester.pumpAndSettle();
+      }
+
+      await ask('mine', 'My line');
+      expect(
+        find.byKey(const ValueKey('direct-delete-for-both')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('direct-delete-for-me')),
+        findsOneWidget,
+      );
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+
+      await ask('theirs', 'Their line');
+      expect(
+        find.byKey(const ValueKey('direct-delete-for-both')),
+        findsNothing,
+      );
+      expect(find.text('Delete this message?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+    },
+  );
+
   testWidgets('a pin line brings its message into view, far up the chat', (
     tester,
   ) async {

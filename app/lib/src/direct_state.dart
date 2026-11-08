@@ -311,6 +311,25 @@ class DirectChats extends Piece {
     await refresh();
   }
 
+  /// Deletes message [id] of the open chat from this device; the friend keeps its copy.
+  Future<void> deleteMessage(String id) async {
+    final friend = open;
+    if (friend == null) return;
+    await app.attempt(
+      () => dm.deleteDirectMessage(deviceId: friend, itemId: id),
+    );
+    await refresh();
+  }
+
+  /// Deletes this device's own message [id] of the open chat for both: here at once, on
+  /// the friend's device when the deletion gets there.
+  Future<void> unsendMessage(String id) async {
+    final friend = open;
+    if (friend == null) return;
+    await app.attempt(() => dm.unsendDirect(deviceId: friend, itemId: id));
+    await refresh();
+  }
+
   List<OutgoingFile> get waiting => outgoing[open] ?? const [];
 
   List<OutgoingFile> get sendingHere => sending[open] ?? const [];

@@ -9,6 +9,7 @@ import '../rust/api/types.dart';
 import '../theme.dart';
 import '../volume.dart' show timeOuts;
 import '../widgets.dart';
+import 'friend_card.dart' show toggleFriendCard;
 import 'group_settings.dart' show InviteFriends, copyInviteLink;
 import 'room.dart' show openRoomChecked, pathWords;
 
@@ -332,10 +333,43 @@ class _MemberRow extends StatelessWidget {
     }
     // Everyone acts on those below it, and only on them.
     final canAct = group.outranks.contains(m.person.id);
-    return Container(
+    // A friend's row opens their card, as in the list of friends.
+    final friend =
+        !m.me && state.contacts.friends.any((f) => f.person.id == m.person.id);
+    if (!friend) return _row(context, state, presence, presenceColor, canAct);
+    final open = state.nav.friendCard == m.person.id;
+    return Pressable(
+      key: ValueKey('member-row:${m.person.id}'),
+      label: l10n.friendsShowCard(m.person.name),
+      onTap: () => toggleFriendCard(context, m.person.id),
+      builder: (context, hovered) => _row(
+        context,
+        state,
+        presence,
+        presenceColor,
+        canAct,
+        lit: open || hovered,
+      ),
+    );
+  }
+
+  Widget _row(
+    BuildContext context,
+    AppState state,
+    String presence,
+    Color presenceColor,
+    bool canAct, {
+    bool lit = false,
+  }) {
+    final c = context.fg;
+    final m = member;
+    final path = m.path;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
       height: 56,
       padding: const EdgeInsets.symmetric(horizontal: 20),
       decoration: BoxDecoration(
+        color: lit ? c.bg2 : null,
         border: last ? null : Border(bottom: BorderSide(color: c.border)),
       ),
       // The way a member comes can be long ("through" a member's name): it takes at most

@@ -4531,6 +4531,42 @@ abstract class L10n {
   /// **'Pin'**
   String get directPin;
 
+  /// Direct chat: tooltip and label of the button beside a message that deletes it from this computer only. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete for me'**
+  String get directDeleteMessage;
+
+  /// Direct chat: title of the question asked before deleting one message from this computer.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete this message?'**
+  String get directDeleteMessageTitle;
+
+  /// Direct chat: text of the question before deleting one message: it goes from this computer with its files, and the friend ({name}) keeps their copy.
+  ///
+  /// In en, this message translates to:
+  /// **'It goes from this computer, with its pictures and files. {name} keeps their copy.'**
+  String directDeleteMessageNote(String name);
+
+  /// Direct chat: the red button that deletes the message. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete'**
+  String get directDeleteMessageAction;
+
+  /// Direct chat: button in the question before deleting one of this person's own messages: deletes it on both devices. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete for both'**
+  String get directDeleteForBoth;
+
+  /// Direct chat: text of the question before deleting one of this person's own messages. It names the two buttons ('Delete for both', 'Delete for me'); use their names as translated there. {name} is the friend.
+  ///
+  /// In en, this message translates to:
+  /// **'Delete for both also takes it out of {name}’s chat, as soon as their Fogata gets it. Delete for me leaves it there.'**
+  String directDeleteOwnNote(String name);
+
   /// Direct chat: screen-reader label of the timer pill in the header; {time} is the current choice, like "Off", "1 day" or "1 week".
   ///
   /// In en, this message translates to:
@@ -7660,7 +7696,7 @@ abstract class L10n {
   /// Group settings › General: note under the picture buttons: which files work and what is done to them.
   ///
   /// In en, this message translates to:
-  /// **'PNG, JPEG or WebP. It is cut to a square and made smaller, like profile pictures.'**
+  /// **'PNG, JPEG or WebP, cut to a square and made smaller like profile pictures, or an animated GIF or WebP up to 550 KB.'**
   String get groupSettingsPictureNote;
 
   /// Group settings › General: small label over the row of icons that can stand for the group instead of a picture.

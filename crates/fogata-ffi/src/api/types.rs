@@ -446,6 +446,8 @@ pub struct UiFile {
     pub name: String,
     pub size: i64,
     pub shared_by: UiPerson,
+    /// When it was listed, by the clock of whoever listed it, as a chat line's time.
+    pub shared_ms: i64,
     pub holders: Vec<UiPerson>,
     /// This device shares it.
     pub mine: bool,
@@ -1110,6 +1112,7 @@ fn file(f: &FileView) -> UiFile {
         name: f.info.name.clone(),
         size: ms(f.info.size),
         shared_by: person(&f.shared_by),
+        shared_ms: ms(f.shared_ms),
         holders: f.holders.iter().map(person).collect(),
         mine: f.mine,
         downloading: f.downloading.map(ms),

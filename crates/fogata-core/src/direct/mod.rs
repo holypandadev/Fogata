@@ -17,6 +17,10 @@
 //! them ([`PINS_PROTOCOL`]); one from before pins would skip them without a receipt, so
 //! they wait here until it is updated.
 //!
+//! Each can also delete one of its own messages for both: the deletion travels the same
+//! way, to a copy that reads it ([`UNSEND_PROTOCOL`]), and goes from here once it arrived;
+//! the friend's device deletes the message as it gets it.
+//!
 //! Writing in a chat is in sending.rs, fetching attachments in fetch.rs, and what the node
 //! tells the chats in node_events.rs.
 
@@ -71,13 +75,20 @@ use crate::{Core, CoreEvent, Inner, Person, now_ms, person, person_of, writer::W
 /// typing signals ([`TYPING_PROTOCOL`]) read pins too, which came first.
 pub const PINS_PROTOCOL: StreamProtocol = StreamProtocol::new("/fogata/direct-pins/1");
 
+/// Marks a device that takes deletions for both in direct chats ([`DirectPayload::Unsend`]),
+/// as [`PINS_PROTOCOL`] marks one that takes pins.
+pub const UNSEND_PROTOCOL: StreamProtocol = StreamProtocol::new("/fogata/direct-unsend/1");
+
 /// Tells the devices `node` connects to, from now on, that this one takes pins
-/// ([`PINS_PROTOCOL`]). Called as the node starts, so the first exchange of what each side
-/// takes carries it. Streams of it are taken and dropped.
+/// ([`PINS_PROTOCOL`]) and deletions for both ([`UNSEND_PROTOCOL`]). Called as the node
+/// starts, so the first exchange of what each side takes carries it. Streams of them are
+/// taken and dropped.
 pub(crate) fn advertise_pins(node: &NodeHandle) {
-    if let Ok(mut incoming) = node.streams().accept(PINS_PROTOCOL) {
-        let node = node.background();
-        tokio::spawn(async move { while node.next_stream(&mut incoming).await.is_some() {} });
+    for protocol in [PINS_PROTOCOL, UNSEND_PROTOCOL] {
+        if let Ok(mut incoming) = node.streams().accept(protocol) {
+            let node = node.background();
+            tokio::spawn(async move { while node.next_stream(&mut incoming).await.is_some() {} });
+        }
     }
 }
 
@@ -210,6 +221,8 @@ struct ChatsState {
     /// Friends whose device, connected now, sent a pin or confirmed one: it takes them,
     /// whatever it said when it connected.
     takes_pins: HashSet<DevicePublicKey>,
+    /// The same for deletions for both.
+    takes_unsends: HashSet<DevicePublicKey>,
     /// What each friend's items took in the chat's journal in the last day, once counted
     /// ([`Taken`]).
     taken: HashMap<DevicePublicKey, Taken>,
@@ -635,6 +648,11 @@ pub(crate) fn received(payload: DirectPayload, now: u64) -> Option<Item> {
             target,
             pinned,
         } => (!far_ahead(sent_ms, now)).then(|| item(id, sent_ms, Body::Pin { target, pinned }, 0)),
+        DirectPayload::Unsend {
+            id,
+            sent_ms,
+            target,
+        } => Some(item(id, sent_ms, Body::Unsend { target }, 0)),
         DirectPayload::Receipt { .. } => None,
     }
 }
@@ -727,13 +745,8 @@ impl Core {
             .iter()
             .filter(|(_, e)| !e.chat.is_empty())
             .map(|(friend, entry)| {
-                // A pin is not news: the last line is the last message or timer.
-                let last = entry
-                    .chat
-                    .items()
-                    .iter()
-                    .rev()
-                    .find(|i| i.pin_target().is_none());
+                // A pin or a deletion is not news: the last line is the last message or timer.
+                let last = entry.chat.items().iter().rev().find(|i| !i.is_aside());
                 let person = chat_person(friend, entry, book.as_ref());
                 ChatSummary {
                     online: shown.contains(friend),
@@ -796,6 +809,8 @@ impl Core {
         let items = items[start..]
             .iter()
             .filter(|i| i.pin_target().is_none_or(|t| entry.chat.contains(t)))
+            // A deletion for both waits for the friend unseen.
+            .filter(|i| i.unsend_target().is_none())
             .map(view)
             .collect();
         let pinned = pinned
@@ -880,6 +895,78 @@ impl Core {
             .collect();
         direct.remove_files(&self.inner.shared, &friend, entry, &here);
         drop(chats);
+        self.inner.emit(CoreEvent::DirectChanged { friend });
+        Ok(())
+    }
+
+    /// Deletes message `item` of the chat from this device, with the files no other message
+    /// refers to; the friend keeps its copy. One of this device's own not sent yet is never
+    /// sent.
+    pub fn delete_direct_message(&self, friend: DevicePublicKey, item: ItemId) -> Result<()> {
+        let mut chats = self.inner.direct.lock();
+        let ChatsState {
+            chats: entries,
+            sent,
+            ..
+        } = &mut *chats;
+        let entry = entries.get_mut(&friend).context("no such chat")?;
+        ensure!(
+            entry.chat.get(&item).is_some_and(Item::is_message),
+            "no such message"
+        );
+        node_events::remove_items(&self.inner, &friend, entry, sent, &[item]);
+        drop(chats);
+        self.inner.emit(CoreEvent::DirectChanged { friend });
+        Ok(())
+    }
+
+    /// Deletes this device's own message `item` for both: here at once, with the files no
+    /// other message refers to, and on the friend's device when the deletion gets there. It
+    /// waits here, like a message, until it does; a copy of the friend's from before such
+    /// deletions gets it once it is updated.
+    pub async fn unsend_direct(&self, friend: DevicePublicKey, item: ItemId) -> Result<()> {
+        {
+            let direct = &self.inner.direct;
+            let mut chats = direct.lock();
+            let ChatsState {
+                chats: entries,
+                sent,
+                ..
+            } = &mut *chats;
+            let entry = entries.get_mut(&friend).context("no such chat")?;
+            ensure!(
+                entry.ended_ms.is_none(),
+                "only a chat with a friend sends a deletion"
+            );
+            ensure!(
+                entry
+                    .chat
+                    .get(&item)
+                    .is_some_and(|i| i.is_message() && i.mine),
+                "only your own message can be deleted for both"
+            );
+            let now = now_ms();
+            let unsend = Item {
+                id: new_id()?,
+                mine: true,
+                sent_ms: now,
+                got_ms: now,
+                seq: 0,
+                at_ms: 0,
+                body: Body::Unsend { target: item },
+                ttl_ms: 0,
+                delivered: false,
+            };
+            let records: Vec<Record> = entry
+                .chat
+                .add(unsend)
+                .map(|item| Record::Item { item })
+                .into_iter()
+                .collect();
+            direct.journal(&friend, entry, &records);
+            node_events::remove_items(&self.inner, &friend, entry, sent, &[item]);
+        }
+        flush(&self.inner, friend).await;
         self.inner.emit(CoreEvent::DirectChanged { friend });
         Ok(())
     }
@@ -1337,8 +1424,28 @@ async fn takes_pins(inner: &Inner, friend: DevicePublicKey) -> bool {
     inner.node.advertises(&peer, &PINS_PROTOCOL) || inner.node.advertises(&peer, &TYPING_PROTOCOL)
 }
 
-/// This device's items to send the friend now: not confirmed, and pins only if the friend's
-/// device takes them; none while all of them were sent a moment ago. Once one is due, those
+/// Whether the friend's device, connected now, takes deletions for both: it says so when it
+/// connects, or it sent or confirmed one.
+async fn takes_unsends(inner: &Inner, friend: DevicePublicKey) -> bool {
+    if inner.direct.lock().takes_unsends.contains(&friend) {
+        return true;
+    }
+    let Ok(Some(peer)) = inner.node.member_peer(friend).await else {
+        return false;
+    };
+    inner.node.advertises(&peer, &UNSEND_PROTOCOL)
+}
+
+/// What the friend's device takes of what not every copy reads.
+#[derive(Clone, Copy)]
+struct Takes {
+    pins: bool,
+    unsends: bool,
+}
+
+/// This device's items to send the friend now: not confirmed, and pins and deletions for
+/// both only if the friend's device takes them; none while all of them were sent a moment
+/// ago. Once one is due, those
 /// sent a moment ago go again with it, in order: one may have gone into a connection that
 /// was already gone (this device asleep, say), and an item must not reach the friend before
 /// those written before it.
@@ -1346,11 +1453,12 @@ fn due<'a>(
     chat: &'a Chat,
     sent: &HashMap<ItemId, Instant>,
     now: Instant,
-    takes_pins: bool,
+    takes: Takes,
 ) -> Vec<&'a Item> {
     let waiting: Vec<&Item> = chat
         .waiting()
-        .filter(|i| takes_pins || i.pin_target().is_none())
+        .filter(|i| takes.pins || i.pin_target().is_none())
+        .filter(|i| takes.unsends || i.unsend_target().is_none())
         .collect();
     let any_due = waiting
         .iter()
@@ -1368,7 +1476,10 @@ async fn flush(inner: &Arc<Inner>, friend: DevicePublicKey) {
         return;
     }
     let _sending = inner.direct.sending.lock().await;
-    let takes_pins = takes_pins(inner, friend).await;
+    let takes = Takes {
+        pins: takes_pins(inner, friend).await,
+        unsends: takes_unsends(inner, friend).await,
+    };
     let (group, payloads, asked) = {
         let mut chats = inner.direct.lock();
         if !chats.connected.contains(&friend) {
@@ -1386,11 +1497,14 @@ async fn flush(inner: &Arc<Inner>, friend: DevicePublicKey) {
             return;
         };
         let now = Instant::now();
-        let due = due(&entry.chat, sent, now, takes_pins);
+        let due = due(&entry.chat, sent, now, takes);
         for item in &due {
             sent.insert(item.id, now);
         }
-        if !takes_pins {
+        if !takes.unsends && entry.chat.waiting().any(|i| i.unsend_target().is_some()) {
+            tracing::debug!("deletions wait for a copy of the friend's that takes them");
+        }
+        if !takes.pins {
             let held = entry
                 .chat
                 .waiting()
@@ -2106,6 +2220,14 @@ mod tests {
 
     #[test]
     fn pins_wait_for_a_device_that_takes_them() {
+        const NONE: Takes = Takes {
+            pins: false,
+            unsends: false,
+        };
+        const ALL: Takes = Takes {
+            pins: true,
+            unsends: true,
+        };
         let mut chat = Chat::default();
         let mine = |id: u8, body| Item {
             id: [id; 16],
@@ -2135,16 +2257,16 @@ mod tests {
         let now = Instant::now();
         let mut sent = HashMap::new();
         let ids = |due: Vec<&Item>| due.iter().map(|i| i.id[0]).collect::<Vec<_>>();
-        assert_eq!(ids(due(&chat, &sent, now, false)), [1]);
-        assert_eq!(ids(due(&chat, &sent, now, true)), [1, 2]);
+        assert_eq!(ids(due(&chat, &sent, now, NONE)), [1]);
+        assert_eq!(ids(due(&chat, &sent, now, ALL)), [1, 2]);
         // One sent a moment ago waits for its receipt a little longer, alone...
         sent.insert([1; 16], now);
-        assert_eq!(ids(due(&chat, &sent, now, false)), Vec::<u8>::new());
+        assert_eq!(ids(due(&chat, &sent, now, NONE)), Vec::<u8>::new());
         // ...but goes again before one written after it, so the two arrive in order.
-        assert_eq!(ids(due(&chat, &sent, now, true)), [1, 2]);
+        assert_eq!(ids(due(&chat, &sent, now, ALL)), [1, 2]);
         sent.insert([2; 16], now);
-        assert_eq!(ids(due(&chat, &sent, now, true)), Vec::<u8>::new());
-        assert_eq!(ids(due(&chat, &sent, now + RESEND_AFTER, true)), [1, 2]);
+        assert_eq!(ids(due(&chat, &sent, now, ALL)), Vec::<u8>::new());
+        assert_eq!(ids(due(&chat, &sent, now + RESEND_AFTER, ALL)), [1, 2]);
     }
 
     #[test]

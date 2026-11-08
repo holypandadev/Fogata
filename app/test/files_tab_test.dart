@@ -35,6 +35,7 @@ void main() {
         chat: const [],
         files: [
           UiFile(
+            sharedMs: 0,
             id: 'f',
             name: long,
             size: 18400000,

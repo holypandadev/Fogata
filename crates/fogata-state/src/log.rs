@@ -20,7 +20,7 @@ use crate::{
         Body, Entry, EntryHash, EpochId, InviteToken, MAX_ENTRY_BYTES, Rotation, Ticket,
         VoiceRoomId, commitment, epoch_number, secret_context,
     },
-    picture::GroupPicture,
+    picture::{GroupPicture, is_group_picture},
     record::MAX_RECORD_AHEAD_MS,
     state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, fair_name},
 };
@@ -367,7 +367,8 @@ impl GroupLog {
             Some(record) if at.is_none_or(|at| record.time_ms > at) => {
                 Some(record.picture.as_slice()).filter(|p| !p.is_empty())
             }
-            _ => state.picture.as_deref(),
+            // An entry holds only a PNG or a JPEG; anything else signed there shows the icon.
+            _ => state.picture.as_deref().filter(|p| is_group_picture(p)),
         }
     }
 
@@ -420,11 +421,11 @@ impl GroupLog {
             return Err(StateError::NotAllowed("only managers choose the picture"));
         }
         if !picture.is_empty()
-            && (picture.len() > crate::state::MAX_PICTURE_BYTES
-                || !crate::picture::is_group_picture(&picture))
+            && (picture.len() > crate::picture::MAX_RECORD_PICTURE_BYTES
+                || !crate::picture::is_record_picture(&picture))
         {
             return Err(StateError::NotAllowed(
-                "a group's picture is a small PNG or JPEG",
+                "a group's picture is a PNG, JPEG, GIF or WebP",
             ));
         }
         let cleared = if state.picture.is_some() {
@@ -4538,13 +4539,13 @@ mod tests {
         assert_eq!(log.picture_record(), Some(&none));
         assert_eq!(log.len(), entries);
 
-        // Not an admin, too big, or not a PNG or JPEG: refused, nothing changes.
+        // Not an admin, too big, or not a picture: refused, nothing changes.
         assert!(log.set_picture(&bea, png(10, 0), 20).is_err());
         assert!(
-            log.set_picture(&ana, png(MAX_PICTURE_BYTES + 1, 0), 20)
+            log.set_picture(&ana, png(crate::MAX_RECORD_PICTURE_BYTES + 1, 0), 20)
                 .is_err()
         );
-        assert!(log.set_picture(&ana, b"GIF89a".to_vec(), 20).is_err());
+        assert!(log.set_picture(&ana, b"%PDF-1.7".to_vec(), 20).is_err());
         assert_eq!(log.picture_record(), Some(&none));
         let by_member = GroupPicture::sign(&bea, log.group_id(), png(10, 0), 40).unwrap();
         assert!(!log.take_picture(by_member));

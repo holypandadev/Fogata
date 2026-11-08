@@ -141,13 +141,13 @@ async fn a_managers_picture_reaches_the_members_and_only_the_newest_a_newcomer()
     assert!(node_b.set_group_picture(group, png(10, 0)).await.is_err());
     assert!(
         node_a
-            .set_group_picture(group, png(fogata_state::MAX_PICTURE_BYTES + 1, 0))
+            .set_group_picture(group, png(fogata_state::MAX_RECORD_PICTURE_BYTES + 1, 0))
             .await
             .is_err()
     );
     assert!(
         node_a
-            .set_group_picture(group, b"GIF89a".to_vec())
+            .set_group_picture(group, b"%PDF-1.7".to_vec())
             .await
             .is_err()
     );

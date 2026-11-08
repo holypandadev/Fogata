@@ -221,6 +221,8 @@ struct Phase {
     downloading: Option<(u64, u64)>,
     from: Option<DevicePublicKey>,
     verifying: bool,
+    /// What is kept on disk was read once, as the updater started.
+    loaded: bool,
     installing: bool,
     failed: Option<(FailKind, String)>,
 }
@@ -433,6 +435,7 @@ impl Updater {
         {
             let mut phase = self.lock();
             phase.verifying = false;
+            phase.loaded = true;
             match loaded {
                 Ok(Some(loaded)) => {
                     phase.ready = loaded.held.packages.contains_key(self.platform());
@@ -1454,6 +1457,15 @@ mod tests {
         options.web = None;
         let (events, _events) = crate::events::queue(None);
         let updater = Updater::start(&data, node.clone(), options, events).unwrap();
+        // What is kept on disk is read first, and the status says Verifying meanwhile; the
+        // reading may not even have started yet on a busy computer.
+        for _ in 0..400 {
+            if updater.lock().loaded {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(updater.lock().loaded, "what is kept on disk was never read");
         let now = now_secs();
         let held = || updater.lock().release.as_ref().map(|r| r.build);
         let last_note = || updater.notes().last().cloned().unwrap_or_default();

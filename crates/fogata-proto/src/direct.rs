@@ -45,6 +45,13 @@ pub enum DirectPayload {
         target: [u8; 16],
         pinned: bool,
     },
+    /// The sender deleted its own message `target` for both people: the device that gets
+    /// this deletes it too, with its files. Sent only to devices that take it, as pins are.
+    Unsend {
+        id: [u8; 16],
+        sent_ms: u64,
+        target: [u8; 16],
+    },
 }
 
 /// What kind of attachment a file is, as the sender tells it: pictures may come by
@@ -176,6 +183,11 @@ mod tests {
                 sent_ms: 9,
                 target: [1; 16],
                 pinned: true,
+            },
+            DirectPayload::Unsend {
+                id: [7; 16],
+                sent_ms: 10,
+                target: [1; 16],
             },
         ] {
             assert_eq!(DirectPayload::decode(&payload.encode()).unwrap(), payload);

@@ -5,7 +5,7 @@ import '../app_state.dart';
 import '../icons.dart';
 import '../l10n.dart';
 import '../names.dart';
-import '../photo.dart';
+import '../moving.dart';
 import '../theme.dart';
 import '../widgets.dart';
 import 'group_banner.dart';
@@ -13,8 +13,7 @@ import 'identity_preview.dart';
 
 /// Lets the person pick the group's picture from the computer; tests put their own here.
 @visibleForTesting
-Future<Uint8List?> Function() pickGroupPicture = () =>
-    pickPhoto(maxBytes: maxGroupPictureBytes);
+Future<Uint8List?> Function() pickGroupPicture = pickGroupPhoto;
 
 Future<void> showNewGroup(BuildContext context) => showFgDialog(
   context,

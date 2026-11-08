@@ -3,8 +3,9 @@
 //! sends again what waits and lets go of what expired.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Weak},
+    time::Instant,
 };
 
 use fogata_crypto::{DevicePublicKey, GroupId};
@@ -13,10 +14,10 @@ use fogata_proto::DirectPayload;
 use fogata_state::GroupLog;
 
 use super::{
-    ChatsState, TICK, Taken,
+    ChatsState, Entry as ChatEntry, TICK, Taken,
     fetch::fetch_by_themselves,
     fits, flush,
-    model::{self, Body, Item},
+    model::{self, Body, Item, ItemId},
     received, room_for, save_group, save_profile,
     store::Record,
     take_group, timer_words, undo_pin,
@@ -70,6 +71,7 @@ pub(crate) fn on_member_disconnected(
         Some(friend) if *friend == device => {
             chats.connected.remove(&device);
             chats.takes_pins.remove(&device);
+            chats.takes_unsends.remove(&device);
             drop(chats);
             inner.emit(CoreEvent::DirectChanged { friend: device });
             true
@@ -165,6 +167,7 @@ pub(crate) async fn on_messages(
             chats: entries,
             sent,
             takes_pins,
+            takes_unsends,
             taken,
             ..
         } = &mut *chats;
@@ -181,6 +184,9 @@ pub(crate) async fn on_messages(
         let mut full = false;
         let mut records = Vec::new();
         let mut delivered = Vec::new();
+        // The friend's messages it deleted for both, and this device's own deletions that
+        // reached the friend: both go from here once what came is saved.
+        let mut gone = Vec::new();
         for bytes in payloads {
             let Ok(payload) = DirectPayload::decode(&bytes) else {
                 continue;
@@ -195,10 +201,27 @@ pub(crate) async fn on_messages(
                             if item.pin_target().is_some() {
                                 takes_pins.insert(from);
                             }
+                            if item.unsend_target().is_some() {
+                                takes_unsends.insert(from);
+                                gone.push(id);
+                            }
                             item.delivered = true;
                             sent.remove(&id);
                             delivered.push(id);
                         }
+                    }
+                }
+                // Only a message of the friend's own, and only that message: nothing of the
+                // deletion is kept, and it is confirmed whether or not the message is here.
+                DirectPayload::Unsend { id, target, .. } => {
+                    takes_unsends.insert(from);
+                    receipt.push(id);
+                    if entry
+                        .chat
+                        .get(&target)
+                        .is_some_and(|i| i.is_message() && !i.mine)
+                    {
+                        gone.push(target);
                     }
                 }
                 payload => {
@@ -208,7 +231,7 @@ pub(crate) async fn on_messages(
                             takes_pins.insert(from);
                             *id
                         }
-                        DirectPayload::Receipt { .. } => continue,
+                        DirectPayload::Receipt { .. } | DirectPayload::Unsend { .. } => continue,
                     };
                     // Kept or not, it is confirmed, so it is not sent again.
                     receipt.push(id);
@@ -258,7 +281,11 @@ pub(crate) async fn on_messages(
         }
         // What could not be saved is not confirmed: the friend sends it again, and it is
         // saved then.
-        direct.save(&from, entry, &records, None)
+        let saved = direct.save(&from, entry, &records, None);
+        if !gone.is_empty() {
+            remove_items(inner, &from, entry, sent, &gone);
+        }
+        saved
     };
     if !saved.await.unwrap_or(false) {
         receipt.clear();
@@ -547,33 +574,47 @@ pub(crate) fn expire(inner: &Inner, now: u64) {
         if ids.is_empty() {
             continue;
         }
-        for id in &ids {
-            sent.remove(id);
-        }
-        let gone = entry.chat.remove(&ids);
-        let mut files = HashSet::new();
-        for file in gone.iter().flat_map(Item::files) {
-            if files.insert(file.id) && !entry.chat.refers_to(&file.id) {
-                let names = gone
-                    .iter()
-                    .flat_map(Item::files)
-                    .filter(|f| f.id == file.id)
-                    .map(|f| f.name.as_str());
-                direct.store.remove_file(friend, &file.id, names);
-                if let Some(group) = entry.group_id() {
-                    inner.shared.remove(group, file.id);
-                }
-            }
-        }
-        // The copies put aside of a damaged journal still hold what just disappeared.
-        let damaged = *friend;
-        direct.rewrite(friend, move |store| store.drop_damaged(&damaged, None));
+        remove_items(inner, friend, entry, sent, &ids);
         changed.push(*friend);
     }
     drop(chats);
     for friend in changed {
         inner.emit(CoreEvent::DirectChanged { friend });
     }
+}
+
+/// Removes items `ids` from `friend`'s chat here, with the files no other item there refers
+/// to, and writes the chat again so nothing of them stays on the disk. Returns what went.
+pub(crate) fn remove_items(
+    inner: &Inner,
+    friend: &DevicePublicKey,
+    entry: &mut ChatEntry,
+    sent: &mut HashMap<ItemId, Instant>,
+    ids: &[ItemId],
+) -> Vec<Item> {
+    let direct = &inner.direct;
+    for id in ids {
+        sent.remove(id);
+    }
+    let gone = entry.chat.remove(ids);
+    let mut files = HashSet::new();
+    for file in gone.iter().flat_map(Item::files) {
+        if files.insert(file.id) && !entry.chat.refers_to(&file.id) {
+            let names = gone
+                .iter()
+                .flat_map(Item::files)
+                .filter(|f| f.id == file.id)
+                .map(|f| f.name.as_str());
+            direct.store.remove_file(friend, &file.id, names);
+            if let Some(group) = entry.group_id() {
+                inner.shared.remove(group, file.id);
+            }
+        }
+    }
+    // The copies put aside of a damaged journal still hold what just disappeared.
+    let damaged = *friend;
+    direct.rewrite(friend, move |store| store.drop_damaged(&damaged, None));
+    gone
 }
 
 #[cfg(test)]

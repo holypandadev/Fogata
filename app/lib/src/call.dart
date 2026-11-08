@@ -410,6 +410,11 @@ class Call extends ChangeNotifier {
     if (mic && !_closed) await _openMic();
     if (camera && !_closed) await _openCamera();
     if (_closed) return;
+    // Someone may have connected while the microphone or the camera opened: what was agreed
+    // with them then had nothing on those channels, and nothing else puts it there.
+    await _resend(_audio);
+    await _resend(_camera);
+    if (_closed) return;
     _levels = Timer.periodic(
       const Duration(milliseconds: 600),
       (_) => _readLevels(),

@@ -1331,6 +1331,92 @@ class _Message extends StatelessWidget {
   /// Just brought into view from the pinned messages.
   final bool lit;
 
+  /// Asks, then deletes the message: from this computer, the friend keeping its copy, or
+  /// for both, one of this device's own in a chat with a friend.
+  Future<void> _delete(
+    BuildContext context,
+    AppState state,
+    UiDirectPage page,
+  ) async {
+    final id = row.item.id;
+    if (!row.item.mine || page.endedMs != null) {
+      final yes = await confirmDialog(
+        context,
+        title: l10n.directDeleteMessageTitle,
+        text: l10n.directDeleteMessageNote(page.friend.name),
+        action: l10n.directDeleteMessageAction,
+      );
+      if (yes) await state.direct.deleteMessage(id);
+      return;
+    }
+    final c = context.fg;
+    final both = await showFgDialog<bool>(
+      context,
+      builder: (dialog) => Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  l10n.directDeleteMessageTitle,
+                  style: tx(
+                    c.fg,
+                    size: 20,
+                    weight: w600,
+                    height: 1.3,
+                    spacing: -.4,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  l10n.directDeleteOwnNote(page.friend.name),
+                  style: tx(c.fg2),
+                ),
+              ],
+            ),
+          ),
+          Footer(
+            children: [
+              // Three buttons may not fit in one row in every language: they wrap.
+              Expanded(
+                child: Wrap(
+                  alignment: WrapAlignment.end,
+                  spacing: 10,
+                  runSpacing: 10,
+                  children: [
+                    FgButton(
+                      text: l10n.commonCancel,
+                      onTap: () => Navigator.of(dialog).pop(),
+                    ),
+                    FgButton(
+                      key: const ValueKey('direct-delete-for-me'),
+                      text: l10n.directDeleteMessage,
+                      onTap: () => Navigator.of(dialog).pop(false),
+                    ),
+                    FgButton(
+                      key: const ValueKey('direct-delete-for-both'),
+                      text: l10n.directDeleteForBoth,
+                      kind: Kind.danger,
+                      onTap: () => Navigator.of(dialog).pop(true),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+    if (both == null) return;
+    await (both
+        ? state.direct.unsendMessage(id)
+        : state.direct.deleteMessage(id));
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.read(context);
@@ -1452,25 +1538,26 @@ class _Message extends StatelessWidget {
               child: message,
             ),
           // In the middle of the message's right edge, however many lines it has.
-          if (canPin)
-            Positioned(
-              top: row.head ? 8 : 0,
-              bottom: -2,
-              right: 4,
-              child: Center(
-                child: _Reveal(
-                  hovered: hovered,
-                  duration: const Duration(milliseconds: 160),
-                  child: _MessageActions(
-                    pinned: item.pinned,
-                    full: full,
-                    onPin: () =>
-                        state.direct.pin(item.id, pinned: !item.pinned),
-                    id: item.id,
-                  ),
+          Positioned(
+            top: row.head ? 8 : 0,
+            bottom: -2,
+            right: 4,
+            child: Center(
+              child: _Reveal(
+                hovered: hovered,
+                duration: const Duration(milliseconds: 160),
+                child: _MessageActions(
+                  pinned: item.pinned,
+                  full: full,
+                  onPin: canPin
+                      ? () => state.direct.pin(item.id, pinned: !item.pinned)
+                      : null,
+                  onDelete: () => _delete(context, state, page),
+                  id: item.id,
                 ),
               ),
             ),
+          ),
         ],
       ),
     );
@@ -1545,17 +1632,55 @@ class _MessageActions extends StatelessWidget {
     required this.pinned,
     required this.full,
     required this.onPin,
+    required this.onDelete,
   });
   final String id;
   final bool pinned;
 
   /// As many messages as a chat keeps pinned are pinned already.
   final bool full;
-  final VoidCallback onPin;
+
+  /// Null where nothing may be pinned (a chat that can only be read).
+  final VoidCallback? onPin;
+  final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
     final c = context.fg;
+    Widget button({
+      required String key,
+      required VoidCallback? onTap,
+      required String label,
+      required String tooltip,
+      required Ic icon,
+      bool danger = false,
+    }) => Springy(
+      key: ValueKey(key),
+      onTap: onTap,
+      label: label,
+      tooltip: tooltip,
+      hoverScale: 1.1,
+      builder: (context, hovered) => AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        width: 24,
+        height: 24,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: hovered && onTap != null ? c.hover : null,
+        ),
+        child: FgIcon(
+          icon,
+          size: 14,
+          color: onTap == null
+              ? c.fg3
+              : hovered
+              ? (danger ? c.red : c.fg)
+              : c.fg2,
+        ),
+      ),
+    );
+    final onPin = this.onPin;
     return Container(
       height: 30,
       padding: const EdgeInsets.all(2),
@@ -1564,35 +1689,30 @@ class _MessageActions extends StatelessWidget {
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: c.border),
       ),
-      child: Springy(
-        key: ValueKey('direct-pin:$id'),
-        onTap: full ? null : onPin,
-        label: pinned ? l10n.directUnpin : l10n.directPin,
-        tooltip: full
-            ? l10n.directPinsFull(maxPins)
-            : pinned
-            ? l10n.directUnpin
-            : l10n.directPin,
-        hoverScale: 1.1,
-        builder: (context, hovered) => AnimatedContainer(
-          duration: const Duration(milliseconds: 140),
-          width: 24,
-          height: 24,
-          alignment: Alignment.center,
-          decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: hovered && !full ? c.hover : null,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (onPin != null)
+            button(
+              key: 'direct-pin:$id',
+              onTap: full ? null : onPin,
+              label: pinned ? l10n.directUnpin : l10n.directPin,
+              tooltip: full
+                  ? l10n.directPinsFull(maxPins)
+                  : pinned
+                  ? l10n.directUnpin
+                  : l10n.directPin,
+              icon: pinned ? Ic.unpin : Ic.pin,
+            ),
+          button(
+            key: 'direct-delete:$id',
+            onTap: onDelete,
+            label: l10n.directDeleteMessageAction,
+            tooltip: l10n.directDeleteMessageAction,
+            icon: Ic.trash,
+            danger: true,
           ),
-          child: FgIcon(
-            pinned ? Ic.unpin : Ic.pin,
-            size: 14,
-            color: full
-                ? c.fg3
-                : hovered
-                ? c.fg
-                : c.fg2,
-          ),
-        ),
+        ],
       ),
     );
   }

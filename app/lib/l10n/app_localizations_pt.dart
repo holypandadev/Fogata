@@ -3490,6 +3490,28 @@ class L10nPt extends L10n {
   String get directPin => 'Fixar';
 
   @override
+  String get directDeleteMessage => 'Apagar para mim';
+
+  @override
+  String get directDeleteMessageTitle => 'Apagar esta mensagem?';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return 'Ela é apagada deste computador, com as suas imagens e arquivos. $name mantém a própria cópia.';
+  }
+
+  @override
+  String get directDeleteMessageAction => 'Apagar';
+
+  @override
+  String get directDeleteForBoth => 'Apagar para os dois';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return 'Apagar para os dois também a tira da conversa de $name, assim que o Fogata dela a receber. Apagar para mim a deixa lá.';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return 'Mensagens temporárias: $time';
   }
@@ -5572,7 +5594,7 @@ class L10nPt extends L10n {
 
   @override
   String get groupSettingsPictureNote =>
-      'PNG, JPEG ou WebP. A imagem é cortada em quadrado e reduzida, como as fotos de perfil.';
+      'PNG, JPEG ou WebP, cortada em quadrado e reduzida como as fotos de perfil, ou um GIF ou WebP animado de até 550 KB.';
 
   @override
   String get groupSettingsOrIcon => 'Ou um ícone';

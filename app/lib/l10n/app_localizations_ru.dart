@@ -3553,6 +3553,28 @@ class L10nRu extends L10n {
   String get directPin => 'Закрепить';
 
   @override
+  String get directDeleteMessage => 'Удалить у себя';
+
+  @override
+  String get directDeleteMessageTitle => 'Удалить это сообщение?';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return 'Оно удалится с этого компьютера вместе с изображениями и файлами. У $name останется своя копия.';
+  }
+
+  @override
+  String get directDeleteMessageAction => 'Удалить';
+
+  @override
+  String get directDeleteForBoth => 'Удалить у обоих';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return '«Удалить у обоих» уберёт его и из чата $name, как только его Fogata это получит. «Удалить у себя» оставит его там.';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return 'Исчезающие сообщения: $time';
   }
@@ -5662,7 +5684,7 @@ class L10nRu extends L10n {
 
   @override
   String get groupSettingsPictureNote =>
-      'PNG, JPEG или WebP. Изображение обрезается до квадрата и уменьшается, как фото профиля.';
+      'PNG, JPEG или WebP — обрезается до квадрата и уменьшается, как фото профиля, — или анимированный GIF или WebP до 550 КБ.';
 
   @override
   String get groupSettingsOrIcon => 'Или значок';

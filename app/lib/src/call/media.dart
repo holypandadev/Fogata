@@ -306,10 +306,19 @@ Future<bool> suppressNoise(bool on) async {
   return running;
 }
 
+/// How long opening the microphone waits first; changed by tests, so that a participant
+/// connects before the microphone is open, as with a system slow to open it or one that
+/// asks first.
+@visibleForTesting
+Duration micOpensAfter = Duration.zero;
+
 /// What this device sends from its own microphone, camera and screen: opening and closing
 /// them, and following the microphone as the system's devices come and go.
 extension _LocalMedia on Call {
   Future<void> _openMic() => _whileOpening(() async {
+    if (micOpensAfter > Duration.zero) {
+      await Future<void>.delayed(micOpensAfter);
+    }
     final MediaStream stream;
     try {
       stream = await _getMic();

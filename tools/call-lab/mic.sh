@@ -14,6 +14,8 @@
 #            CALL_LAB_ALSA=1): listed devices do not change it
 #   hang     a's sound server takes the connection and never answers: asked twice (5 s each,
 #            a slow one answers the second time), then as for broken
+#   late     a's microphone opens 8 s after its room does, so b connects first; b must
+#            hear it without a muting and unmuting
 #   quit     a quits the application as it enters the room with its microphone on, after
 #            QUIT_AFTER ms (default 0); it must end by itself within 15 s, without a crash
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
@@ -34,6 +36,7 @@ if [ "${1:-}" = --inside ]; then
       lab_copy a 2 hang FOGATA_TEST_MIC_CASE=hang
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=hang
       ;;
+    late) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=late FOGATA_TEST_MIC_LATE=8; lab_copy b 2 off FOGATA_TEST_MIC_CASE=late ;;
     quit)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=quit
@@ -82,7 +85,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug broken alsa hang quit:0 quit:300 quit:1500)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late broken alsa hang quit:0 quit:300 quit:1500)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }

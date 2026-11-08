@@ -3471,6 +3471,28 @@ class L10nDe extends L10n {
   String get directPin => 'Anpinnen';
 
   @override
+  String get directDeleteMessage => 'Für mich löschen';
+
+  @override
+  String get directDeleteMessageTitle => 'Diese Nachricht löschen?';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return 'Sie wird mit ihren Bildern und Dateien von diesem Computer gelöscht. $name behält die eigene Kopie.';
+  }
+
+  @override
+  String get directDeleteMessageAction => 'Löschen';
+
+  @override
+  String get directDeleteForBoth => 'Für beide löschen';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return 'Für beide löschen entfernt sie auch aus dem Chat von $name, sobald deren Fogata es erhält. Für mich löschen lässt sie dort.';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return 'Verschwindende Nachrichten: $time';
   }
@@ -5548,7 +5570,7 @@ class L10nDe extends L10n {
 
   @override
   String get groupSettingsPictureNote =>
-      'PNG, JPEG oder WebP. Das Bild wird quadratisch zugeschnitten und verkleinert, wie Profilbilder.';
+      'PNG, JPEG oder WebP, quadratisch zugeschnitten und verkleinert wie Profilbilder, oder ein animiertes GIF oder WebP bis 550 KB.';
 
   @override
   String get groupSettingsOrIcon => 'Oder ein Symbol';

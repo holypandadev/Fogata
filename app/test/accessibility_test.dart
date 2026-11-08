@@ -504,6 +504,7 @@ void main() {
     state.roomState.remember('g', history);
     // Once read, a line and a file of the others are new; this device's own are not.
     final file = UiFile(
+      sharedMs: 0,
       id: 'f',
       name: 'photo.jpg',
       size: 1000,

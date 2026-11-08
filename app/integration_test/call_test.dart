@@ -50,8 +50,9 @@
 // FOGATA_TEST_MEASURE=<seconds> measures instead the call as it is, with every copy's voice
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
-// one thing of the microphone (muted, switch, unplug, broken, quit); see _micCase. Both are
-// run by tools/call-lab.
+// one thing of the microphone (muted, switch, unplug, late, broken, quit); see _micCase. Both are
+// run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the microphone open only that
+// long after the room does, so the others connect first.
 
 import 'dart:async';
 import 'dart:convert';
@@ -495,6 +496,10 @@ Future<void> _call(WidgetTester tester) async {
     await _quitWhileOpening(tester, state);
     return;
   }
+  // The microphone opening only after the others connected, as on a system slow to open
+  // it: what they hear must not depend on which comes first.
+  final late = int.tryParse(_env['FOGATA_TEST_MIC_LATE'] ?? '');
+  if (late != null) micOpensAfter = Duration(seconds: late);
   await state.openRoom(state.contacts.groups.first.id);
   if (const ['broken', 'alsa', 'hang'].contains(_env['FOGATA_TEST_MIC_CASE'])) {
     await _noSoundServer(tester, state, _env['FOGATA_TEST_MIC_CASE']!);
@@ -3825,6 +3830,22 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
         await _say(state, 'mic done');
       } else {
         await _hear(tester, state, ['mic done'], seconds: 180);
+      }
+    case 'late':
+      // Copy a's microphone opens only after b connected (FOGATA_TEST_MIC_LATE): b hears it
+      // without anyone muting and unmuting, which agrees on the connection again.
+      if (_role == 'a') {
+        await _hear(tester, state, ['heard'], seconds: 120);
+      } else {
+        final _Other other = (id: call.peers.keys.single, name: _names['a']!);
+        final peer = _peer(state, other);
+        await _until(
+          tester,
+          'a heard speaking',
+          () => peer.speaking,
+          seconds: 40,
+        );
+        await _say(state, 'heard');
       }
     case 'switch':
       await _voiceSteps(tester, state, unplug: false);

@@ -192,6 +192,7 @@ impl Core {
             .map(|file| FileView {
                 info: file.info.clone(),
                 shared_by: who(&file.shared_by),
+                shared_ms: file.shared_ms,
                 holders: file.holders.iter().map(who).collect(),
                 mine: file.holders.contains(&me),
                 downloading: downloads.get(&(group, file.info.id)).copied(),

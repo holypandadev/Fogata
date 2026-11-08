@@ -103,6 +103,9 @@ pub struct VideoPreview {
 pub struct RoomFile {
     pub info: FileInfo,
     pub shared_by: DevicePublicKey,
+    /// When it was listed, by the clock of whoever listed it first, as a chat line's time:
+    /// a file shows among the lines in that order.
+    pub shared_ms: u64,
     pub holders: BTreeSet<DevicePublicKey>,
 }
 
@@ -644,6 +647,7 @@ impl<S: Clone> RoomTracker<S> {
                             RoomFile {
                                 info: info.clone(),
                                 shared_by: sender,
+                                shared_ms: event.timestamp_ms,
                                 holders: BTreeSet::from([sender]),
                             },
                         );

@@ -532,9 +532,13 @@ class _RoundPictureState extends State<RoundPicture> {
         .resolve(createLocalImageConfiguration(context));
     if (stream.key == _stream?.key) return;
     _stop();
-    // The picture shown stays until the new one is there.
+    // The picture shown stays until the new one is there. Only the first frame of one that
+    // moves: rounding each frame again would cost every time, and nothing would stop it
+    // (a GIF moves through [MovingPicture]).
     _listener = ImageStreamListener(
       (info, _) {
+        if (_listener != null) _stream?.removeListener(_listener!);
+        _listener = null;
         if (mounted) setState(() => _image = info.image);
       },
       onError: (_, _) {
@@ -1813,7 +1817,29 @@ class GroupBadge extends StatelessWidget {
     final c = context.fg;
     final picture = this.picture;
     if (picture != null) {
-      return RoundedPicture(bytes: picture, size: size, radius: radius);
+      final still = RoundedPicture(bytes: picture, size: size, radius: radius);
+      // A large round one that moves plays, as a person's avatar does.
+      if (size < minMovingAvatar ||
+          radius < size / 2 ||
+          !isMovingKind(picture)) {
+        return still;
+      }
+      return Stack(
+        clipBehavior: Clip.none,
+        children: [
+          still,
+          SizedBox.square(
+            dimension: size,
+            child: MovingPicture(
+              key: ValueKey(picture),
+              bytes: picture,
+              maxPixels: maxMovingPhotoPixels,
+              round: true,
+              still: const SizedBox.shrink(),
+            ),
+          ),
+        ],
+      );
     }
     return Container(
       width: size,

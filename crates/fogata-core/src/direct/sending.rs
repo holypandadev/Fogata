@@ -101,6 +101,11 @@ pub(super) fn payload(item: &Item) -> Option<DirectPayload> {
             target: *target,
             pinned: *pinned,
         },
+        Body::Unsend { target } => DirectPayload::Unsend {
+            id: item.id,
+            sent_ms: item.sent_ms,
+            target: *target,
+        },
         Body::Call { .. } => return None,
     })
 }

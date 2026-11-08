@@ -20,6 +20,7 @@ UiRoom room(String path, String name, int size) => UiRoom(
   chat: const [],
   files: [
     UiFile(
+      sharedMs: 0,
       id: 'f',
       name: name,
       size: size,

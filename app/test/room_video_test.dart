@@ -26,6 +26,7 @@ UiRoom _room(int got) => UiRoom(
   chat: const [],
   files: [
     UiFile(
+      sharedMs: 0,
       id: 'v',
       name: 'trip.mp4',
       size: 1000,

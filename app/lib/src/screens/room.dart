@@ -3848,7 +3848,14 @@ class _ChatState extends State<_Chat> {
       final seen = memory!.files[id];
       if (seen == null) continue;
       if (pattern != null && !pattern.hasMatch(seen.name)) continue;
-      entries.add(_Entry(note.atMs, note.atMs, file: seen, who: seen.byId));
+      entries.add(
+        _Entry(
+          note.atMs,
+          seen.sharedMs ?? note.atMs,
+          file: seen,
+          who: seen.byId,
+        ),
+      );
     }
     // Sorted keeping the order they were listed in where both times are the same, as
     // lines that came together have: a plain sort may swap those in a long chat.

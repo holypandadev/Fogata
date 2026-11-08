@@ -1003,6 +1003,7 @@ class _SideColumnState extends State<SideColumn> {
         if (g.room != null)
           _Item(
             icon: groupIcon(g.icon, small: true),
+            picture: g.picture,
             text: g.name,
             live: Contacts.peopleIn(g).length,
             mine: g.room!.joined,
@@ -1233,9 +1234,13 @@ class _Item extends StatelessWidget {
     this.barred,
     this.before = '',
     this.after = '',
+    this.picture,
   });
 
   final Ic icon;
+
+  /// A group's own picture, shown instead of [icon].
+  final Uint8List? picture;
   final String text;
   final VoidCallback onTap;
 
@@ -1288,11 +1293,14 @@ class _Item extends StatelessWidget {
         ),
         child: Row(
           children: [
-            FgIcon(
-              icon,
-              size: 16,
-              color: barred != null ? c.fg3 : (selected ? c.fg : c.fg2),
-            ),
+            if (picture case final picture?)
+              RoundedPicture(bytes: picture, size: 18, radius: 5)
+            else
+              FgIcon(
+                icon,
+                size: 16,
+                color: barred != null ? c.fg3 : (selected ? c.fg : c.fg2),
+              ),
             const SizedBox(width: 10),
             Expanded(
               child: LayoutBuilder(

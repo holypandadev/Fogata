@@ -118,6 +118,23 @@ Future<Picked?> pickProfilePicture() async {
   return (still: still, moving: moving);
 }
 
+/// Lets the person pick a group's picture: a photo becomes a small square of at most
+/// [maxGroupPictureBytes] (photo.dart); a GIF or WebP that moves stays as it is, at most
+/// [maxMovingPhotoBytes], and its first frame shows wherever it does not play. Null when
+/// nothing was picked; throws [PictureProblem] when the picture cannot be used.
+Future<Uint8List?> pickGroupPhoto() async {
+  final file = await openFile(acceptedTypeGroups: [_pictures]);
+  if (file == null) return null;
+  final bytes = await readPicked(file);
+  final moving = await _moving(bytes, maxMovingPhotoBytes, 'pictures');
+  if (moving != null) return moving;
+  final still = await squarePicture(bytes, maxBytes: maxGroupPictureBytes);
+  if (still == null) {
+    throw PictureProblem(unreadablePicture);
+  }
+  return still;
+}
+
 /// Lets the person pick a picture for the top of their card: [bannerPng] of it, and the
 /// animation as it is when it moves (at most [maxMovingBannerBytes]).
 Future<Picked?> pickCardBanner() async {

@@ -112,7 +112,7 @@ impl Core {
                 picture: group
                     .picture
                     .clone()
-                    .filter(|p| fogata_friends::is_picture(p)),
+                    .filter(|p| fogata_state::is_record_picture(p)),
                 banner: group.banner,
                 max_members: state.max_members,
                 max_in_room: state.max_in_room,
@@ -623,22 +623,22 @@ impl Core {
         .await
     }
 
-    /// Sets a group's picture for everyone, a small PNG or JPEG, or none to show the icon
-    /// (managers). It goes apart from the log, only the newest kept, to the members whose
+    /// Sets a group's picture for everyone, a PNG, JPEG, GIF or WebP of at most 550 KiB, or
+    /// none to show the icon (managers). It goes apart from the log, only the newest kept, to the members whose
     /// version keeps such records; earlier versions show the icon instead of a picture set
     /// this way (see [`GroupLog::set_picture`]).
     pub async fn set_group_picture(&self, group: GroupId, picture: Option<Vec<u8>>) -> Result<()> {
         if picture
             .as_ref()
-            .is_some_and(|p| p.len() > fogata_state::MAX_PICTURE_BYTES)
+            .is_some_and(|p| p.len() > fogata_state::MAX_RECORD_PICTURE_BYTES)
         {
             bail!("that picture is too big for a group");
         }
         if picture
             .as_ref()
-            .is_some_and(|p| !fogata_friends::is_picture(p))
+            .is_some_and(|p| !fogata_state::is_record_picture(p))
         {
-            bail!("a group's picture is a PNG or JPEG");
+            bail!("a group's picture is a PNG, JPEG, GIF or WebP");
         }
         let picture = picture.unwrap_or_default();
         Ok(self.inner.node.set_group_picture(group, picture).await?)

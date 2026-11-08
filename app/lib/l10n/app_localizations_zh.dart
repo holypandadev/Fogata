@@ -3196,6 +3196,28 @@ class L10nZh extends L10n {
   String get directPin => '置顶';
 
   @override
+  String get directDeleteMessage => '仅为我删除';
+
+  @override
+  String get directDeleteMessageTitle => '删除这条消息？';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return '它会连同图片和文件从这台电脑上删除。$name 仍保留自己的副本。';
+  }
+
+  @override
+  String get directDeleteMessageAction => '删除';
+
+  @override
+  String get directDeleteForBoth => '为双方删除';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return '“为双方删除”会在 $name 的 Fogata 收到后，把它也从对方的聊天中移除。“仅为我删除”则会保留在对方那里。';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return '限时消息：$time';
   }
@@ -5148,7 +5170,8 @@ class L10nZh extends L10n {
   String get groupSettingsUseIcon => '使用图标';
 
   @override
-  String get groupSettingsPictureNote => 'PNG、JPEG或WebP。会像头像一样裁成正方形并缩小。';
+  String get groupSettingsPictureNote =>
+      'PNG、JPEG或WebP（会像头像一样裁成正方形并缩小），或不超过550 KB的动态GIF或WebP。';
 
   @override
   String get groupSettingsOrIcon => '或使用图标';

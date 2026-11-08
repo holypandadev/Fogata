@@ -275,7 +275,7 @@ fn item(view: &ItemView) -> UiDirectItem {
                 pinned: *pinned,
             }),
         ),
-        Body::Call { .. } => (String::new(), None, None),
+        Body::Unsend { .. } | Body::Call { .. } => (String::new(), None, None),
     };
     let call = match &item.body {
         Body::Call { lasted_ms, starter } => Some(UiDirectCall {
@@ -476,6 +476,26 @@ pub async fn forget_direct_file_copy(path: String) -> Result<()> {
 pub async fn clear_direct_files(device_id: String) -> Result<()> {
     let friend = device(&device_id)?;
     run(|core| async move { core.clear_direct_files(friend) }).await
+}
+
+/// Deletes one message of the chat from this device, with its files; the friend keeps its
+/// copy.
+pub async fn delete_direct_message(device_id: String, item_id: String) -> Result<()> {
+    let friend = device(&device_id)?;
+    let message: [u8; 16] = hex::decode(&item_id)?
+        .try_into()
+        .map_err(|_| anyhow!("not a message id"))?;
+    run(|core| async move { core.delete_direct_message(friend, message) }).await
+}
+
+/// Deletes this device's own message for both: here at once, on the friend's device when
+/// the deletion gets there.
+pub async fn unsend_direct(device_id: String, item_id: String) -> Result<()> {
+    let friend = device(&device_id)?;
+    let message: [u8; 16] = hex::decode(&item_id)?
+        .try_into()
+        .map_err(|_| anyhow!("not a message id"))?;
+    run(|core| async move { core.unsend_direct(friend, message).await }).await
 }
 
 /// Deletes a chat with someone who is no longer a friend, here only.

@@ -34,7 +34,9 @@ pub use log::{
     GroupLog, JOIN_ON_SPARE, KeyProblem, RAISE_LEVEL_ONLY, StateError, TICKET_EXPIRED, Taken,
     Verdicts,
 };
-pub use picture::{GroupPicture, PictureKind, is_group_picture};
+pub use picture::{
+    GroupPicture, MAX_RECORD_PICTURE_BYTES, PictureKind, is_group_picture, is_record_picture,
+};
 pub use record::{GroupRecord, MAX_RECORD_AHEAD_MS, RecordKind};
 pub use room::{
     AWAY_MS, ChatLine, EVENT_SLACK_BYTES, FileInfo, GRACE_MS, HERE_INTERVAL_MS, MAX_CHAT_CHARS,

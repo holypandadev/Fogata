@@ -3239,6 +3239,28 @@ class L10nJa extends L10n {
   String get directPin => 'ピン留め';
 
   @override
+  String get directDeleteMessage => '自分の画面から削除';
+
+  @override
+  String get directDeleteMessageTitle => 'このメッセージを削除しますか？';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return '画像やファイルとともにこのコンピューターから削除されます。$nameさんの手元のコピーは残ります。';
+  }
+
+  @override
+  String get directDeleteMessageAction => '削除';
+
+  @override
+  String get directDeleteForBoth => '両方から削除';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return '「両方から削除」を選ぶと、$nameさんのFogataが受け取りしだい、相手のチャットからも消えます。「自分の画面から削除」では相手の画面に残ります。';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return '消えるメッセージ：$time';
   }
@@ -5221,7 +5243,7 @@ class L10nJa extends L10n {
 
   @override
   String get groupSettingsPictureNote =>
-      'PNG、JPEG、WebPに対応しています。プロフィール写真のように正方形に切り抜かれ、縮小されます。';
+      'PNG、JPEG、WebP（プロフィール写真のように正方形に切り抜かれ、縮小されます）、または550 KBまでのアニメーションGIF・WebPに対応しています。';
 
   @override
   String get groupSettingsOrIcon => 'またはアイコン';

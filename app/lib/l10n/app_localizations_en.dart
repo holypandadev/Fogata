@@ -3364,6 +3364,28 @@ class L10nEn extends L10n {
   String get directPin => 'Pin';
 
   @override
+  String get directDeleteMessage => 'Delete for me';
+
+  @override
+  String get directDeleteMessageTitle => 'Delete this message?';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return 'It goes from this computer, with its pictures and files. $name keeps their copy.';
+  }
+
+  @override
+  String get directDeleteMessageAction => 'Delete';
+
+  @override
+  String get directDeleteForBoth => 'Delete for both';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return 'Delete for both also takes it out of $name’s chat, as soon as their Fogata gets it. Delete for me leaves it there.';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return 'Disappearing messages: $time';
   }
@@ -5421,7 +5443,7 @@ class L10nEn extends L10n {
 
   @override
   String get groupSettingsPictureNote =>
-      'PNG, JPEG or WebP. It is cut to a square and made smaller, like profile pictures.';
+      'PNG, JPEG or WebP, cut to a square and made smaller like profile pictures, or an animated GIF or WebP up to 550 KB.';
 
   @override
   String get groupSettingsOrIcon => 'Or an icon';

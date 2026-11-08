@@ -26,6 +26,7 @@ class FakeCore implements RustLibApi {
 final core = FakeCore();
 
 UiFile _video() => UiFile(
+  sharedMs: 0,
   id: 'f1',
   name: 'party.mp4',
   size: 1 << 20,

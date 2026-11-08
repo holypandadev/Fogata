@@ -6,7 +6,7 @@ import '../format.dart';
 import '../icons.dart';
 import '../l10n.dart';
 import '../names.dart';
-import '../photo.dart';
+import '../moving.dart';
 import '../room_count.dart';
 import '../rust/api/app.dart' as api;
 import '../rust/api/types.dart';
@@ -320,7 +320,7 @@ class _GeneralState extends State<_General> {
     setState(() => _picking = true);
     final state = AppScope.read(context);
     try {
-      final picture = await pickPhoto(maxBytes: maxGroupPictureBytes);
+      final picture = await pickGroupPhoto();
       if (picture != null && mounted) {
         await state.setGroupPicture(widget.group.id, picture);
       }

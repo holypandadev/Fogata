@@ -8,13 +8,23 @@
 //! and keep showing the last picture set with an entry.
 
 use crate::{
+    banner::is_banner_picture,
     record::{GroupRecord, RecordKind},
-    state::MAX_PICTURE_BYTES,
 };
 
-/// Whether `bytes` start like a picture a group's picture may be: a PNG or a JPEG.
+/// Largest picture in a record, in bytes: a GIF or WebP that moves, as large as a banner.
+/// Versions that took at most 48 KiB, a PNG or a JPEG, refuse a larger one, or one that
+/// moves, and keep the picture they have.
+pub const MAX_RECORD_PICTURE_BYTES: usize = 550 * 1024;
+
+/// Whether `bytes` start like a picture a `SetPicture` entry may hold: a PNG or a JPEG.
 pub fn is_group_picture(bytes: &[u8]) -> bool {
     bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(b"\xff\xd8\xff")
+}
+
+/// Whether `bytes` start like a picture a record may hold: a PNG, a JPEG, a GIF or a WebP.
+pub fn is_record_picture(bytes: &[u8]) -> bool {
+    is_banner_picture(bytes)
 }
 
 /// The kind of [`GroupPicture`].
@@ -23,10 +33,10 @@ pub struct PictureKind;
 
 impl RecordKind for PictureKind {
     const LABEL: &'static [u8] = b"fogata/v1/group-picture";
-    const MAX_BYTES: usize = MAX_PICTURE_BYTES;
+    const MAX_BYTES: usize = MAX_RECORD_PICTURE_BYTES;
 
     fn takes(bytes: &[u8]) -> bool {
-        is_group_picture(bytes)
+        is_record_picture(bytes)
     }
 }
 
@@ -72,17 +82,25 @@ mod tests {
     }
 
     #[test]
-    fn only_small_pngs_and_jpegs_are_pictures() {
+    fn pictures_are_pngs_jpegs_gifs_or_webps_of_at_most_550_kib() {
         let identity = DeviceIdentity::generate().unwrap();
         let group = GroupId::random().unwrap();
-        for not in [b"GIF89a".as_slice(), b"RIFF\0\0\0\0WEBP", b"%PDF-1.7"] {
+        for not in [b"BM6\0\0".as_slice(), b"%PDF-1.7"] {
             assert!(GroupPicture::sign(&identity, group, not.to_vec(), 1).is_err());
         }
-        assert!(GroupPicture::sign(&identity, group, png(MAX_PICTURE_BYTES + 1), 1).is_err());
-        let full = GroupPicture::sign(&identity, group, png(MAX_PICTURE_BYTES), 1).unwrap();
+        let most = MAX_RECORD_PICTURE_BYTES;
+        assert!(GroupPicture::sign(&identity, group, png(most + 1), 1).is_err());
+        let full = GroupPicture::sign(&identity, group, png(most), 1).unwrap();
         assert_eq!(GroupPicture::decode(&full.encode()).unwrap(), full);
-        let mut jpeg = b"\xff\xd8\xff".to_vec();
-        jpeg.resize(1000, 0);
-        assert!(GroupPicture::sign(&identity, group, jpeg, 1).is_ok());
+        for start in [
+            b"\xff\xd8\xff".as_slice(),
+            b"GIF89a",
+            b"GIF87a",
+            b"RIFF\0\0\0\0WEBP",
+        ] {
+            let mut picture = start.to_vec();
+            picture.resize(1000, 0);
+            assert!(GroupPicture::sign(&identity, group, picture, 1).is_ok());
+        }
     }
 }

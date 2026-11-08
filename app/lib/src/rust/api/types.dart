@@ -662,6 +662,9 @@ class UiFile {
   final String name;
   final PlatformInt64 size;
   final UiPerson sharedBy;
+
+  /// When it was listed, by the clock of whoever listed it, as a chat line's time.
+  final PlatformInt64 sharedMs;
   final List<UiPerson> holders;
 
   /// This device shares it.
@@ -684,6 +687,7 @@ class UiFile {
     required this.name,
     required this.size,
     required this.sharedBy,
+    required this.sharedMs,
     required this.holders,
     required this.mine,
     this.downloading,
@@ -698,6 +702,7 @@ class UiFile {
       name.hashCode ^
       size.hashCode ^
       sharedBy.hashCode ^
+      sharedMs.hashCode ^
       holders.hashCode ^
       mine.hashCode ^
       downloading.hashCode ^
@@ -714,6 +719,7 @@ class UiFile {
           name == other.name &&
           size == other.size &&
           sharedBy == other.sharedBy &&
+          sharedMs == other.sharedMs &&
           holders == other.holders &&
           mine == other.mine &&
           downloading == other.downloading &&

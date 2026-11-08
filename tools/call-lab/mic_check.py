@@ -129,6 +129,10 @@ elif check == "unplug":
         if not re.search(r"told: Your microphone is back", log("a")):
             problems.append("a was not told its microphone came back")
         notes += said
+elif check == "late":
+    if "laba_mic" not in sources_between("a", 0, 1e12):
+        problems.append("a never recorded from its microphone")
+    notes += re.findall(r"a heard speaking[^\n]*", log("b"))
 elif check in ("broken", "alsa", "hang"):
     notes += re.findall(r"no sound server:[^\n]*", log("a"))
     answers = re.findall(r"call [0-9:.]+: sound server: (\w+)", (run / "a.out").read_text(errors="replace"))

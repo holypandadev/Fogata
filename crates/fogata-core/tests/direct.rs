@@ -67,7 +67,7 @@ fn texts(chat: &ChatView) -> Vec<String> {
         .iter()
         .filter_map(|i| match &i.item.body {
             Body::Message { text, .. } => Some(text.clone()),
-            Body::Timer { .. } | Body::Pin { .. } | Body::Call { .. } => None,
+            Body::Timer { .. } | Body::Pin { .. } | Body::Unsend { .. } | Body::Call { .. } => None,
         })
         .collect()
 }
@@ -503,6 +503,131 @@ fn pinned(chat: &ChatView) -> Vec<String> {
             _ => None,
         })
         .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_deleted_for_both_goes_from_both() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-direct-unsend-{}", std::process::id()));
+    let (dir_a, dir_b) = friends(&base);
+    let (options_a, options_b) = dialling();
+    let (ana, mut events_a) = Core::start(dir_a.clone(), options_a).unwrap();
+    let (bea, mut events_b) = Core::start(dir_b, options_b).unwrap();
+    let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
+    wait_for(&mut events_a, "Bea online", online).await;
+    wait_for(&mut events_b, "Ana online", online).await;
+
+    ana.send_direct(bea.me(), "stays", Vec::new())
+        .await
+        .unwrap();
+    ana.send_direct(bea.me(), "oops", Vec::new()).await.unwrap();
+    chat_until(&bea, ana.me(), "Ana's messages on Bea's side", |c| {
+        texts(c).len() == 2
+    })
+    .await;
+    let chat = ana.direct_chat(bea.me(), 100).await.unwrap();
+    let oops = chat
+        .items
+        .iter()
+        .find(|i| matches!(&i.item.body, Body::Message { text, .. } if text == "oops"))
+        .unwrap()
+        .item
+        .id;
+    // Only one's own message is deleted for both.
+    let theirs = bea.direct_chat(ana.me(), 100).await.unwrap().items[0]
+        .item
+        .id;
+    assert!(bea.unsend_direct(ana.me(), theirs).await.is_err());
+
+    ana.unsend_direct(bea.me(), oops).await.unwrap();
+    assert_eq!(
+        texts(&ana.direct_chat(bea.me(), 100).await.unwrap()),
+        ["stays"]
+    );
+    chat_until(&bea, ana.me(), "the deletion on Bea's side", |c| {
+        texts(c) == ["stays"]
+    })
+    .await;
+    // Once it arrived, nothing of the deletion stays on Ana's side, where it waited with
+    // the pins.
+    let pins = dir_a
+        .join("direct")
+        .join(hex::encode(bea.me().as_bytes()))
+        .join("pins");
+    let confirmed = timeout(Duration::from_secs(60), async {
+        while pins.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(confirmed.is_ok(), "the deletion stayed on Ana's side");
+    ana.shutdown().await.unwrap();
+    bea.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_message_deleted_here_goes_from_here_only_and_for_good() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-direct-delete-{}", std::process::id()));
+    let (dir_a, dir_b) = friends(&base);
+    let (options_a, options_b) = dialling();
+    let (ana, mut events_a) = Core::start(dir_a.clone(), options_a.clone()).unwrap();
+    let (bea, mut events_b) = Core::start(dir_b, options_b).unwrap();
+    let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
+    wait_for(&mut events_a, "Bea online", online).await;
+    wait_for(&mut events_b, "Ana online", online).await;
+
+    bea.send_direct(ana.me(), "keep", Vec::new()).await.unwrap();
+    bea.send_direct(ana.me(), "delete", Vec::new())
+        .await
+        .unwrap();
+    ana.send_direct(bea.me(), "mine", Vec::new()).await.unwrap();
+    let chat = chat_until(&ana, bea.me(), "Bea's messages", |c| texts(c).len() == 3).await;
+    let id = |text: &str| {
+        chat.items
+            .iter()
+            .find(|i| matches!(&i.item.body, Body::Message { text: t, .. } if t == text))
+            .unwrap()
+            .item
+            .id
+    };
+    // The friend's message and this device's own.
+    ana.delete_direct_message(bea.me(), id("delete")).unwrap();
+    ana.delete_direct_message(bea.me(), id("mine")).unwrap();
+    assert_eq!(
+        texts(&ana.direct_chat(bea.me(), 100).await.unwrap()),
+        ["keep"]
+    );
+    assert!(ana.delete_direct_message(bea.me(), id("delete")).is_err());
+    // Bea keeps her copy.
+    let chat = chat_until(&bea, ana.me(), "Ana's message on Bea's side", |c| {
+        texts(c).len() == 3
+    })
+    .await;
+    assert_eq!(texts(&chat).len(), 3);
+
+    // Gone after a restart too.
+    ana.shutdown().await.unwrap();
+    drop(ana);
+    let mut started = None;
+    for _ in 0..50 {
+        match Core::start(dir_a.clone(), options_a.clone()) {
+            Ok(s) => {
+                started = Some(s);
+                break;
+            }
+            Err(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    let (ana, _events) = started.expect("the folder stayed locked");
+    assert_eq!(
+        texts(&ana.direct_chat(bea.me(), 100).await.unwrap()),
+        ["keep"]
+    );
+    ana.shutdown().await.unwrap();
+    bea.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&base);
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -374,6 +374,8 @@ pub struct RequestView {
 pub struct FileView {
     pub info: FileInfo,
     pub shared_by: Person,
+    /// When it was listed, by the clock of whoever listed it.
+    pub shared_ms: u64,
     pub holders: Vec<Person>,
     /// This device shares it.
     pub mine: bool,

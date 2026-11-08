@@ -3541,6 +3541,28 @@ class L10nEs extends L10n {
   String get directPin => 'Fijar';
 
   @override
+  String get directDeleteMessage => 'Borrar para mí';
+
+  @override
+  String get directDeleteMessageTitle => '¿Borrar este mensaje?';
+
+  @override
+  String directDeleteMessageNote(String name) {
+    return 'Se borra de este equipo, con sus imágenes y archivos. $name conserva su copia.';
+  }
+
+  @override
+  String get directDeleteMessageAction => 'Borrar';
+
+  @override
+  String get directDeleteForBoth => 'Borrar para los dos';
+
+  @override
+  String directDeleteOwnNote(String name) {
+    return 'Borrar para los dos también lo quita del chat de $name en cuanto su Fogata lo reciba. Borrar para mí lo deja allí.';
+  }
+
+  @override
   String directTimerLabel(String time) {
     return 'Mensajes temporales: $time';
   }
@@ -5598,7 +5620,7 @@ class L10nEs extends L10n {
 
   @override
   String get groupSettingsPictureNote =>
-      'PNG, JPEG o WebP. Se recorta en cuadrado y se reduce, como las fotos de perfil.';
+      'PNG, JPEG o WebP, que se recorta en cuadrado y se reduce como las fotos de perfil, o un GIF o WebP animado de hasta 550 KB.';
 
   @override
   String get groupSettingsOrIcon => 'O un icono';

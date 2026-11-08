@@ -29,12 +29,24 @@ class RoomNote {
 
 /// A file seen in a room, remembered after its holders leave.
 class SeenFile {
-  SeenFile(this.id, this.name, this.size, this.byId, this.byName);
+  SeenFile(
+    this.id,
+    this.name,
+    this.size,
+    this.byId,
+    this.byName, {
+    this.sharedMs,
+  });
   final String id;
   final String name;
   final int size;
   final String byId;
   final String byName;
+
+  /// When it was shared, by the clock of whoever shared it, as a chat line's time: among
+  /// what reached this device together (the room's past, on entering) it shows in that
+  /// order among the lines, not after them all.
+  final int? sharedMs;
   int? goneMs;
   String? goneName;
 }
@@ -223,6 +235,7 @@ class RoomState extends Piece {
           f.size,
           f.sharedBy.id,
           f.sharedBy.name,
+          sharedMs: f.sharedMs,
         );
         memory.addNote(
           RoomNote.file(now, f.id, f.sharedBy.id, f.sharedBy.name),

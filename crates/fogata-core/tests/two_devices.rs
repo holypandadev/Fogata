@@ -927,7 +927,7 @@ async fn a_join_waiting_for_an_admin_goes_on_after_a_restart() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn a_group_picture_is_a_png_or_jpeg() {
+async fn a_group_picture_is_a_png_jpeg_gif_or_webp() {
     let _one = ONE_AT_A_TIME.lock().await;
     let base = std::env::temp_dir().join(format!("fogata-core-picture-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
@@ -941,10 +941,23 @@ async fn a_group_picture_is_a_png_or_jpeg() {
         .unwrap();
     assert_eq!(ana.groups().await.unwrap()[0].picture, Some(png.clone()));
     assert!(
-        ana.set_group_picture(group, Some(b"GIF89a".to_vec()))
+        ana.set_group_picture(group, Some(b"BM6more".to_vec()))
             .await
             .is_err()
     );
+    let mut too_big = b"GIF89a".to_vec();
+    too_big.resize(fogata_state::MAX_RECORD_PICTURE_BYTES + 1, 0);
+    assert!(ana.set_group_picture(group, Some(too_big)).await.is_err());
+    // One that moves, larger than a still one may be.
+    let mut gif = b"GIF89a".to_vec();
+    gif.resize(300 * 1024, 1);
+    ana.set_group_picture(group, Some(gif.clone()))
+        .await
+        .unwrap();
+    assert_eq!(ana.groups().await.unwrap()[0].picture, Some(gif));
+    ana.set_group_picture(group, Some(png.clone()))
+        .await
+        .unwrap();
     ana.shutdown().await.unwrap();
     drop(ana);
 

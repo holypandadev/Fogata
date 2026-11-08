@@ -122,6 +122,13 @@ pub enum Body {
         target: ItemId,
         pinned: bool,
     },
+    /// This device's own message `target` was deleted for both people. Kept on this device
+    /// only until it reached the friend, never shown; the friend's device deletes the
+    /// message as it gets it and keeps nothing of this.
+    Unsend {
+        #[serde(with = "hex_array")]
+        target: ItemId,
+    },
     /// A call the two were in ended. It lasted `lasted_ms`, from when it was answered until
     /// the last moment two or more people were in it. The item is `mine` when this device
     /// started the call; `starter` names the one who did when that was neither of the two.
@@ -183,7 +190,7 @@ impl Item {
         let text = match &self.body {
             Body::Message { text, .. } => text.len(),
             Body::Call { starter, .. } => starter.as_ref().map_or(0, String::len),
-            Body::Timer { .. } | Body::Pin { .. } => 0,
+            Body::Timer { .. } | Body::Pin { .. } | Body::Unsend { .. } => 0,
         };
         let files: u64 = self
             .files()
@@ -199,14 +206,16 @@ impl Item {
     pub fn files(&self) -> &[Attachment] {
         match &self.body {
             Body::Message { files, .. } => files,
-            Body::Timer { .. } | Body::Pin { .. } | Body::Call { .. } => &[],
+            Body::Timer { .. } | Body::Pin { .. } | Body::Unsend { .. } | Body::Call { .. } => &[],
         }
     }
 
     pub fn files_mut(&mut self) -> &mut [Attachment] {
         match &mut self.body {
             Body::Message { files, .. } => files,
-            Body::Timer { .. } | Body::Pin { .. } | Body::Call { .. } => &mut [],
+            Body::Timer { .. } | Body::Pin { .. } | Body::Unsend { .. } | Body::Call { .. } => {
+                &mut []
+            }
         }
     }
 
@@ -220,6 +229,21 @@ impl Item {
             Body::Pin { target, .. } => Some(target),
             _ => None,
         }
+    }
+
+    /// The message this device's deletion for both is about.
+    pub fn unsend_target(&self) -> Option<&ItemId> {
+        match &self.body {
+            Body::Unsend { target } => Some(target),
+            _ => None,
+        }
+    }
+
+    /// A pin, an unpin or a deletion for both: kept apart from the journal (in the chat's
+    /// pins, which copies from before pins leave alone) and sent only to a device that
+    /// takes it.
+    pub fn is_aside(&self) -> bool {
+        matches!(self.body, Body::Pin { .. } | Body::Unsend { .. })
     }
 
     fn order(&self) -> (u64, ItemId) {
@@ -428,7 +452,10 @@ impl Chat {
             .iter()
             .filter_map(|i| match i.body {
                 Body::Timer { ms } => Some(((i.sent_ms, i.id), ms)),
-                Body::Message { .. } | Body::Pin { .. } | Body::Call { .. } => None,
+                Body::Message { .. }
+                | Body::Pin { .. }
+                | Body::Unsend { .. }
+                | Body::Call { .. } => None,
             })
             .max_by_key(|(key, _)| *key)
             .map(|((sent, _), ms)| (sent, ms))
@@ -926,6 +953,7 @@ pub fn preview(item: &Item, friend: &str, timer_words: impl Fn(u64) -> String) -
         Body::Timer { ms } => timer_words(*ms),
         Body::Pin { pinned: true, .. } => "Pinned a message".to_string(),
         Body::Pin { pinned: false, .. } => "Unpinned a message".to_string(),
+        Body::Unsend { .. } => "Deleted a message".to_string(),
         // The list puts "You: " before this device's own lines.
         Body::Call { lasted_ms, starter } => match (starter, item.mine) {
             (None, true) => format!("Started a call that lasted {}", call_length(*lasted_ms)),

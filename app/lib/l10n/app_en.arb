@@ -4808,6 +4808,40 @@
   "@directPin": {
     "description": "Direct chat: tooltip and label of the button that pins a message (keeps it in the pinned list). Short."
   },
+  "directDeleteMessage": "Delete for me",
+  "@directDeleteMessage": {
+    "description": "Direct chat: tooltip and label of the button beside a message that deletes it from this computer only. Short."
+  },
+  "directDeleteMessageTitle": "Delete this message?",
+  "@directDeleteMessageTitle": {
+    "description": "Direct chat: title of the question asked before deleting one message from this computer."
+  },
+  "directDeleteMessageNote": "It goes from this computer, with its pictures and files. {name} keeps their copy.",
+  "@directDeleteMessageNote": {
+    "description": "Direct chat: text of the question before deleting one message: it goes from this computer with its files, and the friend ({name}) keeps their copy.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "directDeleteMessageAction": "Delete",
+  "@directDeleteMessageAction": {
+    "description": "Direct chat: the red button that deletes the message. Short."
+  },
+  "directDeleteForBoth": "Delete for both",
+  "@directDeleteForBoth": {
+    "description": "Direct chat: button in the question before deleting one of this person's own messages: deletes it on both devices. Short."
+  },
+  "directDeleteOwnNote": "Delete for both also takes it out of {name}’s chat, as soon as their Fogata gets it. Delete for me leaves it there.",
+  "@directDeleteOwnNote": {
+    "description": "Direct chat: text of the question before deleting one of this person's own messages. It names the two buttons ('Delete for both', 'Delete for me'); use their names as translated there. {name} is the friend.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
   "directTimerLabel": "Disappearing messages: {time}",
   "@directTimerLabel": {
     "description": "Direct chat: screen-reader label of the timer pill in the header; {time} is the current choice, like \"Off\", \"1 day\" or \"1 week\".",
@@ -7525,7 +7559,7 @@
   "@groupSettingsUseIcon": {
     "description": "Group settings › General: button that drops the picture and shows the chosen icon instead. Short."
   },
-  "groupSettingsPictureNote": "PNG, JPEG or WebP. It is cut to a square and made smaller, like profile pictures.",
+  "groupSettingsPictureNote": "PNG, JPEG or WebP, cut to a square and made smaller like profile pictures, or an animated GIF or WebP up to 550 KB.",
   "@groupSettingsPictureNote": {
     "description": "Group settings › General: note under the picture buttons: which files work and what is done to them."
   },
