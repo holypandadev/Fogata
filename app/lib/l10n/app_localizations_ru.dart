@@ -1901,19 +1901,6 @@ class L10nRu extends L10n {
   }
 
   @override
-  String roomYourScreenWatching(int n) {
-    String _temp0 = intl.Intl.pluralLogic(
-      n,
-      locale: localeName,
-      other: 'Ваш экран · $n зрителя',
-      many: 'Ваш экран · $n зрителей',
-      few: 'Ваш экран · $n зрителя',
-      one: 'Ваш экран · $n зритель',
-    );
-    return '$_temp0';
-  }
-
-  @override
   String roomTileAway(String name) {
     return '$name · нет связи';
   }

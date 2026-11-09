@@ -416,7 +416,6 @@
   "roomTileYou": "{name} (вы)",
   "roomTileNoSound": "{name} · без звука",
   "roomTileConnecting": "{name} · подключение",
-  "roomYourScreenWatching": "{n, plural, one{Ваш экран · {n} зритель} few{Ваш экран · {n} зрителя} many{Ваш экран · {n} зрителей} other{Ваш экран · {n} зрителя}}",
   "roomTileAway": "{name} · нет связи",
   "roomTileMicOff": "{name}, микрофон выключен",
   "roomTileMutedByYou": "{said}, без звука для вас",

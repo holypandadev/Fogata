@@ -191,6 +191,40 @@ void main() {
     await _done(tester);
   });
 
+  testWidgets('someone in a direct call who is neither a friend nor a member '
+      'gets a card, without a friend request', (tester) async {
+    final state = await _show(tester);
+    // A direct call: p1 came with the friend, and shares no group with this device.
+    state.contacts.members.remove('g');
+    state.callState.calls = [
+      UiCall(
+        groupId: 'g',
+        with_: other(0),
+        outgoing: true,
+        phase: UiCallPhase.connected,
+        sinceMs: 1,
+        members: [me, other(0), other(1)],
+        adding: const [],
+        away: const [],
+      ),
+    ];
+    state.contacts.changed();
+    state.callState.changed();
+    await tester.pump(const Duration(milliseconds: 400));
+    tester.takeException();
+    await _tap(tester, _side('p1'));
+    expect(state.nav.friendCard, 'p1');
+    final card = find.byType(FriendCardLayer);
+    expect(
+      find.descendant(of: card, matching: find.text(other(1).name)),
+      findsOneWidget,
+    );
+    expect(find.byKey(const ValueKey('member-card-in-call')), findsOneWidget);
+    // The other side takes a request only from a member of a group it is in.
+    expect(find.byKey(const ValueKey('member-card-ask')), findsNothing);
+    await _done(tester);
+  });
+
   testWidgets('this device in the voice room opens its own panel beside it', (
     tester,
   ) async {

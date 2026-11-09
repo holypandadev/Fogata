@@ -1862,17 +1862,6 @@ class L10nDe extends L10n {
   }
 
   @override
-  String roomYourScreenWatching(int n) {
-    String _temp0 = intl.Intl.pluralLogic(
-      n,
-      locale: localeName,
-      other: 'Dein Bildschirm · $n sehen zu',
-      one: 'Dein Bildschirm · 1 sieht zu',
-    );
-    return '$_temp0';
-  }
-
-  @override
   String roomTileAway(String name) {
     return '$name · keine Verbindung';
   }

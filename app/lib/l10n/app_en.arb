@@ -2603,15 +2603,6 @@
       }
     }
   },
-  "roomYourScreenWatching": "{n, plural, other{Your screen · {n} watching}}",
-  "@roomYourScreenWatching": {
-    "description": "Label on the tile of the screen this computer shares, with how many people watch it (1 or more).",
-    "placeholders": {
-      "n": {
-        "type": "int"
-      }
-    }
-  },
   "roomTileAway": "{name} · no connection",
   "@roomTileAway": {
     "description": "Name on a person's tile while nothing is heard from them: their connection dropped for a moment. Not the away status (nobody using the computer): a different word.",

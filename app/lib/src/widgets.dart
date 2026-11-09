@@ -1801,6 +1801,7 @@ class GroupBadge extends StatelessWidget {
     this.radius = 6,
     this.iconSize = 12,
     this.selected = false,
+    this.play = false,
   });
 
   final int icon;
@@ -1812,33 +1813,20 @@ class GroupBadge extends StatelessWidget {
   final double iconSize;
   final bool selected;
 
+  /// A picture that moves plays at any size and shape; otherwise only a large round one
+  /// does, as a person's avatar.
+  final bool play;
+
   @override
   Widget build(BuildContext context) {
     final c = context.fg;
     final picture = this.picture;
     if (picture != null) {
-      final still = RoundedPicture(bytes: picture, size: size, radius: radius);
-      // A large round one that moves plays, as a person's avatar does.
-      if (size < minMovingAvatar ||
-          radius < size / 2 ||
-          !isMovingKind(picture)) {
-        return still;
-      }
-      return Stack(
-        clipBehavior: Clip.none,
-        children: [
-          still,
-          SizedBox.square(
-            dimension: size,
-            child: MovingPicture(
-              key: ValueKey(picture),
-              bytes: picture,
-              maxPixels: maxMovingPhotoPixels,
-              round: true,
-              still: const SizedBox.shrink(),
-            ),
-          ),
-        ],
+      return MovingGroupPicture(
+        bytes: picture,
+        size: size,
+        radius: radius,
+        play: play || (size >= minMovingAvatar && radius >= size / 2),
       );
     }
     return Container(
@@ -1855,6 +1843,48 @@ class GroupBadge extends StatelessWidget {
         size: iconSize,
         color: c.fg,
       ),
+    );
+  }
+}
+
+/// A group's picture in a square with round corners of [radius] (a circle at half its
+/// [size]): one that moves (a GIF or WebP of several frames) plays over its first frame
+/// while [play], by the rules of every animation here (moving.dart).
+class MovingGroupPicture extends StatelessWidget {
+  const MovingGroupPicture({
+    super.key,
+    required this.bytes,
+    required this.size,
+    required this.radius,
+    this.play = true,
+  });
+
+  final Uint8List bytes;
+  final double size;
+  final double radius;
+  final bool play;
+
+  @override
+  Widget build(BuildContext context) {
+    final still = RoundedPicture(bytes: bytes, size: size, radius: radius);
+    if (!play || !isMovingKind(bytes)) return still;
+    final round = radius >= size / 2;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        still,
+        SizedBox.square(
+          dimension: size,
+          child: MovingPicture(
+            key: ValueKey(bytes),
+            bytes: bytes,
+            maxPixels: maxMovingPhotoPixels,
+            round: round,
+            corner: round || size <= 0 ? null : radius / size,
+            still: const SizedBox.shrink(),
+          ),
+        ),
+      ],
     );
   }
 }

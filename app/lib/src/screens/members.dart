@@ -75,6 +75,7 @@ class MembersPage extends StatelessWidget {
                           size: 56,
                           radius: 14,
                           iconSize: 24,
+                          play: true,
                         ),
                         const SizedBox(width: 16),
                         Expanded(

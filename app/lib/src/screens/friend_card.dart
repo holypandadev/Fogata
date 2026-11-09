@@ -55,6 +55,27 @@ UiMember? memberOf(AppState state, String id, String? group) {
   return null;
 }
 
+/// Someone in the direct call this device is in who is no friend and no member of a group
+/// it is in: the call is where they were met, and the only way to know them.
+UiMember? callPersonOf(AppState state, String id) {
+  if (state.callState.callIn(state.roomState.roomGroup) == null) return null;
+  for (final p
+      in state.roomState.room?.participants ?? const <UiParticipant>[]) {
+    if (p.person.id == id && id != state.contacts.profile?.person.id) {
+      return UiMember(
+        person: p.person,
+        rank: 0,
+        manager: false,
+        me: false,
+        away: false,
+        waitingForKey: false,
+        fingerprint: '',
+      );
+    }
+  }
+  return null;
+}
+
 /// A friend's card over the window, beside the row that opened it: their banner, picture,
 /// name and status, the friends in common if there are any, and a button to call. A
 /// group member who is not a friend gets a card of the same look that offers a friend
@@ -75,7 +96,11 @@ class FriendCardLayer extends StatelessWidget {
     final member = friend != null || id == null || !state.nav.memberCard
         ? null
         : memberOf(state, id, state.nav.memberCardGroup);
-    if (from == null || friend == null && member == null) {
+    final inCall =
+        friend == null && member == null && id != null && state.nav.memberCard
+        ? callPersonOf(state, id)
+        : null;
+    if (from == null || friend == null && member == null && inCall == null) {
       return const SizedBox.shrink();
     }
     return Positioned.fill(
@@ -112,8 +137,9 @@ class FriendCardLayer extends StatelessWidget {
                       child: friend != null
                           ? _FriendCard(friend: friend)
                           : _MemberCard(
-                              member: member!,
+                              member: member ?? inCall!,
                               group: state.nav.memberCardGroup,
+                              inCall: member == null,
                             ),
                     ),
                   ),
@@ -351,9 +377,17 @@ class _Frame extends StatelessWidget {
 /// they were met, and a friend request to send, or the one between the two: sent and
 /// waiting, or theirs to accept.
 class _MemberCard extends StatelessWidget {
-  const _MemberCard({required this.member, required this.group});
+  const _MemberCard({
+    required this.member,
+    required this.group,
+    this.inCall = false,
+  });
   final UiMember member;
   final String? group;
+
+  /// Known only from the direct call this device is in: no group of theirs carries a
+  /// friend request (the other side takes one only from a member of a group it is in).
+  final bool inCall;
 
   @override
   Widget build(BuildContext context) {
@@ -362,12 +396,13 @@ class _MemberCard extends StatelessWidget {
     final person = member.person;
     final id = person.id;
     final name = person.name;
-    final on = member.path != null;
+    // Someone in the call with this device is connected to it.
+    final on = inCall || member.path != null;
     final asked = state.contacts.requests.outgoing.any(
       (r) => r.person.id == id,
     );
     final asks = state.contacts.requests.incoming.any((r) => r.person.id == id);
-    final where = state.contacts.group(group)?.name;
+    final where = inCall ? null : state.contacts.group(group)?.name;
     return _Frame(
       person: person,
       banner: null,
@@ -388,8 +423,19 @@ class _MemberCard extends StatelessWidget {
             style: tx(c.fg3, size: 13),
           ),
         ],
-        const SizedBox(height: 14),
-        if (asks) ...[
+        if (inCall) ...[
+          const SizedBox(height: 2),
+          Text(
+            key: const ValueKey('member-card-in-call'),
+            l10n.shellSectionInCall,
+            overflow: TextOverflow.ellipsis,
+            style: tx(c.fg3, size: 13),
+          ),
+        ],
+        if (!inCall) const SizedBox(height: 14),
+        if (inCall)
+          const SizedBox.shrink()
+        else if (asks) ...[
           Text(
             l10n.memberCardAsksYou(name),
             textAlign: TextAlign.center,

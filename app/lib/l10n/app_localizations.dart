@@ -2607,12 +2607,6 @@ abstract class L10n {
   /// **'{name} · connecting'**
   String roomTileConnecting(String name);
 
-  /// Label on the tile of the screen this computer shares, with how many people watch it (1 or more).
-  ///
-  /// In en, this message translates to:
-  /// **'{n, plural, other{Your screen · {n} watching}}'**
-  String roomYourScreenWatching(int n);
-
   /// Name on a person's tile while nothing is heard from them: their connection dropped for a moment. Not the away status (nobody using the computer): a different word.
   ///
   /// In en, this message translates to:

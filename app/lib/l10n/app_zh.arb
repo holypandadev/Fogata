@@ -416,7 +416,6 @@
   "roomTileYou": "{name}（你）",
   "roomTileNoSound": "{name} · 无声音",
   "roomTileConnecting": "{name} · 连接中",
-  "roomYourScreenWatching": "{n, plural, other{你的屏幕 · {n}人观看}}",
   "roomTileAway": "{name} · 连接中断",
   "roomTileMicOff": "{name}，麦克风已关闭",
   "roomTileMutedByYou": "{said}，已在你这边静音",

@@ -495,7 +495,7 @@ class _InCallCard extends StatelessWidget {
     final Widget leading = call != null
         ? Avatar(avatar: call.with_.avatar, size: 36)
         : group?.picture != null
-        ? RoundedPicture(bytes: group!.picture!, size: 36, radius: 18)
+        ? MovingGroupPicture(bytes: group!.picture!, size: 36, radius: 18)
         : Container(
             width: 36,
             height: 36,

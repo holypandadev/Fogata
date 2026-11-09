@@ -416,7 +416,6 @@
   "roomTileYou": "{name} (du)",
   "roomTileNoSound": "{name} · ohne Ton",
   "roomTileConnecting": "{name} · verbindet",
-  "roomYourScreenWatching": "{n, plural, =1{Dein Bildschirm · 1 sieht zu} other{Dein Bildschirm · {n} sehen zu}}",
   "roomTileAway": "{name} · keine Verbindung",
   "roomTileMicOff": "{name}, Mikrofon aus",
   "roomTileMutedByYou": "{said}, für dich stummgeschaltet",

@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:fogata_video/fogata_video.dart';
 import 'package:intl/intl.dart' show NumberFormat;
 
+import '../main_color.dart';
 import '../app_state.dart';
 import '../devices.dart';
 import '../emoji.dart' show emojiText;
@@ -731,48 +732,62 @@ class _Tile extends StatelessWidget {
         child: Skeleton(radius: 12, child: Stack(children: [tag])),
       );
     }
-    final tile = Container(
-      decoration: BoxDecoration(
-        color: c.tile,
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: speaking ? c.green : c.border,
-            spreadRadius: speaking ? 2 : 1,
-          ),
-        ],
-      ),
-      child: Stack(
-        children: [
-          if (video != null)
-            Positioned.fill(
-              child: QualityDim(
-                id: quality ? person.id : null,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(12),
-                  child: RTCVideoView(
-                    video,
-                    mirror: mirror,
-                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+    // Without a picture, the tile takes on the main colour of the avatar shown in it,
+    // mixed into the usual one so the name and the icons on it still read.
+    Widget tinted(Widget Function(Color colour) build) => video != null
+        ? build(c.tile)
+        : MainColour(
+            avatar: person.avatar,
+            builder: (context, colour) => build(
+              colour == null ? c.tile : Color.lerp(c.tile, colour, .35)!,
+            ),
+          );
+    final tile = tinted(
+      (colour) => AnimatedContainer(
+        duration: const Duration(milliseconds: 240),
+        decoration: BoxDecoration(
+          color: colour,
+          borderRadius: BorderRadius.circular(12),
+          boxShadow: [
+            BoxShadow(
+              color: speaking ? c.green : c.border,
+              spreadRadius: speaking ? 2 : 1,
+            ),
+          ],
+        ),
+        child: Stack(
+          children: [
+            if (video != null)
+              Positioned.fill(
+                child: QualityDim(
+                  id: quality ? person.id : null,
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: RTCVideoView(
+                      video,
+                      mirror: mirror,
+                      objectFit:
+                          RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    ),
                   ),
                 ),
+              )
+            else
+              Positioned.fill(
+                child: _TileAvatar(
+                  avatar: person.avatar,
+                  id: person.id,
+                  size: avatarSize,
+                  dim: away,
+                  quality: quality ? person.id : null,
+                  name: name,
+                ),
               ),
-            )
-          else
-            Positioned.fill(
-              child: _TileAvatar(
-                avatar: person.avatar,
-                id: person.id,
-                size: avatarSize,
-                dim: away,
-                quality: quality ? person.id : null,
-                name: name,
-              ),
-            ),
-          if (video != null) tag,
-          if (quality)
-            Positioned(right: 10, top: 10, child: TileQuality(id: person.id)),
-        ],
+            if (video != null) tag,
+            if (quality)
+              Positioned(right: 10, top: 10, child: TileQuality(id: person.id)),
+          ],
+        ),
       ),
     );
     final onTap = this.onTap;

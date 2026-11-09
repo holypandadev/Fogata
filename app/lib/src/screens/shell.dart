@@ -681,6 +681,15 @@ class Rail extends StatelessWidget {
                     onTap: () => state.selectGroup(g.id),
                     badge: Contacts.peopleIn(g).length,
                     badgeColor: c.green,
+                    // Still, and moving only while the pointer is on it.
+                    hoverChild: g.picture == null
+                        ? null
+                        : (hovered) => MovingGroupPicture(
+                            bytes: g.picture!,
+                            size: 46,
+                            radius: 23,
+                            play: hovered,
+                          ),
                     child: g.picture != null
                         ? RoundedPicture(
                             bytes: g.picture!,
@@ -733,12 +742,16 @@ class _RailItem extends StatelessWidget {
     this.badgeColor,
     this.dashed = false,
     this.plain = false,
+    this.hoverChild,
   });
 
   final bool selected;
   final String tooltip;
   final VoidCallback onTap;
   final Widget child;
+
+  /// Built instead of [child], told whether the pointer is on the item.
+  final Widget Function(bool hovered)? hoverChild;
   final int badge;
   final Color? badgeColor;
   final bool dashed;
@@ -795,7 +808,7 @@ class _RailItem extends StatelessWidget {
               ),
               child: dashed
                   ? Dashed(radius: 24, child: Center(child: child))
-                  : child,
+                  : hoverChild?.call(hovered) ?? child,
             ),
           ),
           if (badge > 0)

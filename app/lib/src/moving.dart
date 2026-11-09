@@ -486,8 +486,9 @@ class _Frames extends ChangeNotifier {
 }
 
 /// Plays [bytes] in a box of [size], filling it as [BoxFit.cover] does; [round] cuts it to
-/// a circle with a smooth edge. [still] shows until the first frame is there, and for
-/// good when the animation cannot be played.
+/// a circle with a smooth edge, and [corner] (of the box's shorter side) to a square with
+/// round corners. [still] shows until the first frame is there, and for good when the
+/// animation cannot be played.
 class MovingPicture extends StatefulWidget {
   const MovingPicture({
     super.key,
@@ -495,12 +496,16 @@ class MovingPicture extends StatefulWidget {
     required this.still,
     required this.maxPixels,
     this.round = false,
+    this.corner,
     this.under,
   });
 
   final Uint8List bytes;
   final Widget still;
   final bool round;
+
+  /// The corners' radius, as a part of the box's shorter side; ignored when [round].
+  final double? corner;
 
   /// Most pixels it may have to play: [maxMovingPhotoPixels], [maxMovingBannerPixels] or
   /// [maxMovingGroupBannerPixels], by what it moves in place of.
@@ -600,6 +605,7 @@ class _MovingPictureState extends State<MovingPicture> {
           painter: _FramePainter(
             frames,
             round: widget.round,
+            corner: widget.corner,
             under: widget.under,
             scale: MediaQuery.devicePixelRatioOf(context),
           ),
@@ -648,12 +654,14 @@ class _FramePainter extends CustomPainter {
   _FramePainter(
     this.frames, {
     required this.round,
+    required this.corner,
     required this.under,
     required this.scale,
   }) : super(repaint: Listenable.merge([frames, Discs.ready]));
 
   final _Frames frames;
   final bool round;
+  final double? corner;
   final Color? under;
   final double scale;
 
@@ -667,6 +675,21 @@ class _FramePainter extends CustomPainter {
     final from = Alignment.center.inscribe(fitted.source, Offset.zero & source);
     final paint = Paint()..filterQuality = FilterQuality.medium;
     final under = this.under;
+    final corner = this.corner;
+    if (!round && corner != null && corner > 0) {
+      // Cut along the round corners, smoothed.
+      canvas.save();
+      canvas.clipRRect(
+        RRect.fromRectAndRadius(
+          box,
+          Radius.circular(corner.clamp(0, .5) * size.shortestSide),
+        ),
+      );
+      if (under != null) canvas.drawRect(box, Paint()..color = under);
+      canvas.drawImageRect(image, from, box, paint);
+      canvas.restore();
+      return;
+    }
     if (!round) {
       if (under != null) canvas.drawRect(box, Paint()..color = under);
       canvas.drawImageRect(image, from, box, paint);
@@ -685,6 +708,7 @@ class _FramePainter extends CustomPainter {
   bool shouldRepaint(_FramePainter old) =>
       old.frames != frames ||
       old.round != round ||
+      old.corner != corner ||
       old.under != under ||
       old.scale != scale;
 }
