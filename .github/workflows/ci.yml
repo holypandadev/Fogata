@@ -57,7 +57,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb dbus-x11 pipewire pipewire-pulse \
-            wireplumber pulseaudio-utils
+            wireplumber pulseaudio-utils \
+            gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav
+          # GStreamer is what the Linux video player opens at run time (video_test).
           # The sound sessions of tools/call-lab/session.sh are unprivileged user namespaces,
           # which Ubuntu's AppArmor refuses by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

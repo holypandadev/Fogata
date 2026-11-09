@@ -146,6 +146,8 @@ class Unzip(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in self.tmp.iterdir()),
                          ["app.zip", "outside", "work"])
 
+    @unittest.skipIf(os.name == "nt", "the release is made on Linux or macOS; links a Mac "
+                     "bundle holds do not resolve on Windows as they do there")
     def test_an_app_bundle_keeps_its_links(self):
         self.unzip([
             ("Fogata.app/", None),
@@ -178,6 +180,8 @@ class Unzip(unittest.TestCase):
                 self.tearDown()
                 self.setUp()
 
+    @unittest.skipIf(os.name == "nt", "the release is made on Linux or macOS; links a Mac "
+                     "bundle holds do not resolve on Windows as they do there")
     def test_a_link_cannot_climb_out_through_another_link(self):
         # "deep" leads one folder down; a link inside it climbs from where it really is.
         with self.assertRaises(SystemExit):
