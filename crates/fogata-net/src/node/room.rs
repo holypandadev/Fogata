@@ -473,8 +473,15 @@ impl Node {
         };
         let changes = tracker.apply(event, wire, now_ms());
         let earlier = tracker.take_earlier_session();
-        if unknown && let Some(peer) = from {
-            self.ask_room(group, peer);
+        // Not taken now, and marked as seen, so nothing else brings it again: the room's
+        // events tell. Asked of that member a moment ago (on entering the room, say), the
+        // room is asked for again at the next heartbeat, or the event is lost for good.
+        if unknown
+            && let Some(peer) = from
+            && !self.ask_room(group, peer)
+            && let Some(slot) = self.groups.get_mut(&group)
+        {
+            slot.room_again.get_or_insert_default();
         }
 
         self.after_room_changes(group, voice, changes, in_room_before);
@@ -618,23 +625,23 @@ impl Node {
     /// Asks a member for `group`'s room events, not more often than [`ASK_AGAIN`]. While
     /// the application is far behind, when the answer would not be opened, the room is
     /// asked for again once it is not, of one member (see `room_heartbeat`), and this one
-    /// counts as asked.
-    pub(super) fn ask_room(&mut self, group: GroupId, peer: PeerId) {
+    /// counts as asked. Returns false when that member was asked too recently to ask again.
+    pub(super) fn ask_room(&mut self, group: GroupId, peer: PeerId) -> bool {
         let full = self.events.full();
         let Some(slot) = self.groups.get_mut(&group) else {
-            return;
+            return false;
         };
         if slot
             .room_asked
             .get(&peer)
             .is_some_and(|at| at.elapsed() < ASK_AGAIN)
         {
-            return;
+            return false;
         }
         slot.room_asked.insert(peer, Instant::now());
         if full {
             slot.room_again.get_or_insert_default();
-            return;
+            return true;
         }
         self.request(
             peer,
@@ -644,6 +651,7 @@ impl Node {
             },
             Pending::RoomSync(group, 0),
         );
+        true
     }
 
     /// This device took another name: in the rooms it is in under the earlier one, it is
@@ -959,7 +967,9 @@ impl Node {
                     Pending::RoomEvents(group),
                 );
             }
-            None if !wanted.is_empty() => self.ask_room(group, from),
+            None if !wanted.is_empty() => {
+                self.ask_room(group, from);
+            }
             _ => {}
         }
         if resync {
@@ -1460,6 +1470,79 @@ mod tests {
     /// behind: a member whose answer came while the queue was full again is one to ask once
     /// more, also once every member answered so. And a member asked that goes makes way for
     /// another at once, without waiting for an answer that will not come.
+    /// A file shared by a member this device does not know yet to be in the room, just after
+    /// the room was asked of that member (as on entering it), is not lost: the share is not
+    /// taken, the ask cannot go again yet, and the share is marked as seen, so nothing else
+    /// would ever bring it. The room is asked for again at the next heartbeat instead.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_share_from_someone_not_yet_seen_in_the_room_has_the_room_asked_again() {
+        // The room's events asked of `peer` and not answered yet.
+        fn room_asks(n: &Node, peer: PeerId) -> usize {
+            n.pending
+                .values()
+                .filter(|(p, kind)| *p == peer && matches!(kind, Pending::RoomSync(..)))
+                .count()
+        }
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "Bea", 2).unwrap();
+        let group = log.group_id();
+        let (node, events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let asked_again = inspect(&node, move |n| {
+            let peer = PeerId::random();
+            add_member(n, group, peer);
+            n.members.get_mut(&peer).unwrap().device = bea.public_key();
+            n.on_room_command(Command::JoinRoom {
+                group,
+                voice: fogata_state::FIRST_ROOM,
+                nick: "Ana".into(),
+            });
+            let (voice, room) = n.joined_room(&group).unwrap();
+            // The room was asked of Bea a moment ago.
+            n.groups
+                .get_mut(&group)
+                .unwrap()
+                .room_asked
+                .insert(peer, Instant::now());
+            let keys = n.groups[&group].ctx.current().cloned().unwrap();
+            let share = GroupPayload::RoomShare {
+                voice,
+                room,
+                id: [7; 32],
+                name: "lake.png".into(),
+                size: 50_000,
+                video: None,
+            };
+            let sealed = SealedMessage::seal(&keys, &bea, now_ms(), &share.encode()).unwrap();
+            n.receive(
+                peer,
+                WireMessage::from(&sealed),
+                super::super::spread::Forward::Flooded,
+            );
+            let before = room_asks(n, peer);
+            n.room_heartbeat();
+            room_asks(n, peer) > before
+        })
+        .await;
+        assert!(asked_again, "the room was not asked for again");
+        drop(events);
+        node.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_room_is_asked_again_after_stall_after_stall() {
         use fogata_proto::MemberResponse;

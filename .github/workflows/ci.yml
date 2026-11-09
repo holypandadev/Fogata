@@ -94,7 +94,12 @@ jobs:
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@0.20.2,cargo-fuzz,flutter_rust_bridge_codegen@2.13.0
+          tool: cargo-deny@0.20.2,flutter_rust_bridge_codegen@2.13.0
+
+      # Built here: the published binary of cargo-fuzz is built for musl and builds the fuzz
+      # targets for musl, where the sanitizers do not work.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --version 0.13.2 --locked
 
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
