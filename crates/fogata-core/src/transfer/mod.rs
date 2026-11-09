@@ -2149,7 +2149,9 @@ async fn sent(
         let _ = channel.send(&Msg::Moved).await;
     }
     deactivate(dir)?;
-    channel.close().await;
+    // The new computer forgets the move's secret only once that word came: the connection
+    // stays until it closes its end, or the word could go with it on a busy computer.
+    channel.linger().await;
     Ok(TransferEvent::Done {
         computer,
         summary: Some(summary.clone()),
@@ -2205,7 +2207,8 @@ async fn finish_resumed(
             mark_moved(dir, &moved)?;
             let _ = channel.send(&Msg::Moved).await;
             deactivate(dir)?;
-            channel.close().await;
+            // As above: the word that the move is over reaches the new computer first.
+            channel.linger().await;
             Ok(TransferEvent::Done {
                 computer: moved.to,
                 summary: None,
