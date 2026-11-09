@@ -376,6 +376,18 @@ class L10nEn extends L10n {
   String get errAlreadyFriends => 'You are already friends.';
 
   @override
+  String get errMemberNotConnected =>
+      'That member is not connected right now. Try again when they are online.';
+
+  @override
+  String get errMemberTooOld =>
+      'That member’s copy of Fogata is too old to take friend requests from a group. Send them a friend link instead.';
+
+  @override
+  String get errMemberAskLost =>
+      'The friend request did not reach that member. Try again.';
+
+  @override
   String get errOwnLink =>
       'That link is your own: send it to the friend you want to add.';
 
@@ -1886,6 +1898,16 @@ class L10nEn extends L10n {
   String get roomLive => 'LIVE';
 
   @override
+  String get roomSharingYourScreen => 'You\'re sharing your screen';
+
+  @override
+  String get roomShowPreview => 'Show preview';
+
+  @override
+  String get roomPreviewMirror =>
+      'Showing it while you share Fogata itself makes an endless mirror';
+
+  @override
   String get roomNobodyWatching => 'Nobody watching';
 
   @override
@@ -2866,6 +2888,33 @@ class L10nEn extends L10n {
     );
     return '$_temp0';
   }
+
+  @override
+  String get memberCardSendRequest => 'Send friend request';
+
+  @override
+  String get memberCardRequestSent => 'Friend request sent';
+
+  @override
+  String get memberCardAccept => 'Accept friend request';
+
+  @override
+  String memberCardAsksYou(String name) {
+    return '$name wants to be your friend.';
+  }
+
+  @override
+  String memberCardInGroup(String group) {
+    return 'Member of $group';
+  }
+
+  @override
+  String memberCardOnlyOnline(String name) {
+    return 'Friend requests go only while $name is online.';
+  }
+
+  @override
+  String get memberCardShowOwn => 'Show your card';
 
   @override
   String get userPanelEditProfile => 'Edit profile';

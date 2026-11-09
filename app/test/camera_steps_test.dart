@@ -121,7 +121,7 @@ void main() {
     expect(camera()!.scaleResolutionDownBy, 2);
     expect(camera()!.maxFramerate, 20);
     // The screen keeps its own limits.
-    expect(screen()!.maxBitrate, isNull);
+    expect(screen()!.maxBitrate, screenKbps(1920, 1080, 30) * 1000);
     expect(screen()!.maxFramerate, isNot(20));
 
     await people(4);
@@ -149,9 +149,22 @@ void main() {
 
       await call.setScreenQuality(const ScreenQuality(fps: 60));
       expect(screen()!.maxFramerate, 60);
+      // A faster screen may use more: before its size is known, as a full 1080p one.
+      expect(screen()!.maxBitrate, 12442000);
 
       await call.setScreenQuality(const ScreenQuality(fps: 15));
       expect(screen()!.maxFramerate, 15);
+      expect(screen()!.maxBitrate, screenLeastKbps * 1000);
     },
   );
+
+  test('a screen may use more the larger and faster it goes out', () {
+    // 0.1 bit for each pixel of each frame: 12.4 Mbit/s for 1080p at 60.
+    expect(screenKbps(1920, 1080, 60), 12442);
+    // Never under what every screen had before, nor over the most any may use.
+    expect(screenKbps(1280, 720, 30), screenLeastKbps);
+    expect(screenKbps(1920, 1080, 15), screenLeastKbps);
+    expect(screenKbps(3840, 2160, 60), screenMaxKbps);
+    expect(screenKbps(0, 0, 60), screenLeastKbps);
+  });
 }

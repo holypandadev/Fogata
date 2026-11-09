@@ -335,6 +335,17 @@ class L10nJa extends L10n {
   String get errAlreadyFriends => 'すでにフレンドです。';
 
   @override
+  String get errMemberNotConnected =>
+      'そのメンバーは今つながっていません。オンラインになってからもう一度お試しください。';
+
+  @override
+  String get errMemberTooOld =>
+      'そのメンバーのFogataは古いため、グループからのフレンド申請を受け取れません。代わりにフレンドリンクを送ってください。';
+
+  @override
+  String get errMemberAskLost => 'フレンド申請がそのメンバーに届きませんでした。もう一度お試しください。';
+
+  @override
   String get errOwnLink => 'それはあなた自身のリンクです。追加したいフレンドに送ってください。';
 
   @override
@@ -1796,6 +1807,15 @@ class L10nJa extends L10n {
   String get roomLive => 'ライブ';
 
   @override
+  String get roomSharingYourScreen => '画面を共有しています';
+
+  @override
+  String get roomShowPreview => 'プレビューを表示';
+
+  @override
+  String get roomPreviewMirror => 'Fogata 自体を共有中に表示すると、映像が無限に映り込みます';
+
+  @override
   String get roomNobodyWatching => '視聴者なし';
 
   @override
@@ -2757,6 +2777,33 @@ class L10nJa extends L10n {
     );
     return '$_temp0';
   }
+
+  @override
+  String get memberCardSendRequest => 'フレンド申請を送る';
+
+  @override
+  String get memberCardRequestSent => 'フレンド申請を送りました';
+
+  @override
+  String get memberCardAccept => 'フレンド申請を承認';
+
+  @override
+  String memberCardAsksYou(String name) {
+    return '$nameからフレンド申請が届いています。';
+  }
+
+  @override
+  String memberCardInGroup(String group) {
+    return '$groupのメンバー';
+  }
+
+  @override
+  String memberCardOnlyOnline(String name) {
+    return 'フレンド申請は$nameがオンラインのときだけ送れます。';
+  }
+
+  @override
+  String get memberCardShowOwn => '自分のカードを表示';
 
   @override
   String get userPanelEditProfile => 'プロフィールを編集';

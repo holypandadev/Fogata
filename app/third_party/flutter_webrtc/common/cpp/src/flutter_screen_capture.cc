@@ -5,9 +5,40 @@
 #include "portal_screen_capturer.h"
 #endif
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+
+#include <cstdint>
+#include <cstdlib>
+#endif
+
 #include <stdexcept>
 
 namespace flutter_webrtc_plugin {
+
+// Fogata: whether a window source is one of this process's own windows, which are not
+// offered: shared, the call's tiles would show the share inside itself, again and again.
+// On Windows a window's source id is its HWND, in decimal; elsewhere nothing is left out
+// here (macOS leaves them out in its own list).
+static bool OwnWindow(const scoped_refptr<MediaSource>& source) {
+#ifdef _WIN32
+  if (source->type() != kWindow) return false;
+  const std::string id = source->id().std_string();
+  char* end = nullptr;
+  const long long value = std::strtoll(id.c_str(), &end, 10);
+  if (id.empty() || end == nullptr || *end != '\0') return false;
+  DWORD pid = 0;
+  GetWindowThreadProcessId(
+      reinterpret_cast<HWND>(static_cast<intptr_t>(value)), &pid);
+  return pid != 0 && pid == GetCurrentProcessId();
+#else
+  (void)source;
+  return false;
+#endif
+}
 
 FlutterScreenCapture::FlutterScreenCapture(FlutterWebRTCBase* base)
     : base_(base) {}
@@ -67,6 +98,7 @@ void FlutterScreenCapture::GetDesktopSources(
 
   EncodableList sources;
   for (auto source : sources_) {
+    if (OwnWindow(source)) continue;
     EncodableMap info;
     info[EncodableValue("id")] = EncodableValue(source->id().std_string());
     info[EncodableValue("name")] =

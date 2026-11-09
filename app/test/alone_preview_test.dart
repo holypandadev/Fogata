@@ -60,8 +60,17 @@ void main() {
     await _show(tester, state);
     expect(phaseOf(state), Phase.alone);
     expect(find.text('Only you'), findsWidgets);
-    expect(_shown(tester), [call.localScreen]);
-    expect(find.text('Your screen'), findsOneWidget);
+    // Its card says it is shared, without its picture: drawn live, a share of Fogata's
+    // own window would show itself inside itself.
+    expect(_shown(tester), isEmpty);
+    expect(find.text("You're sharing your screen"), findsOneWidget);
+    expect(find.text('Nobody watching'), findsOneWidget);
+    expect(
+      find.text(
+        'Showing it while you share Fogata itself makes an endless mirror',
+      ),
+      findsOneWidget,
+    );
     expect(find.text('Marta (you)'), findsWidgets);
     expect(
       find.text('When someone from the group comes in, they appear here.'),
@@ -69,7 +78,8 @@ void main() {
     );
     // Nobody to send it to: it is drawn here only.
     expect(call.peers, isEmpty);
-    await tester.tap(find.text('Your screen'));
+    // The picture shows when asked, enlarged.
+    await tester.tap(find.text('Show preview'));
     await tester.pump(const Duration(milliseconds: 400));
     expect(call.ownScreen, isTrue);
     expect(_shown(tester), contains(call.localScreen));
@@ -91,10 +101,9 @@ void main() {
     call.sharing = true;
     state.callState.changed();
     await tester.pump(const Duration(milliseconds: 400));
-    expect(
-      _shown(tester),
-      unorderedEquals([call.localScreen, call.localCamera]),
-    );
+    // The screen's card, without its picture, beside the camera.
+    expect(_shown(tester), [call.localCamera]);
+    expect(find.text("You're sharing your screen"), findsOneWidget);
     state.callState.call = null;
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 10));

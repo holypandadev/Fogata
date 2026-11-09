@@ -24,7 +24,10 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
 @implementation FlutterRTCVideoRenderer {
   CGSize _frameSize;
   CGSize _renderSize;
+  // The newest frame converted, which copyPixelBuffer hands to Flutter.
   CVPixelBufferRef _pixelBufferRef;
+  // Fogata: buffers of the current size, a new one for each frame (see renderFrame:).
+  CVPixelBufferPoolRef _pool;
   RTCVideoRotation _rotation;
   FlutterEventChannel* _eventChannel;
   bool _isFirstFrameRendered;
@@ -74,6 +77,11 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
   return buffer;
 }
 
+- (void)dealloc {
+  if (_pixelBufferRef) CVBufferRelease(_pixelBufferRef);
+  if (_pool) CVPixelBufferPoolRelease(_pool);
+}
+
 - (void)dispose {
   [_eventChannel setStreamHandler:nil];
   _eventChannel = nil;
@@ -83,6 +91,10 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
   if (_pixelBufferRef) {
     CVBufferRelease(_pixelBufferRef);
     _pixelBufferRef = nil;
+  }
+  if (_pool) {
+    CVPixelBufferPoolRelease(_pool);
+    _pool = NULL;
   }
   _frameAvailable = false;
   os_unfair_lock_unlock(&_lock);
@@ -251,19 +263,39 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
     return;
   }
 
+  // Fogata: every frame goes into a buffer of its own, converted outside the lock, and
+  // takes the place of the one before even when Flutter has not drawn that yet. Frames
+  // were written into one buffer, and one that came before Flutter took the last was
+  // dropped: whenever Flutter drew late, the newest frame was lost and an older one
+  // stayed on screen. A buffer Flutter may still draw from is never written again: the
+  // pool gives another.
   os_unfair_lock_lock(&_lock);
-  if(_videoTrack == nil) {
+  if(_videoTrack == nil || _pool == NULL) {
     os_unfair_lock_unlock(&_lock);
     return;
   }
-  if(!_frameAvailable && _pixelBufferRef) {
-    [self copyI420ToCVPixelBuffer:_pixelBufferRef withFrame:frame];
-    if(_textureId != -1) {
-      [_registry textureFrameAvailable:_textureId];
-    }
-    _frameAvailable = true;
-  }
+  CVPixelBufferPoolRef pool = CVPixelBufferPoolRetain(_pool);
   os_unfair_lock_unlock(&_lock);
+  CVPixelBufferRef buffer = NULL;
+  if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) ==
+          kCVReturnSuccess &&
+      buffer != NULL) {
+    [self copyI420ToCVPixelBuffer:buffer withFrame:frame];
+    os_unfair_lock_lock(&_lock);
+    // Kept only while its size is still the one asked (and the renderer not disposed).
+    if (_pool == pool) {
+      CVPixelBufferRef older = _pixelBufferRef;
+      _pixelBufferRef = buffer;
+      buffer = older;
+      if(_textureId != -1) {
+        [_registry textureFrameAvailable:_textureId];
+      }
+      _frameAvailable = true;
+    }
+    os_unfair_lock_unlock(&_lock);
+    if (buffer != NULL) CVBufferRelease(buffer);
+  }
+  CVPixelBufferPoolRelease(pool);
 
   __weak FlutterRTCVideoRenderer* weakSelf = self;
   if (_renderSize.width != frame.width || _renderSize.height != frame.height) {
@@ -326,15 +358,24 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
       CVBufferRelease(_pixelBufferRef);
       _pixelBufferRef = nil;
     }
+    if (_pool) {
+      CVPixelBufferPoolRelease(_pool);
+      _pool = NULL;
+    }
     _frameAvailable = false;
     _frameSize = size;
     if (!FrameSizeAllowed(size.width, size.height)) {
       os_unfair_lock_unlock(&_lock);
       return;
     }
-    NSDictionary* pixelAttributes = @{(id)kCVPixelBufferIOSurfacePropertiesKey : @{}};
-    CVPixelBufferCreate(kCFAllocatorDefault, size.width, size.height, kCVPixelFormatType_32BGRA,
-                        (__bridge CFDictionaryRef)(pixelAttributes), &_pixelBufferRef);
+    NSDictionary* pixelAttributes = @{
+      (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+      (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+      (id)kCVPixelBufferWidthKey : @((int)size.width),
+      (id)kCVPixelBufferHeightKey : @((int)size.height),
+    };
+    CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
+                            (__bridge CFDictionaryRef)(pixelAttributes), &_pool);
   }
   os_unfair_lock_unlock(&_lock);
 }

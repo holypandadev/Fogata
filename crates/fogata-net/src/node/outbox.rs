@@ -69,6 +69,7 @@ impl Node {
                 }
             }
             Pending::Presence(sent) => self.presence_done(peer, sent, false),
+            Pending::FriendAsk(device, fresh) => self.member_ask_answered(device, fresh, false),
             Pending::Join(group) | Pending::JoinCommit(group) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
                     slot.join_sent.remove(&peer);

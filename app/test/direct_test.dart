@@ -14,7 +14,8 @@ import 'package:fogata/src/rust/api/direct.dart';
 import 'package:fogata/src/rust/api/types.dart';
 import 'package:fogata/src/screens/direct.dart';
 import 'package:fogata/src/screens/friend_card.dart';
-import 'package:fogata/src/screens/user_panel.dart' show shellLayerKey;
+import 'package:fogata/src/screens/user_panel.dart'
+    show UserPanelLayer, shellLayerKey;
 import 'package:fogata/src/theme.dart';
 import 'package:fogata/src/widgets.dart';
 
@@ -700,9 +701,8 @@ void main() {
     expect(find.text('Nothing pinned yet'), findsOneWidget);
   });
 
-  testWidgets("the friend's picture and name open the friend's card", (
-    tester,
-  ) async {
+  testWidgets("the friend's picture and name open the friend's card, and "
+      "this device's own open its own", (tester) async {
     tester.view.physicalSize = const Size(1440, 900);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.reset);
@@ -736,6 +736,8 @@ void main() {
                   const Positioned.fill(child: DirectPage()),
                   if (AppScope.of(context).nav.friendCard != null)
                     const FriendCardLayer(),
+                  if (AppScope.of(context).nav.userPanelFrom != null)
+                    const UserPanelLayer(),
                 ],
               ),
             ),
@@ -777,15 +779,37 @@ void main() {
     expect(state.nav.friendCard, sofia.id);
     state.closeFriendCard();
     await tester.pumpAndSettle();
-    // Not from this device's own messages.
+    // This device's own messages open its own panel, beside the name.
+    final mine = find.descendant(
+      of: find.byKey(const ValueKey('direct-item:2')),
+      matching: find.text('Marta'),
+    );
+    await tester.tap(mine);
+    await tester.pumpAndSettle();
+    tester.takeException();
+    expect(state.nav.friendCard, isNull);
+    expect(state.nav.userPanelFrom, isNotNull);
+    expect(state.nav.userPanelBeside, isTrue);
+    expect(find.byType(UserPanelLayer), findsOneWidget);
+    expect(find.text('Edit profile'), findsOneWidget);
+    // Beside the name, its top near the name's.
+    final panel = tester.getTopLeft(find.text('Edit profile'));
+    final written = tester.getTopLeft(mine);
+    expect(panel.dx, greaterThan(written.dx));
+    // A second click closes it.
+    state.closeUserPanel();
+    await tester.pumpAndSettle();
     await tester.tap(
       find.descendant(
         of: find.byKey(const ValueKey('direct-item:2')),
-        matching: find.text('Marta'),
+        matching: find.byType(Avatar),
       ),
     );
     await tester.pumpAndSettle();
-    expect(state.nav.friendCard, isNull);
+    tester.takeException();
+    expect(state.nav.userPanelFrom, isNotNull);
+    state.closeUserPanel();
+    await tester.pumpAndSettle();
   });
 
   testWidgets(

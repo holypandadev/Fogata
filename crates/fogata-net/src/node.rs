@@ -24,6 +24,7 @@ mod judging;
 mod limits;
 mod links;
 mod mdns_dials;
+mod member_friends;
 mod member_reach;
 mod members;
 mod network;
@@ -263,6 +264,21 @@ pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents
             .is_some()
         {}
     });
+    // Said in identify, so members know this device takes friend requests made from a
+    // group's card; nothing is sent over it either.
+    let mut marker = swarm
+        .behaviour()
+        .stream
+        .new_control()
+        .accept(member_friends::MEMBER_FRIEND_PROTOCOL)
+        .map_err(|e| setup(&e))?;
+    let stop = stopped.clone();
+    tasks.spawn(async move {
+        while crate::next_until_stopped(&stop, &mut marker)
+            .await
+            .is_some()
+        {}
+    });
     // This device's capability level, listed to every peer it connects to. Nothing is
     // sent over it: a stream someone opens is closed at once.
     let mut caps_streams = swarm
@@ -484,6 +500,9 @@ enum Pending {
     /// About two sessions of a member's or friend's device.
     OtherSession(DevicePublicKey, sessions::SessionCheck),
     KeyProblem,
+    /// A friend request to a member's device (see member_friends.rs), and whether no
+    /// request to it was waiting before this one.
+    FriendAsk(DevicePublicKey, bool),
 }
 
 /// Member requests to one peer: how many are on their way, and those waiting their turn.

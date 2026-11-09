@@ -235,6 +235,9 @@ String explain(Object error) {
     'that call no longer rings': () => l10n.errCallGone,
     'you are already in a call': () => l10n.errAlreadyInCall,
     'you are already friends': () => l10n.errAlreadyFriends,
+    'this member is not connected now': () => l10n.errMemberNotConnected,
+    'too old to take friend requests from a group': () => l10n.errMemberTooOld,
+    'the friend request did not reach the member': () => l10n.errMemberAskLost,
     'this link was made on this device': () => l10n.errOwnLink,
     'the link was already used or has expired': () => l10n.errLinkUsed,
     'the link expired before its device could be reached': () =>

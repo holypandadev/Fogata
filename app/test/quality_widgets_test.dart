@@ -85,51 +85,50 @@ Future<void> pump(WidgetTester tester, AppState state, Widget child) async {
 }
 
 void main() {
-  testWidgets('a tile shows bars, the word when not good, and Reconnecting', (
-    tester,
-  ) async {
-    final state = callState();
-    await pump(
-      tester,
-      state,
-      const Align(
-        alignment: Alignment.topRight,
-        child: TileQuality(id: 'leo'),
-      ),
-    );
-    expect(find.byType(SignalBars), findsNothing);
-    // Good from the start: nothing shows.
-    read(state, 'leo', 0);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.byType(SignalBars), findsNothing);
-    expect(find.text('Good'), findsNothing);
-    settle(state, 'leo', 2, ms: 320);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Poor'), findsOneWidget);
-    // Nothing for 3 s.
-    state.callState.call!.quality.take(
-      'leo',
-      LinkSample(delayMs: 320, heard: _heard),
-      start.add(const Duration(seconds: 7)),
-    );
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.text('Reconnecting…'), findsOneWidget);
-    expect(find.byType(Spinner), findsOneWidget);
-    expect(find.byType(SignalBars), findsNothing);
-    // Good again: the bars stay a few seconds, then go.
-    settle(state, 'leo', 8);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.byType(SignalBars), findsOneWidget);
-    await tester.pump(goodFor - const Duration(seconds: 1));
-    expect(find.byType(SignalBars), findsOneWidget);
-    await tester.pump(const Duration(seconds: 1));
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.byType(SignalBars), findsNothing);
-    // Worse again: back at once.
-    settle(state, 'leo', 12, ms: 320);
-    await tester.pump(const Duration(milliseconds: 300));
-    expect(find.byType(SignalBars), findsOneWidget);
-  });
+  testWidgets(
+    'a tile always shows bars, the word when not good, and Reconnecting',
+    (tester) async {
+      final state = callState();
+      await pump(
+        tester,
+        state,
+        const Align(
+          alignment: Alignment.topRight,
+          child: TileQuality(id: 'leo'),
+        ),
+      );
+      expect(find.byType(SignalBars), findsNothing);
+      // Good from the start: the bars, without the word.
+      read(state, 'leo', 0);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(SignalBars), findsOneWidget);
+      expect(find.text('Good'), findsNothing);
+      settle(state, 'leo', 2, ms: 320);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Poor'), findsOneWidget);
+      // Nothing for 3 s.
+      state.callState.call!.quality.take(
+        'leo',
+        LinkSample(delayMs: 320, heard: _heard),
+        start.add(const Duration(seconds: 7)),
+      );
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Reconnecting…'), findsOneWidget);
+      expect(find.byType(Spinner), findsOneWidget);
+      expect(find.byType(SignalBars), findsNothing);
+      // Good again: the bars stay, without the word.
+      settle(state, 'leo', 8);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(SignalBars), findsOneWidget);
+      await tester.pump(goodFor + const Duration(seconds: 1));
+      expect(find.byType(SignalBars), findsOneWidget);
+      expect(find.text('Poor'), findsNothing);
+      // Worse again: the word at once.
+      settle(state, 'leo', 12, ms: 320);
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.text('Poor'), findsOneWidget);
+    },
+  );
 
   testWidgets('a picture dims while nothing comes', (tester) async {
     final state = callState();

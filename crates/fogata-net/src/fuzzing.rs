@@ -140,6 +140,10 @@ fn member_request(request: &MemberRequest) {
         | MemberRequest::OtherSession
         | MemberRequest::KeyProblem { .. }
         | MemberRequest::Signal { .. } => {}
+        // Opened only with this device's key, on the node.
+        MemberRequest::FriendAsk { sealed } => {
+            let _ = sealed.len();
+        }
         MemberRequest::Addresses { addresses } => addresses_of(addresses),
         MemberRequest::JoinDeclined { revoke, .. } => {
             if let Some(revoke) = revoke {
@@ -1063,6 +1067,9 @@ pub fn member_wire_seeds() -> Vec<Vec<u8>> {
         MemberRequest::KeyProblem {
             group_id: group,
             epoch: 7,
+        },
+        MemberRequest::FriendAsk {
+            sealed: vec![9; 160],
         },
     ];
     let proof = fogata_crypto::MembershipProof::create(

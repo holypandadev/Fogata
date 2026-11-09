@@ -27,6 +27,7 @@ import '../voice.dart';
 import '../widgets.dart';
 import 'emoji_picker.dart';
 import 'friend_card.dart' show toggleFriendCard;
+import 'user_panel.dart' show toggleUserPanel;
 import 'members.dart' show confirmDialog;
 import 'room.dart' show callFriendChecked;
 import 'user_panel.dart' show CardBio, PanelBanner, StatusDot;
@@ -1423,9 +1424,17 @@ class _Message extends StatelessWidget {
     final c = context.fg;
     final item = row.item;
     final friend = !item.mine;
-    // The friend's picture and name open the friend's card, as in Friends.
-    Widget toCard(Widget child, String label) =>
-        friend && state.contacts.friends.any((f) => f.person.id == writer.id)
+    // The friend's picture and name open the friend's card, as in Friends; this
+    // device's own open its own panel beside them.
+    Widget toCard(Widget child, String label) => !friend
+        ? Builder(
+            builder: (context) => Pressable(
+              onTap: () => toggleUserPanel(context, beside: true),
+              label: l10n.memberCardShowOwn,
+              builder: (_, _) => child,
+            ),
+          )
+        : state.contacts.friends.any((f) => f.person.id == writer.id)
         ? Builder(
             builder: (context) => Pressable(
               onTap: () => toggleFriendCard(context, writer.id),

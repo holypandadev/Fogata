@@ -527,3 +527,11 @@ extension _LocalMedia on Call {
     }
   }
 }
+
+/// Whether a source of the list to share is Fogata's own window, as far as the list tells
+/// it here. Under X11 ([linux]) it does not tell a window's process: a window with the
+/// title Fogata's has (linux/runner/my_application.cc) is taken for it. macOS and Windows
+/// leave Fogata's windows out of the list themselves, by their process.
+@visibleForTesting
+bool ownWindow(SourceType type, String name, {required bool linux}) =>
+    linux && type == SourceType.Window && name == 'Fogata';

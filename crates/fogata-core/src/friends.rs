@@ -160,6 +160,22 @@ impl Core {
         Ok(())
     }
 
+    /// Sends a friend request to `device`, a member of a group this device is in, over the
+    /// connection where it proved to be that member: no link or code needed. It is listed by
+    /// the name of the member's profile, or by `shown` (the name its group shows) until one
+    /// came. When that member asked first, its request is accepted instead. Whether it got
+    /// there comes as an event, as for a link.
+    pub async fn ask_member(&self, device: DevicePublicKey, shown: &str) -> Result<()> {
+        let name = self
+            .inner
+            .lock()
+            .profiles
+            .get(&device)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| shown.to_string());
+        Ok(self.inner.node.ask_member_friend(device, name).await?)
+    }
+
     pub async fn answer_request(&self, device: DevicePublicKey, accept: bool) -> Result<()> {
         Ok(self.inner.node.answer_friend(device, accept).await?)
     }

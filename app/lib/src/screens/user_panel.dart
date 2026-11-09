@@ -56,15 +56,38 @@ Rect followBounds(Rect from) {
   return _bounds(context) ?? from;
 }
 
-/// Opens the person's panel next to `context`'s box, or closes it if it is open.
-void toggleUserPanel(BuildContext context) {
+/// Opens the person's panel next to `context`'s box, or closes it if it is open. With
+/// [beside], it floats beside the box as a friend's card does: opened from the person's
+/// name or picture somewhere in the window rather than from their own card.
+void toggleUserPanel(BuildContext context, {bool beside = false}) {
   final state = AppScope.read(context);
   if (state.nav.userPanelFrom != null) {
     state.closeUserPanel();
     return;
   }
   final from = boundsInLayer(context);
-  if (from != null) state.openUserPanel(from);
+  if (from != null) state.openUserPanel(from, beside: beside);
+}
+
+/// Puts a card to the right of the picture and name it was opened from, its top near
+/// theirs, and keeps it inside the window.
+class BesideBox extends SingleChildLayoutDelegate {
+  BesideBox(this.from);
+  final Rect from;
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
+      constraints.loosen();
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final left = math.min(from.left + 160, size.width - childSize.width - 8);
+    final top = math.min(from.top - 10, size.height - childSize.height - 8);
+    return Offset(math.max(8, left), math.max(8, top));
+  }
+
+  @override
+  bool shouldRelayout(BesideBox old) => old.from != from;
 }
 
 /// The person's own panel, over the window above their card, which opens it. A click
@@ -90,6 +113,37 @@ class UserPanelLayer extends StatelessWidget {
           child: LayoutBuilder(
             builder: (context, box) {
               final from = followBounds(opened);
+              if (state.nav.userPanelBeside) {
+                return Stack(
+                  children: [
+                    Positioned.fill(
+                      child: Backdrop(onTap: state.closeUserPanel),
+                    ),
+                    Positioned.fill(
+                      child: CustomSingleChildLayout(
+                        delegate: BesideBox(from),
+                        child: TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0, end: 1),
+                          duration: springTime,
+                          curve: spring,
+                          builder: (context, t, child) => Opacity(
+                            opacity: t.clamp(0, 1),
+                            child: Transform.translate(
+                              offset: Offset(-8 * (1 - t), 0),
+                              child: Transform.scale(
+                                scale: .95 + .05 * t,
+                                alignment: Alignment.topLeft,
+                                child: child,
+                              ),
+                            ),
+                          ),
+                          child: const _UserPanel(),
+                        ),
+                      ),
+                    ),
+                  ],
+                );
+              }
               final above = from.center.dy > box.maxHeight / 2;
               final double left = (above ? from.left : from.right - width)
                   .clamp(8.0, math.max(8.0, box.maxWidth - width - 8));

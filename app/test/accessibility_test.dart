@@ -357,12 +357,14 @@ void main() {
     final handle = tester.ensureSemantics();
     // Leo's camera is on and his microphone too; Sofía's microphone is off.
     await _show(tester, fakeRoom(people: 3, cameras: 1));
-    // Leo's tile enlarges his camera: a button that says his name, once.
+    // Leo's tile enlarges his camera: a button that says his name, once. His row in the
+    // side column, which opens his card, is a button of its own that says so.
     final leo = find.semantics
         .byLabel(RegExp('Leo'))
         .evaluate()
         .map((node) => node.getSemanticsData())
         .where((data) => data.flagsCollection.isButton)
+        .where((data) => !data.label.startsWith(l10n.friendsShowCard('Leo')))
         .toList();
     expect(leo.map((data) => data.label), ['Leo']);
     final sofia = find.semantics.byLabel(l10n.roomTileMicOff('Sofía'));

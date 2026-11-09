@@ -46,6 +46,7 @@ List<Rect> tiles(WidgetTester tester) => [
   for (final e in [
     ...byTypeName('_Tile').evaluate(),
     ...byTypeName('_LiveCard').evaluate(),
+    ...byTypeName('_OwnShareCard').evaluate(),
   ])
     rectOf(tester, e),
 ];
@@ -195,13 +196,13 @@ void main() {
     });
   }
 
-  testWidgets('the own screen’s tile opens with the keyboard too', (
+  testWidgets('the own screen’s preview opens with the keyboard too', (
     tester,
   ) async {
     final state = fakeRoom(people: 3, own: true);
     await showRoom(tester, state, const Size(1440, 900));
     final tile = find.byWidgetPredicate(
-      (w) => w is Pressable && w.label == 'Your screen',
+      (w) => w is Pressable && w.label == 'Show preview',
     );
     expect(tile, findsOneWidget);
     Focus.of(

@@ -75,6 +75,8 @@ class FlutterVideoRenderer
   std::unique_ptr<flutter::TextureVariant> texture_;
   std::shared_ptr<FlutterDesktopPixelBuffer> pixel_buffer_;
   mutable std::shared_ptr<uint8_t[]> rgb_buffer_;
+  // The frame rgb_buffer_ holds, converted by CopyPixelBuffer on the raster thread.
+  mutable scoped_refptr<RTCVideoFrame> drawn_;
   mutable std::mutex mutex_;
 };
 

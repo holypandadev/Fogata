@@ -9,7 +9,7 @@ import '../rust/api/types.dart';
 import '../theme.dart';
 import '../volume.dart' show timeOuts;
 import '../widgets.dart';
-import 'friend_card.dart' show toggleFriendCard;
+import 'friend_card.dart' show personCardLabel, togglePersonCard;
 import 'group_settings.dart' show InviteFriends, copyInviteLink;
 import 'room.dart' show openRoomChecked, pathWords;
 
@@ -333,15 +333,15 @@ class _MemberRow extends StatelessWidget {
     }
     // Everyone acts on those below it, and only on them.
     final canAct = group.outranks.contains(m.person.id);
-    // A friend's row opens their card, as in the list of friends.
-    final friend =
-        !m.me && state.contacts.friends.any((f) => f.person.id == m.person.id);
-    if (!friend) return _row(context, state, presence, presenceColor, canAct);
-    final open = state.nav.friendCard == m.person.id;
+    // A row opens the member's card: a friend's as in the list of friends, the person's
+    // own panel, or for anyone else a card that offers a friend request.
+    final open = m.me
+        ? state.nav.userPanelFrom != null && state.nav.userPanelBeside
+        : state.nav.friendCard == m.person.id;
     return Pressable(
       key: ValueKey('member-row:${m.person.id}'),
-      label: l10n.friendsShowCard(m.person.name),
-      onTap: () => toggleFriendCard(context, m.person.id),
+      label: personCardLabel(state, m.person),
+      onTap: () => togglePersonCard(context, m.person.id, group: group.id),
       builder: (context, hovered) => _row(
         context,
         state,

@@ -35,8 +35,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart'
-    show SourceType, StatsReport, desktopCapturer;
+import 'package:flutter_webrtc/flutter_webrtc.dart' show StatsReport;
 import 'package:fogata/main.dart' as app;
 import 'package:fogata/src/app_state.dart';
 import 'package:fogata/src/call.dart';
@@ -503,20 +502,18 @@ Future<void> _shareScreen(WidgetTester tester, AppState state) async {
     );
   }
 
-  // How many screens and windows the system lists (the app shows its list only for more
-  // than one, and shares the only one at once). Asked as the button asks, so a list that
-  // never answers fails here, named.
+  // How many screens and windows the app offers (it shows its list only for more than
+  // one, and shares the only one at once): the system's list without Fogata's own
+  // windows. Asked as the button asks, so a list that never answers fails here, named.
   var sources = 0;
   if (!_portal) {
     final asked = DateTime.now();
-    final listed = await desktopCapturer
-        .getSources(types: [SourceType.Screen, SourceType.Window])
-        .timeout(
-          const Duration(seconds: 30),
-          onTimeout: () => throw StateError(
-            'the system\'s list of screens and windows gave no answer in 30 s',
-          ),
-        );
+    final listed = await call.screens().timeout(
+      const Duration(seconds: 30),
+      onTimeout: () => throw StateError(
+        'the system\'s list of screens and windows gave no answer in 30 s',
+      ),
+    );
     sources = listed.length;
     _log(
       'the system lists $sources sources in '

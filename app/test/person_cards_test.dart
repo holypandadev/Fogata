@@ -1,0 +1,287 @@
+// The people in a voice room, listed under it in the side column, open their cards beside
+// them: a friend's card, the person's own panel, and for a member who is not a friend a
+// card of the same look that offers a friend request, or says where one stands.
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:fogata/src/app_state.dart';
+import 'package:fogata/src/l10n.dart';
+import 'package:fogata/src/rust/api/types.dart';
+import 'package:fogata/src/screens/friend_card.dart';
+import 'package:fogata/src/screens/shell.dart';
+import 'package:fogata/src/screens/user_panel.dart' show UserPanelLayer;
+import 'package:fogata/src/theme.dart';
+import 'package:fogata/src/widgets.dart';
+
+import 'fake_room.dart';
+
+UiMember _member(UiPerson p, {bool online = true, bool me = false}) => UiMember(
+  person: p,
+  rank: 1,
+  manager: false,
+  me: me,
+  path: online ? UiPath.direct : null,
+  away: false,
+  waitingForKey: false,
+  fingerprint: '${p.short} 0000',
+);
+
+UiRequest _request(UiPerson p) =>
+    UiRequest(person: p, fingerprint: p.short, sinceMs: 1);
+
+/// A room of group `g` with this device, a friend (`p0`) and a member who is not one
+/// (`p1`), shown in the shell.
+Future<AppState> _show(WidgetTester tester) async {
+  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+    const MethodChannel('window_manager'),
+    (call) async => false,
+  );
+  tester.view.physicalSize = const Size(1440, 900);
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.reset);
+  final state = fakeRoom(people: 3)
+    ..contacts.friends = [
+      UiFriend(
+        person: other(0),
+        fingerprint: other(0).short,
+        presence: UiPresence.inRoom,
+        delivered: true,
+      ),
+    ];
+  state.contacts.members['g'] = [
+    _member(me, me: true),
+    _member(other(0)),
+    _member(other(1)),
+  ];
+  await tester.pumpWidget(
+    AppScope(
+      state: state,
+      child: MaterialApp(
+        theme: Fg.darkTokens.themeData,
+        home: const Material(child: Shell()),
+      ),
+    ),
+  );
+  await tester.pump(const Duration(milliseconds: 400));
+  tester.takeException();
+  return state;
+}
+
+Future<void> _done(WidgetTester tester) async {
+  await tester.pumpWidget(const SizedBox());
+  await tester.pump(const Duration(seconds: 1));
+}
+
+Finder _side(String id) => find.byKey(ValueKey('side-person:$id'));
+
+Future<void> _tap(WidgetTester tester, Finder target) async {
+  await tester.tap(target);
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 600));
+  tester.takeException();
+}
+
+/// A click where [target] is, under what floats over it now.
+Future<void> _tapOver(WidgetTester tester, Finder target) async {
+  await tester.tapAt(tester.getCenter(target));
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 600));
+  tester.takeException();
+}
+
+void main() {
+  setUpAll(loadFonts);
+
+  testWidgets("a friend in the voice room opens the friend's card", (
+    tester,
+  ) async {
+    final state = await _show(tester);
+    await _tap(tester, _side('p0'));
+    expect(state.nav.friendCard, 'p0');
+    expect(state.nav.memberCard, isFalse);
+    expect(find.byType(FriendCardLayer), findsOneWidget);
+    expect(find.byKey(const ValueKey('friend-card-message')), findsOneWidget);
+    expect(find.byKey(const ValueKey('member-card-ask')), findsNothing);
+    // Beside the row it was opened from.
+    final card = tester.getTopLeft(
+      find.byKey(const ValueKey('friend-card-message')),
+    );
+    expect(card.dx, greaterThan(tester.getTopLeft(_side('p0')).dx));
+    // A click on the same row, beside the card, closes it.
+    await _tapOver(tester, _side('p0'));
+    expect(state.nav.friendCard, isNull);
+    await _done(tester);
+  });
+
+  testWidgets('a member who is not a friend gets a card that offers a friend '
+      'request, or says where one stands', (tester) async {
+    final state = await _show(tester);
+    await _tap(tester, _side('p1'));
+    expect(state.nav.friendCard, 'p1');
+    expect(state.nav.memberCard, isTrue);
+    final card = find.byType(FriendCardLayer);
+    expect(
+      find.descendant(of: card, matching: find.text(other(1).name)),
+      findsOneWidget,
+    );
+    expect(
+      find.descendant(
+        of: card,
+        matching: find.text(l10n.memberCardInGroup('Friday games')),
+      ),
+      findsOneWidget,
+    );
+    final ask = find.byKey(const ValueKey('member-card-ask'));
+    expect(ask, findsOneWidget);
+    expect(tester.widget<FgButton>(ask).onTap, isNotNull);
+    expect(find.byKey(const ValueKey('friend-card-call')), findsNothing);
+
+    // A request sent and waiting: said so instead of the button.
+    state.contacts.requests = UiRequests(
+      incoming: const [],
+      outgoing: [_request(other(1))],
+    );
+    state.contacts.changed();
+    await tester.pump();
+    expect(ask, findsNothing);
+    expect(find.byKey(const ValueKey('member-card-sent')), findsOneWidget);
+    expect(find.text(l10n.memberCardRequestSent), findsOneWidget);
+
+    // A request of theirs: accepted from the card.
+    state.contacts.requests = UiRequests(
+      incoming: [_request(other(1))],
+      outgoing: const [],
+    );
+    state.contacts.changed();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('member-card-accept')), findsOneWidget);
+    expect(find.text(l10n.memberCardAsksYou(other(1).name)), findsOneWidget);
+
+    // Offline: no request can go, and the card says why.
+    state.contacts.requests = UiRequests(
+      incoming: const [],
+      outgoing: const [],
+    );
+    state.contacts.members['g'] = [
+      _member(me, me: true),
+      _member(other(0)),
+      _member(other(1), online: false),
+    ];
+    state.contacts.changed();
+    await tester.pump();
+    expect(tester.widget<FgButton>(ask).onTap, isNull);
+    expect(find.text(l10n.memberCardOnlyOnline(other(1).name)), findsOneWidget);
+
+    // Once friends, the card is a friend's.
+    state.contacts.friends = [
+      ...state.contacts.friends,
+      UiFriend(
+        person: other(1),
+        fingerprint: other(1).short,
+        presence: UiPresence.inRoom,
+        delivered: true,
+      ),
+    ];
+    state.contacts.changed();
+    await tester.pump();
+    expect(find.byKey(const ValueKey('friend-card-message')), findsOneWidget);
+    expect(ask, findsNothing);
+    state.closeFriendCard();
+    await _done(tester);
+  });
+
+  testWidgets('this device in the voice room opens its own panel beside it', (
+    tester,
+  ) async {
+    final state = await _show(tester);
+    await _tap(tester, _side(me.id));
+    expect(state.nav.friendCard, isNull);
+    expect(state.nav.userPanelFrom, isNotNull);
+    expect(state.nav.userPanelBeside, isTrue);
+    expect(find.byType(UserPanelLayer), findsOneWidget);
+    final edit = find.text(l10n.userPanelEditProfile);
+    expect(edit, findsOneWidget);
+    expect(
+      tester.getTopLeft(edit).dx,
+      greaterThan(tester.getTopLeft(_side(me.id)).dx),
+    );
+    await _tapOver(tester, _side(me.id));
+    expect(state.nav.userPanelFrom, isNull);
+    await _done(tester);
+  });
+
+  testWidgets('every row of the members page opens a card', (tester) async {
+    final state = await _show(tester);
+    state.showMembers('g');
+    await tester.pump(const Duration(milliseconds: 400));
+    tester.takeException();
+    Finder row(String id) => find.byKey(ValueKey('member-row:$id'));
+    await _tap(tester, row('p1'));
+    expect(state.nav.memberCard, isTrue);
+    expect(state.nav.memberCardGroup, 'g');
+    expect(find.byKey(const ValueKey('member-card-ask')), findsOneWidget);
+    state.closeFriendCard();
+    await tester.pump(const Duration(milliseconds: 400));
+    await _tap(tester, row('p0'));
+    expect(find.byKey(const ValueKey('friend-card-message')), findsOneWidget);
+    state.closeFriendCard();
+    await tester.pump(const Duration(milliseconds: 400));
+    await _tap(tester, row(me.id));
+    expect(state.nav.userPanelBeside, isTrue);
+    expect(find.text(l10n.userPanelEditProfile), findsOneWidget);
+    state.closeUserPanel();
+    await _done(tester);
+  });
+
+  testWidgets("a writer's name in the room's chat opens their card", (
+    tester,
+  ) async {
+    final state = await _show(tester);
+    final room = state.roomState.room!;
+    state.roomState.room = UiRoom(
+      startedMs: room.startedMs,
+      joined: true,
+      participants: room.participants,
+      chat: [
+        UiChatLine(
+          id: 'c1',
+          sender: 'p1',
+          nick: other(1).name,
+          text: 'Hello',
+          timestampMs: DateTime.now().millisecondsSinceEpoch,
+          mine: false,
+        ),
+      ],
+      files: const [],
+    );
+    state.roomState.changed();
+    await tester.pump(const Duration(milliseconds: 400));
+    tester.takeException();
+    final name = find.text(other(1).name);
+    // The name over the line, in the nearest column that holds both.
+    final line = find
+        .ancestor(of: find.text('Hello'), matching: find.byType(Column))
+        .evaluate()
+        .firstWhere(
+          (column) => find
+              .descendant(
+                of: find.byElementPredicate((e) => e == column),
+                matching: name,
+              )
+              .evaluate()
+              .isNotEmpty,
+        );
+    await _tap(
+      tester,
+      find.descendant(
+        of: find.byElementPredicate((e) => e == line),
+        matching: name,
+      ),
+    );
+    expect(state.nav.friendCard, 'p1');
+    expect(state.nav.memberCard, isTrue);
+    state.closeFriendCard();
+    await _done(tester);
+  });
+}

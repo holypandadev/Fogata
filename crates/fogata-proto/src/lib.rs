@@ -246,7 +246,21 @@ pub enum MemberRequest {
         group_id: Vec<u8>,
         epoch: u32,
     },
+    /// A friend request from a member of a group the receiver shares with it, made from its
+    /// card in that group rather than with a link or a code: its profile and request secret,
+    /// signed and sealed to the receiver (`fogata_friends::member_request`). The receiver
+    /// takes it only from a peer that proved to be that member, and answers it as any other
+    /// friend request. Only for devices that advertise [`MEMBER_FRIEND_MARKER`]; older ones
+    /// cannot read it, which only fails this request.
+    FriendAsk {
+        #[serde(with = "serde_bytes")]
+        sealed: Vec<u8>,
+    },
 }
+
+/// Protocol a device advertises (identify) when it takes [`MemberRequest::FriendAsk`].
+/// Nothing is ever sent over it.
+pub const MEMBER_FRIEND_MARKER: &str = "/fogata/member-friend/1";
 
 /// Protocol a device advertises (identify) when it takes [`MemberRequest::Spread`] and
 /// [`MemberRequest::RoomEvents`]. Nothing is ever sent over it.

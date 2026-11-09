@@ -33,6 +33,7 @@ const HELLO: &[u8] = b"fogata/v1/friend-hello";
 const HELLO_REPLY: &[u8] = b"fogata/v1/friend-hello-reply";
 const HELLO_KNOWS: &[u8] = b"fogata/v1/friend-hello-knows";
 const LINK_REQUEST: &[u8] = b"fogata/v1/friend-link-request";
+const MEMBER_REQUEST: &[u8] = b"fogata/v1/friend-member-request";
 const ACCEPT: &[u8] = b"fogata/v1/friend-accept";
 const PROFILE_UPDATE: &[u8] = b"fogata/v1/friend-profile";
 const STATUS: &[u8] = b"fogata/v1/friend-status";
@@ -848,6 +849,35 @@ pub fn open_link_request(
     read_introduction(&open_sealed(identity, &context, sealed)?, &context)
 }
 
+/// A friend request to `member`, a member of a group this device is in, sent on a connection
+/// where it proved to be that member: this device's profile and request secret, signed and
+/// sealed to it. No shared secret keys it: the receiver takes it only from the peer that
+/// proved to be a member, and checks that the profile inside is that member's device.
+pub fn member_request(
+    identity: &DeviceIdentity,
+    own_profile: &Profile,
+    own_secret: &FriendSecret,
+    member: &DevicePublicKey,
+    local: &[u8],
+    remote: &[u8],
+) -> Result<Vec<u8>, FriendError> {
+    let context = bound(MEMBER_REQUEST, local, remote, member);
+    let body = introduction_body(identity, own_profile, own_secret, &context);
+    Ok(encode_sealed(&Sealed::seal(member, &context, &body)?))
+}
+
+/// Opens a friend request from a member of a group this device is in. Whose it is (the
+/// profile's device) is for the caller to compare with the member the peer proved to be.
+pub fn open_member_request(
+    identity: &DeviceIdentity,
+    local: &[u8],
+    remote: &[u8],
+    sealed: &[u8],
+) -> Result<Introduction, FriendError> {
+    let context = bound(MEMBER_REQUEST, remote, local, &identity.public_key());
+    read_introduction(&open_sealed(identity, &context, sealed)?, &context)
+}
+
 /// Accepts a friend request, or gives a friend a new friend secret: this device's profile
 /// and friend secret, sealed to the friend, with an HMAC keyed by the secret the two share
 /// (`pair`), which nobody else can check.
@@ -1486,6 +1516,27 @@ mod tests {
         assert_eq!(
             open_hello_reply(&b.identity, &a_key, &b.peer, &a.peer, &reply),
             Err(FriendError::NotProved)
+        );
+    }
+
+    #[test]
+    fn member_requests_open_only_on_their_connection() {
+        let a = device("Ana", b"peer-a");
+        let b = device("Bea", b"peer-b");
+        let a_key = a.identity.public_key();
+        let sealed =
+            member_request(&b.identity, &b.profile, &b.secret, &a_key, &b.peer, &a.peer).unwrap();
+        let intro = open_member_request(&a.identity, &a.peer, &b.peer, &sealed).unwrap();
+        assert_eq!(intro.profile, b.profile);
+        assert_eq!(intro.secret.as_bytes(), b.secret.as_bytes());
+        // Replayed on another connection, or to another device, it does not open.
+        assert!(open_member_request(&a.identity, &a.peer, b"peer-c", &sealed).is_err());
+        let c = device("Cid", b"peer-a");
+        assert!(open_member_request(&c.identity, &c.peer, &b.peer, &sealed).is_err());
+        // Nor is it a link request.
+        let link = FriendLink::new(a_key, "Ana", vec![], vec![], 0).unwrap();
+        assert!(
+            open_link_request(&a.identity, &link, &a.peer, &b.peer, &[0; 32], &sealed).is_err()
         );
     }
 

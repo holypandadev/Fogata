@@ -1473,9 +1473,29 @@ class _Person extends StatelessWidget {
         ),
       ),
     );
+    // A click opens their card beside the row: the person's own panel, a friend's card, or
+    // a member's that offers a friend request.
+    final state = AppScope.only(context, {Navigation, Contacts});
+    final open = me
+        ? state.nav.userPanelFrom != null && state.nav.userPanelBeside
+        : state.nav.friendCard == person.id;
+    final card = Builder(
+      builder: (context) => Pressable(
+        key: ValueKey('side-person:${person.id}'),
+        label: personCardLabel(state, person),
+        onTap: () => togglePersonCard(context, person.id, group: group),
+        builder: (context, hovered) => DecoratedBox(
+          decoration: BoxDecoration(
+            color: open || hovered ? c.hover : null,
+            borderRadius: BorderRadius.circular(6),
+          ),
+          child: row,
+        ),
+      ),
+    );
     return me
-        ? row
-        : VolumeTarget(person: person, group: group, voice: voice, child: row);
+        ? card
+        : VolumeTarget(person: person, group: group, voice: voice, child: card);
   }
 }
 

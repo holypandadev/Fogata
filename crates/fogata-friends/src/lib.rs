@@ -40,10 +40,11 @@ pub use handshake::{
     CallMessage, CallSignal, CodeInviter, CodeReply, CodeRequester, CodeStart, Envelope, HelloFrom,
     HelloReply, Introduction, Status, accept, animation_update, banner_update, bio_update,
     call_message, code_gate_ok, code_reply, code_start, hello, hello_reply, link_request,
-    mutual_ask, mutual_reply, open_accept, open_animation_update, open_banner_update,
-    open_bio_update, open_call_message, open_hello, open_hello_reply, open_link_request,
-    open_mutual_ask, open_mutual_reply, open_profile_update, open_status, open_unfriend,
-    open_unfriend_ack, profile_update, removal_digest, status, unfriend, unfriend_ack,
+    member_request, mutual_ask, mutual_reply, open_accept, open_animation_update,
+    open_banner_update, open_bio_update, open_call_message, open_hello, open_hello_reply,
+    open_link_request, open_member_request, open_mutual_ask, open_mutual_reply,
+    open_profile_update, open_status, open_unfriend, open_unfriend_ack, profile_update,
+    removal_digest, status, unfriend, unfriend_ack,
 };
 pub use link::{FriendLink, LINK_LIFETIME_MS, LINK_PREFIX, MAX_LINK_ADDRS};
 pub use mutual::{MAX_MUTUAL_POINTS, MutualAnswer, MutualAsk, Point, mutual_answer};

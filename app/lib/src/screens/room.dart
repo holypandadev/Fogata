@@ -33,6 +33,7 @@ import '../widgets.dart';
 import '../window.dart';
 import 'add_to_call.dart';
 import 'emoji_picker.dart';
+import 'friend_card.dart' show personCardLabel, togglePersonCard;
 import 'home.dart' show Ticker;
 import 'members.dart' show confirmDialog;
 import 'stream_quality.dart';
@@ -605,7 +606,6 @@ class _Tile extends StatelessWidget {
     this.connected = false,
     this.video,
     this.mirror = false,
-    this.whole = false,
     this.speaking = false,
     this.muted = false,
     this.volume = 100,
@@ -627,12 +627,9 @@ class _Tile extends StatelessWidget {
   final bool connecting;
   final bool connected;
 
-  /// Camera or screen to show instead of the avatar.
+  /// Camera to show instead of the avatar.
   final RTCVideoRenderer? video;
   final bool mirror;
-
-  /// Show all of the picture (screens) rather than filling the tile (cameras).
-  final bool whole;
   final bool speaking;
   final bool muted;
 
@@ -736,7 +733,7 @@ class _Tile extends StatelessWidget {
     }
     final tile = Container(
       decoration: BoxDecoration(
-        color: video != null && whole ? Colors.black : c.tile,
+        color: c.tile,
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
@@ -756,9 +753,7 @@ class _Tile extends StatelessWidget {
                   child: RTCVideoView(
                     video,
                     mirror: mirror,
-                    objectFit: whole
-                        ? RTCVideoViewObjectFit.RTCVideoViewObjectFitContain
-                        : RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+                    objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
                   ),
                 ),
               ),
@@ -1179,14 +1174,9 @@ class _Tiles extends StatelessWidget {
     // which is only sent here once watched.
     if (call != null && call.sharing && !call.ownScreen) {
       tiles.add(
-        _Tile(
-          person: profile.person,
-          label: call.watchers == 0
-              ? l10n.pipYourScreen
-              : l10n.roomYourScreenWatching(call.watchers),
-          video: call.localScreen,
-          whole: true,
-          onTap: () => call.showOwnScreen(true),
+        _OwnShareCard(
+          watchers: call.watchers,
+          onPreview: () => call.showOwnScreen(true),
         ),
       );
     }
@@ -1371,6 +1361,84 @@ class _LiveCard extends StatelessWidget {
                         height: small ? 30 : 36,
                         onTap: onWatch,
                       ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// This device's own share, in the tiles: that it is shared and to how many, without its
+/// picture. Drawn live, the picture showed in the window shared whenever that was Fogata's
+/// (or the screen under it), was captured again with it, and so on without end: every frame
+/// changed, and the share went out at a few frames a second. Under Wayland nothing can
+/// leave Fogata's window out of what the system's dialog shares, so the picture shows only
+/// when asked, enlarged, with a word of that.
+class _OwnShareCard extends StatelessWidget {
+  const _OwnShareCard({required this.watchers, required this.onPreview});
+  final int watchers;
+  final VoidCallback onPreview;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.fg;
+    return LayoutBuilder(
+      builder: (context, box) {
+        // Small in the strip, or in a short tile: the words and the button only.
+        final small = box.maxHeight < 200 || box.maxWidth < 200;
+        return Container(
+          decoration: BoxDecoration(
+            color: c.tile,
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [BoxShadow(color: c.border, spreadRadius: 1)],
+          ),
+          child: Stack(
+            children: [
+              const Positioned(left: 10, top: 10, child: _LivePill()),
+              Center(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (!small) ...[
+                        FgIcon(Ic.screen, size: 32, color: c.fg2),
+                        const SizedBox(height: 12),
+                      ],
+                      Text(
+                        l10n.roomSharingYourScreen,
+                        textAlign: TextAlign.center,
+                        overflow: TextOverflow.ellipsis,
+                        style: tx(c.fg, weight: w600),
+                      ),
+                      Text(
+                        watchers == 0
+                            ? l10n.roomNobodyWatching
+                            : l10n.roomPeopleWatching(watchers),
+                        overflow: TextOverflow.ellipsis,
+                        style: tx(c.fg2, size: 13),
+                      ),
+                      SizedBox(height: small ? 8 : 14),
+                      FgButton(
+                        text: l10n.roomShowPreview,
+                        icon: Ic.eye,
+                        kind: Kind.secondary,
+                        height: small ? 30 : 36,
+                        onTap: onPreview,
+                      ),
+                      if (!small) ...[
+                        const SizedBox(height: 10),
+                        Text(
+                          l10n.roomPreviewMirror,
+                          textAlign: TextAlign.center,
+                          style: tx(c.fg3, size: 12),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -3911,10 +3979,24 @@ class _Message extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final c = context.fg;
+    final state = AppScope.read(context);
+    // The writer's picture and name open their card: a friend's, the person's own, or a
+    // member's that offers a friend request.
+    Widget toCard(Widget child) => Builder(
+      builder: (context) => Pressable(
+        onTap: () => togglePersonCard(
+          context,
+          person.id,
+          group: state.roomState.roomGroup,
+        ),
+        label: personCardLabel(state, person),
+        builder: (_, _) => child,
+      ),
+    );
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Avatar(avatar: person.avatar, size: 24),
+        toCard(Avatar(avatar: person.avatar, size: 24)),
         const SizedBox(width: 10),
         Expanded(
           child: Column(
@@ -3925,10 +4007,12 @@ class _Message extends StatelessWidget {
                 textBaseline: TextBaseline.alphabetic,
                 children: [
                   Flexible(
-                    child: Text(
-                      person.name,
-                      overflow: TextOverflow.ellipsis,
-                      style: tx(c.fg, weight: w500),
+                    child: toCard(
+                      Text(
+                        person.name,
+                        overflow: TextOverflow.ellipsis,
+                        style: tx(c.fg, weight: w500),
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),

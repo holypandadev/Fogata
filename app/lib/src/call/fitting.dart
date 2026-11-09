@@ -93,13 +93,21 @@ const screenSteps = [1080, 720, 540];
 typedef ScreenOut = ({int width, int height, double fps, bool lowered});
 
 /// How a shared screen goes out to one person. It keeps its size, so text stays sharp, and
-/// WebRTC drops frames when the connection falls short. When that leaves it choppy (under
-/// 10 frames a second, or half its rate, for 6 s), it goes out a step smaller (see
-/// [screenSteps]); once a smaller size goes out at nearly the full rate for a while, it
-/// tries the size above again, waiting twice as long each time that did not last. The
-/// first 10 s are not judged: WebRTC starts slow and finds the connection's rate then.
+/// WebRTC drops frames when the connection falls short. When that leaves it choppy (see
+/// [choppyUnder], for 6 s), it goes out a step smaller (see [screenSteps]); once a smaller
+/// size goes out at nearly the full rate for a while, it tries the size above again,
+/// waiting twice as long each time that did not last. The first 10 s are not judged:
+/// WebRTC starts slow and finds the connection's rate then.
 @visibleForTesting
 class ScreenFit {
+  /// Under how many frames a second a screen meant to go out at [wanted] is choppy: under
+  /// 10, or half its rate, for a screen of 30 frames a second or fewer, where sharp text
+  /// matters more than motion; under three quarters of it above that, as a rate of 60 is
+  /// chosen for motion: kept at its size at 25 or 30 of its 60 frames a second, as a
+  /// connection that falls short left it, it moved no better than a screen chosen at 30.
+  static double choppyUnder(double wanted) =>
+      wanted > 30 ? wanted * 0.75 : math.min(10, wanted / 2);
+
   /// How many steps below its chosen size the screen goes out now.
   int step = 0;
 
@@ -143,7 +151,7 @@ class ScreenFit {
     if (wanted <= 0) return false;
     final first = _first ??= now;
     if (now.difference(first) < _settling) return false;
-    if (fps < math.min(10, wanted / 2)) {
+    if (fps < choppyUnder(wanted)) {
       _smooth = null;
       if (++_choppy < 3 || step >= steps - 1) return false;
       _choppy = 0;
@@ -191,13 +199,18 @@ class ScreenFit {
 /// [busyCores] (what they take now, grown by the level's pixels and frames), it goes a
 /// level back up,
 /// and waits twice as long (up to 160 s) each time that did not last 20 s. A share starts
-/// lower with more watchers ([startFor]), and goes lower when more come.
+/// lower with more watchers ([startFor]), and goes lower when more come. The rate halves a
+/// level at a time (60, 30, 15) before the size goes down: one moment of load once took a
+/// 60 frames a second screen straight to 15, and the level above then had to fit in a
+/// quarter of the cores it took, so it seldom came back. A level that sends the same as
+/// the one above it, as 60 and 30 do for a screen captured at 30, is passed over.
 @visibleForTesting
 class ScreenLoad {
   /// The most lines and frames a second the screen goes out at, by level; null lines
   /// keeps the quality's own size.
   static const levels = <({int? lines, int fps})>[
     (lines: null, fps: 60),
+    (lines: null, fps: 30),
     (lines: null, fps: 15),
     (lines: 720, fps: 15),
     (lines: 540, fps: 10),
@@ -217,11 +230,11 @@ class ScreenLoad {
   static const _longestWait = Duration(seconds: 160);
 
   /// The level a share starts at with [watchers] watching: the full screen for one or
-  /// two, a lower rate from three, and a smaller size too from five.
+  /// two, 15 frames a second from three, and a smaller size too from five.
   static int startFor(int watchers) => watchers >= 5
-      ? 2
+      ? 3
       : watchers >= 3
-      ? 1
+      ? 2
       : 0;
 
   /// How much encoding a level takes, as lines squared times frames a second, with the
@@ -268,8 +281,35 @@ class ScreenLoad {
 
   ({int? lines, int fps}) get limits => levels[level];
 
+  /// Whether the screen goes out smaller or at fewer frames than at the first level.
+  bool get lowered => _sent(level) != _sent(0);
+
   /// The most frames a second the screen goes out at now.
   int get _fps => math.min(limits.fps, capturedFps);
+
+  /// What level [at] sends of a screen captured at [capturedFps].
+  ({int? lines, int fps}) _sent(int at) =>
+      (lines: levels[at].lines, fps: math.min(levels[at].fps, capturedFps));
+
+  /// The next level down that sends less than [level]; [level] itself at the last.
+  int _below(int level) {
+    for (var i = level + 1; i < levels.length; i++) {
+      if (_sent(i) != _sent(level)) return i;
+    }
+    return level;
+  }
+
+  /// The first of the levels that send what the one above [level] sends; 0 at the top.
+  int _above(int level) {
+    var i = level;
+    while (i > 0 && _sent(i) == _sent(level)) {
+      i--;
+    }
+    while (i > 0 && _sent(i - 1) == _sent(i)) {
+      i--;
+    }
+    return i;
+  }
 
   void _setLevel(int to, DateTime now) {
     level = to;
@@ -355,13 +395,14 @@ class ScreenLoad {
     }
     if (held || busy > busyCores) {
       _light = null;
-      if (++_heavy < 2 || level >= levels.length - 1) return false;
+      final below = _below(level);
+      if (++_heavy < 2 || below == level) return false;
       final tried = _tried;
       if (tried != null &&
           now.difference(tried) < const Duration(seconds: 20)) {
         wait = wait * 2 > _longestWait ? _longestWait : wait * 2;
       }
-      _setLevel(level + 1, now);
+      _setLevel(below, now);
       return true;
     }
     _heavy = 0;
@@ -371,10 +412,11 @@ class ScreenLoad {
     // more.
     final idle = _idle;
     final stuck = idle != null && now.difference(idle) >= _idleAfter;
+    final above = _above(level);
     if (level == 0 ||
         (encoders.values.any((e) => e.cpu) && !stuck) ||
         busy *
-                costOf(level - 1, fps: capturedFps) /
+                costOf(above, fps: capturedFps) /
                 costOf(level, fps: capturedFps) >
             busyCores * 0.9) {
       _light = null;
@@ -382,7 +424,7 @@ class ScreenLoad {
     }
     final since = _light ??= now;
     if (now.difference(since) < wait) return false;
-    _setLevel(level - 1, now);
+    _setLevel(above, now);
     _tried = now;
     return true;
   }
@@ -404,9 +446,36 @@ class ScreenLoad {
   }
 }
 
-/// The most a shared screen may use, in kbit/s. WebRTC's own limit for a large picture is
-/// 2500, which kept a sharp screen well under 30 frames a second.
-const screenMaxKbps = 6000;
+/// The most a shared screen may use, in kbit/s, whatever its size and rate: what each
+/// side's description lets the other send in the screen channel. WebRTC takes the largest
+/// codec limit of a description as the most its bandwidth estimate may reach for the whole
+/// connection too, so this is also the ceiling of everything sent together.
+const screenMaxKbps = 20000;
+
+/// The most a shared screen may use whatever it sends, in kbit/s: the one limit every
+/// screen had before the limit grew with the size and rate (see [screenKbps]). WebRTC's
+/// own limit for a large picture is 2500, which kept a sharp screen well under 30 frames a
+/// second.
+const screenLeastKbps = 6000;
+
+/// How many bits a shared screen may spend on each pixel of each frame that goes out, on
+/// top of [screenLeastKbps]: about what a moving 1080p screen at 60 frames a second needs
+/// to keep its text sharp (12 Mbit/s).
+const screenBitsPerPixel = 0.1;
+
+/// The most a shared screen going out at [width] by [height] and [fps] frames a second may
+/// use, in kbit/s: [screenBitsPerPixel] of every pixel sent, at least [screenLeastKbps] and
+/// at most [screenMaxKbps]. A larger or faster screen needs more for the same sharpness:
+/// with one limit for all, 6000 left a 1080p screen at 60 frames a second dropping frames
+/// as soon as it moved. The sender sets it on each connection, where it takes the place of
+/// the limit in the other side's description (an older version's 6000 still bounds the
+/// connection's bandwidth estimate, see [screenMaxKbps]).
+@visibleForTesting
+int screenKbps(double width, double height, num fps) =>
+    (width * height * fps * screenBitsPerPixel / 1000).round().clamp(
+      screenLeastKbps,
+      screenMaxKbps,
+    );
 
 /// The most the camera may use, in kbit/s. Unlimited, WebRTC let it take about 2500 for each
 /// member, so four members could try to send three times that at once.
@@ -630,7 +699,9 @@ extension _Fitting on Call {
                   ? math.min(screenQuality.fps, _screenLoad.limits.fps)
                   : camera.step.fps,
               // Always set: a value left out keeps the one set before.
-              maxBitrate: channel == _screen ? null : camera.step.kbps * 1000,
+              maxBitrate: channel == _screen
+                  ? _screenKbpsAt(screenScale) * 1000
+                  : camera.step.kbps * 1000,
             ),
         ];
         if (!await sender.setParameters(parameters)) {
@@ -662,6 +733,22 @@ extension _Fitting on Call {
       '${step.fps} fps',
     );
     unawaited(_retune());
+  }
+
+  /// The most the shared screen may use going out scaled down by [scale] (see
+  /// [screenKbps]), at the rate it goes out at now. Before its size is known it is taken
+  /// to fill its quality's 16:9 box (1080 lines when as captured).
+  int _screenKbpsAt(double scale) {
+    final video = localScreen.value;
+    final lines = (screenQuality.lines ?? 1080).toDouble();
+    final (width, height) = video.width > 0 && video.height > 0
+        ? (video.width / scale, video.height / scale)
+        : (lines * 16 / 9, lines);
+    return screenKbps(
+      width,
+      height,
+      math.min(screenQuality.fps, _screenLoad.limits.fps),
+    );
   }
 
   /// The sizes, in lines, the shared screen can go out at (see [ScreenFit.sizes]).
@@ -736,7 +823,7 @@ extension _Fitting on Call {
         width: width,
         height: lines,
         fps: fps,
-        lowered: peer._fit.step > 0 || _screenLoad.level > 0,
+        lowered: peer._fit.step > 0 || _screenLoad.lowered,
       ));
     }
     if (!changed) return;
@@ -857,7 +944,7 @@ extension _Fitting on Call {
   }
 
   /// The shared screen's size became known or changed: every connection is told the new
-  /// scale.
+  /// scale, and the bitrate the new size may use (see [screenKbps]).
   Future<void> _rescale() async {
     // A size not known (no picture yet, or none any more) keeps the scale there is: while
     // another screen is picked, the one before may still send to those who watch it.
@@ -865,8 +952,10 @@ extension _Fitting on Call {
     final known = video.width > 0 && video.height > 0;
     if (!known && _screenTooLarge == null) return;
     final scale = _scaleNow();
-    if (_closed || scale == _screenScale) return;
+    final kbps = _screenKbpsAt(scale);
+    if (_closed || (scale == _screenScale && kbps == _screenKbps)) return;
     _screenScale = scale;
+    _screenKbps = kbps;
     await _retune();
   }
 

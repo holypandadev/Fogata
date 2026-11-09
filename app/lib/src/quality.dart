@@ -556,8 +556,8 @@ UiPerson? _personOf(AppState state, String id) {
 
 /// The connection of the person a tile shows, in its top right corner: the bars, with
 /// the level's word unless it is good, or "Reconnecting…" once nothing comes. A click
-/// opens the details. Nothing shows until the connection is measured, nor while it is good
-/// ([WhileNotGood]).
+/// opens the details. Nothing shows until the connection is measured; from then on the bars
+/// always show, a good connection's too, so everyone sees how each one is.
 class TileQuality extends StatelessWidget {
   const TileQuality({super.key, required this.id});
   final String id;
@@ -574,25 +574,22 @@ class TileQuality extends StatelessWidget {
           duration: const Duration(milliseconds: 200),
           child: level == null
               ? const SizedBox.shrink()
-              : WhileNotGood(
-                  level: level,
-                  child: _Details(
-                    id: id,
-                    builder: (context, open) => Pressable(
-                      onTap: open,
-                      focusRadius: 999,
-                      label: id == quality.me
-                          ? l10n.qualityYourDetails(level.word)
-                          : l10n.qualityTheirDetails(
-                              _nameOf(AppScope.read(context), id),
-                              level.word,
-                            ),
-                      builder: (context, hovered) => AnimatedScale(
-                        scale: hovered ? 1.06 : 1,
-                        duration: springTime,
-                        curve: spring,
-                        child: _Chip(level: level),
-                      ),
+              : _Details(
+                  id: id,
+                  builder: (context, open) => Pressable(
+                    onTap: open,
+                    focusRadius: 999,
+                    label: id == quality.me
+                        ? l10n.qualityYourDetails(level.word)
+                        : l10n.qualityTheirDetails(
+                            _nameOf(AppScope.read(context), id),
+                            level.word,
+                          ),
+                    builder: (context, hovered) => AnimatedScale(
+                      scale: hovered ? 1.06 : 1,
+                      duration: springTime,
+                      curve: spring,
+                      child: _Chip(level: level),
                     ),
                   ),
                 ),

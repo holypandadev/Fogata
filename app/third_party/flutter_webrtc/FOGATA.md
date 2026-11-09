@@ -92,6 +92,18 @@ thread each, 0.63 cores and 30 (measured with `tools/call-lab`).
 - In WebRTC M156 only the VP8 encoder reads that limit (`LibvpxVp8Encoder`, the only video
   codec Fogata's builds have); H.264 already encodes on one thread, and VP9 and AV1 ignore
   it. Another codec, if one is ever added, needs its own look.
+- The limit holds for a shared screen too, and one thread may not encode a moving 1080p
+  screen at 60 frames a second: WebRTC then says the processor holds it back, and the app
+  lowers the screen's rate (`ScreenLoad` in `lib/src/call/fitting.dart`). Nothing here can
+  give the screen more threads than the cameras: `VideoStreamEncoder` reads the field trial
+  once, from the factory's (or a whole connection's) field trials, and hands the same
+  limit to every encoder; the wrapper's API makes no encoder factory of the plugin's own;
+  and a desktop source is not marked as a screen (`is_screencast()` is false in the
+  wrapper's `ScreenCapturerTrackSource`, and the portal's capture is a custom source), so
+  WebRTC encodes it as a camera. A limit of its own for the screen needs a patch of
+  WebRTC (`tools/webrtc/patches/webrtc`: in `VideoStreamEncoder`, another limit when the
+  content type is a screen) and the desktop sources marked as screens (a wrapper patch,
+  and the portal's source), then new libwebrtc builds for every system.
 
 ## libwebrtc's log and field trials for tests (Linux, Windows, macOS)
 
@@ -313,6 +325,20 @@ through ScreenCaptureKit like a display, at the asked frame rate:
   a screen of another scale.
 - `FlutterRTCDesktopCapturer.m` (both copies, identical): uses it for windows.
 
+## Fogata's own windows are not shared (macOS, Windows)
+
+Shared, Fogata's window showed the share inside itself, captured again with it, and so on
+without end: every frame changed and the share went out at a few frames a second.
+
+- `FlutterRTCDesktopCapturer.m` (both copies, identical): `getDesktopSources` leaves out
+  the windows whose number is one of the application's own (`NSApp.windows`).
+- `macos/flutter_webrtc/Sources/flutter_webrtc/FlutterScreenCaptureKitCapturer.m`: a
+  display is captured without the application's own windows
+  (`excludingApplications:`), those opened after the capture started too.
+- `common/cpp/src/flutter_screen_capture.cc` (Windows): `GetDesktopSources` leaves out
+  the windows (their source id is the HWND) that this process owns. Under X11 the list
+  says nothing of a window's process; the app leaves Fogata's window out by its title.
+
 ## A screen capture that does not start, or ends by itself (macOS)
 
 - `FlutterRTCDesktopCapturer.m` (both copies, identical): `getDisplayMedia` through
@@ -442,7 +468,10 @@ was given, on the thread frames come on and outside its lock, while the raster t
 be reading the one `CopyPixelBuffer` had just returned (a stream shown in place of another).
 
 - `common/cpp/src/flutter_video_renderer.cc`: `initialize` makes it once; it lives as long
-  as the renderer, and only `CopyPixelBuffer` changes it, under the lock.
+  as the renderer, and only `CopyPixelBuffer` changes it, on the raster thread. It takes
+  the newest frame under the lock and converts it after: held through the conversion
+  (milliseconds for a large picture), the lock held up every frame coming in. The same
+  frame asked for again is not converted again.
 - What `OnFrame` keeps of the frames before (size, rotation, first frame, a frame too
   large told) is set back by `SetVideoTrack` on the platform thread while frames come on
   another: both take the lock for it. `SetVideoTrack` removes the renderer from the old
@@ -460,6 +489,18 @@ be reading the one `CopyPixelBuffer` had just returned (a stream shown in place 
   `SetLocalDescription`, and that section's transceiver stops; with the first section
   rejected but still in the group, the offer is refused. It reaches the sound server, as
   libwebrtc's audio module needs one at start, but adds no track.
+
+## The newest frame drawn (macOS)
+
+The renderer wrote every frame into one `CVPixelBuffer`, under its lock, and dropped any
+frame that came before Flutter had taken the last one: whenever Flutter drew late, the
+newest frame was lost and an older one stayed on screen.
+
+- `FlutterRTCVideoRenderer.m` (both copies, identical): `setSize:` makes a
+  `CVPixelBufferPool` of the size; `renderFrame:` converts each frame into a buffer of its
+  own, outside the lock, and puts it in place of the one before, drawn or not. A buffer
+  Flutter may still draw from is never written again. A buffer of a size since replaced,
+  or converted while the renderer was disposed, is let go.
 
 ## A texture before its first frame (Linux)
 

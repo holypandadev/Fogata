@@ -212,6 +212,9 @@ pub(super) struct FriendContext {
     /// The secret shared with each friend, former friend and device asked (see
     /// `FriendSecret::pair`), worked out once.
     pairs: HashMap<DevicePublicKey, FriendSecret>,
+    /// Members whose friend request made from a group came lately, and when (see
+    /// member_friends.rs).
+    pub(super) member_asks: HashMap<DevicePublicKey, Instant>,
 }
 
 impl FriendContext {
@@ -248,6 +251,7 @@ impl FriendContext {
             status_retry: HashSet::new(),
             acked: HashSet::new(),
             pairs: HashMap::new(),
+            member_asks: HashMap::new(),
         }
     }
 
@@ -685,6 +689,7 @@ impl Node {
                 self.provided.1 = None;
             }
             Command::UseLink(link) => self.use_link(link, now),
+            Command::AskMember { device, name } => self.ask_member(device, name, now),
             Command::UseCode(secrets) => {
                 let Ok(request_secret) = FriendSecret::generate() else {
                     return;
@@ -1441,7 +1446,7 @@ impl Node {
     }
 
     /// Records a checked friend request that came from `peer`.
-    fn received_request(&mut self, peer: PeerId, intro: Introduction) {
+    pub(super) fn received_request(&mut self, peer: PeerId, intro: Introduction) {
         let Some(f) = self.friends.as_mut() else {
             return;
         };

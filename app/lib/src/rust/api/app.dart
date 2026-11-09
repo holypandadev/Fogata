@@ -207,6 +207,11 @@ Future<UiInvitation> friendCode() =>
 Future<void> addFriend({required String text}) =>
     RustLib.instance.api.crateApiAppAddFriend(text: text);
 
+/// Sends a friend request to a member of a group this device is in, from its card in the
+/// group: no link or code needed. `name` is the name the group shows for it.
+Future<void> askMember({required String deviceId, required String name}) =>
+    RustLib.instance.api.crateApiAppAskMember(deviceId: deviceId, name: name);
+
 Future<void> answerRequest({required String deviceId, required bool accept}) =>
     RustLib.instance.api.crateApiAppAnswerRequest(
       deviceId: deviceId,

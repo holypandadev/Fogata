@@ -400,6 +400,18 @@ class L10nRu extends L10n {
   String get errAlreadyFriends => 'Вы уже друзья.';
 
   @override
+  String get errMemberNotConnected =>
+      'Этот участник сейчас не подключён. Попробуйте снова, когда он будет в сети.';
+
+  @override
+  String get errMemberTooOld =>
+      'Версия Fogata у этого участника слишком старая, чтобы принимать запросы в друзья из группы. Отправьте ему ссылку для добавления в друзья.';
+
+  @override
+  String get errMemberAskLost =>
+      'Запрос в друзья не дошёл до этого участника. Попробуйте снова.';
+
+  @override
   String get errOwnLink =>
       'Это ваша собственная ссылка: отправьте её другу, которого хотите добавить.';
 
@@ -1942,6 +1954,16 @@ class L10nRu extends L10n {
   String get roomLive => 'ЭФИР';
 
   @override
+  String get roomSharingYourScreen => 'Вы показываете свой экран';
+
+  @override
+  String get roomShowPreview => 'Показать предпросмотр';
+
+  @override
+  String get roomPreviewMirror =>
+      'Если показать его, пока вы делитесь самим Fogata, получится бесконечное зеркало';
+
+  @override
   String get roomNobodyWatching => 'Никто не смотрит';
 
   @override
@@ -3033,6 +3055,33 @@ class L10nRu extends L10n {
     );
     return '$_temp0';
   }
+
+  @override
+  String get memberCardSendRequest => 'Отправить запрос в друзья';
+
+  @override
+  String get memberCardRequestSent => 'Запрос в друзья отправлен';
+
+  @override
+  String get memberCardAccept => 'Принять запрос в друзья';
+
+  @override
+  String memberCardAsksYou(String name) {
+    return '$name хочет добавить вас в друзья.';
+  }
+
+  @override
+  String memberCardInGroup(String group) {
+    return 'Участник группы $group';
+  }
+
+  @override
+  String memberCardOnlyOnline(String name) {
+    return 'Запросы в друзья доходят, только пока $name в сети.';
+  }
+
+  @override
+  String get memberCardShowOwn => 'Показать вашу карточку';
 
   @override
   String get userPanelEditProfile => 'Изменить профиль';

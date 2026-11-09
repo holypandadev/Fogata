@@ -471,6 +471,18 @@
   "@errAlreadyFriends": {
     "description": "Error message. Adding someone who is already a friend."
   },
+  "errMemberNotConnected": "That member is not connected right now. Try again when they are online.",
+  "@errMemberNotConnected": {
+    "description": "Error: a friend request sent from a group member's card could not go, because that member is not connected now."
+  },
+  "errMemberTooOld": "That member’s copy of Fogata is too old to take friend requests from a group. Send them a friend link instead.",
+  "@errMemberTooOld": {
+    "description": "Error: a friend request sent from a group member's card could not go, because that member runs an older version of Fogata. A friend link is a link made in Friends to add a friend."
+  },
+  "errMemberAskLost": "The friend request did not reach that member. Try again.",
+  "@errMemberAskLost": {
+    "description": "Error: a friend request sent from a group member's card was lost on the way (the connection dropped, say)."
+  },
   "errOwnLink": "That link is your own: send it to the friend you want to add.",
   "@errOwnLink": {
     "description": "Error message. The person pasted their own friend link."
@@ -2669,6 +2681,18 @@
   "@roomLive": {
     "description": "Small red label in capitals on a shared screen that is live. Very short."
   },
+  "roomSharingYourScreen": "You're sharing your screen",
+  "@roomSharingYourScreen": {
+    "description": "On the tile of the screen or window this computer shares, in place of its live picture: says that it is being shared. Short."
+  },
+  "roomShowPreview": "Show preview",
+  "@roomShowPreview": {
+    "description": "Button on the tile of the screen or window this computer shares: shows its live picture, enlarged. Short."
+  },
+  "roomPreviewMirror": "Showing it while you share Fogata itself makes an endless mirror",
+  "@roomPreviewMirror": {
+    "description": "Small note under the Show preview button: showing the live picture of your own share while the window shared is Fogata's makes the picture repeat inside itself, like two facing mirrors."
+  },
   "roomNobodyWatching": "Nobody watching",
   "@roomNobodyWatching": {
     "description": "Tooltip over the eye and count on a shared screen: nobody watches it."
@@ -4108,6 +4132,49 @@
         "type": "int"
       }
     }
+  },
+  "memberCardSendRequest": "Send friend request",
+  "@memberCardSendRequest": {
+    "description": "Member card (the card of a group member who is not your friend, opened by clicking them in a group): button that sends them a friend request, no link or code needed. Short."
+  },
+  "memberCardRequestSent": "Friend request sent",
+  "@memberCardRequestSent": {
+    "description": "Member card (the card of a group member who is not your friend): shown instead of the button once you sent them a friend request that waits for their answer."
+  },
+  "memberCardAccept": "Accept friend request",
+  "@memberCardAccept": {
+    "description": "Member card (the card of a group member who is not your friend): button that accepts the friend request this member sent you. Short."
+  },
+  "memberCardAsksYou": "{name} wants to be your friend.",
+  "@memberCardAsksYou": {
+    "description": "Member card (the card of a group member who is not your friend): note above the Accept button: this member sent you a friend request. {name} is the member's name.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "memberCardInGroup": "Member of {group}",
+  "@memberCardInGroup": {
+    "description": "Member card (the card of a group member who is not your friend): line under the name: the group it was opened from. {group} is the group's name.",
+    "placeholders": {
+      "group": {
+        "type": "String"
+      }
+    }
+  },
+  "memberCardOnlyOnline": "Friend requests go only while {name} is online.",
+  "@memberCardOnlyOnline": {
+    "description": "Member card (the card of a group member who is not your friend): note under the disabled Send friend request button: the request can only go while the member is online. {name} is the member's name.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      }
+    }
+  },
+  "memberCardShowOwn": "Show your card",
+  "@memberCardShowOwn": {
+    "description": "What screen readers say for your own name or picture in a list or a chat: clicking it shows your own card (the panel with your profile and status)."
   },
   "userPanelEditProfile": "Edit profile",
   "@userPanelEditProfile": {

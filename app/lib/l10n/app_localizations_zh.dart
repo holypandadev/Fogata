@@ -329,6 +329,15 @@ class L10nZh extends L10n {
   String get errAlreadyFriends => '你们已经是好友了。';
 
   @override
+  String get errMemberNotConnected => '该成员现在未连接。请在对方在线时再试。';
+
+  @override
+  String get errMemberTooOld => '该成员的 Fogata 版本太旧，无法接收来自群组的好友请求。请改为发送好友链接。';
+
+  @override
+  String get errMemberAskLost => '好友请求未送达该成员。请再试一次。';
+
+  @override
   String get errOwnLink => '这是你自己的链接：请把它发给你想添加的好友。';
 
   @override
@@ -1771,6 +1780,15 @@ class L10nZh extends L10n {
   String get roomLive => '直播';
 
   @override
+  String get roomSharingYourScreen => '你正在共享屏幕';
+
+  @override
+  String get roomShowPreview => '显示预览';
+
+  @override
+  String get roomPreviewMirror => '共享 Fogata 本身时显示预览会形成无限镜像';
+
+  @override
   String get roomNobodyWatching => '无人观看';
 
   @override
@@ -2730,6 +2748,33 @@ class L10nZh extends L10n {
     );
     return '$_temp0';
   }
+
+  @override
+  String get memberCardSendRequest => '发送好友请求';
+
+  @override
+  String get memberCardRequestSent => '好友请求已发送';
+
+  @override
+  String get memberCardAccept => '接受好友请求';
+
+  @override
+  String memberCardAsksYou(String name) {
+    return '$name想加你为好友。';
+  }
+
+  @override
+  String memberCardInGroup(String group) {
+    return '$group的成员';
+  }
+
+  @override
+  String memberCardOnlyOnline(String name) {
+    return '只有$name在线时才能发送好友请求。';
+  }
+
+  @override
+  String get memberCardShowOwn => '显示你的名片';
 
   @override
   String get userPanelEditProfile => '编辑个人资料';

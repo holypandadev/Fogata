@@ -28,28 +28,40 @@ void FlutterVideoRenderer::initialize(
 const FlutterDesktopPixelBuffer* FlutterVideoRenderer::CopyPixelBuffer(
     size_t width,
     size_t height) const {
-  mutex_.lock();
-  if (pixel_buffer_.get() && frame_.get() &&
-      FrameSizeAllowed(frame_->width(), frame_->height())) {
-    if (pixel_buffer_->width != frame_->width() ||
-        pixel_buffer_->height != frame_->height()) {
-      size_t buffer_size =
-          (size_t(frame_->width()) * size_t(frame_->height())) * (32 >> 3);
-      rgb_buffer_.reset(new uint8_t[buffer_size]);
-      pixel_buffer_->width = frame_->width();
-      pixel_buffer_->height = frame_->height();
-    }
-
-    frame_->ConvertToARGB(RTCVideoFrame::Type::kABGR, rgb_buffer_.get(), 0,
-                          static_cast<int>(pixel_buffer_->width),
-                          static_cast<int>(pixel_buffer_->height));
-
-    pixel_buffer_->buffer = rgb_buffer_.get();
-    mutex_.unlock();
+  // Fogata: only the newest frame is taken under the lock, and converted after it.
+  // OnFrame waits for the lock on the thread frames come on, and converting a large
+  // picture takes milliseconds: held through it, every conversion held up the next
+  // frame. The buffers are only touched here, on the raster thread.
+  scoped_refptr<RTCVideoFrame> frame;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    frame = frame_;
+  }
+  if (!pixel_buffer_.get() || !frame.get() ||
+      !FrameSizeAllowed(frame->width(), frame->height())) {
+    return nullptr;
+  }
+  // The same frame asked for again (the texture drawn again with no new frame) is
+  // already in the buffer.
+  if (frame.get() == drawn_.get() && pixel_buffer_->buffer != nullptr) {
     return pixel_buffer_.get();
   }
-  mutex_.unlock();
-  return nullptr;
+  if (pixel_buffer_->width != size_t(frame->width()) ||
+      pixel_buffer_->height != size_t(frame->height())) {
+    size_t buffer_size =
+        (size_t(frame->width()) * size_t(frame->height())) * (32 >> 3);
+    rgb_buffer_.reset(new uint8_t[buffer_size]);
+    pixel_buffer_->width = frame->width();
+    pixel_buffer_->height = frame->height();
+  }
+
+  frame->ConvertToARGB(RTCVideoFrame::Type::kABGR, rgb_buffer_.get(), 0,
+                       static_cast<int>(pixel_buffer_->width),
+                       static_cast<int>(pixel_buffer_->height));
+
+  pixel_buffer_->buffer = rgb_buffer_.get();
+  drawn_ = frame;
+  return pixel_buffer_.get();
 }
 
 void FlutterVideoRenderer::OnFrame(scoped_refptr<RTCVideoFrame> frame) {

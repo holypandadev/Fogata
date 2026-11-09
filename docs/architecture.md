@@ -1773,8 +1773,8 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   normal jitter or loss never come near it.
 - **Who is talking** comes from WebRTC's audio levels, read every 600 ms (this device's
   own level once, from the first connection).
-- **Each person's connection** shows as bars on their tile, in the room list only when it
-  is not good, and on the own card. While in a call, each device reads every connection's
+- **Each person's connection** shows as bars on their tile, always (the level's word only
+  when it is not good), in the room list only when it is not good, and on the own card. While in a call, each device reads every connection's
   statistics every 2 s: the round trip of the chosen candidate pair, the share of voice
   packets lost (over 20 to 50 packets at least, so a quiet voice that sends a few a second
   does not read as a large loss) and whether anything arrived (the connectivity checks keep
@@ -1792,9 +1792,25 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   10 frames a second (or half the rate captured) three readings in a row, the screen goes
   to that person a step smaller (1080, then 720, then 540 lines, below its chosen size);
   once a smaller size goes out at 80 % of the captured rate for 10 s, the size above is
-  tried again, after twice as long each time that did not last (up to 160 s). The first
+  tried again, after twice as long each time that did not last (up to 160 s). A quality
+  of 60 frames a second is chosen for motion rather than text, so there a step smaller
+  comes under three quarters of the rate (45 frames a second): kept at its size at 25 to
+  30 frames, it moved no better than a screen chosen at 30. The first
   10 s are not judged (WebRTC starts slow and finds the connection's rate then), and a
-  new share, another quality or someone who stops watching starts over. Measured in the lab with a moving 1600x900 screen: at
+  new share, another quality or someone who stops watching starts over. What the screen
+  may use grows with what it sends: 0.1 bit for each pixel of each frame, at least
+  6 Mbit/s (the one limit every screen had before) and at most 20 (1080p at 30 frames a
+  second gets 6.2 Mbit/s, at 60 12.4), set by the sender on each connection
+  (`maxBitrate`). Each side's description allows up to 20 Mbit/s in the screen channel
+  (`x-google-max-bitrate`); WebRTC also takes that as the most its bandwidth estimate may
+  reach for the whole connection, so with 6 a 1080p screen at 60 could never get more.
+  The processor lowers the screen for everyone, a level at a time: the rate halves first
+  (60, 30, 15 frames a second, a level that sends the same as the one above being passed
+  over), then 720 lines at 15, then 540 at 10 and at 5; it goes down when WebRTC says an
+  encoder is held back by the processor (`cpu`) and sends well under its level's rate, or
+  when the encoders together keep 1.5 cores busy, and back up a level once the one above
+  would fit. A single step from 60 straight to 15 once left a screen there: to come back,
+  the encoders had to fit in a quarter of what they took. Measured in the lab with a moving 1600x900 screen: at
   600 kbit/s, keeping the size gave 2.5 frames a second, WebRTC's own balance 600x336 at
   15, and the steps 960x540 at 10; at 1.5 Mbit/s, 11 frames a second at full size (the
   balance: 800x450 at 26); on a fast link full size at 26 (the balance shrank it to
@@ -1919,6 +1935,17 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   at, from the readings every 2 s, and says when someone's connection made it smaller
   (see the steps above), so a choice that seems to change nothing for them is explained.
   "Source" shows the screen's own height ("Source (1080p)").
+- **The sharer's own share shows as a card, not its picture.** Drawn live in its tile,
+  the picture showed inside the window shared whenever that was Fogata's (or the screen
+  under it), was captured again with it, and so on without end: every frame changed, and
+  the share went out at a few frames a second. The card says the screen is shared and how
+  many watch, with a button that shows the picture enlarged and a note that doing so
+  while sharing Fogata itself makes that mirror. Fogata's own windows are also left out of
+  what can be shared: on macOS out of the list (by window number) and out of a shared
+  display (ScreenCaptureKit leaves out the application, windows opened later too), on
+  Windows out of the list by the process that owns each window, and under X11 by
+  Fogata's window title. Under Wayland the system's dialog offers every window and
+  nothing can be left out, so the card is what keeps the mirror away there.
 - A connection that fails, or that does not come up within 15 s, is tried again after a
   pause of 4 to 6 s while both are in the room. Each offer carries a number that its
   answer sends back, and an answer to an offer replaced since is dropped: when both sides
@@ -2930,6 +2957,18 @@ valid for 10 minutes and accepts one request.
   every code computed in advance (some 2 million CPU-years) serves one hour only.
   Codes of an earlier format, `FGT-XXXX-XXXX` (40 bits, one fixed salt for every code), are
   refused as not a code; only builds from before any release made them.
+- *From a group* (no invite): a member can ask another member of a group they share from
+  its card. The request (`FriendAsk`, a member request) goes on a connection where the
+  other proved to be that member, and carries what a link's does, without the HMAC: B's
+  signed profile, a request secret and B's signature over both transport ids, sealed to A's
+  key. A takes it only from a peer that proved membership of a group other than a direct
+  chat's, and only when the profile inside is that member's device; from there it is an
+  ordinary request, answered and completed as one made with a link. A shows a member's
+  request at most once an hour (one declined a moment ago is acknowledged and let go,
+  telling nothing, as a decline never does); a member that asked first is accepted when
+  the other asks back. Older devices cannot read `FriendAsk`, so it goes only to those that
+  advertise `/fogata/member-friend/1` in identify; for an older or unconnected member the
+  person is told to try later or send a link.
 - *Both ends look for each other.* Getting through two NATs needs both ends to dial at the
   scheduled slots (3.4), so the device showing a link or code looks up the peers that
   announce under it, and the device that uses it announces there too. A link's addresses

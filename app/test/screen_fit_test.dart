@@ -96,4 +96,24 @@ void main() {
     }
     expect(fit.step, 0);
   });
+
+  test(
+    'a screen chosen at 60 frames a second steps down when well short of it',
+    () {
+      final fit = ScreenFit()..take(fps: 0, wanted: 60, steps: 3, now: at(-10));
+      // 50 of 60 is smooth enough; 40 is not, though far over 10.
+      for (var s = 0; s <= 20; s += 2) {
+        fit.take(fps: 50, wanted: 60, steps: 3, now: at(s));
+      }
+      expect(fit.step, 0);
+      for (var s = 22; s <= 26; s += 2) {
+        fit.take(fps: 40, wanted: 60, steps: 3, now: at(s));
+      }
+      expect(fit.step, 1);
+      // At 30 or under, only a choppy screen does.
+      expect(ScreenFit.choppyUnder(30), 10);
+      expect(ScreenFit.choppyUnder(15), 7.5);
+      expect(ScreenFit.choppyUnder(60), 45);
+    },
+  );
 }

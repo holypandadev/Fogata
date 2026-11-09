@@ -281,10 +281,20 @@ NSArray<RTCDesktopSource*>* _captureSources;
     return;
   }
 
+  // Fogata: Fogata's own windows are not offered. Shared, the call's tiles would show the
+  // share inside itself, again and again. A window's source id is its window number.
+  NSMutableSet<NSString*>* own = [NSMutableSet set];
+  for (NSWindow* window in NSApp.windows) {
+    [own addObject:[NSString stringWithFormat:@"%ld", (long)window.windowNumber]];
+  }
+
   NSMutableArray* sources = [NSMutableArray array];
   NSEnumerator* enumerator = [_captureSources objectEnumerator];
   RTCDesktopSource* object;
   while ((object = enumerator.nextObject) != nil) {
+    if (object.sourceType == RTCDesktopSourceTypeWindow && [own containsObject:object.sourceId]) {
+      continue;
+    }
     /*NSData *data = nil;
     if([object thumbnail]) {
         data = [[NSData alloc] init];

@@ -749,6 +749,7 @@ impl Node {
                 self.on_direct_request(peer, &group_id, messages)
             }
             MemberRequest::OtherSession => self.on_other_session(peer),
+            MemberRequest::FriendAsk { sealed } => self.on_member_friend_ask(peer, &sealed),
             MemberRequest::KeyProblem { group_id, epoch } => {
                 let Some(group) = group_of(&group_id) else {
                     return MemberResponse::Refused;
@@ -1045,6 +1046,9 @@ impl Node {
                         slot.picture_refused.remove(&peer);
                     }
                 }
+            }
+            (Pending::FriendAsk(device, fresh), response) => {
+                self.member_ask_answered(device, fresh, matches!(response, MemberResponse::Ack))
             }
             // Refused while the member was still checking this device, say.
             (Pending::Presence(sent), response) => {

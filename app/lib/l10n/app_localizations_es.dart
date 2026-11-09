@@ -378,6 +378,18 @@ class L10nEs extends L10n {
   String get errAlreadyFriends => 'Ya tienes a esa persona entre tus amigos.';
 
   @override
+  String get errMemberNotConnected =>
+      'Ese miembro no está conectado ahora. Vuelve a intentarlo cuando esté en línea.';
+
+  @override
+  String get errMemberTooOld =>
+      'La copia de Fogata de ese miembro es demasiado antigua para recibir solicitudes de amistad desde un grupo. Envíale un enlace de amistad.';
+
+  @override
+  String get errMemberAskLost =>
+      'La solicitud de amistad no llegó a ese miembro. Vuelve a intentarlo.';
+
+  @override
   String get errOwnLink =>
       'Ese enlace es tuyo: envíaselo al amigo que quieres añadir.';
 
@@ -1894,6 +1906,16 @@ class L10nEs extends L10n {
   String get roomLive => 'EN VIVO';
 
   @override
+  String get roomSharingYourScreen => 'Estás compartiendo tu pantalla';
+
+  @override
+  String get roomShowPreview => 'Mostrar vista previa';
+
+  @override
+  String get roomPreviewMirror =>
+      'Mostrarla mientras compartes el propio Fogata crea un espejo sin fin';
+
+  @override
   String get roomNobodyWatching => 'Nadie la está viendo';
 
   @override
@@ -3039,6 +3061,33 @@ class L10nEs extends L10n {
     );
     return '$_temp0';
   }
+
+  @override
+  String get memberCardSendRequest => 'Enviar solicitud de amistad';
+
+  @override
+  String get memberCardRequestSent => 'Solicitud de amistad enviada';
+
+  @override
+  String get memberCardAccept => 'Aceptar solicitud de amistad';
+
+  @override
+  String memberCardAsksYou(String name) {
+    return '$name te envió una solicitud de amistad.';
+  }
+
+  @override
+  String memberCardInGroup(String group) {
+    return 'Miembro de $group';
+  }
+
+  @override
+  String memberCardOnlyOnline(String name) {
+    return 'Las solicitudes de amistad solo llegan mientras $name está en línea.';
+  }
+
+  @override
+  String get memberCardShowOwn => 'Mostrar tu tarjeta';
 
   @override
   String get userPanelEditProfile => 'Editar perfil';

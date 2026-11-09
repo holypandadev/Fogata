@@ -55,11 +55,23 @@ class Navigation extends Piece {
   int groupSettingsTab = 0;
 
   /// The friend whose card floats next to [friendCardFrom], the bounds of what was clicked;
-  /// null while no card is open.
+  /// null while no card is open. It may be a member of a group who is not a friend
+  /// ([memberCard]): their card offers a friend request instead, and becomes a friend's
+  /// card once they are one.
   String? friendCard;
   Rect? friendCardFrom;
+
+  /// The card open is a group member's who was not a friend when it opened, and the group
+  /// it was opened from, if one (its member list is looked in first).
+  bool memberCard = false;
+  String? memberCardGroup;
 
   /// What the person's panel opens from (the bounds of what was clicked); null while it
   /// is closed.
   Rect? userPanelFrom;
+
+  /// The person's panel opened from their name or picture somewhere in the window, not
+  /// from their own card at the bottom: it floats beside what was clicked, as a friend's
+  /// card does.
+  bool userPanelBeside = false;
 }

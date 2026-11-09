@@ -591,6 +591,24 @@ abstract class L10n {
   /// **'You are already friends.'**
   String get errAlreadyFriends;
 
+  /// Error: a friend request sent from a group member's card could not go, because that member is not connected now.
+  ///
+  /// In en, this message translates to:
+  /// **'That member is not connected right now. Try again when they are online.'**
+  String get errMemberNotConnected;
+
+  /// Error: a friend request sent from a group member's card could not go, because that member runs an older version of Fogata. A friend link is a link made in Friends to add a friend.
+  ///
+  /// In en, this message translates to:
+  /// **'That member’s copy of Fogata is too old to take friend requests from a group. Send them a friend link instead.'**
+  String get errMemberTooOld;
+
+  /// Error: a friend request sent from a group member's card was lost on the way (the connection dropped, say).
+  ///
+  /// In en, this message translates to:
+  /// **'The friend request did not reach that member. Try again.'**
+  String get errMemberAskLost;
+
   /// Error message. The person pasted their own friend link.
   ///
   /// In en, this message translates to:
@@ -2649,6 +2667,24 @@ abstract class L10n {
   /// **'LIVE'**
   String get roomLive;
 
+  /// On the tile of the screen or window this computer shares, in place of its live picture: says that it is being shared. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'You\'re sharing your screen'**
+  String get roomSharingYourScreen;
+
+  /// Button on the tile of the screen or window this computer shares: shows its live picture, enlarged. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'Show preview'**
+  String get roomShowPreview;
+
+  /// Small note under the Show preview button: showing the live picture of your own share while the window shared is Fogata's makes the picture repeat inside itself, like two facing mirrors.
+  ///
+  /// In en, this message translates to:
+  /// **'Showing it while you share Fogata itself makes an endless mirror'**
+  String get roomPreviewMirror;
+
   /// Tooltip over the eye and count on a shared screen: nobody watches it.
   ///
   /// In en, this message translates to:
@@ -3852,6 +3888,48 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'{n, plural, =1{1 mutual friend} other{{n} mutual friends}}'**
   String friendCardMutualFriends(int n);
+
+  /// Member card (the card of a group member who is not your friend, opened by clicking them in a group): button that sends them a friend request, no link or code needed. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'Send friend request'**
+  String get memberCardSendRequest;
+
+  /// Member card (the card of a group member who is not your friend): shown instead of the button once you sent them a friend request that waits for their answer.
+  ///
+  /// In en, this message translates to:
+  /// **'Friend request sent'**
+  String get memberCardRequestSent;
+
+  /// Member card (the card of a group member who is not your friend): button that accepts the friend request this member sent you. Short.
+  ///
+  /// In en, this message translates to:
+  /// **'Accept friend request'**
+  String get memberCardAccept;
+
+  /// Member card (the card of a group member who is not your friend): note above the Accept button: this member sent you a friend request. {name} is the member's name.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} wants to be your friend.'**
+  String memberCardAsksYou(String name);
+
+  /// Member card (the card of a group member who is not your friend): line under the name: the group it was opened from. {group} is the group's name.
+  ///
+  /// In en, this message translates to:
+  /// **'Member of {group}'**
+  String memberCardInGroup(String group);
+
+  /// Member card (the card of a group member who is not your friend): note under the disabled Send friend request button: the request can only go while the member is online. {name} is the member's name.
+  ///
+  /// In en, this message translates to:
+  /// **'Friend requests go only while {name} is online.'**
+  String memberCardOnlyOnline(String name);
+
+  /// What screen readers say for your own name or picture in a list or a chat: clicking it shows your own card (the panel with your profile and status).
+  ///
+  /// In en, this message translates to:
+  /// **'Show your card'**
+  String get memberCardShowOwn;
 
   /// Your own panel (opened by clicking your pill at the bottom left): small button that opens Settings › My profile.
   ///

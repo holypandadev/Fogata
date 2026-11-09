@@ -583,6 +583,10 @@ enum Command {
     ShowCode(CodeSecrets),
     UseLink(FriendLink),
     UseCode(CodeSecrets),
+    AskMember {
+        device: DevicePublicKey,
+        name: String,
+    },
     AnswerFriend {
         device: DevicePublicKey,
         accept: bool,
@@ -807,6 +811,7 @@ impl fmt::Debug for Command {
             Command::UseLink(_) => "UseLink",
             Command::UseCode(_) => "UseCode",
             Command::AnswerFriend { .. } => "AnswerFriend",
+            Command::AskMember { .. } => "AskMember",
             Command::RemoveFriend(_) => "RemoveFriend",
             Command::SetHidden(_) => "SetHidden",
             Command::SetAway(..) => "SetAway",
@@ -1251,6 +1256,19 @@ impl NodeHandle {
     pub async fn use_friend_code(&self, code: FriendCode) -> Result<(), NetError> {
         let secrets = stretch(code, unix_secs()).await?;
         self.tell(Command::UseCode(secrets)).await
+    }
+
+    /// Sends a friend request to `device`, a member of a group this device is in, over the
+    /// connection where it proved to be that member: no link or code needed. `name` is what
+    /// the request is listed as until it is answered. It fails (a
+    /// [`NodeEvent::FriendRequestFailed`]) when the member is not connected now or its copy
+    /// is too old to take it; when that member asked first, this accepts its request.
+    pub async fn ask_member_friend(
+        &self,
+        device: DevicePublicKey,
+        name: String,
+    ) -> Result<(), NetError> {
+        self.tell(Command::AskMember { device, name }).await
     }
 
     /// Answers a friend request.

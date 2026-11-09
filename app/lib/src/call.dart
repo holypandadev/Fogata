@@ -975,12 +975,19 @@ class Call extends ChangeNotifier {
   }
 
   /// The screens and windows that can be shared. Under Wayland there is no list: the
-  /// system's own dialog offers screens and windows when sharing starts.
+  /// system's own dialog offers screens and windows when sharing starts. Fogata's own
+  /// window is not offered (shared, the call's tiles would show the share inside itself):
+  /// macOS and Windows leave it out of the list by its process; under X11 the list does
+  /// not tell a window's process, and it is known by its title.
   Future<List<DesktopCapturerSource>> screens() async {
     if (await screenThroughPortal()) return const [];
-    return desktopCapturer.getSources(
+    final sources = await desktopCapturer.getSources(
       types: [SourceType.Screen, SourceType.Window],
     );
+    return [
+      for (final source in sources)
+        if (!ownWindow(source.type, source.name, linux: onLinux)) source,
+    ];
   }
 
   Future<void> shareScreen(DesktopCapturerSource? source) =>
@@ -1443,6 +1450,11 @@ class Call extends ChangeNotifier {
   /// How much this device's shared screen is scaled down before it goes out, from the
   /// size it is captured at; 1 until its first picture tells.
   double _screenScale = 1;
+
+  /// The most the shared screen may use at that scale, in kbit/s, when its size last
+  /// changed (see [screenKbps]): a new size the scale keeps (a window made larger, within
+  /// its quality) still changes it.
+  int _screenKbps = 0;
 
   /// How far the shared screen is lowered for everyone, for this device's processor.
   final _screenLoad = ScreenLoad();

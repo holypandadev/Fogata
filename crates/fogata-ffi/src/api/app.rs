@@ -754,6 +754,13 @@ pub async fn add_friend(text: String) -> Result<()> {
     run(|core| async move { core.add_friend(&text).await }).await
 }
 
+/// Sends a friend request to a member of a group this device is in, from its card in the
+/// group: no link or code needed. `name` is the name the group shows for it.
+pub async fn ask_member(device_id: String, name: String) -> Result<()> {
+    let device = device(&device_id)?;
+    run(|core| async move { core.ask_member(device, &name).await }).await
+}
+
 pub async fn answer_request(device_id: String, accept: bool) -> Result<()> {
     let device = device(&device_id)?;
     run(|core| async move { core.answer_request(device, accept).await }).await

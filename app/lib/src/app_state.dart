@@ -591,26 +591,44 @@ class AppState extends ChangeNotifier {
   }
 
   /// Opens a friend's card next to `from`, the bounds of what was clicked, or closes it if
-  /// it is open.
-  void toggleFriendCard(String id, Rect from) {
+  /// it is open. With [member], the card is a group member's who is not a friend, from
+  /// [group]'s list if given.
+  void toggleFriendCard(
+    String id,
+    Rect from, {
+    bool member = false,
+    String? group,
+  }) {
     if (nav.friendCard == id) {
       closeFriendCard();
       return;
     }
     nav.friendCard = id;
     nav.friendCardFrom = from;
+    nav.memberCard = member;
+    nav.memberCardGroup = group;
     nav.userPanelFrom = null;
     notices.bellFrom = null;
     nav.changed();
     notices.changed();
-    _loadFriendCard(id);
+    if (!member) _loadFriendCard(id);
   }
 
   void closeFriendCard() {
     if (nav.friendCard == null) return;
     nav.friendCard = null;
     nav.friendCardFrom = null;
+    nav.memberCard = false;
+    nav.memberCardGroup = null;
     nav.changed();
+  }
+
+  /// Sends a friend request to a member of a group this device is in, from their card:
+  /// no link or code. [name] is the name their group shows. Whether it got there comes
+  /// later, as for a link.
+  Future<void> askMember(String id, String name) async {
+    await attempt(() => api.askMember(deviceId: id, name: name));
+    await refreshFriends();
   }
 
   /// What a person's voice is multiplied by on this device.
@@ -986,9 +1004,11 @@ class AppState extends ChangeNotifier {
     nav.changed();
   }
 
-  /// Opens the person's panel next to `from`, the bounds of what was clicked.
-  void openUserPanel(Rect from) {
+  /// Opens the person's panel next to `from`, the bounds of what was clicked: above or
+  /// below their own card, or [beside] their name or picture elsewhere.
+  void openUserPanel(Rect from, {bool beside = false}) {
     nav.userPanelFrom = from;
+    nav.userPanelBeside = beside;
     nav.friendCard = null;
     nav.friendCardFrom = null;
     nav.changed();
@@ -1443,8 +1463,9 @@ class AppState extends ChangeNotifier {
       if (card != null) {
         if (contacts.friends.any((f) => f.person.id == card)) {
           contacts.friendBanners[card] = await api.friendBanner(deviceId: card);
-        } else {
-          // No longer a friend: removed here or by them.
+        } else if (!nav.memberCard) {
+          // No longer a friend: removed here or by them. A member's card stays: it says
+          // where a request between the two stands.
           nav.friendCard = null;
           nav.friendCardFrom = null;
         }

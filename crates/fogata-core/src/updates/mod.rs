@@ -220,7 +220,6 @@ struct Phase {
     /// Bytes of this platform's package there, while it comes, and from whom.
     downloading: Option<(u64, u64)>,
     from: Option<DevicePublicKey>,
-    verifying: bool,
     /// What is kept on disk was read once, as the updater started.
     loaded: bool,
     installing: bool,
@@ -285,7 +284,12 @@ impl Updater {
             node,
             shelf,
             options,
-            phase: Arc::default(),
+            // The first check, from reading what is kept on disk until the first round of
+            // asks has started (see Book::checking).
+            phase: Arc::new(Mutex::new(Phase {
+                asking: 1,
+                ..Phase::default()
+            })),
             notes: Mutex::new(VecDeque::new()),
             events,
             commands,
@@ -309,8 +313,6 @@ impl Updater {
             UpdateState::Installing
         } else if let Some((kind, message)) = phase.failed {
             UpdateState::Failed { kind, message }
-        } else if phase.verifying {
-            UpdateState::Verifying
         } else if let Some((done, total)) = phase.downloading {
             UpdateState::Downloading { done, total }
         } else if phase.ready && phase.release.as_ref().is_some_and(|r| r.build > build) {
@@ -427,14 +429,11 @@ impl Updater {
         let dir = self.dir.clone();
         let options = self.options.clone();
         let platform = self.platform().to_string();
-        self.lock().verifying = true;
-        self.changed();
         let loaded = tokio::task::spawn_blocking(move || load(&dir, &options, &platform))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
         {
             let mut phase = self.lock();
-            phase.verifying = false;
             phase.loaded = true;
             match loaded {
                 Ok(Some(loaded)) => {
@@ -655,6 +654,10 @@ struct Book {
     /// page is then not used for that release).
     web_failed: Option<Instant>,
     web_damaged: Option<u64>,
+    /// A check (the first, or one asked for) counted in `asking` until the asks it makes
+    /// have started and are counted themselves: the status says checking throughout, never
+    /// up to date in between, which the splash would take as the answer.
+    checking: bool,
 }
 
 /// Where a package comes from.
@@ -670,7 +673,10 @@ async fn run(
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<Done>();
-    let mut book = Book::default();
+    let mut book = Book {
+        checking: true,
+        ..Book::default()
+    };
     let mut tick = tokio::time::interval(TICK);
     loop {
         tokio::select! {
@@ -713,6 +719,11 @@ async fn run(
             Some(Command::CheckNow) = commands.recv() => {
                 book.asked.clear();
                 book.web_read = None;
+                if !book.checking {
+                    let Some(updater) = weak.upgrade() else { return };
+                    updater.lock().asking += 1;
+                    book.checking = true;
+                }
             }
             Some(done) = done_rx.recv() => {
                 let Some(updater) = weak.upgrade() else { return };
@@ -781,6 +792,10 @@ impl Updater {
         self.read_web(book, done, now);
         self.tidy_others(book, now);
         self.start_fetches(book, done, now);
+        if std::mem::take(&mut book.checking) {
+            self.done_asking();
+            self.changed();
+        }
     }
 
     /// Reads the releases page when it is time.
@@ -1050,10 +1065,6 @@ impl Updater {
     async fn done(&self, book: &mut Book, done: Done, tasks: &mpsc::UnboundedSender<Done>) {
         match done {
             Done::Asked(peer, result) => {
-                {
-                    let mut phase = self.lock();
-                    phase.asking = phase.asking.saturating_sub(1);
-                }
                 let from = self.who(book, &peer);
                 match result {
                     Ok(Some(offer)) => {
@@ -1080,13 +1091,13 @@ impl Updater {
                     }
                     Err(e) => tracing::debug!("asking {from} for releases: {e}"),
                 }
+                // Only now: until a release offered is held, the status must still say it is
+                // checking. Ending the ask first let it read "up to date" for that moment, and
+                // the splash then opened the old version.
+                self.done_asking();
                 self.changed();
             }
             Done::Listed(result) => {
-                {
-                    let mut phase = self.lock();
-                    phase.asking = phase.asking.saturating_sub(1);
-                }
                 book.web_reading = false;
                 match result {
                     Ok(offers) => self.listed(book, offers).await,
@@ -1096,6 +1107,7 @@ impl Updater {
                         book.web_read = Instant::now().checked_sub(WEB_EVERY - WEB_RETRY);
                     }
                 }
+                self.done_asking();
                 self.changed();
             }
             Done::Fetched {
@@ -1268,6 +1280,12 @@ impl Updater {
                 let _ = tasks.send(Done::Told);
             });
         }
+    }
+
+    /// One ask (a friend or the releases page) answered and what it offered held.
+    fn done_asking(&self) {
+        let mut phase = self.lock();
+        phase.asking = phase.asking.saturating_sub(1);
     }
 
     fn who(&self, book: &Book, peer: &PeerId) -> String {
@@ -1638,9 +1656,25 @@ mod tests {
         key: &DeviceIdentity,
         base: &str,
     ) -> (Arc<Updater>, NodeHandle, PathBuf) {
+        web_updater_holding(name, key, base, None).await
+    }
+
+    /// As [`web_updater`], with a release and its package kept on disk from before, as a copy
+    /// has once it updated to it.
+    async fn web_updater_holding(
+        name: &str,
+        key: &DeviceIdentity,
+        base: &str,
+        kept: Option<(Signed, Vec<u8>)>,
+    ) -> (Arc<Updater>, NodeHandle, PathBuf) {
         let data = std::env::temp_dir().join(format!("fogata-web-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
         std::fs::create_dir_all(&data).unwrap();
+        if let Some((signed, package)) = kept {
+            let dir = store::dir(&data);
+            store::keep(&dir, &signed).unwrap();
+            std::fs::write(store::package_path(&dir, PLATFORM), package).unwrap();
+        }
         let (node, _node_events) = fogata_net::start(fogata_net::NodeConfig {
             identity: Arc::new(DeviceIdentity::generate().unwrap()),
             groups: Vec::new(),
@@ -1721,6 +1755,55 @@ mod tests {
         );
         node.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// From the moment the updater starts until the release found on the releases page is
+    /// ready, the status says it is checking or downloading: never up to date, which the
+    /// splash takes as the answer and opens this version, and never verifying while it reads
+    /// what is kept on disk, which the splash took as a newer version on its way and so asked
+    /// nobody. Both with nothing kept and with the release this copy is (and its package) kept
+    /// from updating to it, which takes a moment to check again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_status_says_checking_until_the_release_found_is_ready() {
+        let key = DeviceIdentity::generate().unwrap();
+        // This copy's own release first: one made after the newer one is refused.
+        let own = web_release(&key, 5, 32 * 1024 * 1024);
+        let base = releases_page(vec![web_release(&key, 7, 100)], false).await;
+        for (name, kept) in [
+            ("checking-empty", None),
+            ("checking-kept", Some((own.0, own.2))),
+        ] {
+            let (updater, node, data) = web_updater_holding(name, &key, &base, kept).await;
+            let mut seen: Vec<UpdateState> = Vec::new();
+            let start = Instant::now();
+            while start.elapsed() < Duration::from_secs(20) {
+                let state = match updater.status().state {
+                    UpdateState::Downloading { .. } => {
+                        UpdateState::Downloading { done: 0, total: 0 }
+                    }
+                    state => state,
+                };
+                if seen.last() != Some(&state) {
+                    seen.push(state.clone());
+                }
+                if state == UpdateState::Ready {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                seen,
+                [
+                    UpdateState::Checking,
+                    UpdateState::Downloading { done: 0, total: 0 },
+                    UpdateState::Ready
+                ],
+                "{name} {:?}",
+                updater.notes()
+            );
+            node.shutdown().await.unwrap();
+            let _ = std::fs::remove_dir_all(&data);
+        }
     }
 
     /// A package from the page that does not match the signed manifest is refused at the

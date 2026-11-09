@@ -1,5 +1,3 @@
-import 'dart:math' as math;
-
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -20,9 +18,47 @@ void toggleFriendCard(BuildContext context, String friend) {
   if (from != null) AppScope.read(context).toggleFriendCard(friend, from);
 }
 
+/// Opens the card of person [id] next to `context`'s box, or closes it if it is open:
+/// the person's own panel when it is them, a friend's card, or else the card of a member
+/// of [group] (of any group this device is in, without one), which offers a friend request.
+void togglePersonCard(BuildContext context, String id, {String? group}) {
+  final state = AppScope.read(context);
+  if (id == state.contacts.profile?.person.id) {
+    toggleUserPanel(context, beside: true);
+    return;
+  }
+  final from = boundsInLayer(context);
+  if (from == null) return;
+  final friend = state.contacts.friends.any((f) => f.person.id == id);
+  state.toggleFriendCard(id, from, member: !friend, group: group);
+}
+
+/// What screen readers say opening [person]'s card does, the person's own included.
+String personCardLabel(AppState state, UiPerson person) =>
+    person.id == state.contacts.profile?.person.id
+    ? l10n.memberCardShowOwn
+    : l10n.friendsShowCard(person.name);
+
+/// The member [id] of the groups this device is in, from [group]'s list first.
+UiMember? memberOf(AppState state, String id, String? group) {
+  final lists = [
+    ?state.contacts.members[group],
+    ...state.contacts.members.entries
+        .where((e) => e.key != group)
+        .map((e) => e.value),
+  ];
+  for (final list in lists) {
+    for (final m in list) {
+      if (m.person.id == id && !m.me) return m;
+    }
+  }
+  return null;
+}
+
 /// A friend's card over the window, beside the row that opened it: their banner, picture,
-/// name and status, the friends in common if there are any, and a button to call. A click
-/// beside it or Esc closes it.
+/// name and status, the friends in common if there are any, and a button to call. A
+/// group member who is not a friend gets a card of the same look that offers a friend
+/// request. A click beside it or Esc closes it.
 class FriendCardLayer extends StatelessWidget {
   const FriendCardLayer({super.key});
 
@@ -32,10 +68,16 @@ class FriendCardLayer extends StatelessWidget {
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
     final from = state.nav.friendCardFrom;
+    final id = state.nav.friendCard;
     final friend = state.contacts.friends
-        .where((f) => f.person.id == state.nav.friendCard)
+        .where((f) => f.person.id == id)
         .firstOrNull;
-    if (from == null || friend == null) return const SizedBox.shrink();
+    final member = friend != null || id == null || !state.nav.memberCard
+        ? null
+        : memberOf(state, id, state.nav.memberCardGroup);
+    if (from == null || friend == null && member == null) {
+      return const SizedBox.shrink();
+    }
     return Positioned.fill(
       child: CallbackShortcuts(
         bindings: {
@@ -50,9 +92,9 @@ class FriendCardLayer extends StatelessWidget {
               Positioned.fill(
                 child: LayoutBuilder(
                   builder: (context, _) => CustomSingleChildLayout(
-                    delegate: _BesideRow(followBounds(from)),
+                    delegate: BesideBox(followBounds(from)),
                     child: TweenAnimationBuilder<double>(
-                      key: ValueKey(friend.person.id),
+                      key: ValueKey(id),
                       tween: Tween(begin: 0, end: 1),
                       duration: springTime,
                       curve: spring,
@@ -67,7 +109,12 @@ class FriendCardLayer extends StatelessWidget {
                           ),
                         ),
                       ),
-                      child: _FriendCard(friend: friend),
+                      child: friend != null
+                          ? _FriendCard(friend: friend)
+                          : _MemberCard(
+                              member: member!,
+                              group: state.nav.memberCardGroup,
+                            ),
                     ),
                   ),
                 ),
@@ -78,27 +125,6 @@ class FriendCardLayer extends StatelessWidget {
       ),
     );
   }
-}
-
-/// Puts the card to the right of the row's picture and name, its top near the row's, and
-/// keeps it inside the window.
-class _BesideRow extends SingleChildLayoutDelegate {
-  _BesideRow(this.from);
-  final Rect from;
-
-  @override
-  BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
-      constraints.loosen();
-
-  @override
-  Offset getPositionForChild(Size size, Size child) {
-    final left = math.min(from.left + 160, size.width - child.width - 8);
-    final top = math.min(from.top - 10, size.height - child.height - 8);
-    return Offset(math.max(8, left), math.max(8, top));
-  }
-
-  @override
-  bool shouldRelayout(_BesideRow old) => old.from != from;
 }
 
 class _FriendCard extends StatelessWidget {
@@ -120,6 +146,117 @@ class _FriendCard extends StatelessWidget {
         ...state.contacts.friends.where((f) => f.person.id == m),
     ];
     final name = friend.person.name;
+    return _Frame(
+      person: friend.person,
+      banner: banner,
+      on: on,
+      away: away,
+      children: [
+        Text(
+          name,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: tx(c.fg, size: 19, weight: w600, height: 1.25),
+        ),
+        // The dot by the picture says online or not; only where they are, or
+        // when they were last seen, is said in words.
+        if (friend.presence == UiPresence.inRoom ||
+            friend.lastSeenMs != null && !on) ...[
+          const SizedBox(height: 2),
+          Text(
+            presenceText(friend),
+            overflow: TextOverflow.ellipsis,
+            style: tx(
+              friend.presence == UiPresence.inRoom ? c.green : c.fg3,
+              size: 13,
+            ),
+          ),
+        ],
+        CardBio(friend.bio),
+        if (mutual.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          _Mutual(mutual: mutual),
+        ],
+        const SizedBox(height: 14),
+        FgButton(
+          key: const ValueKey('friend-card-call'),
+          text: state.callState.callText(id),
+          icon: Ic.phone,
+          kind: Kind.primary,
+          height: 38,
+          fontSize: 13,
+          expand: true,
+          onTap: on && !inCall && together == null
+              ? () async {
+                  if (!await confirmCalling(context, id)) return;
+                  state.closeFriendCard();
+                  state.notices.missedCalls.remove(id);
+                  await state.callFriend(id);
+                }
+              : null,
+        ),
+        if (!on || inCall || together != null) ...[
+          const SizedBox(height: 8),
+          Text(
+            !on
+                ? l10n.friendCardCallsOnlyOnline
+                : inCall
+                ? l10n.friendCardHangUpFirst(name)
+                : l10n.friendCardBothInRoom(together ?? ''),
+            textAlign: TextAlign.center,
+            style: tx(c.fg3, size: 11),
+          ),
+        ],
+        // Why the friend may not be reached: this side's network, or, with
+        // nothing in the way here, that the friend is probably offline.
+        if (!on)
+          WhyUnreached(
+            key: ValueKey('why-unreached:$id'),
+            firewall: state.notices.firewallCommand != null,
+            load: state.reachability,
+            friend: name,
+            center: true,
+            size: 11,
+            top: 8,
+          ),
+        const SizedBox(height: 8),
+        FgButton(
+          key: const ValueKey('friend-card-message'),
+          text: l10n.friendCardMessage,
+          icon: Ic.chat,
+          height: 38,
+          fontSize: 13,
+          expand: true,
+          onTap: () {
+            state.closeFriendCard();
+            state.direct.show(id);
+          },
+        ),
+      ],
+    );
+  }
+}
+
+/// What a person's card looks like: their banner, a plain one without, their picture with
+/// a dot that says whether they are online, and under it [children].
+class _Frame extends StatelessWidget {
+  const _Frame({
+    required this.person,
+    required this.banner,
+    required this.on,
+    required this.away,
+    required this.children,
+  });
+  final UiPerson person;
+  final UiBanner? banner;
+  final bool on;
+  final bool away;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.fg;
+    final banner = this.banner;
     return Material(
       type: MaterialType.transparency,
       child: Container(
@@ -146,10 +283,10 @@ class _FriendCard extends StatelessWidget {
                 SizedBox(
                   height: 96,
                   child: PanelBanner(
-                    // A friend that never sent a banner gets a plain one.
+                    // Someone that never sent a banner gets a plain one.
                     color: banner == null ? c.hover : Color(banner.color),
                     picture: banner?.picture,
-                    id: friend.person.id,
+                    id: person.id,
                   ),
                 ),
                 Positioned(
@@ -167,9 +304,9 @@ class _FriendCard extends StatelessWidget {
                           ),
                           alignment: Alignment.center,
                           child: Avatar(
-                            avatar: friend.person.avatar,
+                            avatar: person.avatar,
                             size: 82,
-                            id: friend.person.id,
+                            id: person.id,
                           ),
                         ),
                         Positioned(
@@ -200,93 +337,113 @@ class _FriendCard extends StatelessWidget {
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    name,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: tx(c.fg, size: 19, weight: w600, height: 1.25),
-                  ),
-                  // The dot by the picture says online or not; only where they are, or
-                  // when they were last seen, is said in words.
-                  if (friend.presence == UiPresence.inRoom ||
-                      friend.lastSeenMs != null && !on) ...[
-                    const SizedBox(height: 2),
-                    Text(
-                      presenceText(friend),
-                      overflow: TextOverflow.ellipsis,
-                      style: tx(
-                        friend.presence == UiPresence.inRoom ? c.green : c.fg3,
-                        size: 13,
-                      ),
-                    ),
-                  ],
-                  CardBio(friend.bio),
-                  if (mutual.isNotEmpty) ...[
-                    const SizedBox(height: 10),
-                    _Mutual(mutual: mutual),
-                  ],
-                  const SizedBox(height: 14),
-                  FgButton(
-                    key: const ValueKey('friend-card-call'),
-                    text: state.callState.callText(id),
-                    icon: Ic.phone,
-                    kind: Kind.primary,
-                    height: 38,
-                    fontSize: 13,
-                    expand: true,
-                    onTap: on && !inCall && together == null
-                        ? () async {
-                            if (!await confirmCalling(context, id)) return;
-                            state.closeFriendCard();
-                            state.notices.missedCalls.remove(id);
-                            await state.callFriend(id);
-                          }
-                        : null,
-                  ),
-                  if (!on || inCall || together != null) ...[
-                    const SizedBox(height: 8),
-                    Text(
-                      !on
-                          ? l10n.friendCardCallsOnlyOnline
-                          : inCall
-                          ? l10n.friendCardHangUpFirst(name)
-                          : l10n.friendCardBothInRoom(together ?? ''),
-                      textAlign: TextAlign.center,
-                      style: tx(c.fg3, size: 11),
-                    ),
-                  ],
-                  // Why the friend may not be reached: this side's network, or, with
-                  // nothing in the way here, that the friend is probably offline.
-                  if (!on)
-                    WhyUnreached(
-                      key: ValueKey('why-unreached:$id'),
-                      firewall: state.notices.firewallCommand != null,
-                      load: state.reachability,
-                      friend: name,
-                      center: true,
-                      size: 11,
-                      top: 8,
-                    ),
-                  const SizedBox(height: 8),
-                  FgButton(
-                    key: const ValueKey('friend-card-message'),
-                    text: l10n.friendCardMessage,
-                    icon: Ic.chat,
-                    height: 38,
-                    fontSize: 13,
-                    expand: true,
-                    onTap: () {
-                      state.closeFriendCard();
-                      state.direct.show(id);
-                    },
-                  ),
-                ],
+                children: children,
               ),
             ),
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The card of a member of a group who is not a friend: their picture and name, where
+/// they were met, and a friend request to send, or the one between the two: sent and
+/// waiting, or theirs to accept.
+class _MemberCard extends StatelessWidget {
+  const _MemberCard({required this.member, required this.group});
+  final UiMember member;
+  final String? group;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final c = context.fg;
+    final person = member.person;
+    final id = person.id;
+    final name = person.name;
+    final on = member.path != null;
+    final asked = state.contacts.requests.outgoing.any(
+      (r) => r.person.id == id,
+    );
+    final asks = state.contacts.requests.incoming.any((r) => r.person.id == id);
+    final where = state.contacts.group(group)?.name;
+    return _Frame(
+      person: person,
+      banner: null,
+      on: on,
+      away: on && member.away,
+      children: [
+        Text(
+          name,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+          style: tx(c.fg, size: 19, weight: w600, height: 1.25),
+        ),
+        if (where != null) ...[
+          const SizedBox(height: 2),
+          Text(
+            l10n.memberCardInGroup(where),
+            overflow: TextOverflow.ellipsis,
+            style: tx(c.fg3, size: 13),
+          ),
+        ],
+        const SizedBox(height: 14),
+        if (asks) ...[
+          Text(
+            l10n.memberCardAsksYou(name),
+            textAlign: TextAlign.center,
+            style: tx(c.fg2, size: 12),
+          ),
+          const SizedBox(height: 8),
+          FgButton(
+            key: const ValueKey('member-card-accept'),
+            text: l10n.memberCardAccept,
+            icon: Ic.check,
+            kind: Kind.primary,
+            height: 38,
+            fontSize: 13,
+            expand: true,
+            onTap: () => state.answer(id, true),
+          ),
+        ] else if (asked)
+          Row(
+            key: const ValueKey('member-card-sent'),
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              FgIcon(Ic.check, size: 14, color: c.green),
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  l10n.memberCardRequestSent,
+                  textAlign: TextAlign.center,
+                  style: tx(c.fg2, size: 13),
+                ),
+              ),
+            ],
+          )
+        else ...[
+          FgButton(
+            key: const ValueKey('member-card-ask'),
+            text: l10n.memberCardSendRequest,
+            icon: Ic.userPlus,
+            kind: Kind.primary,
+            height: 38,
+            fontSize: 13,
+            expand: true,
+            onTap: on ? () => state.askMember(id, name) : null,
+          ),
+          // A request goes over the connection the two have as members.
+          if (!on) ...[
+            const SizedBox(height: 8),
+            Text(
+              l10n.memberCardOnlyOnline(name),
+              textAlign: TextAlign.center,
+              style: tx(c.fg3, size: 11),
+            ),
+          ],
+        ],
+      ],
     );
   }
 }

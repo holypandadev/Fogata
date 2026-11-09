@@ -97,7 +97,17 @@
           onStarted(noDisplay);
           return;
         }
-        filter = [[SCContentFilter alloc] initWithDisplay:display excludingWindows:@[]];
+        // Fogata: the display without Fogata's own windows, those opened later too.
+        // Captured with them, the call's tiles showed the share inside itself, again and
+        // again, and every frame changed.
+        NSMutableArray<SCRunningApplication *> *own = [NSMutableArray array];
+        const pid_t pid = NSProcessInfo.processInfo.processIdentifier;
+        for (SCRunningApplication *app in content.applications) {
+          if (app.processID == pid) [own addObject:app];
+        }
+        filter = [[SCContentFilter alloc] initWithDisplay:display
+                                    excludingApplications:own
+                                         exceptingWindows:@[]];
         FogataCaptureSize(display.width, display.height, &width, &height);
       }
 
