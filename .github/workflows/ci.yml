@@ -106,11 +106,12 @@ jobs:
           key: linux-deps-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock', 'app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
           restore-keys: linux-deps-
 
-      # ci.sh runs `flutter pub get --offline` and cargo deny offline: the packages and the
-      # RustSec database are fetched here first.
+      # ci.sh runs `flutter pub get --offline` and cargo deny offline (over the crates of every
+      # system): the packages, the crates and the RustSec database are fetched here first.
       - name: Fetch the Dart packages and the RustSec database
         run: |
           (cd app && flutter pub get)
+          cargo fetch
           cargo deny fetch db
           git status --porcelain
 
@@ -177,9 +178,11 @@ jobs:
           key: macos-deps-${{ hashFiles('Cargo.lock') }}
           restore-keys: macos-deps-
 
-      - name: Fetch the Dart packages
+      # cargo deny runs offline over the crates of every system, not only this one's.
+      - name: Fetch the Dart packages and the crates
         run: |
           (cd app && flutter pub get)
+          cargo fetch
           git status --porcelain
 
       # These computers carry no multicast: the mDNS test (crates/fogata-net/tests/mdns_stale.rs)
@@ -220,13 +223,16 @@ jobs:
           key: windows-deps-${{ hashFiles('Cargo.lock') }}
           restore-keys: windows-deps-
 
-      - name: Fetch the Dart packages
+      # cargo deny runs offline over the crates of every system, not only this one's.
+      - name: Fetch the Dart packages and the crates
         shell: pwsh
         run: |
           Push-Location app
           flutter pub get
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Pop-Location
+          cargo fetch
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git status --porcelain
 
       - name: tools/ci-leg.ps1

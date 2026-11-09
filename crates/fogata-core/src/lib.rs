@@ -683,6 +683,12 @@ struct Inner {
     /// Held while a call's room is entered or let go of (see calls.rs): a call that comes
     /// back as it is let go of finds its room and group either let go of already, or kept.
     call_rooms: tokio::sync::Mutex<()>,
+    /// Held from asking the node for a group's log until it is handed to the writer
+    /// ([`Inner::save_group`]): the writer keeps the last log handed to it for a file, so the
+    /// logs must reach it in the order the node gave them, newest last. Without it a save
+    /// that asked before a change and was slow to hand its log over (the event pump, while
+    /// [`Core::shutdown`] saves every group) would write the log from before the change.
+    saving_groups: tokio::sync::Mutex<()>,
     /// The node is being shut down on purpose ([`Core::shutdown`]).
     stopping: AtomicBool,
     /// Direct chats with friends.
@@ -994,6 +1000,7 @@ impl Core {
             events,
             bridge: tokio::sync::Mutex::new(None),
             call_rooms: tokio::sync::Mutex::new(()),
+            saving_groups: tokio::sync::Mutex::new(()),
             stopping: AtomicBool::new(false),
             _running: running,
             direct: chats,
@@ -1299,9 +1306,12 @@ impl Inner {
     }
 
     async fn save_group(&self, group: GroupId) {
+        let _in_order = self.saving_groups.lock().await;
         let Ok(Some(log)) = self.node.group(group).await else {
             return;
         };
+        #[cfg(test)]
+        save_tests::paused(group).await;
         let name = self.lock().joining.get(&group).cloned();
         let name = name.unwrap_or_else(|| log.shared_state().name.clone());
         let store = self.store.clone();
@@ -1382,4 +1392,102 @@ async fn firewall_blocks(port: u16) -> Option<String> {
         .await
         .ok()
         .flatten()
+}
+
+#[cfg(test)]
+mod save_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Notify;
+
+    use super::*;
+
+    /// A save of this group that waits, once it has the log, until told to go on.
+    struct Pause {
+        group: GroupId,
+        reached: Notify,
+        go: Notify,
+    }
+
+    static PAUSE: Mutex<Option<Arc<Pause>>> = Mutex::new(None);
+
+    /// Called by [`Inner::save_group`] between asking for the log and handing it over.
+    pub(super) async fn paused(group: GroupId) {
+        let pause = {
+            let mut armed = PAUSE.lock().unwrap();
+            match armed.as_ref() {
+                Some(p) if p.group == group => armed.take(),
+                _ => None,
+            }
+        };
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.go.notified().await;
+        }
+    }
+
+    /// A save that asked for a group's log before a change, and hands it over only after a
+    /// later save handed over the log with the change, does not write the older log over the
+    /// newer: the saves hand their logs over in the order they asked for them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_slow_save_never_writes_an_older_log_over_a_newer_one() {
+        let dir = std::env::temp_dir().join(format!("fogata-save-order-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Core::create_profile(&dir, "Ana", None).unwrap();
+        let options = NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        };
+        let (core, _events) = Core::start(dir.clone(), options).unwrap();
+        let inner = core.inner.clone();
+        let group = core.create_group("crew", 0, &[]).await.unwrap();
+        let mut gif = b"GIF89a".to_vec();
+        gif.resize(1024, 1);
+        let png = b"\x89PNG\r\n\x1a\nmore".to_vec();
+        core.set_group_picture(group, Some(gif)).await.unwrap();
+        inner.save_group(group).await;
+        inner.writer.then(|| ()).await.unwrap();
+
+        // A save takes the log with the GIF and stops before handing it over.
+        let pause = Arc::new(Pause {
+            group,
+            reached: Notify::new(),
+            go: Notify::new(),
+        });
+        *PAUSE.lock().unwrap() = Some(pause.clone());
+        let slow = tokio::spawn({
+            let inner = inner.clone();
+            async move { inner.save_group(group).await }
+        });
+        pause.reached.notified().await;
+        // The picture changes, and another save takes the log with the PNG.
+        core.set_group_picture(group, Some(png.clone()))
+            .await
+            .unwrap();
+        let later = tokio::spawn({
+            let inner = inner.clone();
+            async move { inner.save_group(group).await }
+        });
+        // Time for the later save to hand its log over, were it not held behind the slow one.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        pause.go.notify_one();
+        slow.await.unwrap();
+        later.await.unwrap();
+        inner.writer.then(|| ()).await.unwrap();
+
+        let store = &inner.store;
+        let stored = store
+            .groups()
+            .unwrap()
+            .into_iter()
+            .find(|g| g.group_id == hex::encode(group.as_bytes()))
+            .unwrap();
+        let log = store.load_log(&stored).unwrap();
+        assert_eq!(log.picture(), Some(png));
+        core.shutdown().await.unwrap();
+        drop(core);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
