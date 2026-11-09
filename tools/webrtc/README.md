@@ -55,15 +55,16 @@ give the same archive, byte for byte (see "Checking an archive").
 
 The plugin's CMake takes the archive named in
 `app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini` (`binary_version` and
-`sha256_<os>-<arch>`). The archives are not published: every build script copies what it
-built into this computer's store, `~/fogata-libwebrtc/<version>/` (`FOGATA_LIBWEBRTC_DIR`
-names another folder), and the app's build takes it from there. Another computer that
-builds the app needs the same file in its own store: copy it over (on Windows the store is
-`%USERPROFILE%\fogata-libwebrtc`). `FOGATA_LIBWEBRTC_ARCHIVE` names one archive instead.
+`sha256_<os>-<arch>`). Every build script copies what it built into this computer's store,
+`~/fogata-libwebrtc/<version>/` (`FOGATA_LIBWEBRTC_DIR` names another folder; on Windows
+the store is `%USERPROFILE%\fogata-libwebrtc`), and the app's build takes it from there;
+`FOGATA_LIBWEBRTC_ARCHIVE` names one archive instead. A computer without it downloads the
+published one: each archive is an asset of a release of
+[holypandadev/fogata-libwebrtc](https://github.com/holypandadev/fogata-libwebrtc) whose tag
+is the version, at `<download_url>/<version>/<archive name>` (the ini's `download_url`). A
+new version is published there, with both archives, before the ini names it.
 
-Whatever the place, the archive must have the SHA-256 the ini names. If they are published
-one day, each archive becomes an asset of a release whose tag is the version, and the ini's
-`download_url` names it: `<download_url>/<version>/<archive name>`.
+Whatever the place, the archive must have the SHA-256 the ini names.
 
 ## Checking an archive
 

@@ -67,6 +67,12 @@ fn trace() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_devices_starting_together_find_each_other_beside_an_older_one() {
+    // GitHub's macOS computers carry no multicast at all, so no device is ever found there;
+    // the workflow says so with FOGATA_TEST_NO_MULTICAST, and this test is left to the others.
+    if std::env::var_os("FOGATA_TEST_NO_MULTICAST").is_some() {
+        println!("skipped: FOGATA_TEST_NO_MULTICAST says this network carries no multicast");
+        return;
+    }
     trace();
     // Started earlier, of a group of its own: it answers every query at once.
     let stale = Arc::new(DeviceIdentity::generate().unwrap());

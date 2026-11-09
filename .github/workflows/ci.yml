@@ -181,13 +181,21 @@ jobs:
           (cd app && flutter pub get)
           git status --porcelain
 
+      # These computers carry no multicast: the mDNS test (crates/fogata-net/tests/mdns_stale.rs)
+      # finds nothing there, and runs on the Linux job and on the computers of tools/ci.sh.
       - name: tools/ci-leg.sh macos
+        env:
+          FOGATA_TEST_NO_MULTICAST: "1"
         run: FOGATA_CI_SHA=$GITHUB_SHA tools/ci-leg.sh macos
 
   windows:
     runs-on: windows-2025
     timeout-minutes: 150
     steps:
+      # The image converts line endings on checkout; flutter pub get then writes the generated
+      # plugin files again with the repository's, and ci-leg.ps1 sees a changed clone.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

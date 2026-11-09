@@ -417,10 +417,10 @@ to draw").
 - `third_party/CMakeLists.txt`: the archive must match that SHA-256, wherever it comes
   from; archives are named after the version, and a stamp in `libwebrtc/` makes a new
   version or archive be extracted again (the package kept using whatever archive it had
-  downloaded first). Fogata's archives are not published: the build takes them from this
-  computer's store, `<home>/fogata-libwebrtc/<version>/` (or `FOGATA_LIBWEBRTC_DIR`), where
-  `tools/webrtc` puts what it builds, or from `FOGATA_LIBWEBRTC_ARCHIVE`, naming one archive.
-  The ini's `download_url`, once they are published, is the last place tried.
+  downloaded first). The build takes them from this computer's store,
+  `<home>/fogata-libwebrtc/<version>/` (or `FOGATA_LIBWEBRTC_DIR`), where `tools/webrtc`
+  puts what it builds, or from `FOGATA_LIBWEBRTC_ARCHIVE`, naming one archive; the ini's
+  `download_url`, the releases of holypandadev/fogata-libwebrtc, is the last place tried.
 - The archive carries `NOTICE.md`, the licences of everything built into the library, and
   the wrapper's `LICENSE`. `tools/third_party_notices.py` puts them into THIRD-PARTY-NOTICES
   from the copies kept in `tools/notices/libwebrtc` (so it also runs on a Mac, which never
