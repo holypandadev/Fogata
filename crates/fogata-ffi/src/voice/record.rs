@@ -816,7 +816,9 @@ pub(crate) mod tests {
     #[test]
     fn the_window_does_not_wait_for_the_microphone_to_close() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
-        let closing = Duration::from_millis(250);
+        // Well past the 50 ms the window's thread may take, and well within STOP_WAIT: a
+        // busy computer oversleeps by tens of milliseconds.
+        let closing = Duration::from_millis(150);
         for throw_away in [false, true] {
             let (stopped, closed) = fake_recording_closing_in(closing);
             let asked = Instant::now();

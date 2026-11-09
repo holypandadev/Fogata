@@ -56,7 +56,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
-            libasound2-dev xvfb dbus-x11 pipewire pipewire-pulse wireplumber pulseaudio-utils
+            libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb dbus-x11 pipewire pipewire-pulse \
+            wireplumber pulseaudio-utils
           # The sound sessions of tools/call-lab/session.sh are unprivileged user namespaces,
           # which Ubuntu's AppArmor refuses by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

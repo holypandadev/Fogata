@@ -667,7 +667,10 @@ async fn leaving_the_room_stops_a_video_fetched_to_play() {
     };
     part_grows(&cache).await;
     bea.leave_room(group).await.unwrap();
-    let ended = timeout(Duration::from_millis(1000), fetching).await;
+    // A fetch left running would go on for at least the 2 s and 5 s it waits between its
+    // rounds; 3 s leaves room for a busy computer (one scanning what is written, say) to
+    // take its part file away.
+    let ended = timeout(Duration::from_secs(3), fetching).await;
     let fetched = ended.expect("the fetch stops at once").unwrap();
     assert!(fetched.is_err());
     let left: Vec<_> = std::fs::read_dir(&cache)
