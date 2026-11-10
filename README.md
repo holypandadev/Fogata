@@ -69,8 +69,7 @@ install them and how to check, before you open anything, that the file is the on
 project signed (`SHA256SUMS` and its signature). Nothing is signed with a paid certificate, so
 your system asks you to confirm the first start once.
 
-To build it yourself, see [docs/building.md](docs/building.md). The Linux and Windows apps
-build from source alone; the macOS app needs a WebRTC framework that is not published yet.
+To build it yourself, see [docs/building.md](docs/building.md).
 
 Fogata keeps itself up to date. At every start it looks for a new version on the Releases page
 and among your friends, and installs it before it opens; one that comes while it runs waits for

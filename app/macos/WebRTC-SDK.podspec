@@ -3,10 +3,11 @@
 # codecs, VP8 pictures larger than 8K refused before they are decoded. It takes the
 # place of webrtc-sdk's WebRTC-SDK pod of the same name once the Podfile names this file.
 #
-# It is not published: the archive comes from this computer's store of what tools/webrtc
-# built, <home>/fogata-libwebrtc/<version>/WebRTC.xcframework.zip (FOGATA_LIBWEBRTC_DIR names
-# another folder), or from FOGATA_WEBRTC_XCFRAMEWORK, naming one archive. It must have the
-# SHA-256 below.
+# The archive comes from this computer's store of what tools/webrtc built,
+# <home>/fogata-libwebrtc/<version>/WebRTC.xcframework.zip (FOGATA_LIBWEBRTC_DIR names
+# another folder), or from FOGATA_WEBRTC_XCFRAMEWORK, naming one archive; without either it is
+# downloaded from the releases of holypandadev/fogata-libwebrtc, where the Linux and Windows
+# archives are too. Wherever it comes from, it must have the SHA-256 below.
 Pod::Spec.new do |s|
   s.name = 'WebRTC-SDK'
   s.version = '156.8078.5'
@@ -22,11 +23,10 @@ Pod::Spec.new do |s|
     store = File.join(Dir.home, 'fogata-libwebrtc') if store.empty?
     local = File.join(store, 'fogata-libwebrtc.m156.8078.5', 'WebRTC.xcframework.zip')
   end
-  unless File.exist?(File.expand_path(local))
-    raise "WebRTC-SDK: #{local} does not exist. Build it with tools/webrtc/build-macos.sh " \
-          "(tools/webrtc/MACOS.md), or copy it there from a computer that did."
-  end
-  s.source = { :http => "file://#{File.expand_path(local)}", :sha256 => sha256 }
+  published = 'https://github.com/holypandadev/fogata-libwebrtc/releases/download/' \
+              'fogata-libwebrtc.m156.8078.5/WebRTC.xcframework.zip'
+  url = File.exist?(File.expand_path(local)) ? "file://#{File.expand_path(local)}" : published
+  s.source = { :http => url, :sha256 => sha256 }
 
   s.osx.deployment_target = '12.0'
   s.vendored_frameworks = 'WebRTC.xcframework'

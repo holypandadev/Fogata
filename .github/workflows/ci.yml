@@ -9,8 +9,8 @@
 #            skipped, as on any other computer without one. Its legs for macOS and Windows
 #            are the two jobs below, so ci.sh records them as skipped; the job passes only
 #            when everything else in the record passed and was checked.
-#   macos    tools/ci-leg.sh macos. No build of the application yet: it needs the macOS
-#            WebRTC.xcframework, which is not published (app/macos/WebRTC-SDK.podspec).
+#   macos    tools/ci-leg.sh macos, then a debug build of the application (the native
+#            plugins, the updater helper and the macOS WebRTC.xcframework).
 #   windows  tools/ci-leg.ps1, without the smoke test, which needs virtual sound devices,
 #            then a debug build of the application (the native plugins and the Windows
 #            libwebrtc, which flutter test never compiles).
@@ -244,11 +244,12 @@ jobs:
           FOGATA_TEST_NO_MULTICAST: "1"
         run: FOGATA_CI_SHA=$GITHUB_SHA tools/ci-leg.sh macos
 
-      # TODO: build the application here (`cd app && flutter build macos --debug`) once the
-      # macOS WebRTC.xcframework is published as a release asset of fogata-libwebrtc and
-      # app/macos/WebRTC-SDK.podspec downloads it by URL and SHA-256. Until then the podspec
-      # reads it only from the owner's own store of builds, which this computer does not have,
-      # so the Mac app is built only on the release Mac (docs/releasing-beta.md).
+      # The application itself, which flutter test never compiles: the native plugins, the
+      # Swift updater helper and the macOS WebRTC.xcframework, downloaded from the releases of
+      # fogata-libwebrtc and checked by its SHA-256 (app/macos/WebRTC-SDK.podspec). Signed to
+      # run here only, as a debug build is.
+      - name: Build the application
+        run: cd app && flutter build macos --debug
 
   windows:
     runs-on: windows-2025

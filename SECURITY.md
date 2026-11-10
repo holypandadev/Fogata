@@ -10,9 +10,6 @@ Use GitHub's private vulnerability reporting: on the repository's **Security** t
 **Report a vulnerability**. Only the maintainers see the report, and the fix can be prepared
 in a private fork with you.
 
-If you cannot use GitHub, write to: <!-- The owner fills in a contact address here. -->
-_(contact to be added)_
-
 Please include what you found, what an attacker needs for it (another member of a group, a
 friend, anyone on the local network, anyone on the internet, a local program), the version
 (at the bottom of Settings) and the system, and a way to reproduce it if you

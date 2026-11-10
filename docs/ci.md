@@ -15,9 +15,9 @@ What GitHub's computers cover, and what they do not:
   push, through the pre-push hook.
 - macOS: `tools/check.sh --no-advisories --no-codegen`, `dart format`, `flutter analyze` and
   `flutter test`;
-  no integration, pair or smoke test, and no build of the application yet: the Mac app needs
-  `WebRTC.xcframework`, which is not published (see `app/macos/WebRTC-SDK.podspec`). Once it
-  is, the job gets `flutter build macos --debug` (a TODO in the workflow).
+  no integration, pair or smoke test; then a debug build of the application (`flutter build
+  macos --debug`), which compiles the native plugins and the updater helper and downloads and
+  checks `WebRTC.xcframework` (see `app/macos/WebRTC-SDK.podspec`).
 - Windows: `tools/ci-leg.ps1` without the smoke test (it needs virtual sound devices), and a
   debug build of the application (`flutter build windows --debug`), which compiles the native
   plugins and downloads and checks the Windows libwebrtc.
@@ -195,11 +195,11 @@ token that can only read; a failure there is for the maintainers to look at, it 
   Chrome's Stable channel (chromiumdash): a warning one milestone behind or with newer merges
   on the same branch-head, a failure two milestones behind.
 
-`.github/dependabot.yml` asks for pull requests once a week, one per ecosystem with every
-update grouped: the actions the workflows pin by commit, the crates of `Cargo.lock` and
-`fuzz/Cargo.lock` (in one, so the two locks move together; the vendored forks are left to
-`tools/vendor_diff.py`), and the Dart packages of `app/`. Security updates, secret scanning
-and private vulnerability reporting are settings of the repository, not files in it.
+Dependencies are updated by hand, not by pull requests a bot opens. The repository's
+Dependabot alerts name the crates and packages with a known vulnerability, and the weekly
+`advisories` job checks the crates against RustSec; secret scanning with push protection and
+private vulnerability reporting are on too. These are settings of the repository, not files
+in it.
 
 ## The smoke test
 
