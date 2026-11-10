@@ -4,8 +4,7 @@ Every commit pushed is checked first on the computer that pushes it. GitHub runs
 checks again on its own computers (`.github/workflows/ci.yml`), for every push to `main`, every
 pull request and by hand: on Linux `tools/ci.sh --full`, whose macOS and Windows legs are the
 workflow's other two jobs, `tools/ci-leg.sh macos` and `tools/ci-leg.ps1` (without the smoke
-test, which needs virtual sound devices, and without the script tests, whose commit marker
-tests fail on GitHub's Windows computers only), side by side.
+test, which needs virtual sound devices), side by side.
 
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD

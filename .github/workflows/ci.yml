@@ -9,8 +9,7 @@
 #            records them as skipped; the job passes only when everything else in the record
 #            passed and was checked.
 #   macos    tools/ci-leg.sh macos.
-#   windows  tools/ci-leg.ps1, without the smoke test (virtual sound devices) and the script
-#            tests (see the job).
+#   windows  tools/ci-leg.ps1, without the smoke test, which needs virtual sound devices.
 #
 # Nothing here signs, builds a release or touches the releases page: the job's token can only
 # read the repository.
@@ -245,14 +244,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           git status --porcelain
 
-      # Without the smoke test, which needs virtual sound devices, and without the script
-      # tests, whose commit marker tests fail on these computers only (short temporary paths,
-      # git objects that cannot be removed): they run on the Linux and macOS jobs, and on a
-      # Windows computer of tools/ci.sh.
+      # Without the smoke test, which needs virtual sound devices.
       - name: tools/ci-leg.ps1
         shell: pwsh
         env:
-          FOGATA_CI_LEG_SKIP: smoke,script-tests
+          FOGATA_CI_LEG_SKIP: smoke
         run: |
           $env:FOGATA_CI_SHA = $env:GITHUB_SHA
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci-leg.ps1

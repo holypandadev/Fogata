@@ -14,6 +14,7 @@
 import os
 import pathlib
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -26,6 +27,22 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
+
+
+def writable_and_again(remove, path, _):
+    """Removes `path` again once it may be written: git keeps its objects read-only, and on
+    Windows a read-only file cannot be removed."""
+    os.chmod(path, stat.S_IWRITE | stat.S_IREAD)
+    remove(path)
+
+
+def remove_tree(path):
+    """shutil.rmtree, read-only files included (`onexc` from Python 3.12 on, which
+    deprecates `onerror`)."""
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=writable_and_again)
+    else:
+        shutil.rmtree(path, onerror=writable_and_again)
 
 
 def run(cwd, *args, env=None):
@@ -73,14 +90,19 @@ class CommitMarker(unittest.TestCase):
         self.clock = 4_000_000_000  # modification times that only grow, whatever the disk's grain
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        remove_tree(self.tmp)
 
     def git(self, *args):
         return run(self.repo, "git", *args)
 
     def touch(self, name, text):
+        """Writes `text` (bytes as they are: a file put back as it was, whatever its line
+        endings) to `name`, a moment after anything written before."""
         path = self.repo / name
-        write(path, text)
+        if isinstance(text, bytes):
+            path.write_bytes(text)
+        else:
+            write(path, text)
         self.clock += 10
         os.utime(path, (self.clock, self.clock))
 
@@ -108,7 +130,7 @@ class CommitMarker(unittest.TestCase):
                     self.assertEqual(self.build(), (f"{self.sha}+dirty", True))
                 finally:
                     self.git("checkout", "--", name)
-                    self.touch(name, (self.repo / name).read_text())
+                    self.touch(name, (self.repo / name).read_bytes())
                 self.assertEqual(self.build(), (self.sha, True))
 
     def test_a_new_native_file_says_dirty(self):
@@ -154,7 +176,7 @@ class LinuxCMake(unittest.TestCase):
         self.build_dir = self.tmp / "cmake"
 
     def tearDown(self):
-        shutil.rmtree(self.tmp)
+        remove_tree(self.tmp)
 
     def version(self, number):
         write(self.work / "crates/fogata-ffi/src/lib.rs",
