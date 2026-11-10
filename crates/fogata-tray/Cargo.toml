@@ -13,7 +13,7 @@ futures.workspace = true
 serde.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-zbus = "5.19.0"
+zbus = "6.2.1"
 
 [lints]
 workspace = true

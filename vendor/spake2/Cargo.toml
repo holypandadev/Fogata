@@ -43,7 +43,7 @@ rustdoc-args = [
 ]
 
 [dependencies.curve25519-dalek]
-version = "4"
+version = "5"
 features = [
     "rand_core",
     "zeroize",
@@ -51,7 +51,7 @@ features = [
 default-features = false
 
 [dependencies.hkdf]
-version = "0.12"
+version = "0.13"
 default-features = false
 
 [dependencies.rand_core]
@@ -59,7 +59,7 @@ version = "0.6"
 default-features = false
 
 [dependencies.sha2]
-version = "0.10"
+version = "0.11"
 default-features = false
 
 [dependencies.zeroize]

@@ -38,7 +38,7 @@ libc = "0.2"
 # The Flatpak portal, which installs updates of the Flatpak (updates/install.rs). The same
 # version and features the keychain's Secret Service store already builds.
 [target.'cfg(target_os = "linux")'.dependencies]
-zbus = "5.19.0"
+zbus = "6.2.1"
 
 [features]
 # The network lab's ways of misbehaving (updates offered unchecked, damaged chunks): only

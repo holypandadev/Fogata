@@ -41,7 +41,7 @@ path = "src/lib.rs"
 version = "0.1"
 
 [dependencies.base64]
-version = "0.22.1"
+version = "0.23.1"
 
 [dependencies.futures]
 version = "0.3"
@@ -50,13 +50,13 @@ version = "0.3"
 version = "0.4"
 
 [dependencies.md-5]
-version = "0.10"
+version = "0.11"
 
 [dependencies.portable-atomic]
 version = "1.6"
 
 [dependencies.rand]
-version = "0.9"
+version = "0.10"
 
 [dependencies.ring]
 version = "0.17.14"
@@ -65,7 +65,7 @@ version = "0.17.14"
 version = "0.17.0"
 
 [dependencies.thiserror]
-version = "1"
+version = "2"
 
 [dependencies.tokio]
 version = "1.32.0"

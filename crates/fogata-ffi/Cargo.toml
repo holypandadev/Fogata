@@ -37,7 +37,7 @@ libc = "0.2"
 # a voice message from the microphone the sound server names.
 [target.'cfg(target_os = "linux")'.dependencies]
 fogata-tray.workspace = true
-zbus = "5.19.0"
+zbus = "6.2.1"
 alsa = "0.11.0"
 # The compositor's idle notifications on Wayland (idle.rs), over the protocol's pure-Rust
 # implementation: no system library is linked or loaded.
