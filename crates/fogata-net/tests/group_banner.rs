@@ -61,11 +61,17 @@ async fn until_banner(node: &NodeHandle, log: &GroupLog, want: Option<&[u8]>, wh
 async fn a_managers_banner_reaches_the_members() {
     let ana = Arc::new(DeviceIdentity::generate().unwrap());
     let bea = Arc::new(DeviceIdentity::generate().unwrap());
-    let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+    // Written now: a key dated long ago is a week old, and the first heartbeat (on a slow
+    // computer, before the test ends) would replace it with a rotation of its own.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut log = GroupLog::create(&ana, "g", now).unwrap();
     // Only Ana manages.
     let first = fogata_state::Body::SetManagers { first: Some(1) };
-    log.append(&ana, first, 1).unwrap();
-    log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+    log.append(&ana, first, now + 1).unwrap();
+    log.add(&ana, bea.public_key(), "bea", now + 2).unwrap();
     let group = log.group_id();
     let port_a = free_port();
     let (node_a, _events_a) = node(ana.clone(), log.clone(), port_a, Vec::new());

@@ -1,0 +1,319 @@
+# The release builds of a pre-release, made on GitHub's computers so that anyone can check
+# where they came from (docs/releasing-beta.md, "A release"):
+#
+#   source   the commit to build: the run's own (github.sha), which is the commit GitHub's
+#            attestations name; by hand the commit given must be it, and on a tag the tag
+#            must be v<THIS_VERSION>.
+#   linux    `flutter build linux --release`, the bundle zipped with its links and modes.
+#   windows  `flutter build windows --release`, the contents of runner\Release zipped.
+#   macos    `flutter build macos --release` (universal) and the updater helper
+#            (tools/beta/macos-updater.sh, with the team pinned in), NOT signed by the
+#            release identity: the Mac signs it afterwards with tools/sign-macos.sh.
+#   attest   the SHA-256 of the three, and a build provenance attestation of each, signed for
+#            this workflow and this commit by GitHub (Sigstore).
+#
+# Each build checks that its library's commit marker is this commit with no changes, as
+# release.py does again later. Nothing here holds a key: release.py signs on the owner's
+# computer, from builds that tools/beta/ci_builds.py fetches and verifies. No cache is
+# restored, so nothing an earlier run left can get into a release. The token reads only;
+# the attest job alone may mint the token that signs attestations, and runs none of the
+# build's code.
+name: Release build
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      commit:
+        description: The full commit to build; must be the commit of the branch or tag the run is started on
+        required: true
+      macos_team:
+        description: The team id pinned into the macOS updater (the OU of the signing certificate); by default the variable FOGATA_MACOS_TEAM
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ github.sha }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  # The same Flutter as .github/workflows/ci.yml.
+  FLUTTER_VERSION: 3.47.8
+  CARGO_TERM_COLOR: never
+
+jobs:
+  source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Check the commit and the version
+        env:
+          EXPECTED: ${{ inputs.commit }}
+        run: |
+          if [[ $GITHUB_EVENT_NAME == workflow_dispatch && $EXPECTED != "$GITHUB_SHA" ]]; then
+            echo "::error::the run is on $GITHUB_SHA, not $EXPECTED: start it on the branch or tag of that commit"
+            exit 1
+          fi
+          version=$(sed -n 's/^pub const THIS_VERSION: &str = "\(.*\)";$/\1/p' crates/fogata-update/src/lib.rs)
+          build=$(sed -n 's/^pub const THIS_BUILD: u64 = \([0-9]*\);$/\1/p' crates/fogata-update/src/lib.rs)
+          [[ -n $version && -n $build ]] || { echo "::error::cannot read THIS_VERSION and THIS_BUILD"; exit 1; }
+          if [[ $GITHUB_REF_TYPE == tag && $GITHUB_REF_NAME != "v$version" ]]; then
+            echo "::error::the tag is $GITHUB_REF_NAME, the source says $version"
+            exit 1
+          fi
+          echo "Building $GITHUB_SHA: build $build, $version" >> "$GITHUB_STEP_SUMMARY"
+
+  linux:
+    needs: source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Make room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # The build packages of the CI job (.github/workflows/ci.yml), without those its tests
+      # need at run time.
+      - name: Install the system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev zip
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # release.py clears these for its own Linux build (BUILD_ENV_CLEARED): they change what
+      # the compilers make, and its hardening checks would refuse what they drop.
+      - name: Check the build's environment
+        run: |
+          for name in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER CFLAGS CXXFLAGS LDFLAGS \
+              CMAKE CARGO_BUILD_TARGET CARGO_TARGET_DIR; do
+            [[ -z ${!name+x} ]] || { echo "::error::$name is set"; exit 1; }
+          done
+
+      - name: Build the application
+        run: |
+          cd app
+          flutter pub get
+          flutter build linux --release
+
+      - name: Check the commit marker
+        run: |
+          # What the release build reads (fogata-update's build.rs): a change there is +dirty.
+          git status --porcelain --untracked-files=normal -- crates vendor app Cargo.toml \
+            Cargo.lock .cargo rust-toolchain.toml
+          python3 -I tools/beta/ci_builds.py check-marker app/build/linux/x64/release/bundle "$GITHUB_SHA"
+
+      # zip -y keeps links as links; release.py's unzip keeps them and the modes.
+      - name: Zip the bundle
+        run: |
+          cd app/build/linux/x64/release
+          zip -q -r -y -X "$GITHUB_WORKSPACE/Fogata-linux-x64-bundle.zip" bundle
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fogata-linux-x64
+          path: Fogata-linux-x64-bundle.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    needs: source
+    runs-on: windows-2025
+    timeout-minutes: 150
+    steps:
+      # As in ci.yml: line endings as committed, or the clone has changes and the marker
+      # says +dirty.
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+
+      - name: Install the Rust of rust-toolchain.toml
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
+          exit $LASTEXITCODE
+
+      # What would drop the mitigations release.py checks every .exe and .dll for.
+      - name: Check the build's environment
+        shell: pwsh
+        run: |
+          foreach ($name in @('RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTC_WRAPPER', 'CFLAGS',
+                              'CXXFLAGS', 'LDFLAGS', 'CL', '_CL_', 'LINK', '_LINK_',
+                              'CARGO_BUILD_TARGET', 'CARGO_TARGET_DIR')) {
+            if (Test-Path "env:$name") { Write-Output "::error::$name is set"; exit 1 }
+          }
+
+      - name: Build the application
+        shell: pwsh
+        working-directory: app
+        run: |
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          flutter build windows --release
+          exit $LASTEXITCODE
+
+      - name: Check the commit marker
+        run: |
+          # What the release build reads (fogata-update's build.rs): a change there is +dirty.
+          git status --porcelain --untracked-files=normal -- crates vendor app Cargo.toml \
+            Cargo.lock .cargo rust-toolchain.toml
+          python -I tools/beta/ci_builds.py check-marker app/build/windows/x64/runner/Release "$GITHUB_SHA"
+
+      # As docs/releasing-beta.md says: the contents of Release, not the folder.
+      - name: Zip the application
+        shell: pwsh
+        run: |
+          Compress-Archive -Path app\build\windows\x64\runner\Release\* -DestinationPath Fogata-windows-x64.zip
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fogata-windows-x64
+          path: Fogata-windows-x64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  macos:
+    needs: source
+    runs-on: macos-15
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The updater helper is built with the team that must sign every new version pinned
+      # into it (tools/beta/macos-updater.sh --team), and tools/sign-macos.sh refuses to sign
+      # it with another team. The team id is no secret (every signature names it).
+      - name: Check the team
+        env:
+          TEAM: ${{ inputs.macos_team || vars.FOGATA_MACOS_TEAM }}
+        run: |
+          [[ $TEAM =~ ^[A-Z0-9]{10}$ ]] || {
+            echo "::error::no team id for the macOS updater: give macos_team, or set the repository variable FOGATA_MACOS_TEAM"
+            exit 1
+          }
+          echo "FOGATA_MACOS_TEAM=$TEAM" >> "$GITHUB_ENV"
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+
+      # The build is universal: the Rust library is built for both Mac targets.
+      - name: Install the Rust of rust-toolchain.toml
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Check the build's environment
+        run: |
+          for name in RUSTFLAGS CARGO_ENCODED_RUSTFLAGS RUSTC_WRAPPER CFLAGS CXXFLAGS LDFLAGS \
+              CMAKE CARGO_BUILD_TARGET CARGO_TARGET_DIR; do
+            [[ -z ${!name+x} ]] || { echo "::error::$name is set"; exit 1; }
+          done
+
+      # Signed by Xcode to run here only (ad hoc); tools/sign-macos.sh signs every part again
+      # with the release identity on the Mac.
+      - name: Build the application and the updater
+        run: |
+          (cd app && flutter pub get && flutter build macos --release)
+          tools/beta/macos-updater.sh --team "$FOGATA_MACOS_TEAM"
+
+      - name: Check the build
+        run: |
+          app=app/build/macos/Build/Products/Release/Fogata.app
+          # What the release build reads (fogata-update's build.rs): a change there is +dirty.
+          git status --porcelain --untracked-files=normal -- crates vendor app Cargo.toml \
+            Cargo.lock .cargo rust-toolchain.toml
+          python3 -I tools/beta/ci_builds.py check-marker "$app" "$GITHUB_SHA"
+          for binary in "$app/Contents/MacOS/Fogata" "$app/Contents/Library/Helpers/Fogata Updater.app/Contents/MacOS/Fogata Updater"; do
+            archs=$(lipo -archs "$binary")
+            [[ " $archs " == *" arm64 "* && " $archs " == *" x86_64 "* ]] ||
+              { echo "::error::$binary is built for $archs, not arm64 and x86_64"; exit 1; }
+          done
+
+      - name: Zip the application
+        run: ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-unsigned.zip
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fogata-macos-unsigned
+          path: Fogata-macos-unsigned.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  # No checkout and none of the build's code: it takes the three zips from this run, lists
+  # their SHA-256 and has GitHub attest each, for this workflow and this commit.
+  attest:
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Take the builds of this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh run download "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" --dir builds \
+            --name fogata-linux-x64 --name fogata-windows-x64 --name fogata-macos-unsigned
+          mkdir sums
+          cd builds
+          sha256sum fogata-linux-x64/Fogata-linux-x64-bundle.zip \
+            fogata-windows-x64/Fogata-windows-x64.zip \
+            fogata-macos-unsigned/Fogata-macos-unsigned.zip |
+            sed 's|  [^/]*/|  |' > ../sums/SHA256SUMS
+          cat ../sums/SHA256SUMS
+          { echo '```'; cat ../sums/SHA256SUMS; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            builds/fogata-linux-x64/Fogata-linux-x64-bundle.zip
+            builds/fogata-windows-x64/Fogata-windows-x64.zip
+            builds/fogata-macos-unsigned/Fogata-macos-unsigned.zip
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fogata-sha256sums
+          path: sums/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30

@@ -172,6 +172,7 @@ if [[ $advisories == 1 ]]; then
         sources advisories
 fi
 python3 -I -B tools/beta/test_release.py
+python3 -I -B tools/beta/test_ci_builds.py
 python3 -I -B tools/test_ci.py
 python3 -I -B tools/test_native_build.py
 python3 -I -B tools/test_third_party_notices.py

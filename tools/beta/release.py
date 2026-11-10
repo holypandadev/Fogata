@@ -6,14 +6,16 @@
         --windows-zip Fogata-windows-x64.zip --macos-zip Fogata-macos-arm64.zip --out <folder>
 
 Inputs (each optional, at least one):
-  --linux-bundle  the Flutter release bundle built on Linux; the Flatpak is made from it
-                  (tools/beta/flatpak.sh; --extra-libs is passed on)
+  --linux-bundle  the Flutter release bundle built on Linux, or by the release workflow
+                  (fetched and checked by tools/beta/ci_builds.py); the Flatpak is made from
+                  it (tools/beta/flatpak.sh; --extra-libs is passed on)
   --build-linux   instead of --linux-bundle: build that bundle here, from a clean worktree of
                   the commit checked out (a target folder of its own, no changes of this
                   checkout and no library of an earlier build can get in), and use it
   --windows-zip   a zip of build\\windows\\x64\\runner\\Release (fogata.exe and what is
-                  beside it), built on Windows
-  --macos-zip     Fogata.app, signed (tools/beta/macos-updater.sh, then tools/sign-macos.sh)
+                  beside it), built on Windows or by the release workflow
+  --macos-zip     Fogata.app (built by hand or by the release workflow, with
+                  tools/beta/macos-updater.sh), signed on the Mac (tools/sign-macos.sh)
                   and zipped with `ditto -c -k --keepParent`; give --macos-arch arm64 or x64
 
 Writes into --out (made new):

@@ -132,6 +132,7 @@ Step 'notices' { Invoke-Python @('tools/third_party_notices.py', '--check') }
 # for Linux and macOS; the release scripts' own tests and the commit marker's run everywhere.
 Step 'script-tests' {
   Invoke-Python @('tools/beta/test_release.py')
+  Invoke-Python @('tools/beta/test_ci_builds.py')
   Invoke-Python @('tools/test_native_build.py')
 }
 Step 'analyze' {

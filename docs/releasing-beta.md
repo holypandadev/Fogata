@@ -153,42 +153,112 @@ refuses a folder that holds any key already.
    them, in each crate's `tests/data`: a fixture changed since the last tag is a change of
    the wire or the log, which must have gone through a capability level
    (`fogata-proto/tests/frozen/mod.rs` says how they are written anew).
-2. Build on each system, release builds only. The Rust is the one `rust-toolchain.toml`
-   names (rustup installs it the first time), and the crates the ones `Cargo.lock` names;
-   libopus is built with CMake (Windows uses Visual Studio's own; on macOS install it once
-   with `brew install cmake`). The macOS build is universal (Apple silicon and Intel): add
-   both Mac targets to that Rust once, `rustup target add aarch64-apple-darwin
-   x86_64-apple-darwin --toolchain 1.99.1` (the version `rust-toolchain.toml` names), or the
-   build stops with "the Rust target x86_64-apple-darwin is not installed".
-   - Linux: `cd app && flutter build linux --release`,
-     or leave it to `release.py` in the next step with `--build-linux`, which builds the
-     bundle from a clean worktree of the commit, in a target folder of its own. Either way
-     the build takes the library from the folder cargo built in, also with `CARGO_TARGET_DIR`
-     set.
-   - Windows: `flutter build windows --release`, then zip the *contents* of
-     `build\windows\x64\runner\Release` (`Compress-Archive -Path Release\* -DestinationPath
-     Fogata-windows-x64.zip`).
-   - macOS: `flutter build macos --release`, `tools/beta/macos-updater.sh --team <team>`
-     (the team ID, the OU of the certificate: `security find-certificate -c "<identity>" -p |
-     openssl x509 -noout -subject` shows it as `OU=`; not the ten characters in brackets at the
-     end of the identity's name, which name the certificate, not the team: the updater takes
-     new versions signed by that team only), `tools/sign-macos.sh "<identity>"` (online: every
-     signature gets Apple's timestamp, so it stays valid after the certificate expires),
-     then
-     `ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-arm64.zip`.
-     Sign every release with the same identity, or macOS forgets the permissions testers
-     gave Fogata and the updater refuses the new bundle. An Apple Development certificate
-     lasts a year: `security find-certificate -c "<identity>" -p | openssl x509 -noout
-     -enddate` says when; before that day, make a new one in Xcode (same team) and sign the
-     next release with it.
-3. Bring the zips to the Linux computer and run:
+2. Build each system's application, release builds only, from that commit with no
+   changes. GitHub's computers build them (`.github/workflows/release-build.yml`), so that
+   anyone can check where they came from; your keys never go there, and the run holds no
+   secret: you sign on your own computers, as before. Building on your own computers is the
+   fallback, in 2d.
+
+   a. Push the commit to `main` (or a branch of its own), then start the workflow on it:
+
+      ```sh
+      gh workflow run release-build.yml --repo holypandadev/Fogata --ref main \
+          -f commit=$(git rev-parse HEAD)
+      gh run list --repo holypandadev/Fogata --workflow release-build.yml   # its id
+      gh run watch --repo holypandadev/Fogata <run id>
+      ```
+
+      Pushing the tag `v0.1.0-beta.2` starts it too (the tag must be `v` and
+      `THIS_VERSION`). The attestations name the commit the run is on, so the run refuses
+      to build when `commit` is not the head of `--ref` as it starts: start it again on a
+      ref at that commit. The macOS updater is built with your team id pinned into it (see
+      2d): give it with `-f macos_team=<team>`, or once as the repository variable
+      `FOGATA_MACOS_TEAM` (Settings, Secrets and variables, Actions, Variables; a tag push
+      can only take it from there). It is no secret: every signature of yours names it.
+
+      The run builds Linux (`flutter build linux --release` on Ubuntu 24.04, the bundle
+      zipped with its links), Windows (`flutter build windows --release`, the contents of
+      `Release` zipped) and macOS (`flutter build macos --release`, universal, and
+      `tools/beta/macos-updater.sh --team <team>`; signed only to run there, not with your
+      identity), from a fresh clone, with no cache of an earlier run. Each job stops unless
+      its library's commit marker is the commit with no changes. Then a last job, which runs
+      none of the build's code, lists the SHA-256 of the three zips (in the run's summary)
+      and has GitHub attest each: a build provenance attestation (SLSA), signed through
+      Sigstore, saying that `release-build.yml` of this repository made that file from that
+      commit on GitHub's computers. The builds are kept 30 days.
+
+   b. On the Linux computer, at that commit (`git status` clean), fetch and check the
+      Linux and Windows builds (`gh auth login` once; reading is enough):
+
+      ```sh
+      python3 -I tools/beta/ci_builds.py fetch <run id> --only linux,windows \
+          --out ~/fogata-ci-builds/0.1.0-beta.2
+      ```
+
+      It refuses a run that did not pass or built another commit than the one checked out,
+      and keeps a build only when `gh attestation verify` finds GitHub's attestation of it
+      (by `release-build.yml` of holypandadev/Fogata, from this commit, not on a self-hosted
+      computer) and its SHA-256 is the one the run listed. It leaves
+      `linux/bundle` (for `--linux-bundle`), `Fogata-windows-x64.zip` and `SHA256SUMS`.
+
+   c. On the Mac, at the same commit, the same for macOS, then sign it there (see 2d for
+      the identity and the team) and zip it:
+
+      ```sh
+      python3 -I tools/beta/ci_builds.py fetch <run id> --only macos --macos-team <team> \
+          --out ~/fogata-ci-builds/0.1.0-beta.2
+      tools/sign-macos.sh "<identity>" ~/fogata-ci-builds/0.1.0-beta.2/macos/Fogata.app
+      ditto -c -k --keepParent ~/fogata-ci-builds/0.1.0-beta.2/macos/Fogata.app Fogata-macos-arm64.zip
+      ```
+
+      `--macos-team` refuses an updater built for another team, as `sign-macos.sh` does
+      again.
+
+   What the attestations show: that the builds that go into the release are the ones
+   GitHub made from the commit, which anyone can check (`gh attestation verify <zip>
+   --repo holypandadev/Fogata`). What testers download is made from them on your computers
+   (the Flatpak, the Windows zip with its installer, the Mac app with your signature), so
+   those files are covered by `SHA256SUMS`, signed by the release key, as before, not by the
+   attestations.
+
+   d. By hand, when GitHub cannot build (the fallback), on each system. The Rust is the one
+      `rust-toolchain.toml` names (rustup installs it the first time), and the crates the
+      ones `Cargo.lock` names;
+      libopus is built with CMake (Windows uses Visual Studio's own; on macOS install it once
+      with `brew install cmake`). The macOS build is universal (Apple silicon and Intel): add
+      both Mac targets to that Rust once, `rustup target add aarch64-apple-darwin
+      x86_64-apple-darwin --toolchain 1.99.1` (the version `rust-toolchain.toml` names), or the
+      build stops with "the Rust target x86_64-apple-darwin is not installed".
+      - Linux: `cd app && flutter build linux --release`,
+        or leave it to `release.py` in the next step with `--build-linux`, which builds the
+        bundle from a clean worktree of the commit, in a target folder of its own. Either way
+        the build takes the library from the folder cargo built in, also with `CARGO_TARGET_DIR`
+        set.
+      - Windows: `flutter build windows --release`, then zip the *contents* of
+        `build\windows\x64\runner\Release` (`Compress-Archive -Path Release\* -DestinationPath
+        Fogata-windows-x64.zip`).
+      - macOS: `flutter build macos --release`, `tools/beta/macos-updater.sh --team <team>`
+        (the team ID, the OU of the certificate: `security find-certificate -c "<identity>" -p |
+        openssl x509 -noout -subject` shows it as `OU=`; not the ten characters in brackets at the
+        end of the identity's name, which name the certificate, not the team: the updater takes
+        new versions signed by that team only), `tools/sign-macos.sh "<identity>"` (online: every
+        signature gets Apple's timestamp, so it stays valid after the certificate expires),
+        then
+        `ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-arm64.zip`.
+        Sign every release with the same identity, or macOS forgets the permissions testers
+        gave Fogata and the updater refuses the new bundle. An Apple Development certificate
+        lasts a year: `security find-certificate -c "<identity>" -p | openssl x509 -noout
+        -enddate` says when; before that day, make a new one in Xcode (same team) and sign the
+        next release with it.
+3. Bring the builds to the Linux computer and run (the paths of 2b; by hand, the bundle is
+   `app/build/linux/x64/release/bundle`):
 
    ```sh
    cargo build --release -p fogata
    python3 -I tools/beta/release.py --build 2 --version 0.1.0-beta.2 --min-build 1 \
-       --notes notes.txt --linux-bundle app/build/linux/x64/release/bundle \
-       --windows-zip Fogata-windows-x64.zip --macos-zip Fogata-macos-arm64.zip \
-       --out ~/fogata-releases/0.1.0-beta.2
+       --notes notes.txt --linux-bundle ~/fogata-ci-builds/0.1.0-beta.2/linux/bundle \
+       --windows-zip ~/fogata-ci-builds/0.1.0-beta.2/Fogata-windows-x64.zip \
+       --macos-zip Fogata-macos-arm64.zip --out ~/fogata-releases/0.1.0-beta.2
    ```
 
    (`--build-linux` in place of `--linux-bundle` builds the Linux bundle there, from a clean
@@ -349,8 +419,9 @@ installed, whoever answers there; but whatever newer commit the key signed, it t
 without any release manifest (keys section, step 5). `tools/beta/test-flatpak-origin.sh`
 tries this in a flatpak installation of its own (`--unsigned` makes a Flatpak that verifies
 nothing, for the lab's tests only: never give one to a tester).
-The bundle is built on this computer; the runtime's glibc (2.44) is newer than Ubuntu
-26.04's (2.43), and the script refuses a bundle that needs a library the runtime lacks.
+The bundle is built on Ubuntu 24.04 by the release workflow (glibc 2.39), or by hand on this
+computer (Ubuntu 26.04, glibc 2.43); the runtime's glibc (2.44) is newer than both, and the
+script refuses a bundle that needs a library the runtime lacks.
 
 The tray needs no library the runtime lacks: Fogata serves its icon and menu over D-Bus
 itself (crates/fogata-tray), so the Flatpak only talks to `org.kde.StatusNotifierWatcher`.

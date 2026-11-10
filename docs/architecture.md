@@ -4576,7 +4576,8 @@ when the requester is online; cancelling the request ends that.
   to that friend's friend on another platform, while a stranger gets nothing
   (`update-chain`), and a modified copy whose unknown key, broken signature, older build,
   oversized package and damaged chunks are refused (`update-refusals`).
-- `tools/beta`: the release tooling's tests (`test_release.py`), the macOS updater's
+- `tools/beta`: the release tooling's tests (`test_release.py`, and `test_ci_builds.py` for the
+  fetch and check of the builds GitHub makes), the macOS updater's
   (`test-macos-updater.sh`: what it refuses, with bundles signed for the test), and on Linux
   the Flatpak's, each in a flatpak installation of its own: what flatpak takes from the
   loopback origin (`test-flatpak-origin.sh`) and where the data key is kept and how it moves

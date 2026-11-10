@@ -26,7 +26,9 @@ A newer push to a pull request cancels the run of the one before; every push to 
 its own run. The Rust builds of the dependencies are cached (`Swatinem/rust-cache`), saved
 only by runs of pushes to `main`, so a pull request reads them and never writes them.
 `.github/workflows/weekly.yml` runs once a week (and by hand) what no push waits for: see
-"Every week" below.
+"Every week" below. `.github/workflows/release-build.yml` builds a pre-release's three
+applications, by hand or on a pushed `v*` tag, and has GitHub attest them; it signs nothing
+(docs/releasing-beta.md, "A release", step 2).
 
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD

@@ -240,13 +240,47 @@ class WebrtcStable(unittest.TestCase):
 class Workflows(unittest.TestCase):
     """The workflows in .github/workflows, as the repository's settings cannot enforce from a
     file: every action pinned by its full commit (a tag can be moved to other code), only the
-    actions reviewed, a token that can only read, and no checkout that keeps the token."""
+    actions reviewed, a token that can only read (but for the one job that attests the
+    release builds), and no checkout that keeps the token."""
 
     ACTIONS = {
         "actions/checkout", "actions/cache", "actions/cache/restore", "actions/cache/save",
         "actions/upload-artifact", "subosito/flutter-action", "taiki-e/install-action",
         "Swatinem/rust-cache",
+        # The release builds' attestations (release-build.yml): a composite action around
+        # actions/attest, which it pins by commit itself.
+        "actions/attest-build-provenance",
     }
+    # The only job whose token may do more than read, and exactly what it may do: take the
+    # builds of its own run (actions: read) and have GitHub sign their attestations. It
+    # checks out nothing and runs none of the build's code.
+    WIDER = {("release-build.yml", "attest"): [
+        "contents: read", "actions: read", "id-token: write", "attestations: write"]}
+
+    def job_permissions(self, text):
+        """Each job's own permissions, as {job: [lines]}; a permissions: that is not a list
+        of its own lines (write-all, read-all) comes out as [that value]."""
+        found = {}
+        job = None
+        lines = text.splitlines()
+        for at, line in enumerate(lines):
+            named = re.match(r"^  ([\w-]+):\s*$", line)
+            if named:
+                job = named.group(1)
+            given = re.match(r"^([ \t]+)permissions:\s*(.*)$", line)
+            if not given:
+                continue
+            if given.group(2):
+                found[job] = [given.group(2)]
+                continue
+            indent = len(given.group(1))
+            block = []
+            for below in lines[at + 1:]:
+                if len(below) - len(below.lstrip()) <= indent:
+                    break
+                block.append(below.strip())
+            found[job] = block
+        return found
 
     def workflows(self):
         found = sorted((TOOLS.parent / ".github/workflows").glob("*.yml"))
@@ -264,11 +298,27 @@ class Workflows(unittest.TestCase):
         for name, text in self.workflows():
             with self.subTest(workflow=name):
                 self.assertRegex(text, r"(?m)^permissions:\n  contents: read\n(?!  )")
-                # No job widens it.
-                self.assertNotRegex(text, r"(?m)^[ \t]+permissions:")
+                # No job widens it, but the one WIDER names, by exactly that.
+                for job, given in self.job_permissions(text).items():
+                    self.assertEqual(given, self.WIDER.get((name, job)), f"job {job}")
                 self.assertNotIn("pull_request_target", text)
                 checkouts = len(re.findall(r"uses: actions/checkout@", text))
                 self.assertEqual(text.count("persist-credentials: false"), checkouts)
+
+    def test_a_job_that_widens_the_token_fails(self):
+        text = ("permissions:\n  contents: read\n\njobs:\n  build:\n    runs-on: x\n"
+                "    permissions:\n      contents: write\n    steps:\n      - run: true\n"
+                "  other:\n    permissions: write-all\n  attest:\n    permissions:\n"
+                "      id-token: write\n")
+        self.assertEqual(self.job_permissions(text), {
+            "build": ["contents: write"], "other": ["write-all"], "attest": ["id-token: write"]})
+
+    def test_the_attesting_job_runs_no_code_of_the_repository(self):
+        text = (TOOLS.parent / ".github/workflows/release-build.yml").read_text()
+        job = re.search(r"(?ms)^  attest:\n(.*?)(?=^  \S|\Z)", text).group(1)
+        self.assertNotIn("actions/checkout", job)
+        self.assertNotIn("tools/", job)
+        self.assertIn("actions/attest-build-provenance@", job)
 
 
 if __name__ == "__main__":
