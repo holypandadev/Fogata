@@ -95,6 +95,23 @@ Future<bool> _letGo(
   }
 }
 
+/// Closes [connection], then lets the platform free it: closed only, it kept its
+/// observer, event channel and Dart subscription until the application quit, one for every
+/// connection made in a long call (each participant, each retry, the screen's sound, the
+/// voice engine, the microphone test). Freed even when the close fails; a free that fails
+/// is only noted, as nothing is left to do with that connection.
+Future<void> closeConnection(RTCPeerConnection connection) async {
+  try {
+    await connection.close();
+  } finally {
+    try {
+      await connection.dispose();
+    } catch (e) {
+      _trace('freeing a connection: $e');
+    }
+  }
+}
+
 void _trace(String line) {
   if (!_verbose) return;
   // The time of day to the millisecond, to line the call's steps up with other logs.
@@ -363,7 +380,7 @@ class Call extends ChangeNotifier {
   Future<void> _closeEngine() async {
     final engine = _engine;
     _engine = null;
-    await engine?.close();
+    if (engine != null) await closeConnection(engine);
   }
 
   /// Says what went wrong, unless the call is over.
@@ -442,7 +459,7 @@ class Call extends ChangeNotifier {
   /// This device's own streams and the voice engine, for tests of [stop].
   @visibleForTesting
   void holdForTests({
-    List<MediaStream> streams = const [],
+    List<MediaStream?> streams = const [],
     RTCPeerConnection? engine,
   }) {
     _micStream = streams.elementAtOrNull(0);
@@ -673,8 +690,13 @@ class Call extends ChangeNotifier {
       !_silent &&
       _screenStream?.getAudioTracks().isNotEmpty == true;
 
-  /// Whether a shared screen here can take the other applications' sound.
-  bool get canShareSound => _displaySound || _soundConnections;
+  /// Whether this device's shared screen can take the other applications' sound. Where
+  /// the capture brings it (Linux, Windows), only while it did: Linux gives none for a
+  /// window, whose sound cannot be narrowed to its application, nor without PipeWire,
+  /// where it would carry the call's own sound.
+  bool get canShareSound =>
+      _soundConnections ||
+      (_displaySound && _screenStream?.getAudioTracks().isNotEmpty == true);
 
   /// Sends the sound of the shared screen, or stops it, without stopping the picture.
   Future<void> setShareSound(bool on) async {
@@ -705,21 +727,38 @@ class Call extends ChangeNotifier {
     await _quietInput();
     final changed = _soundInChannel != _soundSending;
     _soundSending = _soundInChannel;
-    // A copy: participants can come and go meanwhile.
-    for (final peer in peers.values.toList()) {
-      if (peers[peer.id] != peer) continue;
+    await _eachPeer('screen sound', (peer) async {
       await _soundTo(peer);
       final transceivers = await _channels(peer.connection);
-      if (transceivers.length <= _screenSound) continue;
+      if (transceivers.length <= _screenSound) return;
       final channel = transceivers[_screenSound];
       await channel.sender.replaceTrack(_track(_screenSound, peer));
       if (changed) {
         await channel.setDirection(_soundDirection);
         await _renegotiate(peer);
       }
-    }
+    });
     _sendState();
     notifyListeners();
+  }
+
+  /// Runs [step] for each participant there is now, one after the other (a copy:
+  /// participants can come and go meanwhile). One whose connection fails meanwhile
+  /// (closed, or replaced as it is made again) is noted, and the others still get theirs:
+  /// a mute stopped at the first failure left the rest hearing "unmuted", and the state
+  /// was not sent.
+  Future<void> _eachPeer(
+    String what,
+    Future<void> Function(CallPeer peer) step,
+  ) async {
+    for (final peer in peers.values.toList()) {
+      if (peers[peer.id] != peer) continue;
+      try {
+        await step(peer);
+      } catch (e) {
+        _trace('$what for ${peer.id}: $e');
+      }
+    }
   }
 
   /// The direction the screen's sound channels were last given.
@@ -882,11 +921,9 @@ class Call extends ChangeNotifier {
       await _quietInput();
       await _closeMic();
     }
-    // A copy: participants can come and go meanwhile.
-    for (final peer in peers.values.toList()) {
-      if (peers[peer.id] != peer) continue;
+    await _eachPeer('microphone', (peer) async {
       final transceivers = await _channels(peer.connection);
-      if (transceivers.isEmpty) continue;
+      if (transceivers.isEmpty) return;
       await transceivers[_audio].sender.replaceTrack(_track(_audio, peer));
       await transceivers[_audio].setDirection(_voiceDirection(peer));
       if (transceivers.length > _screenSound) {
@@ -897,7 +934,7 @@ class Call extends ChangeNotifier {
       }
       _soundSending = _soundInChannel;
       await _renegotiate(peer);
-    }
+    });
     _sendState();
     notifyListeners();
   }
@@ -1085,11 +1122,7 @@ class Call extends ChangeNotifier {
 
   /// Puts the current track of a channel on every connection and tells everyone.
   Future<void> _resend(int channel) async {
-    // A copy: participants can come and go meanwhile.
-    for (final peer in peers.values.toList()) {
-      if (peers[peer.id] != peer) continue;
-      await _resendTo(peer, channel);
-    }
+    await _eachPeer('channel $channel', (peer) => _resendTo(peer, channel));
     _sendState();
     notifyListeners();
   }
@@ -1352,7 +1385,7 @@ class Call extends ChangeNotifier {
     // The call ended, the participant left or was kept out meanwhile: nothing would ever
     // close it.
     if (_closed || peers[peer.id] != peer || peer._keptOut) {
-      await connection.close();
+      await closeConnection(connection);
       throw StateError('no longer in the call');
     }
     peer.connection = connection;
@@ -1640,10 +1673,15 @@ class Call extends ChangeNotifier {
   NetLevel? _told;
 
   bool _reading = false;
+  bool _readingLevels = false;
 
   /// Reads the statistics of every connection now, as every 2 s, for tests.
   @visibleForTesting
   Future<void> measureNow() => _measure();
+
+  /// Reads who talks now, as every 600 ms, for tests.
+  @visibleForTesting
+  Future<void> readLevelsNow() => _readLevels();
 
   // ----- Who is talking -----
 

@@ -22,6 +22,10 @@ class Toast {
 class ToastBoard extends Piece {
   final List<Toast> list = [];
 
+  /// At most this many at once, the oldest going for a new one: more would climb past the
+  /// top of the window, and many may come at once from others (requests, invitations).
+  static const maxShown = 4;
+
   /// The toasts' timers, to stop with the window.
   final Set<Timer> _timers = {};
 
@@ -38,9 +42,14 @@ class ToastBoard extends Piece {
   void say(String text, {bool error = false, String? path}) {
     final toast = Toast(text, error: error, path: path);
     list.add(toast);
+    while (list.length > maxShown) {
+      list.removeAt(0);
+    }
     changed();
     // One with a file stays long enough to use its buttons.
     _after(Duration(seconds: error ? 7 : (path != null ? 10 : 4)), () {
+      // Gone already, for newer ones.
+      if (!list.contains(toast)) return;
       toast.leaving = true;
       changed();
       _after(const Duration(milliseconds: 260), () {

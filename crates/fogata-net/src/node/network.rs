@@ -25,6 +25,12 @@ const MAX_OBSERVED: usize = 64;
 const MAX_REPORTERS: usize = 64;
 /// A confirmed address nobody has reported for this long is dropped.
 const CONFIRMED_FOR: Duration = Duration::from_secs(15 * 60);
+/// Networks ([`Network`]) whose peers must agree on an address of this device before it is
+/// taken: with a member or friend among them, and with strangers only. Anyone can connect
+/// and say anything; two strangers' providers are easy to come by, and the address taken is
+/// announced to everyone who looks this device up.
+const NETWORKS_WITH_CONTACT: usize = 2;
+const NETWORKS_OF_STRANGERS: usize = 3;
 
 /// Whether a failed check dial says UDP did not get through (see udp_check.rs): every
 /// address tried timed out or could not be sent to.
@@ -376,32 +382,7 @@ impl Node {
                 tracing::trace!(%reporter, %observed, "address observed by a peer");
             }
         }
-        // Confirmed by peers on two different networks (see [`Network`]): one machine, or a
-        // few at one provider, posing as many peers (fake DHT nodes, say) cannot make this
-        // device announce an address of its choice or take members for being behind its
-        // own address.
-        let networks = distinct_networks(self.observed[&observed].values().flatten());
-        if networks >= 2 && !self.confirmed.contains(&observed) {
-            let ip = addr::ip(&observed);
-            let same_family = |a: &Multiaddr| {
-                addr::ip(a).is_some_and(|a| Some(a.is_ipv4()) == ip.map(|ip| ip.is_ipv4()))
-            };
-            // Another public address than the ones known, with no local change: the router
-            // or the carrier gave this device a new one (or it moved without noticing).
-            let moved = self.started.elapsed() > STARTUP
-                && self.confirmed.iter().any(same_family)
-                && !self.confirmed.iter().any(|a| addr::ip(a) == ip);
-            self.confirmed.insert(observed.clone());
-            self.confirmed_seen.insert(observed.clone(), Instant::now());
-            self.swarm.add_external_address(observed.clone());
-            self.emit(NodeEvent::ExternalAddress(observed.clone()));
-            // Announced again at once: the others look for this device where it is now.
-            self.provided.1 = None;
-            if moved {
-                tracing::info!(%observed, "this device's public address changed");
-                self.network_changed(false);
-            }
-        }
+        self.confirm_if_agreed(&observed);
 
         // Same public IP seen with different ports, each from at least two addresses: this
         // NAT picks a new port per destination, which only a member in between can work
@@ -427,13 +408,74 @@ impl Node {
                 // members whose router filters by address only open it for us: once peers
                 // on two networks said so, as for any address taken.
                 if self.confirmed.is_empty()
-                    && distinct_networks(&all_ips) >= 2
+                    && distinct_networks(&all_ips) >= NETWORKS_OF_STRANGERS
                     && self.confirmed.insert(observed.clone())
                 {
                     self.confirmed_seen.insert(observed.clone(), Instant::now());
                     self.swarm.add_external_address(observed);
                 }
             }
+        }
+    }
+
+    /// Takes `observed` for this device's address once peers on enough networks say so (see
+    /// [`NETWORKS_WITH_CONTACT`]): one machine, or a few at one or two providers, posing as
+    /// many peers (fake DHT nodes, say) cannot make this device announce an address of its
+    /// choice or take members for being behind its own address. Only a member or friend
+    /// among them makes this device take it as having moved, which looks for everyone
+    /// again: strangers could otherwise have it do so with every address they make up.
+    fn confirm_if_agreed(&mut self, observed: &Multiaddr) {
+        let Some(reporters) = self.observed.get(observed) else {
+            return;
+        };
+        if self.confirmed.contains(observed) {
+            return;
+        }
+        let contact = reporters
+            .keys()
+            .any(|p| self.members.contains_key(p) || self.is_friend_peer(p));
+        let networks = distinct_networks(reporters.values().flatten());
+        let needed = if contact {
+            NETWORKS_WITH_CONTACT
+        } else {
+            NETWORKS_OF_STRANGERS
+        };
+        if networks < needed {
+            return;
+        }
+        let ip = addr::ip(observed);
+        let same_family = |a: &Multiaddr| {
+            addr::ip(a).is_some_and(|a| Some(a.is_ipv4()) == ip.map(|ip| ip.is_ipv4()))
+        };
+        // Another public address than the ones known, with no local change: the router or
+        // the carrier gave this device a new one (or it moved without noticing).
+        let moved = contact
+            && self.started.elapsed() > STARTUP
+            && self.confirmed.iter().any(same_family)
+            && !self.confirmed.iter().any(|a| addr::ip(a) == ip);
+        self.confirmed.insert(observed.clone());
+        self.confirmed_seen.insert(observed.clone(), Instant::now());
+        self.swarm.add_external_address(observed.clone());
+        self.emit(NodeEvent::ExternalAddress(observed.clone()));
+        // Announced again at once: the others look for this device where it is now.
+        self.provided.1 = None;
+        if moved {
+            tracing::info!(%observed, "this device's public address changed");
+            self.network_changed(false);
+        }
+    }
+
+    /// `peer` just proved membership: the addresses it reported for this device before
+    /// that, which may now be agreed on (see [`Self::confirm_if_agreed`]).
+    pub(super) fn reported_by_member(&mut self, peer: PeerId) {
+        let reported: Vec<Multiaddr> = self
+            .observed
+            .iter()
+            .filter(|(a, reporters)| reporters.contains_key(&peer) && !self.confirmed.contains(*a))
+            .map(|(a, _)| a.clone())
+            .collect();
+        for observed in reported {
+            self.confirm_if_agreed(&observed);
         }
     }
 
@@ -526,8 +568,9 @@ mod tests {
 
     /// Peers that report an address from one network (/16 of IPv4, /48 of IPv6), however
     /// many addresses they come from, do not confirm it: one machine or one provider's few
-    /// can take many there. From a second network they do. The same for an address taken
-    /// because this device's network changes its port for each destination.
+    /// can take many there. Strangers from a second network do not either, from a third
+    /// they do. The same for an address taken because this device's network changes its
+    /// port for each destination.
     #[tokio::test(flavor = "multi_thread")]
     async fn peers_on_one_network_do_not_confirm_an_address() {
         let (node, _group) = lone_member();
@@ -552,16 +595,18 @@ mod tests {
                 n.on_observed_address(peer, says.clone());
             };
             let mut found = Vec::new();
-            for (says, one, other) in [
+            for (says, one, other, third) in [
                 (
                     "/ip4/198.51.100.7/udp/4001/quic-v1",
                     ["203.0.113.10", "203.0.113.11", "203.0.200.12"],
                     "192.0.2.13",
+                    "100.64.0.14",
                 ),
                 (
                     "/ip6/2001:db8:9::7/udp/4001/quic-v1",
                     ["2001:db8:1::1", "2001:db8:1:ffff::2", "2001:db8:1:8000::3"],
                     "2001:db8:2::4",
+                    "2001:db8:3::5",
                 ),
             ] {
                 let says: Multiaddr = says.parse().unwrap();
@@ -570,7 +615,9 @@ mod tests {
                 }
                 let by_one = n.confirmed.contains(&says);
                 report(n, other, &says);
-                found.push((by_one, n.confirmed.contains(&says)));
+                let by_two = n.confirmed.contains(&says);
+                report(n, third, &says);
+                found.push((by_one, by_two, n.confirmed.contains(&says)));
             }
             // Three addresses of one network, each told another port of one address: the
             // port changes, but the address is not taken for it.
@@ -584,11 +631,18 @@ mod tests {
                     .unwrap();
                 report(n, from, &says);
             }
-            found.push((n.port_change_reported, !n.confirmed.is_empty()));
+            found.push((n.port_change_reported, false, !n.confirmed.is_empty()));
             found
         })
         .await;
-        assert_eq!(found, [(false, true), (false, true), (true, false)]);
+        assert_eq!(
+            found,
+            [
+                (false, false, true),
+                (false, false, true),
+                (true, false, false)
+            ]
+        );
         node.shutdown().await.unwrap();
     }
 
@@ -778,13 +832,69 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// Strangers on three networks that say this device is at a new address have it taken
+    /// and announced, but do not have it taken as moved, which would look for everyone
+    /// again; a member on a second network confirms an address, and its new one moves it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_member_can_make_this_device_take_itself_as_moved() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            n.started = Instant::now() - Duration::from_secs(3600);
+            let mut next = 9600;
+            let mut report = |n: &mut Node, peer: PeerId, from: &str, says: &Multiaddr| {
+                next += 1;
+                n.on_connection_established(
+                    peer,
+                    ConnectionId::new_unchecked(next),
+                    &ConnectedPoint::Listener {
+                        local_addr: "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
+                        send_back_addr: format!("/ip4/{from}/udp/4001/quic-v1").parse().unwrap(),
+                    },
+                );
+                n.on_observed_address(peer, says.clone());
+            };
+            let here: Multiaddr = "/ip4/198.51.100.7/udp/4001/quic-v1".parse().unwrap();
+            let made_up: Multiaddr = "/ip4/198.51.100.66/udp/4001/quic-v1".parse().unwrap();
+            let moved_to: Multiaddr = "/ip4/198.51.100.8/udp/4001/quic-v1".parse().unwrap();
+            for from in ["203.0.113.10", "192.0.2.11", "100.64.0.12"] {
+                report(n, PeerId::random(), from, &here);
+            }
+            n.last_network_change = None;
+            for from in ["203.0.113.20", "192.0.2.21", "100.64.0.22"] {
+                report(n, PeerId::random(), from, &made_up);
+            }
+            let by_strangers = (
+                n.confirmed.contains(&made_up),
+                n.last_network_change.is_some(),
+            );
+            // A member on a second network, its report made before it proved itself.
+            let bea = PeerId::random();
+            report(n, PeerId::random(), "203.0.113.30", &moved_to);
+            report(n, bea, "192.0.2.31", &moved_to);
+            let before_proof = n.confirmed.contains(&moved_to);
+            crate::node::tests::add_member(n, group, bea);
+            n.reported_by_member(bea);
+            let by_member = (
+                n.confirmed.contains(&moved_to),
+                n.last_network_change.is_some(),
+            );
+            (by_strangers, before_proof, by_member)
+        })
+        .await;
+        assert_eq!(found, ((true, false), false, (true, true)));
+        node.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn strangers_cannot_make_another_address_this_devices_own() {
         let (node, _group) = lone_member();
         let (confirmed, own) = inspect(&node, |n| {
-            // Two DHT nodes at two addresses say this device is at a member's address.
+            // Three DHT nodes on three networks say this device is at a member's address.
             let member_at: Multiaddr = "/ip4/198.51.100.7/udp/4001/quic-v1".parse().unwrap();
-            for (i, from) in ["203.0.113.10", "192.0.2.11"].iter().enumerate() {
+            for (i, from) in ["203.0.113.10", "192.0.2.11", "100.64.0.12"]
+                .iter()
+                .enumerate()
+            {
                 let stranger = PeerId::random();
                 n.on_connection_established(
                     stranger,

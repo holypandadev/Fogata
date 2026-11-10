@@ -12,7 +12,8 @@ use libp2p::{
     swarm::dial_opts::{DialOpts, PeerCondition},
 };
 
-use super::{Node, Pending, SEARCH_HARD, now_ms};
+use super::members::bytes;
+use super::{Node, ON_ITS_WAY_AT_MOST, Pending, RecordSent, SEARCH_HARD, now_ms};
 use crate::{NodeEvent, Path};
 
 /// How long after a peer the relay no longer serves was disconnected it is dialled again
@@ -25,9 +26,14 @@ const REDIAL_LET_GO: Duration = Duration::from_secs(3);
 pub(super) const CALL_GRACE: Duration = Duration::from_secs(5 * 60);
 
 /// A banner's or picture record's digest as kept for [`Pending::Banner`] and
-/// [`Pending::Picture`]; all zeros for none.
+/// [`Pending::Picture`], padded with zeros; all zeros for none. A digest is 16 bytes: taken
+/// whole rather than as 32 (which made every banner's key the same, so that a banner one
+/// member refused was never sent it again, whatever it was).
 pub(super) fn banner_key(digest: &[u8]) -> [u8; 32] {
-    digest.try_into().unwrap_or_default()
+    let mut key = [0; 32];
+    let n = digest.len().min(32);
+    key[..n].copy_from_slice(&digest[..n]);
+    key
 }
 
 impl Node {
@@ -260,29 +266,13 @@ impl Node {
         let Some(slot) = self.groups.get(&group) else {
             return;
         };
-        if let Some(banner) = slot.ctx.encoded_banner() {
-            let digest = banner_key(&slot.ctx.banner_digest());
-            let peers: Vec<PeerId> = slot
-                .banner_peers
-                .iter()
-                .filter(|p| {
-                    slot.members.contains(p)
-                        && Some(**p) != from
-                        && slot.banner_refused.get(p) != Some(&digest)
-                })
-                .copied()
-                .collect();
-            for peer in peers {
-                self.request(
-                    peer,
-                    MemberRequest::GroupBanner {
-                        group_id: group.as_bytes().to_vec(),
-                        banner: banner.clone(),
-                    },
-                    Pending::Banner(group, digest),
-                );
-            }
-        }
+        let peers: Vec<PeerId> = slot
+            .banner_peers
+            .iter()
+            .filter(|p| slot.members.contains(p) && Some(**p) != from)
+            .copied()
+            .collect();
+        self.send_banner_to(group, &peers);
         self.emit(NodeEvent::GroupChanged(group));
     }
 
@@ -292,30 +282,113 @@ impl Node {
         let Some(slot) = self.groups.get(&group) else {
             return;
         };
-        if let Some(picture) = slot.ctx.encoded_picture() {
-            let digest = banner_key(&slot.ctx.picture_digest());
-            let peers: Vec<PeerId> = slot
-                .picture_peers
-                .iter()
-                .filter(|p| {
-                    slot.members.contains(p)
-                        && Some(**p) != from
-                        && slot.picture_refused.get(p) != Some(&digest)
-                })
-                .copied()
-                .collect();
-            for peer in peers {
-                self.request(
-                    peer,
-                    MemberRequest::GroupPicture {
-                        group_id: group.as_bytes().to_vec(),
-                        picture: picture.clone(),
-                    },
-                    Pending::Picture(group, digest),
-                );
-            }
-        }
+        let peers: Vec<PeerId> = slot
+            .picture_peers
+            .iter()
+            .filter(|p| slot.members.contains(p) && Some(**p) != from)
+            .copied()
+            .collect();
+        self.send_picture_to(group, &peers);
         self.emit(NodeEvent::GroupChanged(group));
+    }
+
+    /// Sends the group's banner to those of `peers` that may be sent it now: not to one that
+    /// refused it, nor to one it went to lately or is on its way to (see [`RecordSent`]).
+    /// Returns the bytes sent, to charge the member that asked.
+    pub(super) fn send_banner_to(&mut self, group: GroupId, peers: &[PeerId]) -> usize {
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return 0;
+        };
+        let digest = banner_key(&slot.ctx.banner_digest());
+        let to: Vec<PeerId> = peers
+            .iter()
+            .filter(|p| {
+                RecordSent::may_send(slot.banner_sent.get(p), slot.banner_refused.get(p), &digest)
+            })
+            .copied()
+            .collect();
+        let Some(banner) = to.first().and_then(|_| slot.ctx.encoded_banner()) else {
+            return 0;
+        };
+        for peer in &to {
+            slot.banner_sent.insert(*peer, RecordSent::now(digest));
+        }
+        for peer in &to {
+            self.request(
+                *peer,
+                MemberRequest::GroupBanner {
+                    group_id: group.as_bytes().to_vec(),
+                    banner: banner.clone(),
+                },
+                Pending::Banner(group, digest),
+            );
+        }
+        banner.len() * to.len()
+    }
+
+    /// Sends the group's picture record to those of `peers` that may be sent it now, as
+    /// [`Self::send_banner_to`] does the banner. Returns the bytes sent.
+    pub(super) fn send_picture_to(&mut self, group: GroupId, peers: &[PeerId]) -> usize {
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return 0;
+        };
+        let digest = banner_key(&slot.ctx.picture_digest());
+        let to: Vec<PeerId> = peers
+            .iter()
+            .filter(|p| {
+                RecordSent::may_send(
+                    slot.picture_sent.get(p),
+                    slot.picture_refused.get(p),
+                    &digest,
+                )
+            })
+            .copied()
+            .collect();
+        let Some(picture) = to.first().and_then(|_| slot.ctx.encoded_picture()) else {
+            return 0;
+        };
+        for peer in &to {
+            slot.picture_sent.insert(*peer, RecordSent::now(digest));
+        }
+        for peer in &to {
+            self.request(
+                *peer,
+                MemberRequest::GroupPicture {
+                    group_id: group.as_bytes().to_vec(),
+                    picture: picture.clone(),
+                },
+                Pending::Picture(group, digest),
+            );
+        }
+        picture.len() * to.len()
+    }
+
+    /// Asks member `peer` for the entries of `group` it has and this device lacks, unless a
+    /// sync with it is on its way already: its answer asks for the next, so a member that
+    /// names other heads at every roster gets one at a time. Returns the bytes sent.
+    pub(super) fn request_sync(&mut self, peer: PeerId, group: GroupId) -> usize {
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return 0;
+        };
+        if slot
+            .syncing
+            .get(&peer)
+            .is_some_and(|at| at.elapsed() < ON_ITS_WAY_AT_MOST)
+        {
+            return 0;
+        }
+        slot.syncing.insert(peer, Instant::now());
+        let have = bytes(slot.ctx.hashes());
+        let sent = have.len() * 32;
+        self.request(
+            peer,
+            MemberRequest::Sync {
+                group_id: group.as_bytes().to_vec(),
+                have,
+            },
+            Pending::Sync(group),
+        );
+        sent
     }
 
     /// Entries `peer` pushed for `group`: taken as any batch a member sends.
@@ -345,5 +418,19 @@ impl Node {
             Some(new) => self.after_group_change(group, new, Some(peer)),
             None => self.take_pushed(peer, group, &entries),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::banner_key;
+
+    /// Two banners have two keys, none has its own: a refusal or a send of one banner says
+    /// nothing of another.
+    #[test]
+    fn each_banner_has_a_key_of_its_own() {
+        assert_ne!(banner_key(&[1; 16]), banner_key(&[2; 16]));
+        assert_eq!(banner_key(&[]), [0; 32]);
+        assert_eq!(banner_key(&[7; 16])[..16], [7; 16]);
     }
 }

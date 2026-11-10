@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
@@ -412,6 +413,89 @@ void main() {
     expect(find.text('lake-a.jpg'), findsOneWidget);
     expect(find.text('Save'), findsOneWidget);
     expect(find.textContaining('lake-b.jpg ·'), findsOneWidget);
+  });
+
+  testWidgets(
+    'pictures read for a chat go with its files, and big ones are not read',
+    (tester) async {
+      final dir = Directory.systemTemp.createTempSync('fogata-direct-kept');
+      addTearDown(() => dir.deleteSync(recursive: true));
+      final small = animation(2, 1);
+      final smallPath = '${dir.path}/dot.gif';
+      File(smallPath).writeAsBytesSync(small);
+      // Larger than any picture of a room: a file to save, never read into memory.
+      const big = 12 << 20;
+      final bigPath = '${dir.path}/huge.png';
+      File(bigPath).writeAsBytesSync(Uint8List(big));
+      UiDirectFile file(String id, String name, String path, int size) =>
+          UiDirectFile(
+            id: id,
+            name: name,
+            size: size,
+            kind: UiFileKind.picture,
+            state: UiFileState.here,
+            received: size,
+            path: path,
+          );
+      final state = await show(
+        tester,
+        page([
+          message(
+            '1',
+            '',
+            files: [file('a', 'dot.gif', smallPath, small.length)],
+          ),
+          message('2', '', files: [file('b', 'huge.png', bigPath, big)]),
+        ], online: true),
+      );
+      await pumpUntil(
+        tester,
+        () => pictureUnder(const ValueKey('direct-item:1')),
+        what: 'the picture read from the disk',
+      );
+      expect(state.direct.pictures.keys, [smallPath]);
+      expect(find.text('huge.png'), findsOneWidget);
+      expect(find.text('Save'), findsOneWidget);
+      // The chat's files cleared: what was read of them goes too.
+      await tester.runAsync(() => state.direct.clearFiles(sofia.id));
+      expect(state.direct.pictures, isEmpty);
+    },
+  );
+
+  test(
+    'a page read earlier that answers later does not replace a newer one',
+    () async {
+      final state = AppState('/nonexistent/fogata-direct-test');
+      final answers = <Completer<UiDirectPage>>[];
+      state.direct
+        ..open = sofia.id
+        ..loadChat = ({required deviceId, required limit}) {
+          final answer = Completer<UiDirectPage>();
+          answers.add(answer);
+          return answer.future;
+        };
+      final older = state.direct.refresh();
+      final newer = state.direct.refresh();
+      await pumpEventQueue();
+      expect(answers, hasLength(2));
+      final sent = page([message('1', 'Before'), message('2', 'Just sent')]);
+      answers[1].complete(sent);
+      await newer;
+      answers[0].complete(page([message('1', 'Before')]));
+      await older;
+      expect(state.direct.page, same(sent));
+    },
+  );
+
+  test('pictures read for a chat go when another is shown', () async {
+    final state = AppState('/nonexistent/fogata-direct-test');
+    state.direct
+      ..open = sofia.id
+      ..pictures['/somewhere/dot.gif'] = Uint8List(4);
+    await state.direct.show(sofia.id);
+    expect(state.direct.pictures, hasLength(1));
+    await state.direct.show('someone-else');
+    expect(state.direct.pictures, isEmpty);
   });
 
   test('how long until a message disappears, in words', () {

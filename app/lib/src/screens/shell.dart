@@ -1901,7 +1901,13 @@ class _ToastPillState extends State<_ToastPill> {
     final toast = widget.toast;
     final error = toast.error;
     final path = toast.path;
-    final text = Text(toast.text, style: tx(c.fg, size: 13));
+    // A few lines at most: what someone else named or wrote may be long.
+    final text = Text(
+      toast.text,
+      style: tx(c.fg, size: 13),
+      maxLines: 4,
+      overflow: TextOverflow.ellipsis,
+    );
     final pill = Container(
       constraints: const BoxConstraints(maxWidth: 520),
       margin: const EdgeInsets.only(top: 8),

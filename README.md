@@ -62,9 +62,15 @@ end.
 
 ## Install
 
-Fogata is in pre-release. Builds for Linux (Flatpak), macOS and Windows will be on the Releases
-page; until then, build it from source. Nothing is signed with a paid certificate, so your system
-asks you to confirm the first start once.
+Fogata is in pre-release. Each pre-release on the
+[Releases page](https://github.com/holypandadev/Fogata/releases) has the first installs for
+Linux (a Flatpak), macOS and Windows among its files, with a `README.txt` that says how to
+install them and how to check, before you open anything, that the file is the one the
+project signed (`SHA256SUMS` and its signature). Nothing is signed with a paid certificate, so
+your system asks you to confirm the first start once.
+
+To build it yourself, see [docs/building.md](docs/building.md). The Linux and Windows apps
+build from source alone; the macOS app needs a WebRTC framework that is not published yet.
 
 Fogata keeps itself up to date. At every start it looks for a new version on the Releases page
 and among your friends, and installs it before it opens; one that comes while it runs waits for
@@ -103,6 +109,8 @@ start and can be changed in Settings.
 - [docs/translating.md](docs/translating.md): improving a translation.
 - [docs/releasing.md](docs/releasing.md), [docs/releasing-beta.md](docs/releasing-beta.md):
   how releases and pre-releases are made and signed.
+- [CONTRIBUTING.md](CONTRIBUTING.md): sending a change. [SECURITY.md](SECURITY.md): reporting a
+  vulnerability privately.
 
 ## License
 

@@ -1,9 +1,9 @@
 //! The libp2p behaviour stack of a Fogata node.
 
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use fogata_proto::{
@@ -188,9 +188,70 @@ fn message_config() -> request_response::Config {
         .with_max_concurrent_streams(16)
 }
 
+/// How long one circuit through this device's relay lasts with `bridge`: a long call (3 hours
+/// of video) and some, not a whole day of someone else's traffic.
+const BRIDGE_CIRCUIT_DURATION: Duration = Duration::from_secs(6 * 60 * 60);
+/// Most bytes one circuit carries with `bridge`: enough for a long call through this device
+/// (about 3 hours of video at 1.5 Mbit/s), not for someone to route everything through it.
+const BRIDGE_CIRCUIT_BYTES: u64 = 2 << 30;
+/// Circuits one member may open through this device's relay with `bridge`: a few at once
+/// (a call, its reconnections), then one every few minutes. libp2p knows nothing of the
+/// bytes a circuit carried, only how many it may carry, so this bounds what one member can
+/// make this device carry over time: [`BRIDGE_CIRCUIT_BYTES`] per circuit, a little more
+/// than 25 Mbit/s at most when used to the full, instead of four circuits at a time at the
+/// speed of the link.
+const BRIDGE_CIRCUIT_BURST: f64 = 8.0;
+const BRIDGE_CIRCUITS_PER_SECOND: f64 = 1.0 / (10.0 * 60.0);
+/// Sources whose circuit budget is kept; past it, those whose budget is full again go.
+const BRIDGE_SOURCES_KEPT: usize = 256;
+
+/// The circuits each source may still open through the relay (see
+/// [`BRIDGE_CIRCUIT_BURST`]).
+#[derive(Default)]
+struct CircuitBudget {
+    sources: HashMap<PeerId, (f64, Instant)>,
+}
+
+impl CircuitBudget {
+    fn tokens(&self, (tokens, at): (f64, Instant), now: Instant) -> f64 {
+        let elapsed = now.saturating_duration_since(at).as_secs_f64();
+        (tokens + elapsed * BRIDGE_CIRCUITS_PER_SECOND).min(BRIDGE_CIRCUIT_BURST)
+    }
+}
+
+impl relay::RateLimiter for CircuitBudget {
+    fn try_next(&mut self, peer: PeerId, _: &Multiaddr, now: Instant) -> bool {
+        if self.sources.len() >= BRIDGE_SOURCES_KEPT && !self.sources.contains_key(&peer) {
+            let sources = std::mem::take(&mut self.sources);
+            self.sources = sources
+                .into_iter()
+                .filter(|(_, budget)| self.tokens(*budget, now) < BRIDGE_CIRCUIT_BURST)
+                .collect();
+            if self.sources.len() >= BRIDGE_SOURCES_KEPT {
+                return false;
+            }
+        }
+        let budget = self
+            .sources
+            .get(&peer)
+            .copied()
+            .unwrap_or((BRIDGE_CIRCUIT_BURST, now));
+        let tokens = self.tokens(budget, now);
+        if tokens < 1.0 {
+            self.sources.insert(peer, (tokens, now));
+            return false;
+        }
+        self.sources.insert(peer, (tokens - 1.0, now));
+        true
+    }
+}
+
 /// Relay server limited to verified members of regular groups. With `bridge` it carries
-/// their traffic for as long as needed; without it, circuits only live long enough to
-/// coordinate a hole punch.
+/// their traffic for as long as a call needs, a bounded number of circuits per member over
+/// time; without it, circuits only live long enough to coordinate a hole punch (libp2p's
+/// defaults: 2 minutes, 128 KiB). libp2p's relay asks nothing about a circuit's other end
+/// beyond it holding a reservation here, which only verified members get: a circuit between
+/// members of two different groups of this device's is not told apart.
 fn relay_config(bridge: bool, verified: VerifiedPeers) -> relay::Config {
     let mut config = relay::Config {
         max_reservations: 32,
@@ -201,10 +262,11 @@ fn relay_config(bridge: bool, verified: VerifiedPeers) -> relay::Config {
         ..Default::default()
     };
     if bridge {
-        // Enough for a long call through this device (about 3 hours of video at 1.5 Mbit/s
-        // each way), not for someone to route everything through it.
-        config.max_circuit_duration = Duration::from_secs(24 * 60 * 60);
-        config.max_circuit_bytes = 2 << 30;
+        config.max_circuit_duration = BRIDGE_CIRCUIT_DURATION;
+        config.max_circuit_bytes = BRIDGE_CIRCUIT_BYTES;
+        config
+            .circuit_src_rate_limiters
+            .push(Box::new(CircuitBudget::default()));
     }
     let for_reservations = verified.clone();
     config.reservation_rate_limiters.push(Box::new(
@@ -291,6 +353,30 @@ mod tests {
             listed.iter().all(|p| !p.contains("fogata")),
             "a stranger was told {listed:?}"
         );
+    }
+
+    /// A member opens circuits through the relay a few at once, then one every few
+    /// minutes, whatever it tries; another member has its own.
+    #[test]
+    fn a_member_opens_a_few_circuits_then_one_every_few_minutes() {
+        use relay::RateLimiter as _;
+        let mut budget = CircuitBudget::default();
+        let (bea, cai) = (PeerId::random(), PeerId::random());
+        let at: Multiaddr = "/ip4/192.0.2.1/udp/4001/quic-v1".parse().unwrap();
+        let start = Instant::now();
+        let opened = (0..100)
+            .filter(|_| budget.try_next(bea, &at, start))
+            .count();
+        assert_eq!(opened, BRIDGE_CIRCUIT_BURST as usize);
+        assert!(budget.try_next(cai, &at, start));
+        assert!(!budget.try_next(bea, &at, start + Duration::from_secs(60)));
+        assert!(budget.try_next(bea, &at, start + Duration::from_secs(10 * 60)));
+        assert!(!budget.try_next(bea, &at, start + Duration::from_secs(10 * 60)));
+        // Made-up sources, as many as one likes: a bounded number kept.
+        for _ in 0..1000 {
+            budget.try_next(PeerId::random(), &at, start);
+        }
+        assert!(budget.sources.len() <= BRIDGE_SOURCES_KEPT);
     }
 
     fn round_trip(request: MemberRequest) -> std::io::Result<MemberRequest> {

@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include <climits>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <map>
@@ -24,6 +25,19 @@ constexpr int kChannels = 2;
 // WebRTC takes sound in 10 ms frames.
 constexpr size_t kFrame = kRate / 100;
 
+// An executable's name without the " (deleted)" the kernel adds once the file was
+// replaced on disk (an update while the app runs), so the running copy still
+// matches the name a sound stream reports, whichever of the two forms it took.
+std::string BinaryName(std::string name) {
+  static const std::string kDeleted = " (deleted)";
+  if (name.size() > kDeleted.size() &&
+      name.compare(name.size() - kDeleted.size(), kDeleted.size(), kDeleted) ==
+          0) {
+    name.resize(name.size() - kDeleted.size());
+  }
+  return name;
+}
+
 // This application's executable name, as PipeWire reports it: its own sound,
 // and that of any other copy of it, is left out.
 std::string OwnBinary() {
@@ -32,7 +46,34 @@ std::string OwnBinary() {
   if (n <= 0) return "";
   path[n] = 0;
   const char* slash = std::strrchr(path, '/');
-  return slash != nullptr ? slash + 1 : path;
+  return BinaryName(slash != nullptr ? slash + 1 : path);
+}
+
+// A process id from a property, or 0 when it is missing or not a number.
+int PidOf(const char* value) {
+  if (value == nullptr) return 0;
+  char* end = nullptr;
+  const long pid = std::strtol(value, &end, 10);
+  if (end == value || *end != 0 || pid <= 0 || pid > INT_MAX) return 0;
+  return int(pid);
+}
+
+// An object id from a property, or SPA_ID_INVALID.
+uint32_t IdOf(const char* value) {
+  if (value == nullptr) return SPA_ID_INVALID;
+  char* end = nullptr;
+  const unsigned long id = std::strtoul(value, &end, 10);
+  if (end == value || *end != 0 || id >= SPA_ID_INVALID) return SPA_ID_INVALID;
+  return uint32_t(id);
+}
+
+// With FOGATA_CALL_LOG set (the switch of the call's own log), each decision about
+// an application's output goes to standard error, so a sighting of the app's own
+// sound in a shared screen can be explained: which node, the process and binary
+// it gave, its client's process, and whether it was linked.
+bool Tracing() {
+  static const bool tracing = std::getenv("FOGATA_CALL_LOG") != nullptr;
+  return tracing;
 }
 
 // For tests: FOGATA_SCREEN_SOUND_FROM names the one program whose sound is taken,
@@ -48,10 +89,19 @@ std::string OnlyFrom() {
 
 struct Node {
   bool app_output = false;
-  // Whose it is comes from the node's full properties, a moment after it appears;
-  // until then it is not linked.
+  // Whose it is comes from the node's full properties, a moment after it appears,
+  // and from its client's process as the server saw it on the socket. Until a
+  // process or a binary is actually known the node is not linked: a stream that
+  // says nothing about itself may be this app's own call sound.
   bool known = false;
+  // Once seen to be this app's own a node stays so: properties that come later
+  // and say less never get it linked.
   bool own = false;
+  // Whether it was linked yet, for the trace.
+  bool linked = false;
+  uint32_t client = SPA_ID_INVALID;
+  int pid = 0;
+  std::string binary;
 };
 
 struct Port {
@@ -80,6 +130,9 @@ struct PipeWireAppsCapturer::State {
   uint32_t node = SPA_ID_INVALID;
 
   std::map<uint32_t, Node> nodes;
+  // Each client's process id, as the server took it from the client's socket
+  // (pipewire.sec.pid), by client id.
+  std::map<uint32_t, int> clients;
   std::map<uint32_t, std::unique_ptr<Watched>> watched;
   std::map<uint32_t, Port> ports;
   // The links this capture made, by the output and input port they join; each
@@ -108,19 +161,71 @@ struct Watched {
 
 void Relink(State* s);
 
+// Takes away every link this capture made from a node's ports.
+void Unlink(State* s, uint32_t node) {
+  for (auto it = s->links.begin(); it != s->links.end();) {
+    auto port = s->ports.find(it->first.first);
+    if (port != s->ports.end() && port->second.node == node) {
+      if (it->second != nullptr) pw_proxy_destroy(it->second);
+      it = s->links.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+// Decides again whose a node is, from all that is known of it now. A node found to
+// be this app's own loses the links it may already have, so a stream whose
+// process was told late is not left in the shared screen's sound.
+void Judge(State* s, uint32_t id, Node& node) {
+  if (!node.app_output) return;
+  int client_pid = 0;
+  if (node.client != SPA_ID_INVALID) {
+    auto client = s->clients.find(node.client);
+    if (client != s->clients.end()) client_pid = client->second;
+  }
+  const std::string binary = BinaryName(node.binary);
+  const bool own =
+      (node.pid != 0 && node.pid == s->own_pid) ||
+      (client_pid != 0 && client_pid == s->own_pid) ||
+      (!binary.empty() && !s->own_binary.empty() && s->own_binary == binary) ||
+      (!s->only_from.empty() && s->only_from != binary);
+  const bool was_own = node.own;
+  node.own = node.own || own;
+  // The client's process alone does not make a node known: every stream of a
+  // PulseAudio application belongs to the one pipewire-pulse client.
+  node.known = node.known || node.pid != 0 || !binary.empty() || node.own;
+  if (node.own && !was_own) Unlink(s, id);
+  if (Tracing()) {
+    std::fprintf(stderr,
+                 "[ScreenSound] node %u: pid=%d binary=%s client=%d "
+                 "client_pid=%d own_pid=%d -> %s\n",
+                 id, node.pid, binary.empty() ? "?" : binary.c_str(),
+                 node.client == SPA_ID_INVALID ? -1 : int(node.client),
+                 client_pid, int(s->own_pid),
+                 node.own     ? "own, not linked"
+                 : node.known ? "taken"
+                              : "unknown, not linked");
+  }
+}
+
 void OnNodeInfo(void* data, const pw_node_info* info) {
   auto w = static_cast<Watched*>(data);
   State* s = w->state;
   if (info == nullptr || info->props == nullptr) return;
+  if ((info->change_mask & PW_NODE_CHANGE_MASK_PROPS) == 0) return;
   auto node = s->nodes.find(w->id);
   if (node == s->nodes.end()) return;
-  const char* pid = spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_ID);
+  // What a later update leaves out is kept from before.
+  if (const int pid =
+          PidOf(spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_ID))) {
+    node->second.pid = pid;
+  }
   const char* binary = spa_dict_lookup(info->props, PW_KEY_APP_PROCESS_BINARY);
-  node->second.known = true;
-  node->second.own =
-      (pid != nullptr && std::atoi(pid) == s->own_pid) ||
-      (binary != nullptr && !s->own_binary.empty() && s->own_binary == binary) ||
-      (!s->only_from.empty() && (binary == nullptr || s->only_from != binary));
+  if (binary != nullptr && *binary != 0) node->second.binary = binary;
+  const uint32_t client = IdOf(spa_dict_lookup(info->props, PW_KEY_CLIENT_ID));
+  if (client != SPA_ID_INVALID) node->second.client = client;
+  Judge(s, w->id, node->second);
   Relink(s);
 }
 
@@ -139,6 +244,17 @@ void Relink(State* s) {
     if (node == s->nodes.end() || !node->second.app_output ||
         !node->second.known || node->second.own) {
       continue;
+    }
+    if (!node->second.linked) {
+      node->second.linked = true;
+      if (Tracing()) {
+        std::fprintf(stderr,
+                     "[ScreenSound] linking node %u: pid=%d binary=%s\n",
+                     port.node, node->second.pid,
+                     node->second.binary.empty()
+                         ? "?"
+                         : node->second.binary.c_str());
+      }
     }
     std::vector<uint32_t> targets;
     auto same = inputs.find(port.channel);
@@ -184,6 +300,7 @@ void OnGlobal(void* data, uint32_t id, uint32_t, const char* type, uint32_t,
     Node node;
     node.app_output =
         media_class != nullptr && std::strcmp(media_class, "Stream/Output/Audio") == 0;
+    node.client = IdOf(spa_dict_lookup(props, PW_KEY_CLIENT_ID));
     s->nodes[id] = node;
     if (node.app_output) {
       auto proxy = static_cast<pw_proxy*>(
@@ -198,6 +315,16 @@ void OnGlobal(void* data, uint32_t id, uint32_t, const char* type, uint32_t,
                              &node_events, w.get());
         s->watched[id] = std::move(w);
       }
+    }
+  } else if (std::strcmp(type, PW_TYPE_INTERFACE_Client) == 0) {
+    // The process the server saw on the client's socket, which a stream cannot
+    // misreport: a node of this app's own whose properties lack its process is
+    // still told apart by it.
+    const int pid = PidOf(spa_dict_lookup(props, PW_KEY_SEC_PID));
+    if (pid == 0) return;
+    s->clients[id] = pid;
+    for (auto& [node_id, node] : s->nodes) {
+      if (node.client == id) Judge(s, node_id, node);
     }
   } else if (std::strcmp(type, PW_TYPE_INTERFACE_Port) == 0) {
     const char* node = spa_dict_lookup(props, PW_KEY_NODE_ID);
@@ -220,6 +347,7 @@ void OnGlobal(void* data, uint32_t id, uint32_t, const char* type, uint32_t,
 void OnGlobalRemove(void* data, uint32_t id) {
   auto s = static_cast<State*>(data);
   s->nodes.erase(id);
+  s->clients.erase(id);
   s->watched.erase(id);
   s->ports.erase(id);
   // The server already dropped a link whose port went away; its proxy stays

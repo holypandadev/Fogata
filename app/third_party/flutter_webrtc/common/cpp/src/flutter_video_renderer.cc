@@ -228,8 +228,13 @@ void FlutterVideoRendererManager::VideoRendererDispose(
     base_->textures_->UnregisterTexture(texture_id,
                                         [&, it] { renderers_.erase(it); });
 #else
-    base_->textures_->UnregisterTexture(texture_id);
+    // Fogata: the engine may still be copying this renderer's pixels on its raster
+    // thread, and reads its buffer after the copy returns: the renderer goes once
+    // the engine has moved on (UnregisterTextureLater), not now.
+    scoped_refptr<FlutterVideoRenderer> renderer = it->second;
     renderers_.erase(it);
+    base_->textures_->UnregisterTextureLater(
+        texture_id, [renderer]() mutable { renderer = nullptr; });
 #endif
     result->Success();
     return;

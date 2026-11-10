@@ -313,6 +313,7 @@ const maxSdpSections = 4;
 /// answers have its channels and no others ([callSections]).
 @visibleForTesting
 bool fairSignal(Map<String, dynamic> message) {
+  if (message['t'] == 'ice') return _fairCandidate(message);
   final sdp = message['sdp'];
   if (sdp == null) return true;
   if (sdp is! String || sdp.length > maxSdpBytes) return false;
@@ -320,6 +321,24 @@ bool fairSignal(Map<String, dynamic> message) {
   if (t == 'offer' || t == 'answer') return callSections(sdp);
   return '\nm='.allMatches(sdp).length + (sdp.startsWith('m=') ? 1 : 0) <=
       maxSdpSections;
+}
+
+/// Longest candidate taken from a participant: one names an address, a port and a few
+/// words about them, some 200 bytes. This device sends its candidates inside its
+/// descriptions; only older copies send them one by one.
+const maxCandidateBytes = 512;
+
+/// A candidate sent alone: its line no longer than [maxCandidateBytes], and the channel
+/// it is for named as the call names them (its number, and its place among at most
+/// [maxSdpSections]).
+bool _fairCandidate(Map<String, dynamic> message) {
+  final candidate = message['candidate'];
+  final mid = message['mid'];
+  final index = message['index'];
+  return (candidate == null ||
+          (candidate is String && candidate.length <= maxCandidateBytes)) &&
+      (mid == null || (mid is String && mid.length <= 4)) &&
+      (index == null || (index is int && index >= 0 && index < maxSdpSections));
 }
 
 /// Whether a description of a call has the call's channels, in order, and no others: at

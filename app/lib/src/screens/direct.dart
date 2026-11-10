@@ -5,7 +5,6 @@ import 'dart:math' as math;
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:fogata_video/fogata_video.dart';
 import 'package:intl/intl.dart';
 
 import '../app_state.dart';
@@ -22,13 +21,13 @@ import '../safe_image.dart';
 import '../shown_text.dart';
 import '../theme.dart';
 import '../typing.dart';
-import '../video_sound.dart';
 import '../voice.dart';
 import '../widgets.dart';
 import 'emoji_picker.dart';
 import 'friend_card.dart' show toggleFriendCard;
 import 'user_panel.dart' show toggleUserPanel;
 import 'members.dart' show confirmDialog;
+import 'video_view.dart';
 import 'room.dart' show callFriendChecked;
 import 'user_panel.dart' show CardBio, PanelBanner, StatusDot;
 import 'voice_ui.dart';
@@ -1789,9 +1788,8 @@ class _FileCard extends StatelessWidget {
     }
     final path = file.path;
     return switch (file.kind) {
-      // One larger than all the pictures kept for the screen together is not read into
-      // memory at every refresh: it shows as a file.
-      UiFileKind.picture when path != null && file.size <= _picturesKept =>
+      // A large one is not read into memory at every refresh: it shows as a file.
+      UiFileKind.picture when path != null && file.size <= _pictureMax =>
         _Picture(file: file, path: path, mine: item.mine, writer: writer),
       UiFileKind.video when file.video != null => _Video(
         file: file,
@@ -1816,10 +1814,14 @@ String availableWhen(AppState state, UiDirectPage page) =>
     ? l10n.directAvailableWhenYouOnline
     : l10n.directAvailableWhenOnline(page.friend.name);
 
-/// Pictures read from the chat's folder for the screen, by path: the newest few, so a
-/// long chat does not keep every picture in memory.
-final _pictures = <String, Uint8List>{};
+/// Most bytes of pictures read from the chat's folder kept for the screen
+/// ([DirectChats.pictures]): the newest few, so a long chat does not keep every picture
+/// in memory.
 const _picturesKept = 64 * 1024 * 1024;
+
+/// Biggest picture read to show in the chat, as in a room ([RoomState.maxPreviewBytes]);
+/// a larger one shows as a file.
+const _pictureMax = RoomState.maxPreviewBytes;
 
 /// Whether a file kept here is sealed with the data folder's key: then only the core reads
 /// it.
@@ -1830,30 +1832,35 @@ Future<bool> _sealed(String path) async {
   return String.fromCharCodes(head) == ' fogata';
 }
 
-/// Reads a picture kept here, through the core when it is sealed.
-Future<Uint8List?> _read(String path, String friend, String file) async {
-  final kept = _pictures.remove(path);
+/// Reads a picture kept here, through the core when it is sealed, into [pictures].
+Future<Uint8List?> _read(
+  Map<String, Uint8List> pictures,
+  String path,
+  String friend,
+  String file,
+) async {
+  final kept = pictures.remove(path);
   if (kept != null) {
-    _pictures[path] = kept;
+    pictures[path] = kept;
     return kept;
   }
   try {
     final local = File(path);
-    if (await local.length() > _picturesKept) return null;
+    if (await local.length() > _pictureMax) return null;
     final bytes = await _sealed(path)
         ? await directFileBytes(
             deviceId: friend,
             file: file,
-            maxBytes: _picturesKept,
+            maxBytes: _pictureMax,
           )
-        : await readAtMost(local.openRead(0, _picturesKept + 1), _picturesKept);
+        : await readAtMost(local.openRead(0, _pictureMax + 1), _pictureMax);
     // A file that grew since its size was looked at is not kept.
     if (bytes == null) return null;
-    _pictures[path] = bytes;
-    var total = _pictures.values.fold<int>(0, (n, b) => n + b.length);
-    while (total > _picturesKept && _pictures.length > 1) {
-      final oldest = _pictures.keys.first;
-      total -= _pictures.remove(oldest)!.length;
+    pictures[path] = bytes;
+    var total = pictures.values.fold<int>(0, (n, b) => n + b.length);
+    while (total > _picturesKept && pictures.length > 1) {
+      final oldest = pictures.keys.first;
+      total -= pictures.remove(oldest)!.length;
     }
     return bytes;
   } catch (_) {
@@ -1896,9 +1903,15 @@ class _PictureState extends State<_Picture> {
   /// Reads the picture, and shows it as a file when it is no picture this computer can
   /// draw (damaged, or one that would take too much memory once decoded).
   Future<void> _load() async {
-    final friend = AppScope.read(context).direct.open;
+    final direct = AppScope.read(context).direct;
+    final friend = direct.open;
     if (friend == null) return;
-    final bytes = await _read(widget.path, friend, widget.file.id);
+    final bytes = await _read(
+      direct.pictures,
+      widget.path,
+      friend,
+      widget.file.id,
+    );
     final fits = bytes != null && await fitsToDecode(bytes, maxPicturePixels);
     if (!mounted) return;
     setState(() {
@@ -2313,17 +2326,6 @@ List<double> _brightness(double b) => [
   0, 0, 0, 1, 0,
 ];
 
-/// `0:42`, or `1:02:05` past an hour.
-String videoLength(int ms) {
-  final d = Duration(milliseconds: ms);
-  final s = (d.inSeconds % 60).toString().padLeft(2, '0');
-  if (d.inHours > 0) {
-    final m = (d.inMinutes % 60).toString().padLeft(2, '0');
-    return '${d.inHours}:$m:$s';
-  }
-  return '${d.inMinutes}:$s';
-}
-
 /// A little dark pill over a picture.
 class _OverPill extends StatelessWidget {
   const _OverPill({required this.text, this.mono = false});
@@ -2461,34 +2463,13 @@ class _Top extends StatelessWidget {
   }
 }
 
-Future<void> _over(BuildContext context, String label, Widget child) {
-  return showGeneralDialog<void>(
-    context: context,
-    barrierDismissible: true,
-    barrierLabel: label,
-    barrierColor: const Color.fromRGBO(0, 0, 0, .9),
-    transitionDuration: springTime,
-    pageBuilder: (context, _, _) => child,
-    transitionBuilder: (context, animation, _, child) {
-      final t = CurvedAnimation(parent: animation, curve: spring);
-      return FadeTransition(
-        opacity: animation,
-        child: ScaleTransition(
-          scale: Tween(begin: .94, end: 1.0).animate(t),
-          child: child,
-        ),
-      );
-    },
-  );
-}
-
 /// A picture large over the window; a click beside it or Esc closes it.
 Future<void> _showPicture(
   BuildContext context,
   Uint8List picture,
   UiDirectFile file,
   UiPerson writer,
-) => _over(
+) => showOverWindow(
   context,
   l10n.directClosePicture,
   Builder(
@@ -2564,317 +2545,41 @@ Future<void> showDirectVideo(
   UiPerson writer,
 ) => _showVideo(context, file, friend, writer);
 
-/// A video kept here, playing over the window with the system's own player.
+/// A video kept here, playing over the window with the system's own player. A sealed one
+/// plays from a plain copy, which goes when the player closes.
 Future<void> _showVideo(
   BuildContext context,
   UiDirectFile file,
   String friend,
   UiPerson writer,
-) => _over(
+) => showOverWindow(
   context,
   l10n.directCloseVideo,
-  _VideoView(file: file, friend: friend, writer: writer),
-);
-
-class _VideoView extends StatefulWidget {
-  const _VideoView({
-    required this.file,
-    required this.friend,
-    required this.writer,
-  });
-  final UiDirectFile file;
-
-  /// The friend whose chat holds the video.
-  final String friend;
-  final UiPerson writer;
-
-  @override
-  State<_VideoView> createState() => _VideoViewState();
-}
-
-class _VideoViewState extends State<_VideoView> {
-  VideoPlayer? _player;
-  String? _problem;
-  VideoState _at = const VideoState();
-  Timer? _tick;
-  late final VideoSound _sound;
-  bool _closed = false;
-  double? _dragging;
-
-  /// The plain copy of a sealed video made for this player.
-  String? _copy;
-
-  @override
-  void initState() {
-    super.initState();
-    _sound = VideoSound(AppScope.read(context), () {
-      if (mounted) setState(() {});
-    });
-    _open();
-  }
-
-  Future<void> _open() async {
-    // A sealed video plays from a plain copy, which goes when the player closes.
-    String? path = widget.file.path;
-    try {
-      if (path != null && await _sealed(path)) {
-        path = await directFileToPlay(
-          deviceId: widget.friend,
-          file: widget.file.id,
-        );
-        _copy = path;
-      }
-    } catch (_) {
-      path = null;
-    }
-    if (!mounted || _closed) {
-      _forgetCopy(Future<void>.value());
-      return;
-    }
-    final player = path == null
-        ? null
-        : await VideoPlayer.open(
-            path,
-            output: AppScope.read(context).prefs.audioOutput,
-          );
-    if (!mounted || _closed) {
-      _forgetCopy(player?.close() ?? Future<void>.value());
-      return;
-    }
-    if (player == null) {
-      _forgetCopy(Future<void>.value());
-      setState(() => _problem = l10n.directCannotPlay);
-      return;
-    }
-    await _sound.attach(player);
-    if (!mounted || _closed) {
-      _forgetCopy(player.close());
-      return;
-    }
-    setState(() => _player = player);
-    await player.play();
-    // Closed while it started: dispose has closed the player, and no timer is left to it.
-    if (!mounted || _closed) return;
-    _tick = Timer.periodic(const Duration(milliseconds: 200), (_) async {
-      final at = await player.state();
-      if (!mounted || _closed) return;
-      setState(() {
-        _at = at;
-        if (at.error != null) {
-          _problem ??= l10n.directCannotPlay;
+  VideoViewer(
+    state: AppScope.read(context),
+    open: () async {
+      String? path = file.path;
+      String? copy;
+      try {
+        if (path != null && await _sealed(path)) {
+          path = copy = await directFileToPlay(deviceId: friend, file: file.id);
         }
-      });
-    });
-  }
-
-  @override
-  void dispose() {
-    _closed = true;
-    _tick?.cancel();
-    _sound.dispose();
-    // A player still opening is closed where it opens.
-    if (_player case final player?) _forgetCopy(player.close());
-    super.dispose();
-  }
-
-  /// The plain copy of a sealed video goes once the player has let it go (`closing`); the
-  /// copies of other players stay.
-  void _forgetCopy(Future<void> closing) {
-    final copy = _copy;
-    if (copy == null) return;
-    _copy = null;
-    unawaited(
-      closing
-          .then((_) => forgetDirectFileCopy(path: copy))
-          .catchError((Object _) {}),
-    );
-  }
-
-  Future<void> _toggle() async {
-    final player = _player;
-    if (player == null) return;
-    if (_at.playing) {
-      await player.pause();
-    } else {
-      await player.play();
-    }
-    final at = await player.state();
-    if (mounted) setState(() => _at = at);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final close = Navigator.of(context).pop;
-    final video = widget.file.video;
-    final ratio = video != null && video.width > 0 && video.height > 0
-        ? video.width / video.height
-        : 16 / 9;
-    final player = _player;
-    final duration = _at.durationMs > 0
-        ? _at.durationMs
-        : (video?.durationMs ?? 0);
-    final position = _dragging != null
-        ? (_dragging! * duration).round()
-        : _at.positionMs.clamp(0, duration == 0 ? 0 : duration);
-    final fraction = duration == 0 ? 0.0 : position / duration;
-    return CallbackShortcuts(
-      bindings: {
-        const SingleActivator(LogicalKeyboardKey.escape): close,
-        const SingleActivator(LogicalKeyboardKey.space): _toggle,
-      },
-      // A scope: Tab goes round what floats here, not the page behind.
-      child: FocusScope(
-        autofocus: true,
-        child: Material(
-          type: MaterialType.transparency,
-          child: Stack(
-            children: [
-              Positioned.fill(
-                child: GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: close,
-                ),
-              ),
-              Positioned.fill(
-                top: 112,
-                bottom: 40,
-                left: 40,
-                right: 40,
-                child: Center(
-                  child: AspectRatio(
-                    aspectRatio: ratio,
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(16),
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          if (player != null && _problem == null)
-                            GestureDetector(
-                              onTap: _toggle,
-                              child: ColoredBox(
-                                color: Colors.black,
-                                child: VideoView(player: player),
-                              ),
-                            )
-                          else
-                            Center(
-                              child: _problem != null
-                                  ? Text(
-                                      _problem!,
-                                      style: tx(Colors.white, size: 14),
-                                    )
-                                  : const Spinner(
-                                      size: 18,
-                                      color: Colors.white,
-                                    ),
-                            ),
-                          Positioned(
-                            left: 0,
-                            right: 0,
-                            bottom: 18,
-                            child: Center(
-                              child: Container(
-                                width: 520,
-                                height: 48,
-                                padding: const EdgeInsets.symmetric(
-                                  horizontal: 8,
-                                ),
-                                decoration: BoxDecoration(
-                                  color: const Color.fromRGBO(17, 17, 17, .82),
-                                  borderRadius: BorderRadius.circular(999),
-                                  border: Border.all(
-                                    color: Colors.white.withValues(alpha: .08),
-                                  ),
-                                ),
-                                child: Row(
-                                  children: [
-                                    _LightButton(
-                                      icon: _at.playing ? Ic.pause : Ic.play,
-                                      tooltip: _at.playing
-                                          ? l10n.directPause
-                                          : l10n.directPlay,
-                                      onTap: player == null ? null : _toggle,
-                                    ),
-                                    const SizedBox(width: 10),
-                                    SizedBox(
-                                      width: 96,
-                                      child: Text(
-                                        '${videoLength(position)} / ${videoLength(duration)}',
-                                        style: tx(
-                                          Colors.white70,
-                                          size: 12,
-                                          monospace: true,
-                                        ),
-                                      ),
-                                    ),
-                                    Expanded(
-                                      child: SliderTheme(
-                                        data: SliderTheme.of(context).copyWith(
-                                          activeTrackColor: Colors.white,
-                                          inactiveTrackColor: Colors.white24,
-                                          thumbColor: Colors.white,
-                                          overlayColor: Colors.white12,
-                                          trackHeight: 3,
-                                          thumbShape:
-                                              const RoundSliderThumbShape(
-                                                enabledThumbRadius: 6,
-                                              ),
-                                        ),
-                                        child: Slider(
-                                          value: fraction.clamp(0.0, 1.0),
-                                          onChanged:
-                                              player == null || duration == 0
-                                              ? null
-                                              : (v) => setState(
-                                                  () => _dragging = v,
-                                                ),
-                                          onChangeEnd: (v) async {
-                                            setState(() => _dragging = null);
-                                            await player?.seek(
-                                              (v * duration).round(),
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                    ),
-                                    FgButton(
-                                      icon: _sound.muted
-                                          ? Ic.volumeOff
-                                          : Ic.volume,
-                                      kind: Kind.ghost,
-                                      height: 32,
-                                      iconColor: Colors.white70,
-                                      tooltip: _sound.muted
-                                          ? l10n.directSoundOn
-                                          : l10n.directMute,
-                                      onTap: player == null
-                                          ? null
-                                          : _sound.toggle,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              Positioned(
-                left: 24,
-                right: 24,
-                top: 56,
-                child: _Top(file: widget.file, writer: widget.writer),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
+      } catch (_) {
+        path = null;
+      }
+      if (path == null) throw VideoProblem(l10n.directCannotPlay);
+      // Only this player's copy goes with it; the copies of other players stay.
+      final made = copy;
+      return VideoFile(
+        path,
+        letGo: made == null ? null : () => forgetDirectFileCopy(path: made),
+      );
+    },
+    cannotPlay: l10n.directCannotPlay,
+    video: () => file.video,
+    top: (context, _) => _Top(file: file, writer: writer),
+  ),
+);
 
 // ----- Writing -----
 

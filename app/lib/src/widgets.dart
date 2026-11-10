@@ -541,14 +541,21 @@ class _RoundPictureState extends State<RoundPicture> {
     // The picture shown stays until the new one is there. Only the first frame of one that
     // moves: rounding each frame again would cost every time, and nothing would stop it
     // (a GIF moves through [MovingPicture]).
+    // Each listener is handed a handle of its own on the picture: this one keeps it while
+    // it draws it, and lets go of it when it draws another or goes, rather than leaving
+    // the decoded pixels to whenever the garbage collector comes.
     _listener = ImageStreamListener(
       (info, _) {
         if (_listener != null) _stream?.removeListener(_listener!);
         _listener = null;
-        if (mounted) setState(() => _image = info.image);
+        if (!mounted) {
+          info.dispose();
+          return;
+        }
+        _show(info.image);
       },
       onError: (_, _) {
-        if (mounted) setState(() => _image = null);
+        if (mounted) _show(null);
       },
     );
     _stream = stream..addListener(_listener!);
@@ -558,6 +565,13 @@ class _RoundPictureState extends State<RoundPicture> {
     if (_listener != null) _stream?.removeListener(_listener!);
     _stream = null;
     _listener = null;
+  }
+
+  /// Draws [image] from now on, letting go of the one drawn before.
+  void _show(ui.Image? image) {
+    final before = _image;
+    setState(() => _image = image);
+    before?.dispose();
   }
 
   @override
@@ -580,6 +594,8 @@ class _RoundPictureState extends State<RoundPicture> {
   @override
   void dispose() {
     _stop();
+    _image?.dispose();
+    _image = null;
     super.dispose();
   }
 

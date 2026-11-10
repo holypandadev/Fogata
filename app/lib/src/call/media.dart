@@ -384,6 +384,12 @@ extension _LocalMedia on Call {
     await stream.dispose();
   }
 
+  /// Linux cannot narrow a window's sound to its application: every other one's would go
+  /// with it, so a window is shared without sound. (Under Wayland the system's dialog
+  /// picks, and the capture leaves the sound out itself when a window was chosen.)
+  static bool _windowWithoutSound(DesktopCapturerSource? source) =>
+      onLinux && source?.type == SourceType.Window;
+
   /// What to ask the system for to capture `source` at `fps` frames a second. Under
   /// Wayland the system's dialog picks it, and the system is asked for up to 60 a second,
   /// since it cannot be asked again without that dialog; the capture then lets through
@@ -391,7 +397,9 @@ extension _LocalMedia on Call {
   Map<String, dynamic> _capture(DesktopCapturerSource? source, int fps) => {
     // The screen's sound is not processed, but WebRTC sets its one sound processing
     // from every source that sends: the microphone's own settings, so they stay on.
-    'audio': _displaySound ? _micProcessing : false,
+    'audio': _displaySound && !_windowWithoutSound(source)
+        ? _micProcessing
+        : false,
     'video': source != null
         ? {
             'deviceId': {'exact': source.id},

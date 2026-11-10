@@ -53,6 +53,18 @@ use crate::{Command, NodeEvent, Path, addr};
 /// After starting, look for friends often for a while: friends that started at about the
 /// same time cannot find each other before both have announced themselves.
 const EAGER: Duration = Duration::from_secs(150);
+/// How long a friend or former friend that stays away waits between lookups, one step after
+/// another (and a little more for some, so that they spread out): each lookup is four DHT
+/// searches (its secret and the one the two share, each in two windows) of some hundreds
+/// of requests, and a device with dozens of friends away would otherwise make them every
+/// couple of minutes for as long as it runs. One that just went is looked up at every slot
+/// for a while (see `SEARCH_HARD`), and a change here or of the network starts over.
+const AWAY_STEPS: [Duration; 4] = [
+    Duration::from_secs(2 * 60),
+    Duration::from_secs(5 * 60),
+    Duration::from_secs(15 * 60),
+    Duration::from_secs(60 * 60),
+];
 /// Also look often for a while after a request, an answer or a new friend secret.
 const AFTER_CHANGE: Duration = Duration::from_secs(10 * 60);
 /// A friend gets at most one answer about friends in common this often, and for at most
@@ -191,6 +203,12 @@ pub(super) struct FriendContext {
     started: Instant,
     /// Last request, answer or new friend secret made here.
     pub(super) recent: Option<Instant>,
+    /// Friends and former friends away, each with when it is looked up next and the step of
+    /// [`AWAY_STEPS`] it is at; when that was last started over; and when each friend that
+    /// went lately went (see `SEARCH_HARD`).
+    away: HashMap<DevicePublicKey, (Instant, usize)>,
+    away_reset: Instant,
+    pub(super) gone_at: HashMap<DevicePublicKey, Instant>,
     pub(super) pending: HashMap<OutboundRequestId, (PeerId, FriendPending)>,
     /// Questions about friends in common waiting for their answer, and who waits for it.
     pub(super) asking: HashMap<DevicePublicKey, (MutualAsk, Vec<MutualReply>)>,
@@ -252,6 +270,9 @@ impl FriendContext {
             acked: HashSet::new(),
             pairs: HashMap::new(),
             member_asks: HashMap::new(),
+            away: HashMap::new(),
+            away_reset: Instant::now(),
+            gone_at: HashMap::new(),
         }
     }
 
@@ -325,10 +346,67 @@ impl FriendContext {
     /// announce under it too. A friend or former friend away is also looked for under the
     /// secret the two share, where it announces when it has something to deliver here, and
     /// so is a device a request made here went to, which announces there once it accepts.
+    /// Those away are looked up less and less often while they stay away (see
+    /// [`AWAY_STEPS`]).
     pub(super) fn lookups(
         &mut self,
         identity: &DeviceIdentity,
     ) -> Vec<([u8; 32], Target, Option<[u8; 32]>)> {
+        self.lookups_at(identity, Instant::now())
+    }
+
+    /// Starts the lookups of friends away over: they are looked up at the next slot, then
+    /// less and less often again.
+    pub(super) fn look_for_the_away_again(&mut self) {
+        self.away.clear();
+        self.away_reset = Instant::now();
+    }
+
+    /// The friends and former friends away whose lookup is due at `now`, their next one
+    /// set: one that just went at every slot, any other at its step of [`AWAY_STEPS`].
+    fn away_due(&mut self, now: Instant) -> HashSet<DevicePublicKey> {
+        if self.recent.is_some_and(|t| t > self.away_reset) {
+            self.away.clear();
+            self.away_reset = now;
+        }
+        let away: Vec<DevicePublicKey> = self
+            .book
+            .friends
+            .keys()
+            .filter(|device| !self.is_online(device))
+            .chain(self.book.departing.keys())
+            .copied()
+            .collect();
+        self.away.retain(|device, _| away.contains(device));
+        self.gone_at.retain(|device, at| {
+            away.contains(device) && now.saturating_duration_since(*at) < super::SEARCH_HARD
+        });
+        let mut due = HashSet::new();
+        for device in away {
+            let just_went = self.gone_at.contains_key(&device);
+            let step = match self.away.get(&device) {
+                Some((next, _)) if *next > now && !just_went => continue,
+                Some((_, step)) => (*step + 1).min(AWAY_STEPS.len() - 1),
+                None => 0,
+            };
+            // Up to a quarter more, by device, so that those away are not all looked up at
+            // the same slot.
+            let wait = AWAY_STEPS[step];
+            let spread = wait.mul_f64(f64::from(device.as_bytes()[0]) / 255.0 / 4.0);
+            let step = if just_went { 0 } else { step };
+            self.away.insert(device, (now + wait + spread, step));
+            due.insert(device);
+        }
+        due
+    }
+
+    /// [`Self::lookups`] at `now`.
+    fn lookups_at(
+        &mut self,
+        identity: &DeviceIdentity,
+        now: Instant,
+    ) -> Vec<([u8; 32], Target, Option<[u8; 32]>)> {
+        let due = self.away_due(now);
         let own = |secret: &FriendSecret, target| {
             let rendezvous = secret.rendezvous();
             (rendezvous, target, Some(rendezvous))
@@ -337,13 +415,14 @@ impl FriendContext {
             .book
             .friends
             .iter()
-            .filter(|(device, _)| !self.is_online(device))
+            .filter(|(device, _)| due.contains(*device))
             .map(|(device, friend)| own(&friend.secret, Target::Friend(*device)))
             .collect();
         out.extend(
             self.book
                 .departing
                 .iter()
+                .filter(|(device, _)| due.contains(*device))
                 .map(|(device, d)| own(&d.secret, Target::Departing(*device))),
         );
         if let Some(link) = &self.sought_link {
@@ -362,12 +441,13 @@ impl FriendContext {
             .book
             .friends
             .keys()
-            .filter(|device| !self.is_online(device))
+            .filter(|device| due.contains(*device))
             .map(|device| (*device, Target::Friend(*device)))
             .chain(
                 self.book
                     .departing
                     .keys()
+                    .filter(|device| due.contains(*device))
                     .map(|device| (*device, Target::Departing(*device))),
             )
             .chain(
@@ -1004,6 +1084,14 @@ impl Node {
                 }
             }
             FriendRequest::Hello { mac, sealed } => {
+                // A friend online already says hello once per connection: one saying it
+                // again and again is answered only so often (see limits.rs).
+                if let Some(device) = f.online.get(&peer).copied()
+                    && !self.limits.take_friend_hello(device, Instant::now())
+                {
+                    tracing::debug!("{} said hello too often", device.fingerprint());
+                    return FriendResponse::Refused;
+                }
                 // Keyed by the secret shared with the friend that sent it: tried with each
                 // friend's.
                 let own: Vec<FriendSecret> = f.book.own_secrets().cloned().collect();
@@ -1034,8 +1122,10 @@ impl Node {
                     tracing::debug!("hello from {}, not a friend", from.device.fingerprint());
                     return FriendResponse::Refused;
                 };
-                let newer =
-                    (from.knows_version < f.book.profile.version_ms).then_some(&f.book.profile);
+                // Not again with every hello of a friend that says it has an older one.
+                let newer = (from.knows_version < f.book.profile.version_ms
+                    && self.limits.hello_profile(from.device, Instant::now()))
+                .then_some(&f.book.profile);
                 let reply = match fogata_friends::hello_reply(
                     &self.identity,
                     &from.device,
@@ -1217,6 +1307,9 @@ impl Node {
                 let Some(by) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
+                if !self.limits.take_friend_offer(by, Instant::now()) {
+                    return FriendResponse::Refused;
+                }
                 let entries: Vec<Vec<u8>> = entries.into_iter().map(|e| e.into_vec()).collect();
                 let Some((index, count)) = part else {
                     return self.on_group_offer(peer, by, entries, declined);
@@ -1433,6 +1526,9 @@ impl Node {
                 let Some(by) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
+                if !self.limits.take_friend_offer(by, Instant::now()) {
+                    return FriendResponse::Refused;
+                }
                 self.on_direct_offer(peer, by, entries)
             }
             FriendRequest::Heartbeat => {
@@ -1728,6 +1824,53 @@ mod tests {
         NodeConfig,
         node::{start, tests::inspect},
     };
+
+    /// A friend that stays away is looked up less and less often, up to once an hour; one
+    /// that just went at every slot for a while; a change here starts over; and a friend
+    /// back online is not looked up.
+    #[test]
+    fn a_friend_that_stays_away_is_looked_up_less_and_less_often() {
+        let ana = DeviceIdentity::generate().unwrap();
+        let bea = DeviceIdentity::generate().unwrap();
+        let bea_book = FriendBook::new(&bea, "Bea", 1).unwrap();
+        let mut f = FriendContext::new(FriendBook::new(&ana, "Ana", 1).unwrap());
+        f.book.friends.insert(
+            bea.public_key(),
+            Friend {
+                profile: bea_book.profile.clone(),
+                secret: bea_book.secret.clone(),
+                since_ms: 2,
+                delivered: true,
+                banner: None,
+                bio: None,
+            },
+        );
+        let start = Instant::now();
+        let looked =
+            |f: &mut FriendContext, at: Duration| !f.lookups_at(&ana, start + at).is_empty();
+        // At every two-minute slot for two hours: looked up at 0, ~2, ~7, ~22, ~82 minutes.
+        let slots: Vec<u64> = (0..60)
+            .filter(|i| looked(&mut f, Duration::from_secs(i * 120)))
+            .collect();
+        assert!((4..=6).contains(&slots.len()), "{slots:?}");
+        let gaps: Vec<u64> = slots.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.windows(2).all(|g| g[0] <= g[1]), "{gaps:?}");
+        assert!(*gaps.last().unwrap() >= 30, "{gaps:?}");
+        // It just went (as after a connection lost): looked up at every slot for a while.
+        let later = Duration::from_secs(2 * 3600);
+        f.gone_at.insert(bea.public_key(), start + later);
+        let hard = (0..6)
+            .filter(|i| looked(&mut f, later + Duration::from_secs(i * 10)))
+            .count();
+        assert_eq!(hard, 6);
+        // A change here starts over.
+        f.lookups_at(&ana, start + later + Duration::from_secs(200));
+        f.recent = Some(Instant::now());
+        assert!(looked(&mut f, later + Duration::from_secs(210)));
+        // Online: not looked up.
+        f.online.insert(PeerId::random(), bea.public_key());
+        assert!(!looked(&mut f, later + Duration::from_secs(4 * 3600)));
+    }
 
     #[test]
     fn friends_are_looked_up_seldom_only_when_nobody_is_missing() {

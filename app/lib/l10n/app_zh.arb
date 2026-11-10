@@ -779,8 +779,6 @@
   "directCannotPlay": "这台电脑无法播放这个视频。",
   "directPause": "暂停",
   "directPlay": "播放",
-  "directSoundOn": "打开声音",
-  "directMute": "静音",
   "directRemoveFilesTitle": "{n, plural, =1{移除这个文件？} other{移除这{n}个文件？}}",
   "directRemoveFilesText": "它们会从这条消息中移除。你电脑上的文件保持不变。",
   "directDraftKept": "你正在写的内容会保留在这里，等可以发送时再发。",

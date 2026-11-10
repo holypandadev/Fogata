@@ -59,11 +59,49 @@ pub use self::groups::{DeclineLeave, DeclinedGroup, Offered, StoredGroup};
 pub(crate) use self::judged::tests as judged_tests;
 pub(crate) use self::judged::{JUDGED_SUFFIX, read_judged, write_judged};
 use self::sealing::SealPhase;
-pub use self::sealing::{BACKUP_DIR, SEALING_FILE, SET_ASIDE_FILE, Sealing};
+pub use self::sealing::{BACKUP_DIR, REFUSED_DIR, SEALING_FILE, SET_ASIDE_FILE, Sealing};
 use crate::vault::{self, Keychain};
 
 /// Where this device keeps its MLS state, one file per group.
 const MLS_DIR: &str = "mls";
+
+/// The file in a data folder that says which layout of it the build that last opened it
+/// writes: its files and folders and what they hold ([`LAYOUT`]).
+pub(crate) const LAYOUT_FILE: &str = "layout";
+
+/// The layout of the data folder this build reads and writes. It goes up only when a build
+/// older than the one that raises it would misread what the newer one writes (a file moved
+/// or written in another form), not for new files an older build leaves alone (those are
+/// read with care: `levels.json`, `.bak` and `.damaged` copies). A folder of a layout above
+/// this build's is refused rather than misread: an older build installed over a newer one
+/// by hand. A folder with no marker is of layout 1, from before there was one.
+pub(crate) const LAYOUT: u32 = 1;
+
+/// The layout the data folder `dir` says it has: 1 with no marker (from before there was
+/// one), `None` when the marker does not read (cut short).
+fn layout_of(dir: &Path) -> Result<Option<u32>> {
+    let path = dir.join(LAYOUT_FILE);
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(text.trim().parse::<u32>().ok()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Some(1)),
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", path.display())),
+    }
+}
+
+/// Refuses the data folder `dir` when a newer build wrote it ([`LAYOUT`]). Nothing is
+/// written: it is marked as this build's once a core runs in it ([`Store::mark_layout`]).
+fn check_layout(dir: &Path) -> Result<()> {
+    if let Some(found) = layout_of(dir)?
+        && found > LAYOUT
+    {
+        bail!(
+            "the data in {} was written by a newer version of Fogata (data layout {found}; \
+             this version reads layout {LAYOUT}): install the newer version again",
+            dir.display()
+        );
+    }
+    Ok(())
+}
 
 /// A secret of the folder that is sealed and does not open with the folder's key (a bit
 /// flipped on the disk, say): sealing cannot be checked to its end while it is there.
@@ -124,8 +162,10 @@ fn local_data_dir(local: Option<PathBuf>, roaming: Option<PathBuf>) -> Option<Pa
     let Some(roaming) = roaming.filter(|r| !local.exists() && r.is_dir()) else {
         return Some(local);
     };
-    if let Some(parent) = local.parent() {
-        let _ = fs::create_dir_all(parent);
+    if let Some(parent) = local.parent()
+        && let Err(e) = fs::create_dir_all(parent)
+    {
+        tracing::warn!("cannot create {}: {e}", parent.display());
     }
     match fs::rename(&roaming, &local) {
         Ok(()) => {
@@ -312,6 +352,7 @@ impl Store {
 
     /// Opens a data folder, using `keychain` for its data key.
     pub fn open_with(dir: PathBuf, keychain: Keychain) -> Result<Self> {
+        check_layout(&dir)?;
         fs::create_dir_all(dir.join("logs"))
             .with_context(|| format!("cannot create {}", dir.display()))?;
         // Only this user goes in: another one could otherwise hold a lock on the file that
@@ -319,7 +360,9 @@ impl Store {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
+            if let Err(e) = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!("cannot keep {} to this user only: {e}", dir.display());
+            }
         }
         let store = Self {
             lock: folder_lock(&dir),
@@ -335,6 +378,19 @@ impl Store {
         };
         store.remove_stale_temps();
         Ok(store)
+    }
+
+    /// Marks the folder as of this build's layout ([`LAYOUT`]), unless it says so already:
+    /// as a core starts in it, so opening a folder only to look (or to restore into it, a
+    /// step that may be refused) changes nothing in it.
+    pub(crate) fn mark_layout(&self) {
+        let path = self.dir.join(LAYOUT_FILE);
+        if path.exists() && matches!(layout_of(&self.dir), Ok(Some(LAYOUT))) {
+            return;
+        }
+        if let Err(e) = write_private(&path, format!("{LAYOUT}\n").as_bytes()) {
+            tracing::warn!("cannot write {}: {e:#}", path.display());
+        }
     }
 
     pub fn dir(&self) -> &Path {
@@ -887,6 +943,16 @@ impl Store {
             d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "log")))
         });
         if self.friends_path().exists() || has_logs {
+            if self.dir.join(REFUSED_DIR).join("identity.key").exists() {
+                bail!(
+                    "{} was found unencrypted in this folder, whose data is encrypted, so it \
+                     was put there by something other than Fogata and was moved to {}: put \
+                     the encrypted file back from a copy, or move the folder away to start as \
+                     a new device",
+                    path.display(),
+                    self.dir.join(REFUSED_DIR).display()
+                );
+            }
             bail!(
                 "{} is missing, but this folder holds a profile or groups made with it: put \
                  the file back from a copy, or move the folder away to start as a new device",
@@ -1078,7 +1144,8 @@ fn read_identity(key: Option<&DataKey>, bytes: &[u8]) -> Option<DeviceIdentity> 
 }
 
 fn write_identity(key: Option<&DataKey>, path: &Path, identity: &DeviceIdentity) -> Result<()> {
-    let text = Zeroizing::new(hex::encode(*identity.secret_bytes()));
+    let secret = identity.secret_bytes();
+    let text = Zeroizing::new(hex::encode(secret.as_slice()));
     write_private(path, &to_disk(key, "identity", text.as_bytes())?)
 }
 
@@ -1175,8 +1242,11 @@ pub fn write_private(path: &Path, contents: &[u8]) -> Result<()> {
         .and_then(|()| {
             fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
         });
-    if written.is_err() {
-        let _ = fs::remove_file(&tmp);
+    if written.is_err()
+        && let Err(e) = fs::remove_file(&tmp)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("cannot remove {}: {e}", tmp.display());
     }
     written?;
     sync_folder(path);
@@ -1342,6 +1412,37 @@ mod tests {
         );
         assert!(roaming.is_dir());
         fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A data folder is marked with the layout this build writes as a core runs in it;
+    /// one with no marker (from before there was one) or a marker cut short opens; one a
+    /// newer layout wrote is refused, not misread. Opening it only to look writes nothing.
+    #[test]
+    fn a_data_folder_of_a_newer_layout_is_refused() {
+        let dir = std::env::temp_dir().join(format!("fogata-layout-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let marker = dir.join(LAYOUT_FILE);
+        let read = || fs::read_to_string(&marker).unwrap();
+        let store = Store::open(dir.clone()).unwrap();
+        assert!(!marker.exists());
+        store.mark_layout();
+        assert_eq!(read(), format!("{LAYOUT}\n"));
+        drop(store);
+        // From before the marker, and cut short.
+        for before in [None, Some("")] {
+            match before {
+                None => fs::remove_file(&marker).unwrap(),
+                Some(text) => fs::write(&marker, text).unwrap(),
+            }
+            Store::open(dir.clone()).unwrap().mark_layout();
+            assert_eq!(read(), format!("{LAYOUT}\n"));
+        }
+        fs::write(&marker, format!("{}\n", LAYOUT + 1)).unwrap();
+        let refused = Store::open(dir.clone()).err().unwrap();
+        assert!(refused.to_string().contains("newer version"), "{refused:#}");
+        // Left as it is, for the newer build.
+        assert_eq!(read(), format!("{}\n", LAYOUT + 1));
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

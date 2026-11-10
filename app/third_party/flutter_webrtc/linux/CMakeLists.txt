@@ -27,7 +27,6 @@ add_library(${PLUGIN_NAME} SHARED
   "../common/cpp/src/flutter_webrtc_base.cc"
   "../common/cpp/src/flutter_common.cc"
   "loopback_capturer_factory.cc"
-  "pulse_loopback_capturer.cc"
   "portal_screen_capturer.cc"
   "desktop_session.cc"
   "pipewire_apps_capturer.cc"
@@ -75,12 +74,9 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ---------------------------------------------------------------------------
-# System-audio (loopback) capture: PulseAudio simple API.
-# Guarded so a host without libpulse dev headers still builds the plugin; in
-# that case pulse_loopback_capturer.cc compiles to nothing and the factory
-# returns nullptr (getDisplayMedia audio degrades to no track), matching the
-# previous Linux stub behaviour rather than breaking the whole plugin build.
-# PipeWire ships a PulseAudio compat layer, so libpulse covers both stacks.
+# libpulse: the sound server's inputs and outputs (input_watcher.cc,
+# output_keeper.cc, input_name.cc). A shared screen's sound is PipeWire's only
+# (loopback_capturer_factory.cc).
 # On Manjaro/.41 the dev headers come from the base `libpulse` package.
 # ---------------------------------------------------------------------------
 find_package(PkgConfig)
@@ -88,11 +84,11 @@ if(PkgConfig_FOUND)
   pkg_check_modules(PULSE IMPORTED_TARGET libpulse libpulse-simple)
 endif()
 if(TARGET PkgConfig::PULSE)
-  message(STATUS "flutter_webrtc: libpulse found -- enabling Linux system-audio loopback capture.")
+  message(STATUS "flutter_webrtc: libpulse found -- watching the sound server.")
   target_compile_definitions(${PLUGIN_NAME} PRIVATE HAVE_LIBPULSE)
   target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::PULSE)
 elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
-  message(WARNING "flutter_webrtc: libpulse NOT found -- Linux system-audio loopback capture disabled (getDisplayMedia({audio:true}) yields no audio track). Install the libpulse dev package to enable it.")
+  message(WARNING "flutter_webrtc: libpulse NOT found -- the sound server is not watched (debug build only). Install the libpulse dev package.")
 else()
   # Fogata: without libpulse the application could not tell that no sound server
   # answers (input_watcher.cc), and WebRTC's voice engine ends the process then.

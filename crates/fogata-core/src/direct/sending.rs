@@ -22,7 +22,74 @@ use super::{
     node_events::expire,
     store::Record,
 };
-use crate::{Core, CoreEvent, now_ms};
+use crate::{Core, CoreEvent, Inner, now_ms};
+
+/// The copies of attachments a send uses in the chat's folder, and those it made there. As
+/// it ends, whether the message was kept or not, a copy it made that no item of the chat
+/// keeps and no other send is using goes: a send that failed (the disk full, the friendship
+/// ended meanwhile, a later file too big) left a full copy of each earlier file there,
+/// which nothing would ever remove and the room for direct messages did not count.
+struct Copies {
+    inner: std::sync::Arc<Inner>,
+    friend: DevicePublicKey,
+    using: Vec<super::model::FileId>,
+    made: Vec<Attachment>,
+}
+
+impl Copies {
+    fn new(inner: &std::sync::Arc<Inner>, friend: DevicePublicKey) -> Self {
+        Self {
+            inner: inner.clone(),
+            friend,
+            using: Vec::new(),
+            made: Vec::new(),
+        }
+    }
+
+    /// Counts the file as in use by this send, before its copy is looked for: another send
+    /// that fails meanwhile then leaves it.
+    fn using(&mut self, file: &super::model::FileId) {
+        *self
+            .inner
+            .direct
+            .lock()
+            .copying
+            .entry((self.friend, *file))
+            .or_default() += 1;
+        self.using.push(*file);
+    }
+}
+
+impl Drop for Copies {
+    fn drop(&mut self) {
+        let mut chats = self.inner.direct.lock();
+        for file in &self.using {
+            let key = (self.friend, *file);
+            if let Some(n) = chats.copying.get_mut(&key) {
+                *n -= 1;
+                if *n == 0 {
+                    chats.copying.remove(&key);
+                }
+            }
+        }
+        for made in &self.made {
+            let kept = chats.chats.get(&self.friend).is_some_and(|e| {
+                e.chat
+                    .items()
+                    .iter()
+                    .flat_map(Item::files)
+                    .any(|f| f.id == made.id && f.name == made.name)
+            });
+            if !kept && !chats.copying.contains_key(&(self.friend, made.id)) {
+                tracing::debug!("a copy of a file a send did not keep goes");
+                self.inner
+                    .direct
+                    .store
+                    .remove_file(&self.friend, &made.id, [made.name.as_str()]);
+            }
+        }
+    }
+}
 
 /// A file to send, with a video's first picture and length as this device read them.
 #[derive(Clone, Debug)]
@@ -148,6 +215,7 @@ impl Core {
         );
         let limit = self.inner.direct.lock().settings.limit;
         let dir = self.inner.direct.store.files_dir(&friend)?;
+        let mut copies = Copies::new(&self.inner, friend);
         let mut files = Vec::new();
         for out in outgoing {
             let name = clean_file_name(&out.path);
@@ -187,6 +255,7 @@ impl Core {
                     .file_path(&friend, &file)
                     .starts_with(&dir)
             );
+            copies.using(&file.id);
             if !self.inner.direct.store.has_copy(&friend, &file) {
                 // Kept here already under a name that ends otherwise: the same file.
                 let here = self
@@ -203,6 +272,7 @@ impl Core {
                 })
                 .await?
                 .with_context(|| format!("cannot keep a copy of {}", file.name))?;
+                copies.made.push(file.clone());
             }
             files.push(file);
         }
@@ -253,6 +323,8 @@ impl Core {
                 played: true,
             }),
         };
+        let mut copies = Copies::new(&self.inner, friend);
+        copies.using(&file.id);
         if !self.inner.direct.store.has_copy(&friend, &file) {
             let (inner, kept, bytes) = (self.inner.clone(), file.clone(), voice.file);
             tokio::task::spawn_blocking(move || {
@@ -260,6 +332,7 @@ impl Core {
             })
             .await?
             .context("cannot keep the voice message")?;
+            copies.made.push(file.clone());
         }
         self.write_message(friend, &name, "", vec![file]).await
     }

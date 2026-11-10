@@ -3418,12 +3418,6 @@ class L10nJa extends L10n {
   String get directPlay => '再生';
 
   @override
-  String get directSoundOn => '音声をオン';
-
-  @override
-  String get directMute => 'ミュート';
-
-  @override
   String directRemoveFilesTitle(int n) {
     String _temp0 = intl.Intl.pluralLogic(
       n,

@@ -216,5 +216,16 @@ class LinuxCMake(unittest.TestCase):
         self.assertEqual(self.bundled_version(), 2)
 
 
+def main():
+    """unittest.main, except that on Linux, where every test here runs, a skipped one fails
+    the run: a Linux computer without cmake does not pass the CMake tests in silence."""
+    result = unittest.main(exit=False).result
+    if sys.platform.startswith("linux") and result.skipped:
+        for test, reason in result.skipped:
+            print(f"skipped where it must run: {test.id()} ({reason})", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0 if result.wasSuccessful() else 1)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    main()

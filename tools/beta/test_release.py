@@ -785,5 +785,102 @@ class Checkout(unittest.TestCase):
                 release.checked_out(repo)
 
 
+class SigningProgram(unittest.TestCase):
+    def test_the_program_that_signs_must_be_built_from_the_commit(self):
+        commit = "a" * 40
+        with tempfile.TemporaryDirectory() as tmp:
+            fogata = pathlib.Path(tmp) / "fogata"
+
+            def holding(*markers):
+                fogata.write_bytes(b"\x7fELF..." + b"".join(
+                    b"\0fogata-commit-marker:" + m.encode() + b";\0" for m in markers)
+                    # The prefix alone, as the pack command's search for it keeps it.
+                    + b"fogata-commit-marker:\0")
+
+            holding(commit)
+            release.check_cli_commit(fogata, commit)
+            for markers in [("b" * 40,), (commit + "+dirty",), ("unknown",), (),
+                            (commit, "b" * 40)]:
+                with self.subTest(markers=markers):
+                    holding(*markers)
+                    with self.assertRaises(SystemExit) as stopped:
+                        release.check_cli_commit(fogata, commit)
+                    self.assertIn("cargo build --release -p fogata", str(stopped.exception))
+
+
+class FlatpakPermissions(unittest.TestCase):
+    """What tools/beta/flatpak.sh lets the Flatpak reach, pinned: a permission added, dropped
+    or widened (all of a filesystem, --device=all, the keychain's org.freedesktop.secrets)
+    must change this list too, deliberately, with its reason in flatpak.sh."""
+
+    PERMISSIONS = [
+        "--command=fogata",
+        "--share=network",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--device=dri",
+        "--socket=pulseaudio",
+        "--filesystem=xdg-run/pipewire-0",
+        "--filesystem=xdg-download",
+        "--talk-name=org.kde.StatusNotifierWatcher",
+        "--talk-name=org.gnome.Mutter.IdleMonitor",
+    ]
+
+    def setUp(self):
+        text = (HERE / "flatpak.sh").read_text()
+        # The script's commands, its comments left out.
+        self.code = [line for line in text.splitlines() if not line.lstrip().startswith("#")]
+
+    def build_finish(self):
+        """The arguments of each `flatpak build-finish` in the script, its lines joined."""
+        calls = []
+        lines = iter(self.code)
+        for line in lines:
+            if "flatpak build-finish" not in line:
+                continue
+            command = line
+            while command.rstrip().endswith("\\"):
+                command = command.rstrip()[:-1] + " " + next(lines)
+            calls.append(command.split(">")[0].split()[3:])  # after `flatpak build-finish "$build"`
+        return calls
+
+    def test_the_permissions_are_the_ones_reviewed(self):
+        self.assertEqual(self.build_finish(), [self.PERMISSIONS])
+
+    def test_nothing_else_grants_a_permission(self):
+        # No `flatpak override`, no metadata written by hand, no permission option outside
+        # build-finish.
+        finish = False
+        for line in self.code:
+            finish = finish or "flatpak build-finish" in line
+            if finish:
+                finish = line.rstrip().endswith("\\")
+                continue
+            with self.subTest(line=line):
+                self.assertNotIn("flatpak override", line)
+                self.assertNotRegex(line, r"--(share|socket|device|filesystem|talk-name|"
+                                          r"own-name|system-talk-name|allow|env|persist)=")
+                self.assertNotIn("[Context]", line)
+
+    def test_the_runtime_is_the_one_reviewed(self):
+        # Moving to another runtime (the old one's end of life) is a release decision: the
+        # libraries the bundle finds there change.
+        text = (HERE / "flatpak.sh").read_text()
+        self.assertIn("\nRUNTIME=org.freedesktop.Platform\n", text)
+        self.assertIn("\nRUNTIME_VERSION=26.08\n", text)
+
+
+def main():
+    """unittest.main, except that a test skipped where it can run fails the run. Only Windows
+    skips (links of a Mac bundle, the Linux build): a Linux or macOS computer without
+    ssh-keygen must not pass the signature tests in silence, as a skip does."""
+    result = unittest.main(exit=False).result
+    if os.name != "nt" and result.skipped:
+        for test, reason in result.skipped:
+            print(f"skipped where it must run: {test.id()} ({reason})", file=sys.stderr)
+        sys.exit(1)
+    sys.exit(0 if result.wasSuccessful() else 1)
+
+
 if __name__ == "__main__":
-    unittest.main()
+    main()

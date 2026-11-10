@@ -187,11 +187,21 @@ struct FolderKey {
 /// public half, so that copies go to someone else) is refused.
 fn folder_key(store: &Store) -> Result<Option<FolderKey>> {
     let path = store.dir().join(KEY_FILE);
-    let bytes = match fs::read(&path) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        bytes => Zeroizing::new(bytes.with_context(|| format!("cannot read {}", path.display()))?),
+    let read = || match fs::read(&path) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        bytes => bytes
+            .map(|b| Some(Zeroizing::new(b)))
+            .with_context(|| format!("cannot read {}", path.display())),
     };
+    if read()?.is_none() {
+        return Ok(None);
+    }
+    // Read again once the key was looked for: the start that looks for it seals the file,
+    // or refuses it and moves it away.
     let key = store.data_key()?;
+    let Some(bytes) = read()? else {
+        return Ok(None);
+    };
     let refused = || {
         anyhow::anyhow!(
             "the recovery key this folder keeps does not check out: turn copies on again"
@@ -1743,6 +1753,94 @@ mod tests {
             assert!(!to.exists());
         }
         fs::write(dir.join(KEY_FILE), &ours).unwrap();
+        let to = base.join("copy.fogata-copy");
+        export_with(&dir, &to, false, &keychain).unwrap();
+        assert_eq!(open_copy(&to, &key).unwrap().name, "Ana");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// The same swap made while Fogata is closed, with a plain key file (and a plain
+    /// identity) that the next start would have sealed with the folder's own key: it is
+    /// refused and moved aside as it was, unsealed, and no copy is made for it, whatever
+    /// the note of how far sealing got says (as left, rewritten in the clear, or gone).
+    #[test]
+    fn plain_secrets_planted_in_a_sealed_folder_are_refused_after_a_restart() {
+        let base = folder("planted");
+        let (_, keychain) = keychain();
+        let (dir, ana, key, _) = exported(&base, &keychain, false);
+        let theirs = RecoveryKey::generate().unwrap();
+        let mut planted_key = vec![KEY_VERSION];
+        planted_key.extend_from_slice(&theirs.public().0);
+        planted_key.extend_from_slice(&theirs.auth_key()[..]);
+        let planted_identity = hex::encode(DeviceIdentity::generate().unwrap().secret_bytes());
+        let ours = fs::read(dir.join(KEY_FILE)).unwrap();
+        let identity = dir.join("identity.key");
+        let sealed_identity = fs::read(&identity).unwrap();
+        let note = dir.join(crate::store::SEALING_FILE);
+        let noted = fs::read(&note).unwrap();
+        let refused = dir.join(crate::store::REFUSED_DIR);
+        for left in [
+            Some(noted.clone()),
+            Some(br#"{"phase":"pending"}"#.to_vec()),
+            None,
+        ] {
+            match &left {
+                Some(bytes) => fs::write(&note, bytes).unwrap(),
+                None => fs::remove_file(&note).unwrap(),
+            }
+            fs::write(dir.join(KEY_FILE), &planted_key).unwrap();
+            fs::write(&identity, &planted_identity).unwrap();
+            let store = Store::open_with(dir.clone(), keychain.clone()).unwrap();
+            let refusal = store.identity().unwrap_err().to_string();
+            assert!(refusal.contains("unencrypted"), "{refusal}");
+            assert!(!is_on(&dir));
+            let to = base.join("copy.fogata-copy");
+            assert!(export_with(&dir, &to, false, &keychain).is_err());
+            assert!(!to.exists());
+            assert_eq!(
+                fs::read(refused.join(KEY_FILE)).unwrap(),
+                planted_key,
+                "{left:?}"
+            );
+            assert_eq!(
+                fs::read(refused.join("identity.key")).unwrap(),
+                planted_identity.as_bytes()
+            );
+            drop(store);
+            fs::remove_dir_all(&refused).unwrap();
+            // The account's own files put back, it is the account it was.
+            fs::write(&identity, &sealed_identity).unwrap();
+            fs::write(dir.join(KEY_FILE), &ours).unwrap();
+            let store = Store::open_with(dir.clone(), keychain.clone()).unwrap();
+            assert_eq!(
+                store.identity().unwrap().0.public_key(),
+                ana.identity.public_key()
+            );
+            let to = base.join("copy.fogata-copy");
+            export_with(&dir, &to, false, &keychain).unwrap();
+            assert_eq!(open_copy(&to, &key).unwrap().name, "Ana");
+            assert!(open_copy(&to, &theirs).is_err());
+            fs::remove_file(&to).unwrap();
+            assert!(!refused.exists());
+        }
+        fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// A plain folder with copies on is sealed whole at the first start a keychain keeps a
+    /// key, its recovery key with it: copies go on for the same key.
+    #[test]
+    fn a_plain_folder_with_copies_on_keeps_them_once_sealed() {
+        let base = folder("sealed-later");
+        let dir = base.join("ana");
+        account(&dir, &Keychain::Off, "Ana");
+        let key = on(&dir, &Keychain::Off);
+        assert!(sealed_form(&fs::read(dir.join(KEY_FILE)).unwrap()).is_none());
+        let (_, keychain) = keychain();
+        let store = Store::open_with(dir.clone(), keychain.clone()).unwrap();
+        assert!(store.data_key().unwrap().is_some());
+        assert!(store.sealed());
+        drop(store);
+        assert!(sealed_form(&fs::read(dir.join(KEY_FILE)).unwrap()).is_some());
         let to = base.join("copy.fogata-copy");
         export_with(&dir, &to, false, &keychain).unwrap();
         assert_eq!(open_copy(&to, &key).unwrap().name, "Ana");

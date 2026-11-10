@@ -16,7 +16,7 @@ use libp2p::{
     },
 };
 
-use super::{ConnectionInfo, Member, Node};
+use super::{ConnectionInfo, Member, Node, dial::private_block};
 use crate::{NodeEvent, Path, addr};
 
 /// How often the direct connections to members are checked for silence, and how long one
@@ -33,6 +33,14 @@ pub(super) const THROUGH_DIAL_WAIT: Duration = Duration::from_secs(10);
 
 /// How long a path worse than the one told must last before it is told.
 const STEADY: Duration = Duration::from_secs(2);
+
+/// Most addresses one QUIC dial for a member's media goes to: a member's own device listens
+/// on a few at most, and each is a handshake sent wherever the address points.
+pub(super) const MAX_QUIC_ADDRESSES: usize = 4;
+/// How long after a QUIC dial for a member's media another goes to it, at the soonest: a
+/// member that closes its QUIC link again and again, while another stays, would otherwise
+/// have this device start a new dial each time, the earlier ones still on their way.
+pub(super) const QUIC_REDIAL: Duration = Duration::from_secs(60);
 
 /// `path` as told to the members of a group, `in_group` the peers that proved membership of
 /// it: the member whose relay slot carries the path is named only when it is one of them, so
@@ -77,10 +85,12 @@ impl Node {
 
     /// A member reached only over TCP (or through another member) cannot receive media
     /// datagrams: try once to open a QUIC connection to the addresses it listens on.
+    /// Tried again at each heartbeat while one is not due yet (see [`QUIC_REDIAL`]).
     pub(super) fn want_datagrams(&mut self, peer: PeerId) {
         if !self.in_regular_group(&peer)
             || crate::datagram::link(&peer).is_some()
             || self.quic_tried.contains(&peer)
+            || self.quic_dialled_lately(&peer)
         {
             return;
         }
@@ -93,22 +103,60 @@ impl Node {
         self.dial_quic(peer, quic);
     }
 
+    /// Whether a QUIC dial for `peer`'s media went less than [`QUIC_REDIAL`] ago.
+    fn quic_dialled_lately(&self, peer: &PeerId) -> bool {
+        self.quic_dialled
+            .get(peer)
+            .is_some_and(|at| at.elapsed() < QUIC_REDIAL)
+    }
+
     /// The QUIC addresses a member listens on, its local ones first: the public ones fail
-    /// between two devices behind the same router, which rarely sends traffic back in.
+    /// between two devices behind the same router, which rarely sends traffic back in. Only
+    /// those where the member is seen to be, at most [`MAX_QUIC_ADDRESSES`]: an address it
+    /// says it listens on at the IP of one of its own connections here, and a local one it
+    /// sent on a local network of this device's block. Anything else a member says would
+    /// let it make this device send handshakes to any address, its own network's included.
     pub(super) fn member_quic_addresses(&self, peer: &PeerId) -> Vec<Multiaddr> {
-        self.member_lan
+        let seen_at: HashSet<std::net::IpAddr> = self
+            .connections
+            .values()
+            .filter(|c| c.peer == *peer && !matches!(c.path, Path::ThroughMember { .. }))
+            .filter_map(|c| addr::ip(&c.address))
+            .collect();
+        let own_blocks: HashSet<[u8; 3]> =
+            self.listen_addrs.iter().filter_map(private_block).collect();
+        let lan = self
+            .member_lan
             .get(peer)
             .into_iter()
             .flatten()
-            .chain(self.peer_listening.get(peer).into_iter().flatten())
-            .filter(|a| addr::is_quic(a) && !addr::is_relayed(a))
-            .cloned()
-            .collect()
+            .filter(|a| private_block(a).is_none_or(|b| own_blocks.contains(&b)));
+        let listening = self
+            .peer_listening
+            .get(peer)
+            .into_iter()
+            .flatten()
+            .filter(|a| addr::ip(a).is_some_and(|ip| seen_at.contains(&ip)));
+        let mut out: Vec<Multiaddr> = Vec::new();
+        for address in lan.chain(listening) {
+            if !addr::is_quic(address) || addr::is_relayed(address) {
+                continue;
+            }
+            let address = addr::without_peer(address);
+            if !out.contains(&address) {
+                out.push(address);
+            }
+            if out.len() == MAX_QUIC_ADDRESSES {
+                break;
+            }
+        }
+        out
     }
 
     /// Dials `peer` over QUIC at `quic`, even while connected: the media link is a QUIC
     /// connection of its own.
     pub(super) fn dial_quic(&mut self, peer: PeerId, quic: Vec<Multiaddr>) {
+        self.quic_dialled.insert(peer, Instant::now());
         let opts = DialOpts::peer_id(peer)
             .addresses(quic)
             .condition(PeerCondition::Always)
@@ -336,8 +384,62 @@ impl Node {
 #[cfg(test)]
 mod tests {
     use fogata_crypto::DeviceIdentity;
+    use libp2p::core::ConnectedPoint;
 
     use super::*;
+    use crate::node::tests::{add_member, inspect, lone_member};
+
+    /// A member that says it listens on hundreds of QUIC addresses, anywhere, and sends
+    /// local ones of a network this device is not on, is dialled for media only at the
+    /// address its own connection comes from; and closing its QUIC link again and again
+    /// does not start a new dial each time.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_is_dialled_over_quic_only_where_it_is_seen_and_not_over_and_over() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            n.on_connection_established(
+                bea,
+                ConnectionId::new_unchecked(9500),
+                &ConnectedPoint::Dialer {
+                    address: "/ip4/192.0.2.50/tcp/4001".parse().unwrap(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                },
+            );
+            add_member(n, group, bea);
+            let quic = |ip: String| -> Multiaddr {
+                format!("/ip4/{ip}/udp/4001/quic-v1").parse().unwrap()
+            };
+            let mut listening: Vec<Multiaddr> = (0..300)
+                .map(|i| quic(format!("198.51.100.{}", i % 250)))
+                .collect();
+            listening.push(quic("127.0.0.1".into()));
+            listening.push(quic("192.0.2.50".into()));
+            n.peer_listening.insert(bea, listening);
+            n.member_lan
+                .insert(bea, vec![quic("10.9.9.9".into()), quic("10.9.9.10".into())]);
+            let chosen = n.member_quic_addresses(&bea);
+            let pending = |n: &Node| {
+                n.swarm
+                    .network_info()
+                    .connection_counters()
+                    .num_pending_outgoing()
+            };
+            let before = pending(n);
+            n.want_datagrams(bea);
+            let first = pending(n) - before;
+            for _ in 0..10 {
+                n.quic_tried.remove(&bea);
+                n.want_datagrams(bea);
+            }
+            (chosen, first, pending(n) - before)
+        })
+        .await;
+        let only: Multiaddr = "/ip4/192.0.2.50/udp/4001/quic-v1".parse().unwrap();
+        assert_eq!(found, (vec![only], 1, 1));
+        node.shutdown().await.unwrap();
+    }
 
     #[test]
     fn a_relaying_member_is_named_only_to_its_own_groups() {

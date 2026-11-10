@@ -25,7 +25,9 @@ fn time_left(ms: u64) -> String {
 /// Where the media bridge listens: `127.0.0.1`, except on Windows, where a socket bound to a
 /// network address (as WebRTC binds its sockets) cannot send to `127.0.0.1`. There it is the
 /// address of the interface toward the internet, found by asking the system for a route to a
-/// documentation address; nothing is sent.
+/// documentation address; nothing is sent. Other devices on that network can reach the port,
+/// but the bridge drops every datagram whose source is not this address before its TURN
+/// server reads it (`only_from` in fogata-media's bridge.rs).
 fn bridge_host() -> std::net::IpAddr {
     use std::net::Ipv4Addr;
     if !cfg!(windows) {

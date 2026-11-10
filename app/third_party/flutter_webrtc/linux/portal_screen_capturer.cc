@@ -47,6 +47,10 @@ void PortalScreenCapturer::Start(bool, int, FrameCallback, StartedCallback start
 
 void PortalScreenCapturer::SetFps(int) {}
 
+bool PortalScreenCapturer::SharesScreen() const {
+  return false;
+}
+
 void PortalScreenCapturer::Stop() {}
 
 #else
@@ -68,6 +72,10 @@ struct PortalScreenCapturer::State {
   guint request_signal = 0;
   std::string request;
   uint32_t node = 0;
+  // What the dialog offered (kMonitor, kWindow) and what was chosen, as the
+  // portal tells it (0 for a portal older than version 3, which does not).
+  uint32_t types = 0;
+  uint32_t source_type = 0;
   // For PipeWire's thread to reach the state on the GLib main thread.
   std::weak_ptr<State> self;
 
@@ -297,7 +305,10 @@ void Ask(const StatePtr& s,
                          new std::shared_ptr<Pending>(pending));
 }
 
-// BT.601 limited range, as WebRTC's encoders expect.
+// BT.601 limited range, as WebRTC's encoders expect. Each colour sample is the
+// average of the 2x2 block it stands for: the top-left pixel alone gave coloured
+// fringes along text and thin lines. (libyuv is inside libwebrtc, but the library
+// exports only the wrapper's API.)
 void ToI420(const uint8_t* src, int stride, int width, int height, bool bgr,
             uint8_t* y, uint8_t* u, uint8_t* v) {
   const int r_at = bgr ? 2 : 0;
@@ -309,16 +320,25 @@ void ToI420(const uint8_t* src, int stride, int width, int height, bool bgr,
     for (int col = 0; col < width; col++, p += 4) {
       yrow[col] = uint8_t(((66 * p[r_at] + 129 * p[1] + 25 * p[b_at] + 128) >> 8) + 16);
     }
-    if (row % 2 != 0) continue;
-    const uint8_t* q = src + size_t(row) * stride;
+  }
+  for (int row = 0; row < height; row += 2) {
+    const uint8_t* top = src + size_t(row) * stride;
+    // The last row of an odd height stands for itself twice.
+    const uint8_t* bottom = row + 1 < height ? top + stride : top;
     uint8_t* urow = u + size_t(row / 2) * half;
     uint8_t* vrow = v + size_t(row / 2) * half;
-    for (int col = 0; col < width; col += 2, q += 8) {
-      const int r = q[r_at];
-      const int g = q[1];
-      const int b = q[b_at];
-      urow[col / 2] = uint8_t(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-      vrow[col / 2] = uint8_t(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+    for (int col = 0; col < width; col += 2) {
+      const size_t left = size_t(col) * 4;
+      // And the last column of an odd width.
+      const size_t right = col + 1 < width ? left + 4 : left;
+      const int r = top[left + r_at] + top[right + r_at] + bottom[left + r_at] +
+                    bottom[right + r_at];
+      const int g = top[left + 1] + top[right + 1] + bottom[left + 1] + bottom[right + 1];
+      const int b = top[left + b_at] + top[right + b_at] + bottom[left + b_at] +
+                    bottom[right + b_at];
+      // Sums of four: the shift takes the average too.
+      urow[col / 2] = uint8_t(((-38 * r - 74 * g + 112 * b + 512) >> 10) + 128);
+      vrow[col / 2] = uint8_t(((112 * r - 94 * g - 18 * b + 512) >> 10) + 128);
     }
   }
 }
@@ -569,7 +589,13 @@ void StartCast(const StatePtr& s) {
         }
         GVariant* properties = nullptr;
         g_variant_get_child(streams, 0, "(u@a{sv})", &s->node, &properties);
-        if (properties != nullptr) g_variant_unref(properties);
+        if (properties != nullptr) {
+          uint32_t source_type = 0;
+          if (g_variant_lookup(properties, "source_type", "u", &source_type)) {
+            s->source_type = source_type;
+          }
+          g_variant_unref(properties);
+        }
         g_variant_unref(streams);
         GVariantBuilder none;
         g_variant_builder_init(&none, G_VARIANT_TYPE_VARDICT);
@@ -666,6 +692,11 @@ void PortalScreenCapturer::SetFps(int fps) {
   state_->fps = fps > 0 ? fps : 30;
 }
 
+bool PortalScreenCapturer::SharesScreen() const {
+  const State& s = *state_;
+  return s.source_type == kMonitor || (s.source_type == 0 && s.types == kMonitor);
+}
+
 void PortalScreenCapturer::Stop() {
   StopState(state_);
 }
@@ -694,6 +725,7 @@ void CreateSession(const StatePtr& s, uint32_t types, uint32_t cursor_mode) {
           return;
         }
         s->session = handle;
+        s->types = types;
         s->closed_signal = g_dbus_connection_signal_subscribe(
             s->bus, kPortal, kSession, "Closed", handle.c_str(), nullptr,
             G_DBUS_SIGNAL_FLAGS_NO_MATCH_RULE, OnClosed, new StatePtr(s),

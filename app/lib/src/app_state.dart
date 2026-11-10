@@ -57,6 +57,18 @@ part 'app_state/calls.dart';
 part 'app_state/events.dart';
 part 'app_state/pictures.dart';
 
+/// The downloads folder when the system does not say where it is: under the home folder,
+/// which Windows names in `USERPROFILE` (it has no `HOME`), rather than one beside wherever
+/// the app was started from, often its own folder, where nothing can be written.
+@visibleForTesting
+String downloadsFallback(Map<String, String> env, {required bool windows}) {
+  final home = windows
+      ? (env['USERPROFILE'] ?? env['HOME'])
+      : (env['HOME'] ?? env['USERPROFILE']);
+  if (home == null || home.isEmpty) return 'Downloads';
+  return '$home${windows ? r'\' : '/'}Downloads';
+}
+
 class AppState extends ChangeNotifier {
   AppState(this.dataDir);
 
@@ -424,8 +436,11 @@ class AppState extends ChangeNotifier {
   final Map<String, int> _quietUntil = {};
   int _lastMessageSound = 0;
 
-  /// The sounds played so far, for tests.
+  /// The last sounds played, for tests: no more than [_playedKept], since it is kept in a
+  /// release build too.
+  @visibleForTesting
   final List<UiSound> played = [];
+  static const _playedKept = 64;
 
   Future<void> boot() async {
     if (!prefs.loaded) await prefs.load();
@@ -438,7 +453,10 @@ class AppState extends ChangeNotifier {
     try {
       prefs.downloadsDir ??= (await getDownloadsDirectory())?.path;
     } catch (_) {}
-    prefs.downloadsDir ??= '${Platform.environment['HOME'] ?? '.'}/Downloads';
+    prefs.downloadsDir ??= downloadsFallback(
+      Platform.environment,
+      windows: onWindows,
+    );
     await loadMoveState();
     final move = moveState?.kind ?? 'none';
     // Moved away: the app is not run here any more.
@@ -807,6 +825,7 @@ class AppState extends ChangeNotifier {
   void _play(UiSound sound) {
     if (!prefs.sounds) return;
     played.add(sound);
+    if (played.length > _playedKept) played.removeAt(0);
     try {
       api.playSound(sound: sound);
     } catch (_) {}
@@ -1742,11 +1761,20 @@ class AppState extends ChangeNotifier {
     await refreshGroups();
   }
 
-  Future<void> sendChat(String text) async {
+  /// Writes [text] in the chat of the room shown; whether it went. When it did not, it is
+  /// kept as the room's draft unless something else was written there since.
+  Future<bool> sendChat(String text) async {
     final group = roomState.roomGroup;
-    if (group == null || text.trim().isEmpty) return;
-    await attempt(() => api.say(groupId: group, text: text.trim()));
+    final draft = roomState.draftHere;
+    if (group == null || draft == null || text.trim().isEmpty) return false;
+    final sent = await succeeds(
+      () => api.say(groupId: group, text: text.trim()),
+    );
+    if (!sent && (roomState.drafts[draft] ?? '').trim().isEmpty) {
+      roomState.drafts[draft] = text;
+    }
     await refreshRoom();
+    return sent;
   }
 
   // ----- Files waiting to be shared -----
@@ -1805,9 +1833,13 @@ class AppState extends ChangeNotifier {
   /// Shares the waiting files with [text], if any: the message first, so the files show
   /// under it. A file that does not go (it failed, or the room took no more files before
   /// its turn) waits again, as the direct chats' files do; one that went does not.
-  Future<void> sendOutgoing(String text) async {
+  /// Whether the message went (none to send counts as gone); one that did not is kept as
+  /// the room's draft, as [sendChat] keeps it.
+  Future<bool> sendOutgoing(String text) async {
     final group = roomState.roomGroup;
-    if (group == null) return;
+    final draft = roomState.draftHere;
+    if (group == null || draft == null) return false;
+    var said = true;
     final batch = roomState.outgoing.remove(group) ?? const <OutgoingFile>[];
     final paths = [for (final f in batch) f.path];
     (_sending[group] ??= []).addAll(paths);
@@ -1827,7 +1859,10 @@ class AppState extends ChangeNotifier {
         (visit == null || identical(roomState.memories[group], visit));
     try {
       if (text.trim().isNotEmpty) {
-        await attempt(() => api.say(groupId: group, text: text.trim()));
+        said = await succeeds(() => api.say(groupId: group, text: text.trim()));
+        if (!said && (roomState.drafts[draft] ?? '').trim().isEmpty) {
+          roomState.drafts[draft] = text;
+        }
       }
       var full = false;
       for (final f in batch) {
@@ -1887,6 +1922,7 @@ class AppState extends ChangeNotifier {
       say(l10n.appSharingMany(shared.length));
     }
     await refreshRoom();
+    return said;
   }
 
   Future<void> stopSharing(String file) async {
@@ -1900,8 +1936,11 @@ class AppState extends ChangeNotifier {
     final group = roomState.roomGroup;
     final dir = prefs.downloadsDir;
     if (group == null || dir == null) return;
-    await Directory(dir).create(recursive: true);
-    await attempt(() => api.download(groupId: group, file: file, dir: dir));
+    // A folder that cannot be made (gone, read-only, a drive taken out) is said too.
+    await attempt(() async {
+      await Directory(dir).create(recursive: true);
+      await api.download(groupId: group, file: file, dir: dir);
+    });
     await refreshRoom();
   }
 

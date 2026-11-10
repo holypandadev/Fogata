@@ -14,20 +14,65 @@ pub(super) const IN_FLIGHT: usize = 6;
 
 /// Most member requests waiting for one peer; past it the oldest goes.
 pub(super) const MAX_WAITING: usize = 1024;
+/// Most bytes of member requests waiting for one peer; past it the oldest go. A member that
+/// stops reading would otherwise keep up to [`MAX_WAITING`] banners or group messages here,
+/// hundreds of MiB, for as long as the queue takes to drain at a few requests per timeout.
+pub(super) const MAX_WAITING_BYTES: usize = 16 * 1024 * 1024;
+
+/// About the bytes `request` takes while it waits: what it carries that can be large.
+pub(super) fn request_bytes(request: &MemberRequest) -> usize {
+    use super::members::wire_bytes;
+    let list = |l: &[serde_bytes::ByteBuf]| l.iter().map(|b| b.len() + 8).sum::<usize>();
+    64 + match request {
+        MemberRequest::Challenge { challenge, tags } => challenge.len() + list(tags),
+        MemberRequest::Deliver(message) => wire_bytes(message),
+        MemberRequest::Spread { message, reached } => wire_bytes(message) + reached.len(),
+        MemberRequest::Sync { have, .. } => list(have),
+        MemberRequest::Push { entries, .. } => entries.iter().map(|e| e.len() + 8).sum(),
+        MemberRequest::Admitted { entries, .. } => list(entries),
+        MemberRequest::JoinRequest { ticket } => ticket.len(),
+        MemberRequest::JoinCommit { entry, binding } => {
+            entry.len() + binding.as_ref().map_or(0, |b| b.len())
+        }
+        MemberRequest::Profile { profile, animation } => {
+            profile.len() + animation.as_ref().map_or(0, |a| a.len())
+        }
+        MemberRequest::Addresses { addresses } => list(addresses),
+        MemberRequest::Signal { payload, .. } => payload.len(),
+        MemberRequest::JoinDeclined { revoke, .. } => revoke.as_ref().map_or(0, |r| r.len()),
+        MemberRequest::Direct { messages, .. } => messages.iter().map(wire_bytes).sum(),
+        MemberRequest::GroupBanner { banner, .. } => banner.len(),
+        MemberRequest::GroupPicture { picture, .. } => picture.len(),
+        MemberRequest::RoomEvents { ids, .. } => ids.len(),
+        MemberRequest::FriendAsk { sealed } => sealed.len(),
+        MemberRequest::Roster { .. }
+        | MemberRequest::RoomSync { .. }
+        | MemberRequest::Presence { .. }
+        | MemberRequest::OtherSession
+        | MemberRequest::KeyProblem { .. } => 0,
+    }
+}
 
 impl Node {
     /// Sends a member request, or keeps it until fewer are on their way to that peer (see
-    /// [`IN_FLIGHT`]).
+    /// [`IN_FLIGHT`]); past [`MAX_WAITING`] or [`MAX_WAITING_BYTES`] waiting, the oldest
+    /// waiting go (the one just added always waits).
     pub(super) fn request(&mut self, peer: PeerId, request: MemberRequest, kind: Pending) {
         let outbox = self.outbox.entry(peer).or_default();
         if outbox.in_flight >= IN_FLIGHT {
-            let dropped = if outbox.waiting.len() >= MAX_WAITING {
-                outbox.waiting.pop_front()
-            } else {
-                None
-            };
+            outbox.waiting_bytes += request_bytes(&request);
             outbox.waiting.push_back((request, kind));
-            if let Some((_, kind)) = dropped {
+            let mut dropped = Vec::new();
+            while outbox.waiting.len() > 1
+                && (outbox.waiting.len() > MAX_WAITING || outbox.waiting_bytes > MAX_WAITING_BYTES)
+            {
+                let Some((request, kind)) = outbox.waiting.pop_front() else {
+                    break;
+                };
+                outbox.waiting_bytes = outbox.waiting_bytes.saturating_sub(request_bytes(&request));
+                dropped.push(kind);
+            }
+            for kind in dropped {
                 self.request_dropped(peer, kind);
             }
             return;
@@ -80,6 +125,24 @@ impl Node {
                     slot.room_asked.remove(&peer);
                 }
             }
+            // No longer on its way: another banner or picture may go to it at once, the same
+            // one only after a while (see `RecordSent`), as after an answer.
+            Pending::Banner(group, digest) => {
+                if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.banner_answered(peer, digest);
+                }
+            }
+            Pending::Picture(group, digest) => {
+                if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.picture_answered(peer, digest);
+                }
+            }
+            // Sent again at the next roster that asks for them.
+            Pending::Sync(group) => {
+                if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.syncing.remove(&peer);
+                }
+            }
             // Those after it wait for the application to send again, in its order,
             // everything not confirmed, as when one fails on its way.
             Pending::Direct => {
@@ -97,7 +160,10 @@ impl Node {
         let waiting = self
             .outbox
             .get_mut(&peer)
-            .map(|o| std::mem::take(&mut o.waiting))
+            .map(|o| {
+                o.waiting_bytes = 0;
+                std::mem::take(&mut o.waiting)
+            })
             .unwrap_or_default();
         for (_, kind) in waiting {
             self.request_dropped(peer, kind);
@@ -145,6 +211,7 @@ impl Node {
         };
         outbox.in_flight = outbox.in_flight.saturating_sub(1);
         if let Some((request, kind)) = outbox.waiting.pop_front() {
+            outbox.waiting_bytes = outbox.waiting_bytes.saturating_sub(request_bytes(&request));
             self.request(peer, request, kind);
         }
         if !self.direct_on_its_way(peer)
@@ -179,6 +246,39 @@ mod tests {
         Admitting, Pending,
         tests::{add_member, empty_push, inspect, lone_member},
     };
+
+    /// Large requests waiting for a member that does not read are kept up to
+    /// [`MAX_WAITING_BYTES`], the oldest dropped first, not up to [`MAX_WAITING`] of them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn requests_waiting_for_a_member_are_kept_up_to_a_bound_in_bytes() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            for _ in 0..IN_FLIGHT {
+                n.request(bea, empty_push(group), Pending::Push);
+            }
+            let large = || MemberRequest::GroupBanner {
+                group_id: group.as_bytes().to_vec(),
+                banner: vec![0; 512 * 1024],
+            };
+            for _ in 0..200 {
+                n.request(bea, large(), Pending::Push);
+            }
+            let outbox = &n.outbox[&bea];
+            let counted: usize = outbox.waiting.iter().map(|(r, _)| request_bytes(r)).sum();
+            (outbox.waiting.len(), outbox.waiting_bytes, counted)
+        })
+        .await;
+        let (waiting, bytes, counted) = found;
+        assert_eq!(bytes, counted);
+        assert!(bytes <= MAX_WAITING_BYTES, "{bytes} bytes waiting");
+        assert!(
+            waiting >= MAX_WAITING_BYTES / (513 * 1024),
+            "only {waiting} waiting"
+        );
+        node.shutdown().await.unwrap();
+    }
 
     /// A member request dropped before it went, the oldest of a full queue to a member
     /// that answers nothing, lets go what waits for its answer as one lost on the way does:

@@ -97,7 +97,10 @@ pub struct Rotation {
 }
 
 impl Rotation {
-    /// A new epoch for `members`, returning the rotation and its secret.
+    /// A new epoch for `members`, returning the rotation and its secret. A weak key among
+    /// them ([`DevicePublicKey::is_weak`]) gets no box: nothing can be sealed to it, and no
+    /// device has it, but a manager can add one as a member, and failing for it would keep
+    /// the group from ever starting another epoch, or removing anyone.
     pub fn new(
         group_id: &GroupId,
         members: impl IntoIterator<Item = DevicePublicKey>,
@@ -107,7 +110,7 @@ impl Rotation {
         let secret = GroupSecret::generate()?;
         let context = secret_context(group_id, &epoch);
         let mut sealed = Vec::new();
-        for member in members {
+        for member in members.into_iter().filter(|m| !m.is_weak()) {
             sealed.push((member, Sealed::seal(&member, &context, secret.as_bytes())?));
         }
         sealed.sort_by_key(|(k, _)| *k);

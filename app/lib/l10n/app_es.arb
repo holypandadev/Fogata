@@ -779,8 +779,6 @@
   "directCannotPlay": "Este equipo no puede reproducir este video.",
   "directPause": "Pausar",
   "directPlay": "Reproducir",
-  "directSoundOn": "Activar sonido",
-  "directMute": "Silenciar",
   "directRemoveFilesTitle": "{n, plural, =1{¿Quitar el archivo?} other{¿Quitar los {n} archivos?}}",
   "directRemoveFilesText": "Se quitan de este mensaje. Los archivos de tu equipo se quedan como están.",
   "directDraftKept": "Lo que estabas escribiendo se queda aquí para cuando puedas enviarlo.",

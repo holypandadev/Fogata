@@ -8,6 +8,7 @@
 #       The same targets under libFuzzer, guided by coverage (nightly toolchain and
 #       cargo-fuzz): each runs for MINUTES, JOBS of them at once, one process each. Corpora
 #       grow in fuzz/corpus/<target>, findings land in fuzz/artifacts/<target>.
+#       FOGATA_FUZZ_TOOLCHAIN names the nightly (`nightly` by default, a dated one in CI).
 #
 # Without TARGET, every target runs. Runs at a lower priority (nice), so the computer stays
 # usable. Written for bash 3.2, the one macOS ships: no mapfile, no `wait -n`, no GNU find.
@@ -61,7 +62,8 @@ fi
 FOGATA_FUZZ_SEEDS="$PWD/fuzz/seeds" nice -n 10 cargo test -p fogata-core --lib -- \
     --ignored --exact fuzzing::runs::write_seeds
 cd fuzz
-nice -n 10 cargo +nightly fuzz build --fuzz-dir .
+toolchain=+${FOGATA_FUZZ_TOOLCHAIN:-nightly}
+nice -n 10 cargo "$toolchain" fuzz build --fuzz-dir .
 mkdir -p logs
 status=0
 pids=()
@@ -73,7 +75,7 @@ reap() {
 for target in "${targets[@]}"; do
     mkdir -p "corpus/$target"
     echo "$target: $minutes min, log in fuzz/logs/$target.log"
-    nice -n 10 cargo +nightly fuzz run --fuzz-dir . "$target" "corpus/$target" "seeds/$target" -- \
+    nice -n 10 cargo "$toolchain" fuzz run --fuzz-dir . "$target" "corpus/$target" "seeds/$target" -- \
         -max_total_time="$seconds" -timeout=10 -rss_limit_mb=2048 \
         -print_final_stats=1 > "logs/$target.log" 2>&1 &
     pids+=($!)

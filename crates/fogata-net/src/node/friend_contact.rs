@@ -142,6 +142,7 @@ impl Node {
             f.offers_in.remove(&device);
             // Maybe gone to another network: look for it at every slot for a while.
             f.searching_until = Some(Instant::now() + SEARCH_HARD);
+            f.gone_at.insert(device, Instant::now());
             f.last_lookup = None;
             self.emit(NodeEvent::FriendOffline { device });
         }

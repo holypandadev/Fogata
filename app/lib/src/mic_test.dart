@@ -4,7 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 
-import 'call.dart' show openMicStream, silenceLabel, suppressNoise;
+import 'call.dart'
+    show closeConnection, openMicStream, silenceLabel, suppressNoise;
 
 /// How loud a microphone is, read where nobody else is connected to read it from.
 ///
@@ -48,7 +49,7 @@ class LevelLoop implements TrackLevel {
     try {
       receiver = await createPeerConnection({'iceServers': []});
     } catch (_) {
-      await sender.close();
+      await closeConnection(sender);
       rethrow;
     }
     final loop = LevelLoop._(sender, receiver, track.id ?? '').._hear = hear;
@@ -133,7 +134,7 @@ class LevelLoop implements TrackLevel {
     _heard?.enabled = false;
     for (final connection in [_sender, _receiver]) {
       try {
-        await connection.close();
+        await closeConnection(connection);
       } catch (_) {}
     }
   }
@@ -247,7 +248,7 @@ Future<MicLoop> openWebrtcMic({
     // The track goes before the last connection: freed after the voice engine stopped, an
     // audio track brought the application down on Linux.
     if (stream != null) await _free(stream);
-    await engine.close();
+    await closeConnection(engine);
     rethrow;
   }
 }
@@ -303,7 +304,7 @@ class _WebrtcMic implements MicLoop {
     // The track first, while connections still keep the voice engine running.
     await _free(_stream);
     await _loop.close();
-    await _engine.close();
+    await closeConnection(_engine);
   }
 }
 

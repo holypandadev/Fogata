@@ -3691,12 +3691,6 @@ class L10nFr extends L10n {
   String get directPlay => 'Lecture';
 
   @override
-  String get directSoundOn => 'Activer le son';
-
-  @override
-  String get directMute => 'Couper le son';
-
-  @override
   String directRemoveFilesTitle(int n) {
     String _temp0 = intl.Intl.pluralLogic(
       n,

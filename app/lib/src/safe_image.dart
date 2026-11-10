@@ -223,6 +223,9 @@ bool samePicture(Uint8List? a, Uint8List? b) {
 
 final _hashes = Expando<int>('picture hash');
 
+/// A hash of [bytes] that goes with [samePicture], for maps of pictures by content.
+int pictureHash(Uint8List bytes) => _hashOf(bytes);
+
 /// The length and up to 4096 bytes spread over the picture, worked out once per list: a
 /// large picture is not read whole for it.
 int _hashOf(Uint8List bytes) => _hashes[bytes] ??= () {

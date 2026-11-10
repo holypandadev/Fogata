@@ -158,7 +158,40 @@ pub(crate) async fn share_download(
 /// it back while the writing goes on.
 pub(crate) struct Room {
     inner: std::sync::Arc<Inner>,
+    disk: Disk,
     held: u64,
+}
+
+/// Which disk a folder is on, for the room held on each: a download to one disk is not
+/// refused for what copies to another hold. Unix: the device of the folder (or of the
+/// nearest folder above it that is there yet); Windows: its drive (or share); elsewhere,
+/// one for all.
+pub(crate) type Disk = String;
+
+pub(crate) fn disk_of(dir: &FsPath) -> Disk {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        dir.ancestors()
+            .find_map(|d| std::fs::metadata(d).ok())
+            .map(|m| m.dev().to_string())
+            .unwrap_or_default()
+    }
+    #[cfg(windows)]
+    {
+        let dir = std::path::absolute(dir).unwrap_or_else(|_| dir.to_path_buf());
+        match dir.components().next() {
+            Some(std::path::Component::Prefix(prefix)) => {
+                prefix.as_os_str().to_string_lossy().to_lowercase()
+            }
+            _ => String::new(),
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = dir;
+        String::new()
+    }
 }
 
 impl Room {
@@ -171,7 +204,12 @@ impl Room {
 impl Drop for Room {
     fn drop(&mut self) {
         let mut copying = self.inner.copying.lock().unwrap_or_else(|e| e.into_inner());
-        *copying = copying.saturating_sub(self.held);
+        if let Some(held) = copying.get_mut(&self.disk) {
+            *held = held.saturating_sub(self.held);
+            if *held == 0 {
+                copying.remove(&self.disk);
+            }
+        }
     }
 }
 
@@ -182,7 +220,8 @@ fn held_for(size: u64) -> u64 {
 }
 
 /// Holds `bytes` of the disk of `dir`, leaving [`SPACE_KEPT_FREE`] and what the copies and
-/// fetches under way hold (`refused` says why when they do not fit). Read and held at once.
+/// fetches under way on that disk hold (`refused` says why when they do not fit). Read and
+/// held at once.
 pub(crate) fn hold_disk(
     inner: &std::sync::Arc<Inner>,
     bytes: u64,
@@ -190,18 +229,27 @@ pub(crate) fn hold_disk(
     refused: &str,
 ) -> Result<Room> {
     let free_space = inner.lock().free_space;
+    let disk = disk_of(dir);
     let mut copying = inner.copying.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some(free) = free_space.and_then(|free_space| free_space(dir)) {
-        let most = free
-            .saturating_sub(SPACE_KEPT_FREE)
-            .saturating_sub(*copying);
-        if bytes > most {
-            bail!("{refused}");
+    let held = copying.get(&disk).copied().unwrap_or(0);
+    match free_space.map(|free_space| free_space(dir)) {
+        Some(Some(free)) => {
+            let most = free.saturating_sub(SPACE_KEPT_FREE).saturating_sub(held);
+            if bytes > most {
+                bail!("{refused}");
+            }
         }
+        // Not checked: what is held is still counted, for when the system answers again.
+        Some(None) => tracing::debug!(
+            "the free space of {} is not known; {bytes} bytes held unchecked",
+            dir.display()
+        ),
+        None => tracing::debug!("no free space check: {bytes} bytes held unchecked"),
     }
-    *copying = copying.saturating_add(bytes);
+    *copying.entry(disk.clone()).or_default() = held.saturating_add(bytes);
     Ok(Room {
         inner: inner.clone(),
+        disk,
         held: bytes,
     })
 }
@@ -789,7 +837,37 @@ mod tests {
         );
         drop(fetching);
         ana.share_file(group, path, None).await.unwrap();
-        assert_eq!(*ana.inner.copying.lock().unwrap(), 0);
+        assert!(ana.inner.copying.lock().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// What is held on one disk does not count against another: a download to a second
+    /// disk is not refused for a copy being made on the first.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn room_held_on_one_disk_leaves_another_alone() {
+        let _one = ONE_AT_A_TIME.lock().await;
+        let base = std::env::temp_dir().join(format!("fogata-two-disks-{}", std::process::id()));
+        let room = in_a_room(&base).await;
+        let ana = &room.ana;
+        const SIZE: u64 = 4 << 20;
+        ana.use_free_space(|_| Some(crate::downloads::SPACE_KEPT_FREE + SIZE * 3 / 2));
+        // Nearly all of another disk's room is held.
+        ana.inner
+            .copying
+            .lock()
+            .unwrap()
+            .insert("another disk".into(), SIZE);
+        let here = super::hold_disk(&ana.inner, SIZE, &base, "full").unwrap();
+        // This disk's own holds still count.
+        assert!(super::hold_disk(&ana.inner, SIZE, &base, "full").is_err());
+        drop(here);
+        let copying = ana.inner.copying.lock().unwrap().clone();
+        assert_eq!(copying.len(), 1, "{copying:?}");
+        assert_eq!(copying["another disk"], SIZE);
+        assert_eq!(
+            super::disk_of(&base),
+            super::disk_of(&base.join("not there yet"))
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 
@@ -828,7 +906,7 @@ mod tests {
             "one shared, one refused"
         );
         // Once made, the copy takes its room on the disk itself: nothing stays held.
-        assert_eq!(*ana.inner.copying.lock().unwrap(), 0);
+        assert!(ana.inner.copying.lock().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&base);
     }
 }

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
@@ -15,7 +16,12 @@ const _side = 24;
 /// Most pictures whose main colour is kept, the last ones asked for.
 const _kept = 64;
 
-final _colours = <Uint8List, Color?>{};
+/// By the pictures' bytes, not their lists: the core hands over a new list with the same
+/// bytes at every refresh.
+final _colours = LinkedHashMap<Uint8List, Color?>(
+  equals: samePicture,
+  hashCode: pictureHash,
+);
 
 /// The colour that covers most of [bytes] (a photo): its pixels sorted into a few
 /// thousand shades, each counted more the more vivid it is, so a small bright subject
@@ -132,7 +138,8 @@ class _MainColourState extends State<MainColour> {
           avatarPresets[widget.avatar.preset % avatarPresets.length].color;
       return;
     }
-    if (identical(photo, _read)) return;
+    // The same photo in a new list, as each refresh brings it: nothing to read again.
+    if (samePicture(photo, _read)) return;
     _read = photo;
     _colour = _colours[photo];
     mainColour(photo).then((colour) {

@@ -100,15 +100,21 @@ impl Node {
             return;
         }
         self.interesting.insert(other);
-        self.wanted.want(other);
         self.hinted.entry(other).or_default().insert(group);
         // Connected, unless only by connections that went silent: then the way through
         // `via` is opened beside them (see `check_member_links`).
         let silent = self.silent.contains_key(&other);
-        if self.swarm.is_connected(&other) && !silent {
+        let connected = self.connections.values().any(|c| c.peer == other);
+        if connected && !silent {
+            // Kept open while it is checked, but not spared when incoming connections run
+            // out, as a peer this device dials is: any member can name any peers in its
+            // roster, and peers connected with those would otherwise hold places that are
+            // never freed for as long as it names them.
+            self.wanted.hear(other);
             self.approach(other, Some(group));
             return;
         }
+        self.wanted.want(other);
         let Some(member) = self.members.get(&via) else {
             return;
         };
@@ -297,9 +303,45 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
-    use libp2p::Multiaddr;
+    use fogata_proto::MemberResponse;
+    use libp2p::{Multiaddr, core::ConnectedPoint, swarm::ConnectionId};
 
     use super::*;
+    use crate::node::tests::{add_member, inspect, lone_member};
+
+    /// A peer connected to this device that a member's roster names is checked, but not
+    /// spared when incoming connections run out; one this device dials through the member
+    /// is.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_connected_peer_a_roster_names_is_not_spared() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let (bea, connected, away) = (PeerId::random(), PeerId::random(), PeerId::random());
+            add_member(n, group, bea);
+            n.on_connection_established(
+                connected,
+                ConnectionId::new_unchecked(9700),
+                &ConnectedPoint::Listener {
+                    local_addr: "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
+                    send_back_addr: "/ip4/192.0.2.70/udp/4001/quic-v1".parse().unwrap(),
+                },
+            );
+            n.on_response(
+                bea,
+                Pending::Roster(group),
+                MemberResponse::Roster {
+                    peers: [connected, away]
+                        .iter()
+                        .map(|p| serde_bytes::ByteBuf::from(p.to_bytes()))
+                        .collect(),
+                },
+            );
+            (n.wanted.is_wanted(&connected), n.wanted.is_wanted(&away))
+        })
+        .await;
+        assert_eq!(found, (false, true));
+        node.shutdown().await.unwrap();
+    }
 
     #[test]
     fn only_local_quic_addresses_a_member_sends_are_kept() {

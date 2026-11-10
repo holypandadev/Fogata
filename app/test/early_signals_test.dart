@@ -63,6 +63,38 @@ void main() {
     expect(fairSignal({'t': 'answer', 'sdp': 7}), isFalse);
   });
 
+  test('candidates too long or for no channel of a call are dropped', () {
+    const line =
+        'candidate:842163049 1 udp 1677729535 192.0.2.7 50000 typ srflx raddr 0.0.0.0 '
+        'rport 0 generation 0 ufrag Ab3d network-id 1 network-cost 10';
+    expect(
+      fairSignal({'t': 'ice', 'candidate': line, 'mid': '0', 'index': 0}),
+      isTrue,
+    );
+    expect(fairSignal({'t': 'ice', 'candidate': null}), isTrue);
+    expect(
+      fairSignal({
+        't': 'ice',
+        'candidate': 'a' * (maxCandidateBytes + 1),
+        'mid': '0',
+        'index': 0,
+      }),
+      isFalse,
+    );
+    expect(fairSignal({'t': 'ice', 'candidate': 7}), isFalse);
+    expect(fairSignal({'t': 'ice', 'candidate': line, 'mid': 0}), isFalse);
+    expect(
+      fairSignal({'t': 'ice', 'candidate': line, 'mid': 'x' * 100}),
+      isFalse,
+    );
+    expect(fairSignal({'t': 'ice', 'candidate': line, 'index': '0'}), isFalse);
+    expect(fairSignal({'t': 'ice', 'candidate': line, 'index': -1}), isFalse);
+    expect(
+      fairSignal({'t': 'ice', 'candidate': line, 'index': maxSdpSections}),
+      isFalse,
+    );
+  });
+
   test('a call\'s offer or answer has its channels and no others', () {
     // Older copies, and copies before the screen's sound, offer fewer.
     for (final kinds in [

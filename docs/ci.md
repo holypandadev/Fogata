@@ -6,6 +6,28 @@ pull request and by hand: on Linux `tools/ci.sh --full`, whose macOS and Windows
 workflow's other two jobs, `tools/ci-leg.sh macos` and `tools/ci-leg.ps1` (without the smoke
 test, which needs virtual sound devices), side by side.
 
+What GitHub's computers cover, and what they do not:
+
+- Linux: everything of `tools/ci.sh --full`, but of the smoke test's desktops only `x11`
+  (Xvfb) runs there; the KDE ones (`wayland`, `xwayland`, `bare`: the desktop portal's screen
+  sharing) need a GPU render node and are skipped. The job fails unless at least one desktop
+  ran the smoke test and passed. The KDE desktops run only on the computers of the people who
+  push, through the pre-push hook.
+- macOS: `tools/check.sh --no-advisories --no-codegen`, `dart format`, `flutter analyze` and
+  `flutter test`;
+  no integration, pair or smoke test, and no build of the application yet: the Mac app needs
+  `WebRTC.xcframework`, which is not published (see `app/macos/WebRTC-SDK.podspec`). Once it
+  is, the job gets `flutter build macos --debug` (a TODO in the workflow).
+- Windows: `tools/ci-leg.ps1` without the smoke test (it needs virtual sound devices), and a
+  debug build of the application (`flutter build windows --debug`), which compiles the native
+  plugins and downloads and checks the Windows libwebrtc.
+
+A newer push to a pull request cancels the run of the one before; every push to `main` keeps
+its own run. The Rust builds of the dependencies are cached (`Swatinem/rust-cache`), saved
+only by runs of pushes to `main`, so a pull request reads them and never writes them.
+`.github/workflows/weekly.yml` runs once a week (and by hand) what no push waits for: see
+"Every week" below.
+
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD
 tools/install-hooks.sh        # once per clone: installs the pre-push hook
@@ -21,16 +43,22 @@ and runs there, in this order:
    built with ThreadSanitizer against the libwebrtc the build unpacked, and the noise
    suppression table's;
 4. `tools/check.sh`, strict: formatting, clippy with warnings as errors, every test (the video
-   players' check of a file's first bytes among them, and on macOS the tests of its video
-   loader, `app/packages/fogata_video/macos/test`), `cargo
+   players' check of a file's first bytes among them, on Linux built a second time with
+   AddressSanitizer and UndefinedBehaviorSanitizer like the Linux player's other C++ tests,
+   and on macOS the tests of its video loader, `app/packages/fogata_video/macos/test`), `cargo
    deny` (licences, bans, sources and the RustSec advisories, which fail when the computer
-   has no advisory database, or one whose last advisory is more than 14 days old), the
+   has no advisory database, or one whose last advisory is more than 14 days old; a yanked
+   crate version fails too, and warnings are printed, not hidden; with the advisories, also
+   over `fuzz/Cargo.toml`, without its licences), the
    tests of the release and check scripts, of the commit marker (a change to a native source,
    or a new file there, makes the library say `+dirty`; a build of Flutter's own files does not
    make cargo compile again) and of the CMake file that bundles the library (it takes the one
    cargo built, whatever `CARGO_TARGET_DIR` says), `THIRD-PARTY-NOTICES` up to date, the bridge
    code generated again the same, the `[patch.crates-io]` of `fuzz/Cargo.toml` the same as the
-   workspace's, the command-line program linted and tested also with its `lab` feature (the
+   workspace's, the crates `fuzz/Cargo.lock` shares with `Cargo.lock` at versions `Cargo.lock`
+   has (`tools/fuzz_lock.py`), the dependencies between the workspace's own crates only along
+   the edges their layers allow (`tools/crate_layers.py`, docs/architecture.md), the app's
+   limits of a message, a bio and the names the same as the Rust ones (`tools/limits.py`), the command-line program linted and tested also with its `lab` feature (the
    network lab's tools and test switches, which the program that ships does not have), and
    where unsafe code may be: every crate but `fogata-ffi`
    has `#![forbid(unsafe_code)]`, clippy denies an unsafe block without a SAFETY comment, and
@@ -43,7 +71,9 @@ and runs there, in this order:
    that no other step compiles;
 6. `flutter gen-l10n`, then nothing in the worktree may differ from the commit (generated
    code, localizations, `fuzz/Cargo.lock`);
-7. `flutter analyze` and `flutter test`;
+7. `dart format --set-exit-if-changed` over the app's own Dart code (`lib`, `test`,
+   `integration_test`, `test_driver`, `packages/fogata_video`; not `third_party`), then
+   `flutter analyze` and `flutter test`;
 8. `tools/integration-tests.sh`: the integration tests that need one copy of the
    application and nothing else (`beta_test`, `chat_tools_test`, `layout_test`,
    `screens_test`, `settings_layout_test`, `video_test`), each with `flutter test -d linux`
@@ -136,6 +166,40 @@ better, so none of it is meant to; a leg that must be trusted is one a maintaine
 proves nothing to a third person. What it does give is a trail: the command, its exit status
 and a digest of its output are in the record, and the output is in the log beside it. `git push --no-verify` skips the hook: only when the
 commit cannot be checked here.
+
+## Every week
+
+`.github/workflows/weekly.yml` runs on Mondays (and by hand, from the Actions tab), with a
+token that can only read; a failure there is for the maintainers to look at, it blocks no push:
+
+- `advisories`: `cargo deny check advisories` online over `Cargo.lock` and
+  `fuzz/Cargo.lock` (a fresh RustSec database, yanked versions read from crates.io), so a new
+  advisory against a crate already locked shows even in a week with no push.
+- `fuzz`: every libFuzzer target (`tools/fuzz.sh --libfuzzer`, 8 minutes each by default,
+  four at a time: about 50 minutes, plus the build), with the dated nightly of `ci.yml`. The
+  corpus is kept from week to week in the Actions cache (written only by this workflow's
+  runs); findings and the logs are kept as the run's `fuzz-findings` artifact. A finding fails
+  the job: replay it as docs/fuzzing.md says.
+- `previous-release`: the command line built at the last release tag before the commit (or
+  the tag given), against this commit's core:
+  `crates/fogata-core/tests/previous_release.rs` (what this version writes to a group, the
+  last release takes in whole, and both meet in its voice room). The tests of
+  `crates/fogata-core/tests/old_copy.rs` are not run there: each needs a copy from before a
+  given feature (banners, MLS, picture records...), older than every published tag, so they
+  run only where such a build is at hand.
+- `vendor`: `tools/vendor_diff.py`, each vendored crate against the one published on
+  crates.io at the version it records: the files changed, which `FOGATA.md` must name, and
+  whether crates.io has a newer version. The whole diff is the `vendor-diff` artifact. Report
+  only.
+- `webrtc`: `tools/webrtc/check_stable.py`, `tools/webrtc/pins.sh` against the milestone on
+  Chrome's Stable channel (chromiumdash): a warning one milestone behind or with newer merges
+  on the same branch-head, a failure two milestones behind.
+
+`.github/dependabot.yml` asks for pull requests once a week, one per ecosystem with every
+update grouped: the actions the workflows pin by commit, the crates of `Cargo.lock` and
+`fuzz/Cargo.lock` (in one, so the two locks move together; the vendored forks are left to
+`tools/vendor_diff.py`), and the Dart packages of `app/`. Security updates, secret scanning
+and private vulnerability reporting are settings of the repository, not files in it.
 
 ## The smoke test
 

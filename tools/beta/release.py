@@ -259,6 +259,19 @@ def checked_out(repo=REPO):
     return git("rev-parse", "--verify", "HEAD^{commit}")
 
 
+def check_cli_commit(fogata, commit):
+    """Stops unless the command-line program `fogata` was built from `commit`, with nothing
+    changed: it packs, signs and checks the release, so one left from another commit (an old
+    target/release/fogata) must not. Its commit marker (fogata_update::COMMIT_MARKER, which a
+    release build holds) says which commit it was built from."""
+    data = pathlib.Path(fogata).read_bytes()
+    found = sorted({m.decode() for m in re.findall(
+        rb"fogata-commit-marker:([0-9a-f]{40}(?:\+dirty)?|unknown);", data)})
+    if found != [commit]:
+        fail(f"{fogata} was built from {', '.join(found) or 'no known commit'}, not from "
+             f"{commit}: build it again here (cargo build --release -p fogata)")
+
+
 def safe_member(name):
     """A zip member's path as plain parts, or None for what must not be unpacked."""
     parts = name.replace("\\", "/").split("/")
@@ -677,6 +690,7 @@ def main():
         check_flatpak_key_apart(args.gpg_homedir, args.key)
     if not args.fogata.is_file():
         fail(f"no {args.fogata}: cargo build --release -p fogata")
+    check_cli_commit(args.fogata, commit)
     if args.out.exists():
         fail(f"{args.out} is there already")
     release, drive, work = args.out / "release", args.out / "drive", args.out / "work"

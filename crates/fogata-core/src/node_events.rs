@@ -173,17 +173,23 @@ impl EventSource<NodeEvent> for NodeEvents {
 
 /// Writes the friend book now, or with the rest of the burst of changes it belongs to (see
 /// saves.rs).
-fn save_friends_soon(inner: &Arc<Inner>, book: &FriendBook) {
-    let when = {
+fn save_friends_soon(inner: &Arc<Inner>, book: FriendBook) {
+    let (when, book) = {
         let mut state = inner.lock();
         let when = state.friends_saves.changed(Instant::now());
-        if when != saves::When::Now {
-            state.unsaved_book = Some(book.clone());
+        if when == saves::When::Now {
+            (when, Some(book))
+        } else {
+            state.unsaved_book = Some(book);
+            (when, None)
         }
-        when
     };
     match when {
-        saves::When::Now => save_friends(inner, book),
+        saves::When::Now => {
+            if let Some(book) = book {
+                save_friends(inner, book);
+            }
+        }
         saves::When::In(wait) => {
             let inner = Arc::downgrade(inner);
             tokio::spawn(async move {
@@ -205,12 +211,12 @@ pub(crate) fn save_waiting_friends(inner: &Inner) {
         state.unsaved_book.take()
     };
     if let Some(book) = book {
-        save_friends(inner, &book);
+        save_friends(inner, book);
     }
 }
 
-fn save_friends(inner: &Inner, book: &FriendBook) {
-    let (store, book) = (inner.store.clone(), book.clone());
+fn save_friends(inner: &Inner, book: FriendBook) {
+    let store = inner.store.clone();
     inner.writer.soon(writer::File::Friends, move || {
         if let Err(e) = store.save_friends(&book) {
             tracing::warn!("cannot save friends: {e:#}");
@@ -484,7 +490,10 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
                 inner.save_group(group).await;
                 let store = inner.store.clone();
                 inner.writer.after(move || {
-                    let _ = store.set_pending(&hex::encode(group.as_bytes()), None);
+                    // Kept, the invitation would be tried again at the next start.
+                    if let Err(e) = store.set_pending(&hex::encode(group.as_bytes()), None) {
+                        tracing::warn!("cannot forget the invitation of a group joined: {e:#}");
+                    }
                 });
             }
             inner.lock().joining.remove(&group);
@@ -704,10 +713,13 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::FriendsChanged => {
             // A friend may have gone.
             forget_gone_soon(inner);
+            // The book is read once for all of these, and handed to the write, not copied
+            // (it carries every friend's picture and banner). A burst of changes is one
+            // event by then: the node's queue keeps only the latest.
             if let Ok(Some(book)) = inner.node.friends().await {
-                save_friends_soon(inner, &book);
                 direct::on_friends_changed(inner, &book).await;
                 calls::on_friends_changed(inner, &book).await;
+                save_friends_soon(inner, book);
             }
             inner.emit(CoreEvent::FriendsChanged);
         }

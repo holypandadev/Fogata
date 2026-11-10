@@ -13,7 +13,8 @@ list (before `tools/webrtc/patches/wrapper/0007`). Instead, `getDisplayMedia` wi
 
 - `linux/portal_screen_capturer.{h,cc}` (new): asks the xdg-desktop-portal ScreenCast
   interface once, for screens and windows, with the cursor drawn in; opens the stream it
-  gives in PipeWire, in plain memory; turns each frame into I420, at most the asked frame
+  gives in PipeWire, in plain memory; turns each frame into I420 (each colour sample the
+  average of its 2x2 block), at most the asked frame
   rate. The session bus and the portal's properties are reached without blocking the
   platform thread.
 - `common/cpp/src/flutter_screen_capture.cc`: `GetDisplayMediaFromPortal` feeds those
@@ -200,16 +201,28 @@ others in a call would hear their own voices back. Instead:
 
 - `linux/pipewire_apps_capturer.{h,cc}` (new): a PipeWire input stream, not linked by the
   session manager, that links itself to every other application's output
-  (`Stream/Output/Audio`), reading each output's owner from its full properties, and
-  leaves out this application's own (same process or same executable). It feeds 10 ms
-  frames of 48 kHz stereo to the loopback audio source. A link it made is let go
-  (`pw_proxy_destroy`) when either of its ports goes away. For tests,
-  `FOGATA_SCREEN_SOUND_FROM` names the one program whose sound is taken (debug builds).
-- `linux/loopback_capturer_factory.cc`: uses it when built with PipeWire; where PipeWire
-  cannot connect (PulseAudio itself is the sound server) and libpulse is there, the
-  package's PulseAudio monitor capture instead.
+  (`Stream/Output/Audio`), reading each output's owner from its full properties and from
+  its client's process as the server saw it on the socket (`pipewire.sec.pid`, through
+  the node's `client.id`), and leaves out this application's own (same process or same
+  executable, without the ` (deleted)` the kernel adds after an update). An output is
+  linked only once its process or executable is known, whose it is is decided again on
+  every update of its properties, and one found to be this application's own loses the
+  links already made (a call's sound stream made again when a viewer comes back had
+  everyone hear themselves). It feeds 10 ms frames of 48 kHz stereo to the loopback
+  audio source. A link it made is let go (`pw_proxy_destroy`) when either of its ports
+  goes away. For tests, `FOGATA_SCREEN_SOUND_FROM` names the one program whose sound is
+  taken (debug builds); with `FOGATA_CALL_LOG` set each decision (node, process,
+  executable, client's process, taken or not) goes to standard error as `[ScreenSound]`.
+- `linux/loopback_capturer_factory.cc`: uses it when built with PipeWire, and only for a
+  whole screen: a window's sound cannot be narrowed to its application here, and every
+  other one's would go with it. Without PipeWire, or where it cannot connect (PulseAudio
+  itself is the sound server), a shared screen has no sound: the package's PulseAudio
+  monitor capture (removed) carried this application's own call sound back to everyone,
+  and its stop could block the platform thread.
 - `common/cpp/src/flutter_screen_capture.cc`: the portal path (Wayland) captures this
-  sound too when `getDisplayMedia` asks for audio, and stops it with the picture.
+  sound too when `getDisplayMedia` asks for audio and the portal says a whole screen was
+  chosen (`source_type`, `PortalScreenCapturer::SharesScreen`; a portal older than
+  version 3 only when it offered no windows), and stops it with the picture.
 - `linux/silent_input.{h,cc}` (new) and the method `fogataSilentInput` in
   `common/cpp/src/flutter_webrtc.cc`: a source of silence, "Fogata silence (<pid>)"
   (node `fogata-silence-<pid>`): a null sink that PipeWire runs as a virtual source,
@@ -217,14 +230,14 @@ others in a call would hear their own voices back. Instead:
   so the application picks its own and never another running Fogata's, which goes away
   with that one. `fogataSilentInput` answers true only once the server has made the
   node (a sync after the request, 2 s at most); a PipeWire without the null sink factory
-  answers false at once.
+  answers false at once. It runs on a thread of its own, one request after the other in
+  the order asked, so a stalled server does not freeze the window.
   WebRTC records from its input whenever any channel of sound sends; while the
   microphone is off and a shared screen's sound goes out, the application points WebRTC
   here so the microphone stays closed.
 - Both connect to PipeWire's own socket, which a Flatpak gets only when given it
   (`--filesystem=xdg-run/pipewire-0`, in tools/beta/flatpak.sh): with only PulseAudio's,
-  the screen's sound falls back to the monitor capture above and the silent input is not
-  made.
+  a shared screen goes without sound and the silent input is not made.
 
 ## The microphone's processing while a screen's sound goes out (Linux, Windows)
 
@@ -291,6 +304,13 @@ and kept going when either failed.
 - `common/cpp/include/loopback_capturer.h`, `linux/loopback_capturer_factory.cc`,
   `windows/loopback_capturer_factory.cc`: `CreateLoopbackCapturer` is told whether the
   source is a window.
+- A capture that fails once started (a shared window that closed) sends
+  `mediaStreamTrackEnded` for its video track, as the portal's end does, so the share
+  stops instead of leaving those who watch a frozen picture; it only stopped the sound
+  before. `OnStop` and `OnError` come on libwebrtc's capture thread: their work is posted
+  to the platform thread, which alone touches the loopback members and the capture's
+  track (`capture_tracks_`), and holds the capturer so that another made meanwhile at its
+  address is not taken for it.
 
 ## Sound of a shared window (Windows)
 
@@ -661,3 +681,33 @@ others (connections, data channels, renderers, frame cryptors, platform views) t
 error again; either way it reached the zone as an uncaught error. The shared channel's
 own errors now go on to its listeners, each of which logs them. Tested by
 `app/test/webrtc_events_test.dart`.
+
+## A renderer freed once the engine is done with it (Linux)
+
+The engine copies a texture's pixels on its raster thread without holding a reference,
+and reads them after the copy returns; `videoRendererDispose` unregistered the texture
+and freed the renderer at once, so a participant leaving as a frame of theirs was drawn
+had the raster thread read freed memory.
+
+- `linux/flutter/include/flutter/texture_registrar.h`, `linux/flutter/texture_registrar_impl.h`,
+  `linux/flutter/core_implementations.cc`: `UnregisterTextureLater` keeps the texture
+  (its proxy) and runs a release on the platform thread only once the raster thread has
+  started copying another texture after the unregistering (the rule of
+  `packages/fogata_video`'s `retire`); the proxy's last unref runs on the raster thread.
+  The proxy's texture pointer is atomic, and the registrar's list of textures has a lock
+  (frames are marked available on the threads they arrive on).
+- `common/cpp/src/flutter_video_renderer.cc`: a disposed renderer is held by that release
+  until then. Windows already waits for the engine's own callback.
+
+## A connection freed after its close (Linux, Windows)
+
+`peerConnectionClose` lets go of the connection but not of its observer (which holds it,
+its event channel and its remote tracks), and `peerConnectionDispose` looked the
+connection up only among those not closed: disposed after its close, as the application
+does with every connection (`closeConnection` in `app/lib/src/call.dart`), nothing was
+freed until the application quit.
+
+- `common/cpp/src/flutter_webrtc.cc`, `common/cpp/include/flutter_peerconnection.h`:
+  `peerConnectionDispose` finds a closed connection through its observer
+  (`FlutterPeerConnectionObserver::peerconnection`), so the observer is detached and both
+  go. macOS keeps a closed connection listed until its dispose, and needed no change.

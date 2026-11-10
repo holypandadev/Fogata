@@ -2,22 +2,53 @@
 //! share, a challenge names a group only by tags, and a proof checked lets the peer in, as
 //! a member of each group it proved, with what it said before kept or dropped.
 
-use std::{sync::Arc, time::Instant};
+use std::{collections::HashSet, net::IpAddr, sync::Arc, time::Instant};
 
 use fogata_crypto::{
     DevicePublicKey, GroupId, GroupKeys, MembershipProof, SealedProof, group_tag,
     group_tag_matches, new_challenge,
 };
 use fogata_proto::{MemberRequest, SharedBytes, WireProof};
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 
-use super::{GroupSlot, Member, Node, Pending, members::bytes};
-use crate::NodeEvent;
+use super::{GroupSlot, Member, Node, Pending};
+use crate::{NodeEvent, Path, addr};
 
 /// Most group tags in a challenge, one per key epoch.
 pub(super) const MAX_TAGS: usize = 4;
 
 impl Node {
+    /// This device's addresses on its local networks to send `peer`, a new member, so that
+    /// two devices behind one router reach each other directly: none when it is seen at a
+    /// public address that is not this device's own, which shows it is elsewhere, and of
+    /// the rest only those a member keeps (local QUIC ones, see `member_reach::lan_quic`).
+    /// Each tells something of this device's networks, and a member of a large group may
+    /// be anyone.
+    pub(super) fn lan_addresses_for(&self, peer: &PeerId) -> Vec<Multiaddr> {
+        let own: HashSet<IpAddr> = self.confirmed.iter().filter_map(addr::ip).collect();
+        let mut elsewhere = false;
+        for c in self.connections.values().filter(|c| c.peer == *peer) {
+            if matches!(c.path, Path::ThroughMember { .. }) || addr::is_relayed(&c.address) {
+                continue;
+            }
+            let Some(ip) = addr::ip(&c.address) else {
+                continue;
+            };
+            if addr::is_local(&c.address) || own.contains(&ip) {
+                elsewhere = false;
+                break;
+            }
+            elsewhere = true;
+        }
+        if elsewhere {
+            return Vec::new();
+        }
+        self.lan_addresses()
+            .into_iter()
+            .filter(|a| addr::is_quic(a) && addr::is_lan(a))
+            .collect()
+    }
+
     pub(super) fn is_member_of(&self, group: &GroupId, peer: &PeerId) -> bool {
         self.groups
             .get(group)
@@ -248,7 +279,6 @@ impl Node {
         let slot = self.groups.get_mut(&group).expect("checked above");
         slot.members.insert(peer);
         let held_back = slot.held_back.remove(&peer);
-        let have = slot.ctx.hashes();
         let member = self.members.entry(peer).or_insert(Member {
             device,
             path: best.path.clone(),
@@ -262,6 +292,8 @@ impl Node {
         let (path, address) = (member.path.clone(), member.address.clone());
         self.note_reached(&best, device);
         self.publish_members();
+        // What it said this device's address is counts as a member's now.
+        self.reported_by_member(peer);
         self.show_protocols(peer);
         self.note_level(peer);
         self.tell_key_problem(group);
@@ -284,14 +316,7 @@ impl Node {
             }
         }
         if direct {
-            self.request(
-                peer,
-                MemberRequest::Sync {
-                    group_id: group.as_bytes().to_vec(),
-                    have: bytes(have),
-                },
-                Pending::Sync(group),
-            );
+            self.request_sync(peer, group);
             if held_back {
                 self.ask_again(peer, group, wire.epoch);
             }
@@ -300,9 +325,9 @@ impl Node {
 
         self.reserve_slot(peer);
         self.want_datagrams(peer);
-        if new_peer {
-            let addresses = self
-                .lan_addresses()
+        let addresses = self.lan_addresses_for(&peer);
+        if new_peer && !addresses.is_empty() {
+            let addresses = addresses
                 .iter()
                 .map(|a| serde_bytes::ByteBuf::from(a.to_vec()))
                 .collect();
@@ -343,14 +368,7 @@ impl Node {
             self.send_presence(peer);
         }
         // Exchange log entries so both ends know the same members and keys.
-        self.request(
-            peer,
-            MemberRequest::Sync {
-                group_id: group.as_bytes().to_vec(),
-                have: bytes(have),
-            },
-            Pending::Sync(group),
-        );
+        self.request_sync(peer, group);
         // Learn about a room that started before this device came online, and tell the
         // member at once if this device is in one.
         self.ask_room(group, peer);
@@ -382,8 +400,53 @@ mod tests {
     use crate::{
         NodeConfig,
         group::GroupSetup,
-        node::{Node, start, tests::inspect},
+        node::{
+            Node, start,
+            tests::{inspect, lone_member},
+        },
     };
+
+    /// A new member seen at another public address is sent none of this device's local
+    /// addresses; one on the local network, or behind this device's own public address, is
+    /// sent its local QUIC ones only.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_addresses_go_only_to_members_that_may_share_the_network() {
+        use libp2p::{Multiaddr, core::ConnectedPoint, swarm::ConnectionId};
+        let (node, _group) = lone_member();
+        let found = inspect(&node, |n| {
+            let at = |s: &str| s.parse::<Multiaddr>().unwrap();
+            n.listen_addrs = vec![
+                at("/ip4/192.168.1.2/udp/4001/quic-v1"),
+                at("/ip4/192.168.1.2/tcp/4001"),
+                at("/ip6/2001:db8::2/udp/4001/quic-v1"),
+                at("/ip4/127.0.0.1/udp/4001/quic-v1"),
+            ];
+            n.confirmed.insert(at("/ip4/198.51.100.1/udp/4001/quic-v1"));
+            let mut next = 9800;
+            let mut from = |n: &mut Node, address: &str| {
+                let peer = PeerId::random();
+                next += 1;
+                n.on_connection_established(
+                    peer,
+                    ConnectionId::new_unchecked(next),
+                    &ConnectedPoint::Listener {
+                        local_addr: at("/ip4/0.0.0.0/udp/4001/quic-v1"),
+                        send_back_addr: at(address),
+                    },
+                );
+                n.lan_addresses_for(&peer)
+            };
+            [
+                from(n, "/ip4/203.0.113.9/udp/4001/quic-v1"),
+                from(n, "/ip4/192.168.1.5/udp/4001/quic-v1"),
+                from(n, "/ip4/198.51.100.1/udp/5000/quic-v1"),
+            ]
+        })
+        .await;
+        let lan = vec!["/ip4/192.168.1.2/udp/4001/quic-v1".parse().unwrap()];
+        assert_eq!(found, [Vec::new(), lan.clone(), lan]);
+        node.shutdown().await.unwrap();
+    }
 
     /// What a challenge from a peer that is no member costs this device, with 50 groups of
     /// one key epoch and of 300: one that names none of the newest keys (as any stranger's

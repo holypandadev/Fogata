@@ -606,6 +606,22 @@ impl GroupState {
         self.losses.get(device).map_or(0, Vec::len)
     }
 
+    /// The entries that demoted, removed or had leave a member that managed the group just
+    /// before, with that member.
+    pub(crate) fn manager_losses(&self) -> impl Iterator<Item = (&DevicePublicKey, &EntryHash)> {
+        self.losses.iter().flat_map(|(device, losses)| {
+            losses
+                .iter()
+                .filter(move |l| {
+                    l.ladder
+                        .iter()
+                        .position(|k| k == device)
+                        .is_some_and(|rank| l.managers.include(rank))
+                })
+                .map(move |l| (device, &l.entry))
+        })
+    }
+
     /// Takes `device` out of the group.
     fn drop_member(&mut self, device: &DevicePublicKey) {
         self.members.remove(device);

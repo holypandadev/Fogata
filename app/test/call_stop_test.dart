@@ -104,6 +104,22 @@ class _Counted implements RTCPeerConnection {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// A connection that notes, in [steps], when it is closed and when freed.
+class _Freed implements RTCPeerConnection {
+  _Freed(this.name, this.steps);
+  final String name;
+  final List<String> steps;
+
+  @override
+  Future<void> close() async => steps.add('$name closed');
+
+  @override
+  Future<void> dispose() async => steps.add('$name freed');
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 /// A participant whose letting go never ends until [unhang] completes.
 class _Stuck extends CallPeer {
   _Stuck(super.id, this.unhang, this.started);
@@ -138,6 +154,36 @@ void main() {
       expect(order, ['connection', 'sound', 'engine']);
     },
   );
+
+  test(
+    'every connection is freed once closed, the voice engine last',
+    () async {
+      final steps = <String>[];
+      final call = Call(group: 'g', me: 'me', mic: false);
+      call.peers['ana'] = CallPeer('ana')
+        ..connection = _Freed('call', steps)
+        ..soundConnection = _Freed('sound', steps);
+      call.holdForTests(engine: _Freed('engine', steps));
+      await call.stop().timeout(const Duration(seconds: 5));
+      expect(steps, [
+        'call closed',
+        'call freed',
+        'sound closed',
+        'sound freed',
+        'engine closed',
+        'engine freed',
+      ]);
+    },
+  );
+
+  test('a connection that leaves the call is freed too', () async {
+    final steps = <String>[];
+    final call = Call(group: 'g', me: 'me', mic: false);
+    call.peers['ana'] = CallPeer('ana')..connection = _Freed('ana', steps);
+    await call.setParticipants(['me']).timeout(const Duration(seconds: 5));
+    expect(steps, ['ana closed', 'ana freed']);
+    await call.stop();
+  });
 
   test('participants are let go of together, within the time of one', () async {
     letGoLimit = const Duration(milliseconds: 100);

@@ -145,7 +145,7 @@ class CallPeer {
   Future<void> _closeSoundIn() async {
     final c = _soundIn;
     _soundIn = null;
-    await c?.close();
+    if (c != null) await closeConnection(c);
   }
 
   /// It sent pictures larger than any participant sends (see [fairPicture]): its
@@ -180,7 +180,7 @@ class CallPeer {
     _again = false;
     _early.clear();
     connected = false;
-    await c?.close();
+    if (c != null) await closeConnection(c);
   }
 
   /// Closes its connections and frees its pictures, once however many ask: a renderer
@@ -200,7 +200,9 @@ class CallPeer {
     await _letGo('the screen sound from $id', _closeSoundIn);
     final out = _soundOut;
     _soundOut = null;
-    if (out != null) await _letGo('the screen sound to $id', out.close);
+    if (out != null) {
+      await _letGo('the screen sound to $id', () => closeConnection(out));
+    }
     await _letGo('the pictures of $id', _freeRenderers);
   }
 

@@ -4,12 +4,16 @@
 #            (with the RustSec advisories and the bridge code), the fuzz targets built, the
 #            localizations, flutter analyze and test, the integration and pair tests on Xvfb
 #            with a PipeWire sound server of the job's own, and the smoke test on the
-#            desktops this computer can build (those it cannot are skipped, as on any other
-#            computer). Its legs for macOS and Windows are the two jobs below, so ci.sh
-#            records them as skipped; the job passes only when everything else in the record
-#            passed and was checked.
-#   macos    tools/ci-leg.sh macos.
-#   windows  tools/ci-leg.ps1, without the smoke test, which needs virtual sound devices.
+#            desktops this computer can build: x11 (Xvfb) must run and pass; the KDE ones
+#            (wayland, xwayland, bare) need a GPU render node GitHub's computers lack and are
+#            skipped, as on any other computer without one. Its legs for macOS and Windows
+#            are the two jobs below, so ci.sh records them as skipped; the job passes only
+#            when everything else in the record passed and was checked.
+#   macos    tools/ci-leg.sh macos. No build of the application yet: it needs the macOS
+#            WebRTC.xcframework, which is not published (app/macos/WebRTC-SDK.podspec).
+#   windows  tools/ci-leg.ps1, without the smoke test, which needs virtual sound devices,
+#            then a debug build of the application (the native plugins and the Windows
+#            libwebrtc, which flutter test never compiles).
 #
 # Nothing here signs, builds a release or touches the releases page: the job's token can only
 # read the repository.
@@ -24,15 +28,22 @@ on:
 permissions:
   contents: read
 
+# A newer push to a pull request replaces the run of the one before; on main every commit
+# keeps its own run (a group of its own: in a shared group a third push would still drop the
+# second's waiting run), so a quick second push never leaves the first without a result.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: ci-${{ github.ref }}-${{ github.event_name == 'pull_request' && 'pr' || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   FLUTTER_VERSION: 3.47.8
   CARGO_TERM_COLOR: never
   # The copies the checks start never read the releases page on GitHub.
   FOGATA_UPDATE_WEB: "off"
+  # The nightly the fuzz targets are built with (tools/ci.sh, tools/fuzz.sh): a dated one, so
+  # a new nightly cannot break the run overnight. Moved forward by hand, like the stable Rust.
+  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-01
+  CARGO_FUZZ_VERSION: 0.13.2
 
 jobs:
   linux:
@@ -94,26 +105,51 @@ jobs:
       - name: Install the Rust tools
         run: |
           rustup show active-toolchain || rustup toolchain install
-          rustup toolchain install nightly --profile minimal
+          rustup toolchain install "$FOGATA_FUZZ_TOOLCHAIN" --profile minimal
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@0.20.2,flutter_rust_bridge_codegen@2.13.0
 
       # Built here: the published binary of cargo-fuzz is built for musl and builds the fuzz
-      # targets for musl, where the sanitizers do not work.
+      # targets for musl, where the sanitizers do not work. Built once per version and kept in
+      # a folder of its own (saved only by a push to main, like the builds of the crates).
+      - name: Restore cargo-fuzz
+        id: cargo-fuzz
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/fogata-cargo-fuzz
+          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz --version 0.13.2 --locked
+        run: |
+          root=$HOME/.cache/fogata-cargo-fuzz
+          if [[ ! -x $root/bin/cargo-fuzz ]]; then
+              cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --root "$root"
+          fi
+          echo "$root/bin" >> "$GITHUB_PATH"
+          PATH=$root/bin:$PATH cargo fuzz --version
+      - name: Keep cargo-fuzz
+        if: steps.cargo-fuzz.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/fogata-cargo-fuzz
+          key: ${{ steps.cargo-fuzz.outputs.cache-primary-key }}
 
+      # The crates, and the builds of the dependencies (never of the workspace's own crates,
+      # which rust-cache leaves out) in the target folder ci.sh keeps. Saved only by a push to
+      # main: a pull request reads it and never writes it. Cargo checks every crate against
+      # Cargo.lock, so what is restored cannot change the code that is built from source.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> .git/fogata-ci/target
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # The libwebrtc archive, checked by its SHA-256 when it is unpacked.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            .git/fogata-ci/downloads
-          key: linux-deps-${{ hashFiles('Cargo.lock', 'fuzz/Cargo.lock', 'app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
-          restore-keys: linux-deps-
+          path: .git/fogata-ci/downloads
+          key: linux-webrtc-${{ hashFiles('app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
 
       # ci.sh runs `flutter pub get --offline` and cargo deny offline (over the crates of every
       # system): the packages, the crates and the RustSec database are fetched here first.
@@ -121,6 +157,7 @@ jobs:
         run: |
           (cd app && flutter pub get)
           cargo fetch
+          cargo fetch --manifest-path fuzz/Cargo.toml
           cargo deny fetch db
           git status --porcelain
 
@@ -144,8 +181,11 @@ jobs:
             { echo "::error::the RustSec advisories were not checked"; ok=0; }
           grep -Eq '^pairs: pass( |$)' "$record" ||
             { echo "::error::the pair tests did not pass"; ok=0; }
-          grep -Eq '^smoke: (pass|skipped)' "$record" ||
-            { echo "::error::the smoke test failed"; ok=0; }
+          # At least one desktop must have run the smoke test and passed (x11, on Xvfb, can be
+          # built here); the KDE desktops (wayland, xwayland, bare) need a GPU render node and
+          # may be skipped. `pass` means some desktop passed and none failed.
+          grep -Eq '^smoke: pass \((wayland|xwayland|bare|x11)[ ;]' "$record" ||
+            { echo "::error::no smoke desktop ran and passed"; ok=0; }
           grep -qx 'result: fail' "$record" && { echo "::error::ci.sh says fail"; ok=0; }
           [[ $ok == 1 ]]
 
@@ -172,20 +212,23 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-          cache: true
+          # Not kept: the SDK caches of the three systems took most of the repository's 10 GB
+          # of caches, which the builds of the dependencies need; only Linux keeps its own.
+          cache: false
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@0.20.2
 
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      # The crates and the builds of the dependencies, saved only by a push to main (see the
+      # Linux job).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: macos-deps-${{ hashFiles('Cargo.lock') }}
-          restore-keys: macos-deps-
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
 
       # cargo deny runs offline over the crates of every system, not only this one's.
       - name: Fetch the Dart packages and the crates
@@ -201,9 +244,15 @@ jobs:
           FOGATA_TEST_NO_MULTICAST: "1"
         run: FOGATA_CI_SHA=$GITHUB_SHA tools/ci-leg.sh macos
 
+      # TODO: build the application here (`cd app && flutter build macos --debug`) once the
+      # macOS WebRTC.xcframework is published as a release asset of fogata-libwebrtc and
+      # app/macos/WebRTC-SDK.podspec downloads it by URL and SHA-256. Until then the podspec
+      # reads it only from the owner's own store of builds, which this computer does not have,
+      # so the Mac app is built only on the release Mac (docs/releasing-beta.md).
+
   windows:
     runs-on: windows-2025
-    timeout-minutes: 150
+    timeout-minutes: 200
     steps:
       # The image converts line endings on checkout; flutter pub get then writes the generated
       # plugin files again with the repository's, and ci-leg.ps1 sees a changed clone.
@@ -217,20 +266,33 @@ jobs:
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
-          cache: true
+          # Not kept: the SDK caches of the three systems took most of the repository's 10 GB
+          # of caches, which the builds of the dependencies need; only Linux keeps its own.
+          cache: false
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
           tool: cargo-deny@0.20.2
 
+      - name: Install the Rust of rust-toolchain.toml
+        shell: pwsh
+        run: |
+          rustup show active-toolchain
+          if ($LASTEXITCODE -ne 0) { rustup toolchain install }
+          exit $LASTEXITCODE
+
+      # The crates and the builds of the dependencies, saved only by a push to main (see the
+      # Linux job).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # The libwebrtc archive the application's build downloads, checked by its SHA-256.
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: windows-deps-${{ hashFiles('Cargo.lock') }}
-          restore-keys: windows-deps-
+          path: app/third_party/flutter_webrtc/third_party/downloads
+          key: windows-webrtc-${{ hashFiles('app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
 
       # cargo deny runs offline over the crates of every system, not only this one's.
       - name: Fetch the Dart packages and the crates
@@ -252,4 +314,15 @@ jobs:
         run: |
           $env:FOGATA_CI_SHA = $env:GITHUB_SHA
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci-leg.ps1
+          exit $LASTEXITCODE
+
+      # The application itself, which flutter test never compiles: the native plugins (CMake
+      # and MSVC), the Rust library through cargokit, and the Windows libwebrtc, downloaded
+      # from the release libwebrtc_version.ini names and refused unless its SHA-256 matches.
+      # After the leg, which needs a clone with nothing new in it.
+      - name: Build the application (debug)
+        shell: pwsh
+        working-directory: app
+        run: |
+          flutter build windows --debug
           exit $LASTEXITCODE

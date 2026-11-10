@@ -52,6 +52,11 @@ class PortalScreenCapturer {
   // rate the capture was started at, which the system was asked for.
   void SetFps(int fps);
 
+  // Once started: what was chosen is a whole screen, as far as the portal tells.
+  // A window, or a choice the portal does not tell (one older than version 3
+  // that offered windows too), is not.
+  bool SharesScreen() const;
+
   // Ends the capture and the portal's session. Safe to call more than once.
   void Stop();
 

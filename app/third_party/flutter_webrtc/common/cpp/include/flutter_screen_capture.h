@@ -78,8 +78,18 @@ class FlutterScreenCapture : public MediaListObserver,
   // stops it (only compared, never used).
   RTCDesktopCapturer* loopback_owner_ = nullptr;
 
+  // Fogata: the video track of each desktop capture going on, by its capturer, so
+  // a capture that fails (a shared window that closed) tells Dart its track ended.
+  // Like the loopback members above, only touched on the platform thread.
+  std::map<RTCDesktopCapturer*, std::string> capture_tracks_;
+
   // Fogata: stops the loopback capturer if it was started with |capturer|.
   void StopSoundOf(RTCDesktopCapturer* capturer);
+
+  // Fogata: runs |task| on the platform thread. The desktop capturer's observer is
+  // called on libwebrtc's capture thread, while the platform thread starts and stops
+  // captures and their sound.
+  void OnPlatformThread(std::function<void()> task);
 };
 
 }  // namespace flutter_webrtc_plugin

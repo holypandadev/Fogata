@@ -160,4 +160,66 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await tester.pump(const Duration(seconds: 10));
   });
+
+  testWidgets(
+    'a chat at its cap still follows a new line taller than the one gone',
+    (tester) async {
+      // The core keeps the newest 500 lines: from there each new one drops the oldest, so
+      // the chat has as many entries after it as before.
+      const cap = 500;
+      final state = fakeRoom(people: 2);
+      final room = state.roomState.room!;
+      UiRoom withChat(List<UiChatLine> chat) => UiRoom(
+        startedMs: room.startedMs,
+        joined: true,
+        participants: room.participants,
+        chat: chat,
+        files: const [],
+      );
+      var chat = [for (var i = 0; i < cap; i++) _line('$i', 'Line $i')];
+      state.roomState.room = withChat(chat);
+      tester.view.physicalSize = const Size(1920, 1080);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        AppScope(
+          state: state,
+          child: MaterialApp(
+            theme: Fg.darkTokens.themeData,
+            home: const Material(child: Shell()),
+          ),
+        ),
+      );
+      await _settle(tester);
+      final position = tester
+          .state<ScrollableState>(
+            find
+                .ancestor(
+                  of: find.text('Line ${cap - 1}', findRichText: true),
+                  matching: find.byType(Scrollable),
+                )
+                .first,
+          )
+          .position;
+      expect(position.pixels, position.maxScrollExtent);
+      for (var n = 0; n < 3; n++) {
+        chat = [
+          ...chat.skip(1),
+          _line(
+            'new$n',
+            ['Taller $n', for (var k = 0; k < 8; k++) 'more'].join('\n'),
+          ),
+        ];
+        expect(chat, hasLength(cap));
+        state.roomState.room = withChat(chat);
+        state.roomState.changed();
+        await _settle(tester);
+        expect(position.pixels, position.maxScrollExtent, reason: 'line $n');
+        expect(position.extentAfter, 0, reason: 'line $n');
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(seconds: 10));
+    },
+  );
 }

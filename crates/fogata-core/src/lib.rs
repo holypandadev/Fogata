@@ -675,8 +675,12 @@ struct Inner {
     shared: SharedFiles,
     /// Copies of the files shared in rooms, served in their place (see shares.rs).
     copies: files::Copies,
-    /// Bytes of the disk held for copies being made now (see `shares::Room`).
-    copying: Mutex<u64>,
+    /// Bytes of each disk held for copies being made and files fetched now (see
+    /// `shares::Room`).
+    copying: Mutex<HashMap<shares::Disk, u64>>,
+    /// The memory previews being fetched may hold together, in KiB (see
+    /// `Core::fetch_preview`).
+    previews: tokio::sync::Semaphore,
     state: Mutex<State>,
     events: events::Sender,
     bridge: tokio::sync::Mutex<Option<(fogata_media::bridge::Bridge, MediaBridge)>>,
@@ -814,6 +818,7 @@ impl Core {
         let running = store.hold_running()?;
         // A move into this folder that was being put in place goes on first.
         transfer::recover_held(store.dir(), &vault::chosen())?;
+        store.mark_layout();
         let (identity, _) = store.identity()?;
         let me = identity.public_key();
         // Files that cannot be read nor mended (the folder cannot be written) leave the device
@@ -873,7 +878,9 @@ impl Core {
                     _ => false,
                 })
             {
-                let _ = store.note_join(group, None);
+                if let Err(e) = store.note_join(group, None) {
+                    tracing::warn!("cannot forget a join: {e:#}");
+                }
                 continue;
             }
             groups.push(GroupSetup::Joining {
@@ -988,7 +995,8 @@ impl Core {
             node: node.clone(),
             shared: SharedFiles::default(),
             copies,
-            copying: Mutex::new(0),
+            copying: Mutex::new(HashMap::new()),
+            previews: tokio::sync::Semaphore::new(downloads::PREVIEWS_KIB as usize),
             state: Mutex::new(State {
                 meta,
                 animations,

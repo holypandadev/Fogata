@@ -181,13 +181,38 @@ void FlutterScreenCapture::OnStart(scoped_refptr<RTCDesktopCapturer> capturer) {
 void FlutterScreenCapture::OnPaused(
     scoped_refptr<RTCDesktopCapturer> capturer) {}
 
+// The capturer is held by the task, so another one made meanwhile cannot take its
+// address and be taken for it.
 void FlutterScreenCapture::OnStop(scoped_refptr<RTCDesktopCapturer> capturer) {
-  StopSoundOf(capturer.get());
+  OnPlatformThread([this, capturer]() {
+    StopSoundOf(capturer.get());
+    capture_tracks_.erase(capturer.get());
+  });
 }
 
 void FlutterScreenCapture::OnError(scoped_refptr<RTCDesktopCapturer> capturer) {
-  // Fogata: no sound goes on without its picture.
-  StopSoundOf(capturer.get());
+  OnPlatformThread([this, capturer]() {
+    // Fogata: no sound goes on without its picture, and Dart is told the capture
+    // ended (as the portal's and macOS's are), so the share stops instead of
+    // showing a frozen picture.
+    StopSoundOf(capturer.get());
+    auto it = capture_tracks_.find(capturer.get());
+    if (it == capture_tracks_.end()) return;
+    const std::string track_id = it->second;
+    capture_tracks_.erase(it);
+    EncodableMap event;
+    event[EncodableValue("event")] = EncodableValue("mediaStreamTrackEnded");
+    event[EncodableValue("trackId")] = EncodableValue(track_id);
+    base_->event_channel()->Success(EncodableValue(event));
+  });
+}
+
+void FlutterScreenCapture::OnPlatformThread(std::function<void()> task) {
+  if (base_->task_runner_ != nullptr) {
+    base_->task_runner_->EnqueueTask(std::move(task));
+  } else {
+    task();
+  }
 }
 
 // Fogata: the sound goes with the capture it was started for. A screen captured again
@@ -404,6 +429,7 @@ void FlutterScreenCapture::GetDisplayMedia(
     result->Error("Bad Arguments", "the screen or window could not be captured");
     return;
   }
+  capture_tracks_[desktop_capturer.get()] = track->id().std_string();
 
   // AUDIO
 
@@ -522,9 +548,11 @@ void FlutterScreenCapture::GetDisplayMediaFromPortal(
         EncodableMap params;
         params[EncodableValue("streamId")] = EncodableValue(uuid);
         params[EncodableValue("videoTracks")] = EncodableValue(video_tracks);
-        // The sound of the other applications, while this screen is shared.
+        // The sound of the other applications, while this screen is shared. Not
+        // for a window: on Linux the sound cannot be narrowed to the window's own
+        // application, and every other one's would go to the whole room.
         EncodableList audio_tracks;
-        if (capture_audio) {
+        if (capture_audio && capturer->SharesScreen()) {
           if (loopback_capturer_) {
             loopback_capturer_->Stop();
             loopback_capturer_.reset();

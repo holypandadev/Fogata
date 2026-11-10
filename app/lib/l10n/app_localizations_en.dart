@@ -3547,12 +3547,6 @@ class L10nEn extends L10n {
   String get directPlay => 'Play';
 
   @override
-  String get directSoundOn => 'Sound on';
-
-  @override
-  String get directMute => 'Mute';
-
-  @override
   String directRemoveFilesTitle(int n) {
     String _temp0 = intl.Intl.pluralLogic(
       n,

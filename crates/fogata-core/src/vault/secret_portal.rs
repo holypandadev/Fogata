@@ -109,8 +109,10 @@ fn retrieve_inner() -> Result<Zeroizing<Vec<u8>>, Failure> {
     // The backend wrote the secret before it answered; what is there is read without
     // waiting for a writer that may stay open.
     ours.set_nonblocking(true).map_err(|e| e.to_string())?;
-    let mut secret = Zeroizing::new(Vec::new());
     let mut buf = Zeroizing::new([0u8; 512]);
+    // Room for all it may read from the start: a vector that grows leaves behind, unwiped,
+    // the copies of what it held.
+    let mut secret = Zeroizing::new(Vec::with_capacity(MAX_SECRET + buf.len()));
     loop {
         match ours.read(buf.as_mut_slice()) {
             Ok(0) => break,

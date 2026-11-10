@@ -1430,6 +1430,63 @@ async fn the_same_file_under_another_ending_is_one_file() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A send that fails part way (here a later file is too big) leaves no copy of the files
+/// before it in the chat's folder: nothing would ever remove one, and the room for direct
+/// messages does not count it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_that_fails_leaves_no_copy_behind() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-direct-failed-{}", std::process::id()));
+    let (dir_a, dir_b) = friends(&base);
+    std::fs::create_dir_all(dir_a.join("direct")).unwrap();
+    std::fs::write(
+        dir_a.join("direct").join("settings.json"),
+        r#"{"limit":100000,"auto_pictures":true,"auto_files":false,"timer_ms":0}"#,
+    )
+    .unwrap();
+    let (options_a, options_b) = dialling();
+    let (ana, mut events_a) = Core::start(dir_a.clone(), options_a.clone()).unwrap();
+    let (bea, mut events_b) = Core::start(dir_b.clone(), options_b.clone()).unwrap();
+    let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
+    wait_for(&mut events_a, "Bea online", online).await;
+    wait_for(&mut events_b, "Ana online", online).await;
+    let (small, big) = (base.join("notes.txt"), base.join("film.bin"));
+    std::fs::write(&small, vec![7u8; 1000]).unwrap();
+    std::fs::write(&big, vec![9u8; 200_000]).unwrap();
+    let files = dir_a
+        .join("direct")
+        .join(hex::encode(bea.me().as_bytes()))
+        .join("files");
+    let kept = || {
+        std::fs::read_dir(&files)
+            .map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>())
+            .unwrap_or_default()
+    };
+    let both = vec![
+        Outgoing {
+            path: small.clone(),
+            video: None,
+        },
+        Outgoing {
+            path: big,
+            video: None,
+        },
+    ];
+    let failed = ana.send_direct(bea.me(), "two", both).await.unwrap_err();
+    assert!(format!("{failed:#}").contains("bigger"), "{failed:#}");
+    assert_eq!(kept(), Vec::<std::ffi::OsString>::new());
+    // The same file sent alone is kept, and stays.
+    let one = vec![Outgoing {
+        path: small,
+        video: None,
+    }];
+    ana.send_direct(bea.me(), "one", one).await.unwrap();
+    assert_eq!(kept().len(), 1);
+    stop(bea).await;
+    stop(ana).await;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_chat_with_someone_no_longer_a_friend_can_only_be_read() {
     let _one = ONE_AT_A_TIME.lock().await;

@@ -3373,12 +3373,6 @@ class L10nZh extends L10n {
   String get directPlay => '播放';
 
   @override
-  String get directSoundOn => '打开声音';
-
-  @override
-  String get directMute => '静音';
-
-  @override
   String directRemoveFilesTitle(int n) {
     String _temp0 = intl.Intl.pluralLogic(
       n,

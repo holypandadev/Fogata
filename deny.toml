@@ -12,7 +12,6 @@ allow = [
     "BSD-1-Clause",
     "BSD-2-Clause",
     "BSD-3-Clause",
-    "BSL-1.0",
     "CC0-1.0",
     "CDLA-Permissive-2.0",
     "ISC",
@@ -59,3 +58,6 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # tree (paste through if-watch, zbus' zvariant pieces through keyring) it waits for those
 # crates to move, and vulnerabilities fail whatever the depth.
 unmaintained = "workspace"
+# A crate version its authors yanked (usually for a bug or a security hole) is refused: Cargo.lock
+# must move off it. Checked against the crates.io index cargo fetched.
+yanked = "deny"

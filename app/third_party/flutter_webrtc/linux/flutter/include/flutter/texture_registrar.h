@@ -82,6 +82,16 @@ class TextureRegistrar {
   // Unregisters an existing Texture object.
   // Textures must not be unregistered while they're in use.
   virtual bool UnregisterTexture(int64_t texture_id) = 0;
+
+  // Fogata: unregisters a texture that may still be in use, and runs [release] on
+  // the platform thread once the engine can no longer be copying its pixels, so
+  // what the texture reads (its renderer) can be freed then and not before.
+  virtual bool UnregisterTextureLater(int64_t texture_id,
+                                      std::function<void()> release) {
+    const bool unregistered = UnregisterTexture(texture_id);
+    release();
+    return unregistered;
+  }
 };
 
 }  // namespace flutter

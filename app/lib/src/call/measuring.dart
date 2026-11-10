@@ -212,9 +212,22 @@ extension _Measuring on Call {
     }
   }
 
+  /// Who talks, every 600 ms. A reading that takes longer (many participants, a busy
+  /// computer: one full statistics report each) is not overtaken by the next one, so
+  /// readings never pile up.
+  Future<void> _readLevels() async {
+    if (_readingLevels) return;
+    _readingLevels = true;
+    try {
+      await _readLevelsNow();
+    } finally {
+      _readingLevels = false;
+    }
+  }
+
   /// Who talks only shows on screen: nothing is read while the window is hidden, and this
   /// device's own level not while its microphone is off.
-  Future<void> _readLevels() async {
+  Future<void> _readLevelsNow() async {
     if (!windowShown.value) {
       unawaited(_alone.close());
       return;

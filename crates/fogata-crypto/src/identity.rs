@@ -101,6 +101,13 @@ impl DevicePublicKey {
         &self.0
     }
 
+    /// Whether the key is a point of small order: no signature verifies under it
+    /// ([`Self::verify`]) and nothing can be sealed to it, so no device has it, though an
+    /// entry can still name it (a group's `Add`, say).
+    pub fn is_weak(&self) -> bool {
+        VerifyingKey::from_bytes(&self.0).map_or(true, |key| key.is_weak())
+    }
+
     /// Verifies an Ed25519 signature, rejecting weak keys and malleable signatures.
     pub fn verify(&self, message: &[u8], signature: &[u8]) -> Result<(), CryptoError> {
         let key = VerifyingKey::from_bytes(&self.0).map_err(|_| CryptoError::InvalidKey)?;
@@ -199,6 +206,8 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(ana.pair_secret(&small, b"x"), Err(CryptoError::InvalidKey));
+        assert!(small.is_weak());
+        assert!(!ana.public_key().is_weak());
     }
 
     #[test]

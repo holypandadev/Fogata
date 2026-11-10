@@ -80,6 +80,15 @@ const WEB_EVERY: Duration = Duration::from_secs(6 * 3600);
 const WEB_RETRY: Duration = Duration::from_secs(15 * 60);
 /// A package from the releases page that stopped is tried again after this long.
 const WEB_FETCH_RETRY: Duration = Duration::from_secs(2 * 60);
+/// An install waits at most this long for the asks under way (friends, members and the
+/// releases page) to be answered, so a newer release one of them has is not passed over
+/// for an older one offered first. Asks are answered in a moment; one that hangs is not
+/// waited for to the end of its transfer's wait.
+const ASKS_WAIT: Duration = Duration::from_secs(10);
+/// After an install went through, the application quits. One that did not quit in this
+/// long (the quit was stopped, say) is no longer taken to be installing, so the install can
+/// be tried again: longer than Windows' swap waits for this process to end (120 s).
+const QUIT_WAIT: Duration = Duration::from_secs(5 * 60);
 
 /// How the updater runs.
 #[derive(Clone, Debug)]
@@ -223,7 +232,27 @@ struct Phase {
     /// What is kept on disk was read once, as the updater started.
     loaded: bool,
     installing: bool,
+    /// When the install went through, while the application is to quit.
+    installed: Option<Instant>,
+    /// A release offered is being kept in place of the one held, which removes its
+    /// packages: an install does not start meanwhile.
+    taking: bool,
     failed: Option<(FailKind, String)>,
+}
+
+impl Phase {
+    /// An install that went through and was not followed by the quit, past [`QUIT_WAIT`],
+    /// is over: it can be tried again.
+    fn settle(&mut self) {
+        if self.installing && self.installed.is_some_and(|at| at.elapsed() >= QUIT_WAIT) {
+            self.installing = false;
+            self.installed = None;
+            self.failed = Some((
+                FailKind::Install,
+                "Fogata did not close to finish the update; try again".into(),
+            ));
+        }
+    }
 }
 
 enum Command {
@@ -361,40 +390,74 @@ impl Updater {
         locked(&self.notes).iter().cloned().collect()
     }
 
-    /// Installs the release that is ready: see [`install::install`].
+    /// Installs the release that is ready: see [`install::install`]. The asks under way are
+    /// waited for first, a few seconds at most ([`ASKS_WAIT`]): the first release offered
+    /// may be an older one, still signed and current, that a friend offered before another
+    /// with the newest answered (the splash installs what is ready as soon as it is).
     pub(crate) async fn install(&self) -> Result<()> {
-        let release = {
-            let mut phase = self.lock();
-            let Some(release) = phase
-                .release
-                .clone()
-                .filter(|r| r.build > self.options.build)
-            else {
-                anyhow::bail!("no newer release is here");
-            };
-            if !phase.ready {
-                anyhow::bail!("the new release is not here whole yet");
+        self.install_waiting(ASKS_WAIT).await
+    }
+
+    async fn install_waiting(&self, asks_wait: Duration) -> Result<()> {
+        let deadline = Instant::now() + asks_wait;
+        let first = self.lock().release.as_ref().map(|r| r.build);
+        let release = loop {
+            {
+                let mut phase = self.lock();
+                if phase.installing {
+                    anyhow::bail!("the install is under way");
+                }
+                // A release being kept takes a moment, and removes the package: never cut.
+                let asked = phase.asking == 0 || Instant::now() >= deadline;
+                if asked && !phase.taking {
+                    let Some(release) = phase
+                        .release
+                        .clone()
+                        .filter(|r| r.build > self.options.build)
+                    else {
+                        anyhow::bail!("no newer release is here");
+                    };
+                    if !phase.ready {
+                        if first.is_some_and(|b| b < release.build) {
+                            anyhow::bail!(
+                                "a newer release (build {}) came meanwhile; it installs once it is here",
+                                release.build
+                            );
+                        }
+                        anyhow::bail!("the new release is not here whole yet");
+                    }
+                    phase.installing = true;
+                    phase.installed = None;
+                    phase.failed = None;
+                    break release;
+                }
             }
-            if phase.installing {
-                anyhow::bail!("the install is under way");
-            }
-            phase.installing = true;
-            phase.failed = None;
-            release
+            tokio::time::sleep(Duration::from_millis(100)).await;
         };
         self.changed();
         let result = install::install(&self.data, &release, self.platform()).await;
-        if let Err(e) = &result {
+        {
             let mut phase = self.lock();
-            phase.installing = false;
-            let kind = match e.downcast_ref::<install::CannotInstall>() {
-                Some(_) => FailKind::CannotInstall,
-                None => FailKind::Install,
-            };
-            phase.failed = Some((kind, format!("{e:#}")));
+            match &result {
+                Ok(()) => phase.installed = Some(Instant::now()),
+                Err(e) => {
+                    phase.installing = false;
+                    let kind = match e.downcast_ref::<install::CannotInstall>() {
+                        Some(_) => FailKind::CannotInstall,
+                        None => FailKind::Install,
+                    };
+                    phase.failed = Some((kind, format!("{e:#}")));
+                }
+            }
         }
         self.changed();
         result
+    }
+
+    /// Whether an install is under way: a release offered meanwhile is not taken (it would
+    /// remove the package being installed), and is asked for again once it is over.
+    fn installing(&self) -> bool {
+        self.lock().installing
     }
 
     fn platform(&self) -> &str {
@@ -402,7 +465,9 @@ impl Updater {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Phase> {
-        locked(&self.phase)
+        let mut phase = locked(&self.phase);
+        phase.settle();
+        phase
     }
 
     fn changed(&self) {
@@ -486,12 +551,27 @@ impl Updater {
             ));
             return false;
         }
+        {
+            let mut phase = self.lock();
+            if phase.installing {
+                drop(phase);
+                self.note(format!(
+                    "build {} from {from} waits: an install is under way",
+                    manifest.build
+                ));
+                return false;
+            }
+            phase.taking = true;
+        }
         let (dir, to_keep) = (self.dir.clone(), signed.clone());
         let kept = tokio::task::spawn_blocking(move || store::keep(&dir, &to_keep))
             .await
             .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
         if let Err(e) = kept {
-            self.lock().failed = Some((FailKind::Disk, format!("{e:#}")));
+            let mut phase = self.lock();
+            phase.taking = false;
+            phase.failed = Some((FailKind::Disk, format!("{e:#}")));
+            drop(phase);
             self.changed();
             return false;
         }
@@ -517,6 +597,7 @@ impl Updater {
                 )
             });
             phase.release = Some(manifest);
+            phase.taking = false;
         }
         self.changed();
         true
@@ -1075,6 +1156,11 @@ impl Updater {
                             // A new release: those who had the old one are asked again.
                             book.holders
                                 .retain(|p, _| *p == peer || book.asked.contains_key(p));
+                        } else if self.installing() {
+                            // Not refused: asked again once the install is over.
+                            if let Some(at) = Instant::now().checked_sub(ASK_AGAIN - RETRY) {
+                                book.asked.insert(peer, at);
+                            }
                         } else {
                             book.shunned.insert(peer, Instant::now() + SHUNNED);
                         }
@@ -1266,6 +1352,11 @@ impl Updater {
                 book.web_failed = None;
                 // A new release: those who had the old one are asked again.
                 book.holders.clear();
+                return;
+            }
+            if self.installing() {
+                // Read again soon, once the install is over.
+                book.web_read = Instant::now().checked_sub(WEB_EVERY - WEB_RETRY);
                 return;
             }
         }
@@ -1523,6 +1614,169 @@ mod tests {
         assert!(updater.offered("", "Bea", &rescued.signed).await);
         assert_eq!(held(), Some(5 + MAX_BUILD_STEP + 1));
 
+        node.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// An updater as build 5 with no friends and no releases page, once it read what is
+    /// kept on disk (nothing).
+    async fn quiet_updater(
+        name: &str,
+        key: &DeviceIdentity,
+    ) -> (Arc<Updater>, NodeHandle, PathBuf) {
+        let data = std::env::temp_dir().join(format!("fogata-quiet-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&data);
+        std::fs::create_dir_all(&data).unwrap();
+        let (node, _node_events) = fogata_net::start(fogata_net::NodeConfig {
+            identity: Arc::new(DeviceIdentity::generate().unwrap()),
+            groups: Vec::new(),
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let mut options = UpdateOptions::compiled_in();
+        options.keys = vec![
+            ReleaseKey::release(*key.public_key().as_bytes()),
+            ReleaseKey::rescue(*DeviceIdentity::generate().unwrap().public_key().as_bytes()),
+        ];
+        options.build = 5;
+        options.platform = Some(PLATFORM.into());
+        options.web = None;
+        let (events, _events) = crate::events::queue(None);
+        let updater = Updater::start(&data, node.clone(), options, events).unwrap();
+        assert!(
+            until(|| updater.lock().loaded).await,
+            "what is kept was never read"
+        );
+        (updater, node, data)
+    }
+
+    /// Holds build `build` as ready to install, its package on disk.
+    async fn ready(updater: &Updater, key: &DeviceIdentity, build: u64) {
+        assert!(
+            updater
+                .offered("", "Bea", &offer(key, build, now_secs()).signed)
+                .await
+        );
+        let dir = store::dir(&updater.data);
+        std::fs::write(
+            store::package_path(&dir, PLATFORM),
+            format!("build {build}"),
+        )
+        .unwrap();
+        updater.lock().ready = true;
+    }
+
+    /// An install waits for the asks under way, so a newer release a friend answers with
+    /// a moment after an older one was offered (and fetched) is not passed over; with
+    /// nothing being asked, it goes at once, and an ask that hangs is not waited for long.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_waits_for_the_asks_under_way() {
+        let key = DeviceIdentity::generate().unwrap();
+        let (updater, node, data) = quiet_updater("asks", &key).await;
+        ready(&updater, &key, 7).await;
+        updater.lock().asking = 1;
+        let installing = {
+            let updater = updater.clone();
+            tokio::spawn(async move { updater.install_waiting(Duration::from_secs(30)).await })
+        };
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(
+            !installing.is_finished(),
+            "the install did not wait for the ask"
+        );
+        assert!(!updater.lock().installing);
+        // The friend asked answers with a newer build, which is taken in place of the old.
+        assert!(
+            updater
+                .offered("", "Cid", &offer(&key, 8, now_secs()).signed)
+                .await
+        );
+        updater.done_asking();
+        let failed = installing.await.unwrap().unwrap_err().to_string();
+        assert!(failed.contains("build 8"), "{failed}");
+        assert!(!updater.lock().installing);
+
+        // An ask that hangs is waited for a moment only.
+        ready(&updater, &key, 9).await;
+        updater.lock().asking = 1;
+        let start = Instant::now();
+        let result = updater.install_waiting(Duration::from_millis(300)).await;
+        assert!(start.elapsed() >= Duration::from_millis(300));
+        // Past the wait, on to installing (which a test build cannot do).
+        let e = result.unwrap_err();
+        assert!(
+            e.downcast_ref::<install::CannotInstall>().is_some(),
+            "{e:#}"
+        );
+        node.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A newer release offered while an install is under way is not taken: taking it would
+    /// remove the package being installed. The friend is not shunned for it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_release_offered_during_an_install_waits() {
+        let key = DeviceIdentity::generate().unwrap();
+        let (updater, node, data) = quiet_updater("during", &key).await;
+        ready(&updater, &key, 7).await;
+        updater.lock().installing = true;
+        assert!(
+            !updater
+                .offered("", "Cid", &offer(&key, 8, now_secs()).signed)
+                .await
+        );
+        assert_eq!(updater.lock().release.as_ref().map(|r| r.build), Some(7));
+        assert!(updater.lock().ready);
+        let package = store::package_path(&store::dir(&data), PLATFORM);
+        assert_eq!(std::fs::read(&package).unwrap(), b"build 7");
+        let kept = store::read_signed(&store::dir(&data)).unwrap().unwrap();
+        assert_eq!(kept.verify(&updater.options.keys).unwrap().build, 7);
+        assert!(updater.notes().last().unwrap().contains("waits"));
+        node.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// An install that went through but was not followed by the application quitting does
+    /// not say "installing" for ever: past a while it can be tried again.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_install_not_followed_by_the_quit_can_be_tried_again() {
+        let key = DeviceIdentity::generate().unwrap();
+        let (updater, node, data) = quiet_updater("quit", &key).await;
+        ready(&updater, &key, 7).await;
+        {
+            let mut phase = updater.lock();
+            phase.installing = true;
+            phase.installed = Some(Instant::now());
+        }
+        assert_eq!(updater.status().state, UpdateState::Installing);
+        let e = updater.install().await.unwrap_err().to_string();
+        assert!(e.contains("under way"), "{e}");
+        updater.lock().installed = Instant::now().checked_sub(QUIT_WAIT + Duration::from_secs(1));
+        assert!(
+            matches!(
+                updater.status().state,
+                UpdateState::Failed {
+                    kind: FailKind::Install,
+                    ..
+                }
+            ),
+            "{:?}",
+            updater.status().state
+        );
+        // Tried again: on to installing (which a test build cannot do).
+        let e = updater.install().await.unwrap_err();
+        assert!(
+            e.downcast_ref::<install::CannotInstall>().is_some(),
+            "{e:#}"
+        );
         node.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&data);
     }

@@ -29,7 +29,7 @@
 //! sealed: what is secret in it is sealed to the device's identity.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     io::{self, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
@@ -229,8 +229,16 @@ impl Record {
             Record::File { file, local } => {
                 chat.set_local(file, *local);
             }
+            // What was removed is remembered, unless it was this device's own: a journal
+            // written whole keeps only the ids of the friend's, whose items are not here.
             Record::Gone { ids } => {
-                chat.remove(ids);
+                let mine: HashSet<ItemId> = chat
+                    .remove(ids)
+                    .into_iter()
+                    .filter(|i| i.mine)
+                    .map(|i| i.id)
+                    .collect();
+                chat.forget(ids.iter().filter(|id| !mine.contains(*id)).copied());
             }
             Record::Ended { ms } => *ended = *ms,
             Record::Played { file } => {
@@ -577,14 +585,23 @@ impl DirectStore {
                 let mut name = path.file_name().unwrap_or_default().to_owned();
                 name.push(".damaged");
                 let aside = path.with_file_name(name);
-                if !aside.exists() {
-                    let _ = fs::copy(&path, &aside);
-                }
+                // Without the copy, what follows the damage is lost at the next write.
+                let copied = aside.exists() || {
+                    fs::copy(&path, &aside)
+                        .inspect_err(|e| {
+                            tracing::warn!("cannot copy {} aside: {e}", path.display())
+                        })
+                        .is_ok()
+                };
                 tracing::warn!(
-                    "{} is damaged: the {} records before the damage are kept, and a copy is in {}",
+                    "{} is damaged: the {} records before the damage are kept{}",
                     path.display(),
                     records.len(),
-                    aside.display()
+                    if copied {
+                        format!(", and a copy is in {}", aside.display())
+                    } else {
+                        String::new()
+                    }
                 );
             }
         }
@@ -683,7 +700,9 @@ impl DirectStore {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+            if let Err(e) = fs::set_permissions(dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!("cannot keep {} to this user only: {e}", dir.display());
+            }
         }
         Ok(())
     }
@@ -799,10 +818,18 @@ impl DirectStore {
         self.make_dir(&dir)?;
         let (pins, items): (Vec<&Item>, Vec<&Item>) =
             chat.items().iter().partition(|item| item.is_aside());
-        let mut records: Vec<Record> = items
-            .into_iter()
-            .map(|item| Record::Item { item: item.clone() })
-            .collect();
+        // The friend's items removed here first, so one sent again is still not kept again
+        // after a restart (an older build reads them as removing what is not there).
+        let forgotten: Vec<ItemId> = chat.forgotten().copied().collect();
+        let mut records: Vec<Record> = Vec::new();
+        if !forgotten.is_empty() {
+            records.push(Record::Gone { ids: forgotten });
+        }
+        records.extend(
+            items
+                .into_iter()
+                .map(|item| Record::Item { item: item.clone() }),
+        );
         records.push(Record::Read { seq: chat.read_seq });
         // Charges older than a day count no more: nothing of them is kept.
         let now = crate::now_ms();
@@ -1381,8 +1408,14 @@ fn append_records(
         .and_then(|()| file.sync_data());
     if written.is_err() {
         // A full disk can take part of the records. Cut it off: records added behind a
-        // broken one would be lost with it the next time the file is read.
-        let _ = file.set_len(len);
+        // broken one would be lost with it the next time the file is read. Should that fail
+        // too, the chat is written again whole (it lags), which replaces the file.
+        if let Err(e) = file.set_len(len) {
+            tracing::warn!(
+                "cannot cut {} back after a failed write: {e}",
+                path.display()
+            );
+        }
     }
     written.with_context(|| format!("cannot write {}", path.display()))?;
     Ok(out.before)

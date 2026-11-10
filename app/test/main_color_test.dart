@@ -73,6 +73,27 @@ void main() {
     expect(await tester.runAsync(() => mainColour(photo)), colour);
   });
 
+  testWidgets('the same photo in a new list keeps its colour, read once', (
+    tester,
+  ) async {
+    final photo = (await tester.runAsync(() => _photo(48)))!;
+    final colour = await tester.runAsync(() => mainColour(photo));
+    expect(colour, isNotNull);
+    final seen = <Color?>[];
+    Widget avatar(Uint8List bytes) => MainColour(
+      avatar: UiAvatar(preset: 0, photo: bytes),
+      builder: (context, colour) {
+        seen.add(colour);
+        return const SizedBox();
+      },
+    );
+    // As the core hands it over at each refresh: the same bytes, another list.
+    await tester.pumpWidget(avatar(Uint8List.fromList(photo)));
+    await tester.pumpWidget(avatar(Uint8List.fromList(photo)));
+    await tester.pump();
+    expect(seen, everyElement(colour));
+  });
+
   testWidgets('a preset avatar has its own colour at once', (tester) async {
     Color? seen;
     await tester.pumpWidget(

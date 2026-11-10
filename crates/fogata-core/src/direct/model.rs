@@ -2,7 +2,7 @@
 //! disappearing timer, and messages pinned or unpinned), where each attachment stands here,
 //! and the rules for ordering them, letting them disappear and freeing space. No I/O.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 
@@ -255,6 +255,13 @@ impl Item {
 /// fields.
 const ITEM_WEIGHT: u64 = 256;
 
+/// How many of the friend's items that were removed here (deleted, or their time ran out)
+/// a chat remembers, newest kept. The friend sends an item again until a receipt for it
+/// comes back, which may be long after it was removed here (this device appearing offline
+/// sends none); one remembered is confirmed and not kept again. Far more than the friend
+/// can send in the time it takes the two to exchange receipts, at 16 bytes each.
+pub const MAX_FORGOTTEN: usize = 4096;
+
 /// Bytes kept on this device for a chat, by kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
@@ -302,6 +309,10 @@ pub struct Chat {
     pub file_charges: Vec<Charge>,
     /// What the friend's items take ([`Item::weight`]), all together.
     theirs: u64,
+    /// The friend's items removed here, oldest first, at most [`MAX_FORGOTTEN`]: one sent
+    /// again is confirmed, not kept again.
+    forgotten: VecDeque<ItemId>,
+    forgotten_ids: HashSet<ItemId>,
 }
 
 /// An attachment of the friend's that started to come by itself: when, what it counts
@@ -433,6 +444,31 @@ impl Chat {
             }
         }
         out
+    }
+
+    /// Remembers the friend's items `ids` as removed here, so one sent again is not kept
+    /// again; past [`MAX_FORGOTTEN`], the oldest are let go.
+    pub fn forget(&mut self, ids: impl IntoIterator<Item = ItemId>) {
+        for id in ids {
+            if self.forgotten_ids.insert(id) {
+                self.forgotten.push_back(id);
+            }
+        }
+        while self.forgotten.len() > MAX_FORGOTTEN {
+            if let Some(old) = self.forgotten.pop_front() {
+                self.forgotten_ids.remove(&old);
+            }
+        }
+    }
+
+    /// Whether the friend's item `id` was here and was removed.
+    pub fn forgot(&self, id: &ItemId) -> bool {
+        self.forgotten_ids.contains(id)
+    }
+
+    /// The friend's items removed here, oldest first.
+    pub fn forgotten(&self) -> impl Iterator<Item = &ItemId> {
+        self.forgotten.iter()
     }
 
     /// What the friend's items here take, all together ([`Item::weight`]).
@@ -1679,6 +1715,23 @@ mod tests {
         let text = serde_json::to_string(&call).unwrap();
         assert!(!text.contains("starter"));
         assert_eq!(serde_json::from_str::<Item>(&text).unwrap(), call);
+    }
+
+    #[test]
+    fn removed_items_are_remembered_up_to_a_bound() {
+        let mut chat = Chat::default();
+        let id = |n: usize| -> ItemId {
+            let mut id = [0; 16];
+            id[..8].copy_from_slice(&(n as u64).to_le_bytes());
+            id
+        };
+        chat.forget((0..MAX_FORGOTTEN).map(id));
+        chat.forget([id(0)]);
+        assert!(chat.forgot(&id(0)), "the same id is remembered once");
+        chat.forget([id(MAX_FORGOTTEN)]);
+        assert_eq!(chat.forgotten().count(), MAX_FORGOTTEN);
+        assert!(!chat.forgot(&id(0)), "the oldest is let go");
+        assert!(chat.forgot(&id(1)) && chat.forgot(&id(MAX_FORGOTTEN)));
     }
 
     #[test]

@@ -523,6 +523,17 @@ pub(crate) fn try_create(
     dir: &Path,
     store: &dyn KeyStore,
 ) -> Result<std::result::Result<DataKey, String>> {
+    try_create_with(dir, store, |_| Ok(()))
+}
+
+/// [`try_create`], running `before` with the new key once the keychain kept it and before
+/// `sealed.json` marks the folder as sealed: what it writes is there whenever the folder
+/// has a key. When it fails, the keychain forgets the key and the folder stays as it is.
+pub(crate) fn try_create_with(
+    dir: &Path,
+    store: &dyn KeyStore,
+    before: impl FnOnce(&DataKey) -> Result<()>,
+) -> Result<std::result::Result<DataKey, String>> {
     let mut id = [0u8; 16];
     random_bytes(&mut id)?;
     let name = format!("data-{}", hex::encode(id));
@@ -554,9 +565,9 @@ pub(crate) fn try_create(
         key: name.clone(),
         check: hex::encode(key.seal_whole("check", CHECK)?),
     };
-    if let Err(e) =
+    if let Err(e) = before(&key).and_then(|()| {
         crate::store::write_private(&dir.join(SEALED_FILE), &serde_json::to_vec_pretty(&sealed)?)
-    {
+    }) {
         let _ = store.delete(&name);
         return Err(e);
     }

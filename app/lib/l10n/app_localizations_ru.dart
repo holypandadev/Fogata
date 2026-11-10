@@ -3736,12 +3736,6 @@ class L10nRu extends L10n {
   String get directPlay => 'Воспроизвести';
 
   @override
-  String get directSoundOn => 'Включить звук';
-
-  @override
-  String get directMute => 'Выключить звук';
-
-  @override
   String directRemoveFilesTitle(int n) {
     String _temp0 = intl.Intl.pluralLogic(
       n,

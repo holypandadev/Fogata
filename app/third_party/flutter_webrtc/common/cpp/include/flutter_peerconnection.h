@@ -38,6 +38,10 @@ class FlutterPeerConnectionObserver : public RTCPeerConnectionObserver {
 
   void RemoveStreamForId(const std::string& id);
 
+  // Fogata: the connection this observes, for a dispose that comes after its
+  // close (see peerConnectionDispose in flutter_webrtc.cc).
+  RTCPeerConnection* peerconnection() const { return peerconnection_.get(); }
+
  private:
   std::unique_ptr<EventChannelProxy> event_channel_;
   scoped_refptr<RTCPeerConnection> peerconnection_;

@@ -201,6 +201,17 @@ class RoomState extends Piece {
 
   List<OutgoingFile> get outgoingHere => outgoing[roomGroup] ?? const [];
 
+  /// What was being written in a room's chat and not sent, by group and voice room: it
+  /// is back when the chat is shown again, after the files tab, a room that could not be
+  /// reached, or another room.
+  final Map<(String, String), String> drafts = {};
+
+  /// The room shown, as [drafts] knows it.
+  (String, String)? get draftHere {
+    final group = roomGroup;
+    return group == null ? null : (group, roomVoice);
+  }
+
   /// The memory of [group]'s room started at [startedMs]: a room opened again starts a
   /// new one, keeping when this device joined and whom it waits for.
   RoomMemory memoryFor(String group, int startedMs) {

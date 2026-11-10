@@ -5100,14 +5100,6 @@
   "@directPlay": {
     "description": "Video player: tooltip of the play button."
   },
-  "directSoundOn": "Sound on",
-  "@directSoundOn": {
-    "description": "Video player: tooltip of the button that turns the sound back on."
-  },
-  "directMute": "Mute",
-  "@directMute": {
-    "description": "Video player: tooltip of the button that mutes the video's sound."
-  },
   "directRemoveFilesTitle": "{n, plural, =1{Remove the file?} other{Remove the {n} files?}}",
   "@directRemoveFilesTitle": {
     "description": "Direct chat: title of the question before taking out files waiting to be sent (Esc).",

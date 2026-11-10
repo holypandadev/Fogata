@@ -87,10 +87,13 @@ pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
             | MOVED_FILE
             | MOVED_IN_FILE
             | STAGE_FILE
-            | crate::recovery::RESTORED_FILE,
+            | crate::recovery::RESTORED_FILE
+            // The new computer marks its folder as its own build lays it out.
+            | crate::store::LAYOUT_FILE,
         ] => None,
         [
             crate::store::BACKUP_DIR
+            | crate::store::REFUSED_DIR
             | INCOMING_DIR
             | REPLACED_DIR
             | "videos"
@@ -144,6 +147,7 @@ fn skipped_dir(rel: &str) -> bool {
     matches!(
         rel,
         crate::store::BACKUP_DIR
+            | crate::store::REFUSED_DIR
             | INCOMING_DIR
             | REPLACED_DIR
             | "videos"
@@ -607,6 +611,7 @@ mod tests {
             "recovery.bin.damaged",
             "recovery.bin.damaged.2",
             "before-sealing/identity.key",
+            "refused/recovery.bin",
             "incoming/identity.key",
             "replaced/identity.key",
             "videos/x.mp4",

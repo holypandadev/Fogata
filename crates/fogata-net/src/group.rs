@@ -105,6 +105,39 @@ pub(crate) struct GroupContext {
     /// The current epoch and when this device first saw it, by its own clock (see
     /// `GroupContext::epoch_began`).
     current_seen: Option<(fogata_state::EpochId, u64)>,
+    /// The digests of the banner and the picture record last asked for, by the record they
+    /// are of (see [`DigestCache`]).
+    digests: std::sync::Mutex<DigestCache>,
+}
+
+/// The digests of a group's banner and picture record, each with the time and signature of
+/// the record it is of: a digest hashes the whole record, up to a few hundred KiB, and every
+/// roster a member asks for compares them, so each is worked out once per record. A record
+/// is known by its time and signature: one with the same of both is the same record.
+#[derive(Default)]
+struct DigestCache {
+    banner: Option<(u64, [u8; 64], Vec<u8>)>,
+    picture: Option<(u64, [u8; 64], Vec<u8>)>,
+}
+
+/// `record`'s digest from `cached` when it is of the same record, worked out (and kept)
+/// otherwise; empty for none.
+fn cached_digest<K: fogata_state::RecordKind>(
+    cached: &mut Option<(u64, [u8; 64], Vec<u8>)>,
+    record: Option<&fogata_state::GroupRecord<K>>,
+) -> Vec<u8> {
+    let Some(record) = record else {
+        return Vec::new();
+    };
+    if let Some((time, signature, digest)) = cached
+        && *time == record.time_ms
+        && *signature == record.signature
+    {
+        return digest.clone();
+    }
+    let digest = record.digest().to_vec();
+    *cached = Some((record.time_ms, record.signature, digest.clone()));
+    digest
 }
 
 /// What a room event weighs as a room keeps it, to hand to members that come online: the
@@ -166,6 +199,7 @@ impl GroupContext {
             keyless_since: None,
             reported: None,
             current_seen: None,
+            digests: Default::default(),
         };
         ctx.refresh();
         ctx
@@ -443,9 +477,8 @@ impl GroupContext {
     /// A short digest of the group's banner, empty for none: two devices with the same one
     /// have the same banner.
     pub(crate) fn banner_digest(&self) -> Vec<u8> {
-        self.log
-            .banner_record()
-            .map_or_else(Vec::new, |b| b.digest().to_vec())
+        let mut cache = crate::locked(&self.digests);
+        cached_digest(&mut cache.banner, self.log.banner_record())
     }
 
     /// The group's banner, encoded, when there is one (a record taking it away included).
@@ -472,9 +505,8 @@ impl GroupContext {
     /// A short digest of the group's picture record, empty for none: two devices with the
     /// same one have the same record.
     pub(crate) fn picture_digest(&self) -> Vec<u8> {
-        self.log
-            .picture_record()
-            .map_or_else(Vec::new, |p| p.digest().to_vec())
+        let mut cache = crate::locked(&self.digests);
+        cached_digest(&mut cache.picture, self.log.picture_record())
     }
 
     /// The group's picture record, encoded, when there is one (one taking it away included).
@@ -1166,14 +1198,28 @@ impl GroupContext {
     }
 
     /// Managers: cancels, in this device's own name, its invites another manager cancelled,
-    /// so the invited device gets a refusal it can check. Returns the new entries.
+    /// so the invited device gets a refusal it can check, and its open invites a manager
+    /// removed or demoted since still knows ([`GroupLog::invites_a_manager_left_with`]):
+    /// that device could let the invited one into a copy of the group as it was before.
+    /// Returns the new entries.
     pub(crate) fn confirm_revokes(&mut self, now_ms: u64) -> Vec<EntryHash> {
         if !self.i_am_manager() {
             return Vec::new();
         }
         let me = self.identity.public_key();
+        let mut tickets = self.log.revokes_to_confirm(&me);
+        let known = self.log.invites_a_manager_left_with(&me, now_ms);
+        if !known.is_empty() {
+            tracing::info!(
+                "cancelling {} open invites: a manager removed or demoted since knows them",
+                known.len()
+            );
+        }
+        tickets.extend(known);
+        tickets.sort_unstable();
+        tickets.dedup();
         let mut new = Vec::new();
-        for ticket_id in self.log.revokes_to_confirm(&me) {
+        for ticket_id in tickets {
             new.extend(self.revoke(ticket_id, now_ms));
         }
         new
@@ -1299,6 +1345,31 @@ mod tests {
 
     fn ctx(identity: &Arc<DeviceIdentity>, log: &GroupLog) -> GroupContext {
         GroupContext::new(identity.clone(), GroupSetup::Member(log.clone()))
+    }
+
+    /// The banner's and picture's digests, kept between asks, are those of the records
+    /// there now, after each change too.
+    #[test]
+    fn the_kept_digests_follow_the_banner_and_picture() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let log = GroupLog::create(&ana, "g", 1).unwrap();
+        let mut ctx = ctx(&ana, &log);
+        assert!(ctx.banner_digest().is_empty());
+        assert!(ctx.picture_digest().is_empty());
+        let mut seen = Vec::new();
+        for now in [10, 20, 30] {
+            ctx.set_banner(Vec::new(), now).unwrap();
+            ctx.set_picture(Vec::new(), now).unwrap();
+            for _ in 0..2 {
+                let banner = ctx.log.banner_record().unwrap().digest().to_vec();
+                let picture = ctx.log.picture_record().unwrap().digest().to_vec();
+                assert_eq!(ctx.banner_digest(), banner);
+                assert_eq!(ctx.picture_digest(), picture);
+            }
+            seen.push(ctx.banner_digest());
+        }
+        seen.dedup();
+        assert_eq!(seen.len(), 3);
     }
 
     fn join(log: &mut GroupLog, joiner: &DeviceIdentity, ticket: Ticket, now: u64) -> EntryHash {
@@ -1596,6 +1667,72 @@ mod tests {
                 .all(|p| p.iter().map(Vec::len).sum::<usize>() <= SYNC_BYTES)
         );
         assert_eq!(parts.concat(), at_ana.encoded(at_ana.hashes()));
+    }
+
+    /// A manager removed or demoted keeps the log with the invites open then, and could
+    /// let their device into a copy of the group where it still manages: the issuer
+    /// cancels them, once. Invites made after, and a manager that leaves by itself, cancel
+    /// nothing.
+    #[test]
+    fn invites_a_removed_manager_knows_are_cancelled_by_their_issuer() {
+        let id = || Arc::new(DeviceIdentity::generate().unwrap());
+        let (ana, bea, leo, zoe) = (id(), id(), id(), id());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+        log.add(&ana, leo.public_key(), "leo", 3).unwrap();
+        log.add(&ana, zoe.public_key(), "zoe", 4).unwrap();
+        let (before, _) = log.invite(&ana, 1_000, 4).unwrap();
+        log.append(&zoe, fogata_state::Body::Leave, 5).unwrap();
+        assert!(ctx(&ana, &log).confirm_revokes(6).is_empty());
+        log.remove(&ana, bea.public_key(), 7).unwrap();
+        let (after, _) = log.invite(&ana, 1_000, 7).unwrap();
+        // Only its issuer's refusal counts for the invited device.
+        assert!(ctx(&leo, &log).confirm_revokes(8).is_empty());
+        let mut at_ana = ctx(&ana, &log);
+        assert_eq!(at_ana.confirm_revokes(8).len(), 1);
+        assert!(at_ana.log().issuer_revoke(&before).is_some());
+        assert!(at_ana.log().issuer_revoke(&after).is_none());
+        assert!(at_ana.confirm_revokes(9).is_empty());
+    }
+
+    /// A member that rotates after someone left may seal the new key to itself alone: the
+    /// log takes it, as every version does. A manager holding that key gives it to every
+    /// member left out; one left out itself starts a new epoch for everyone.
+    #[test]
+    fn members_left_out_of_a_members_rotation_get_the_key_from_a_manager() {
+        let id = || Arc::new(DeviceIdentity::generate().unwrap());
+        let (ana, bea, leo, zoe) = (id(), id(), id(), id());
+        let mut base = GroupLog::create(&ana, "g", 1).unwrap();
+        base.append(&ana, fogata_state::Body::SetManagers { first: Some(1) }, 2)
+            .unwrap();
+        base.add(&ana, bea.public_key(), "bea", 3).unwrap();
+        base.add(&ana, leo.public_key(), "leo", 4).unwrap();
+        base.add(&ana, zoe.public_key(), "zoe", 5).unwrap();
+        base.append(&zoe, fogata_state::Body::Leave, 6).unwrap();
+        for with_ana in [true, false] {
+            let mut log = base.clone();
+            let to: Vec<_> = if with_ana {
+                vec![ana.public_key(), bea.public_key()]
+            } else {
+                vec![bea.public_key()]
+            };
+            let (rotation, _) = fogata_state::Rotation::new(&log.group_id(), to).unwrap();
+            log.append(&bea, fogata_state::Body::Rotate { rotation }, 7)
+                .unwrap();
+            assert!(log.current_keys(&leo).is_none());
+            let mut at_ana = ctx(&ana, &log);
+            let new = if with_ana {
+                at_ana.welcome_lacking(8)
+            } else {
+                at_ana.mend_key(8, false)
+            };
+            assert_eq!(new.len(), 1, "{with_ana}");
+            let log = at_ana.log();
+            assert!(log.state().lacking_current_secret().is_empty());
+            for member in [&ana, &bea, &leo] {
+                assert!(log.current_keys(member).is_some(), "{with_ana}");
+            }
+        }
     }
 
     #[test]

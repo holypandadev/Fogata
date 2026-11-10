@@ -35,7 +35,7 @@ passphrase is asked on the terminal and not shown; on Windows the command refuse
    target/release/fogata release keygen
    ```
 
-   It asks for a passphrase (at least 8 characters, twice) and makes
+   It asks for a passphrase (at least 16 characters, twice) and makes
    `~/.config/fogata-release/release-key` (the secret, sealed with the passphrase: Argon2id,
    then XChaCha20-Poly1305; readable only by you; never printed) and `release-key.pub`. It
    prints a line `ReleaseKey::release([0x.., ...]),` and a line starting `fogata-prerelease
@@ -128,7 +128,26 @@ refuses a folder that holds any key already.
    `result: pass`, with the macOS and Windows legs run, or checked by hand on those systems
    at that very commit (the same commit the builds below come from: copy it there with
    `git bundle` or a push, never by copying files). Every build of the release comes from
-   that commit, with no changes.
+   that commit, with no changes. Then check it against the last release: build the command
+   line at the last release's tag, in a worktree and a target folder of its own, and run
+   the test of the two together (the weekly workflow on GitHub does the same, job
+   `previous-release`; it must have passed for this commit or be run here):
+
+   ```sh
+   git fetch --tags
+   git worktree add --detach ../fogata-previous v0.1.0-beta.1   # the last release's tag
+   (cd ../fogata-previous && CARGO_TARGET_DIR=$HOME/fogata-previous-target \
+       cargo build --release --locked -p fogata)
+   FOGATA_OLD_CLI=$HOME/fogata-previous-target/release/fogata \
+       cargo test -p fogata-core --test previous_release -- --ignored
+   git worktree remove ../fogata-previous
+   ```
+
+   It must pass: what this version writes to a group, copies of the last release must take
+   in whole, or a group splits between those who updated and those who did not (see
+   docs/architecture.md, 3.15 and 5.1). The tests of `crates/fogata-core/tests/old_copy.rs`
+   need copies from before given features, older than any published tag: run them too when
+   the change touches what they cover and such a build is at hand.
 2. Build on each system, release builds only. The Rust is the one `rust-toolchain.toml`
    names (rustup installs it the first time), and the crates the ones `Cargo.lock` names;
    libopus is built with CMake (Windows uses Visual Studio's own; on macOS install it once
@@ -169,7 +188,10 @@ refuses a folder that holds any key already.
 
    (`--build-linux` in place of `--linux-bundle` builds the Linux bundle there, from a clean
    worktree of the commit checked out.) It refuses to go on while `RELEASE_KEYS` lacks a release key or a rescue key (no copy would
-   take the release) or while the checkout has changes not committed, refuses debug and
+   take the release), while the checkout has changes not committed, or while the command-line
+   program that packs and signs (`target/release/fogata`, or `--fogata`) was built from
+   another commit or with changes (its own commit marker says which: build it again after
+   every commit), refuses debug and
    profile builds, checks that each build holds build 2, trusts exactly the keys
    `RELEASE_KEYS` names and was built from the commit checked out with no changes (each
    release build of the library carries the commit it was made from, with `+dirty` when a

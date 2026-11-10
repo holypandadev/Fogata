@@ -30,6 +30,7 @@ impl Node {
     pub(super) fn friends_look_again(&mut self) {
         if let Some(f) = self.friends.as_mut() {
             f.last_lookup = None;
+            f.look_for_the_away_again();
         }
     }
 

@@ -13,9 +13,13 @@
 // removed in favor of the normal structure since templates will no longer
 // manually include files.
 
+#include <atomic>
 #include <cassert>
 #include <iostream>
+#include <mutex>
+#include <utility>
 #include <variant>
+#include <vector>
 
 #include "binary_messenger_impl.h"
 #include "include/flutter/engine_method_result.h"
@@ -24,7 +28,9 @@
 
 struct FlTextureProxy {
   FlPixelBufferTexture parent_instance;
-  flutter::TextureVariant* texture = nullptr;
+  // Fogata: read on the raster thread while the platform thread clears it. GObject
+  // zeroes the instance (no constructor runs), which is a null pointer.
+  std::atomic<flutter::TextureVariant*> texture;
 };
 
 struct FlTextureProxyClass {
@@ -53,17 +59,86 @@ static gboolean fl_texture_proxy_no_frame(const uint8_t** out_buffer,
   return TRUE;
 }
 
+// Fogata: unregistered textures, kept until the engine is surely done with them. The
+// engine looks a texture up and copies its pixels on its raster thread without holding
+// a reference, and uses the pixels after copy_pixels returns, so a texture unregistered
+// on the platform thread may still be in use there, and with it the renderer whose
+// buffer it reads (freed at once, a participant leaving as a frame of theirs was being
+// drawn read freed memory). That thread copies one texture at a time: once it starts
+// copying another texture after the unregistering, the old one is no longer in use and
+// never will be. The same rule as packages/fogata_video's `retire`.
+namespace {
+
+struct Retired {
+  FlTextureProxy* proxy;
+  // `copies` when it was unregistered.
+  uint64_t after;
+  // Frees what the texture read; run on the platform thread.
+  std::function<void()> release;
+};
+
+std::mutex retired_mutex;
+std::vector<Retired> retired;
+// The releases of textures no longer in use, waiting for the platform thread.
+std::vector<std::function<void()>> released;
+// How many times the raster thread has started copying pixels.
+uint64_t copies = 0;
+
+gboolean run_released(gpointer) {
+  std::vector<std::function<void()>> run;
+  {
+    std::lock_guard<std::mutex> lock(retired_mutex);
+    run.swap(released);
+  }
+  for (auto& release : run) release();
+  return G_SOURCE_REMOVE;
+}
+
+// Hands the plugin's reference to [proxy] over to the list above.
+void retire(FlTextureProxy* proxy, std::function<void()> release) {
+  std::lock_guard<std::mutex> lock(retired_mutex);
+  retired.push_back({proxy, copies, std::move(release)});
+}
+
+// On the raster thread, as [current] is about to be copied: the textures it has moved
+// past go. Their last unref runs here, on the thread whose GL context made their GL
+// textures; what they read is freed on the platform thread.
+void moved_on(FlTextureProxy* current) {
+  std::vector<FlTextureProxy*> done;
+  bool release = false;
+  {
+    std::lock_guard<std::mutex> lock(retired_mutex);
+    copies++;
+    for (auto it = retired.begin(); it != retired.end();) {
+      if (copies > it->after && it->proxy != current) {
+        done.push_back(it->proxy);
+        released.push_back(std::move(it->release));
+        release = true;
+        it = retired.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+  for (FlTextureProxy* gone : done) g_object_unref(gone);
+  if (release) g_idle_add(run_released, nullptr);
+}
+
+}  // namespace
+
 static gboolean fl_texture_proxy_copy_pixels(FlPixelBufferTexture* texture,
                                              const uint8_t** out_buffer,
                                              uint32_t* width,
                                              uint32_t* height,
                                              GError** error) {
   FlTextureProxy* proxy = FL_TEXTURE_PROXY(texture);
-  if (proxy->texture == nullptr) {
+  moved_on(proxy);
+  flutter::TextureVariant* variant = proxy->texture.load();
+  if (variant == nullptr) {
     return fl_texture_proxy_no_frame(out_buffer, width, height);
   }
   flutter::PixelBufferTexture& pixel_buffer =
-      std::get<flutter::PixelBufferTexture>(*proxy->texture);
+      std::get<flutter::PixelBufferTexture>(*variant);
   const FlutterDesktopPixelBuffer* copy =
       pixel_buffer.CopyPixelBuffer(*width, *height);
   if (copy == nullptr) {
@@ -78,7 +153,7 @@ static gboolean fl_texture_proxy_copy_pixels(FlPixelBufferTexture* texture,
 static FlTextureProxy* fl_texture_proxy_new(flutter::TextureVariant* texture) {
   FlTextureProxy* proxy =
       FL_TEXTURE_PROXY(g_object_new(fl_texture_proxy_get_type(), nullptr));
-  proxy->texture = texture;
+  proxy->texture.store(texture);
   return proxy;
 }
 
@@ -245,11 +320,13 @@ int64_t TextureRegistrarImpl::RegisterTexture(TextureVariant* texture) {
   fl_texture_registrar_register_texture(texture_registrar_ref_,
                                         FL_TEXTURE(texture_proxy));
   int64_t texture_id = reinterpret_cast<int64_t>(texture_proxy);
+  std::lock_guard<std::mutex> lock(mutex_);
   textures_[texture_id] = texture_proxy;
   return texture_id;
 }
 
 bool TextureRegistrarImpl::MarkTextureFrameAvailable(int64_t texture_id) {
+  std::lock_guard<std::mutex> lock(mutex_);
   auto it = textures_.find(texture_id);
   if (it != textures_.end()) {
     return fl_texture_registrar_mark_texture_frame_available(
@@ -258,18 +335,43 @@ bool TextureRegistrarImpl::MarkTextureFrameAvailable(int64_t texture_id) {
   return false;
 }
 
-bool TextureRegistrarImpl::UnregisterTexture(int64_t texture_id) {
-  auto it = textures_.find(texture_id);
-  if (it != textures_.end()) {
-    auto texture = it->second;
+FlTextureProxy* TextureRegistrarImpl::Unregister(int64_t texture_id,
+                                                 bool* unregistered) {
+  FlTextureProxy* texture = nullptr;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = textures_.find(texture_id);
+    if (it == textures_.end()) return nullptr;
+    texture = it->second;
     textures_.erase(it);
-    FL_TEXTURE_PROXY(texture)->texture = nullptr;
-    bool success = fl_texture_registrar_unregister_texture(
-        texture_registrar_ref_, FL_TEXTURE(texture));
-    g_object_unref(texture);
-    return success;
   }
-  return false;
+  texture->texture.store(nullptr);
+  *unregistered = fl_texture_registrar_unregister_texture(
+      texture_registrar_ref_, FL_TEXTURE(texture));
+  return texture;
+}
+
+bool TextureRegistrarImpl::UnregisterTexture(int64_t texture_id) {
+  bool success = false;
+  FlTextureProxy* texture = Unregister(texture_id, &success);
+  if (texture == nullptr) return false;
+  g_object_unref(texture);
+  return success;
+}
+
+bool TextureRegistrarImpl::UnregisterTextureLater(
+    int64_t texture_id,
+    std::function<void()> release) {
+  bool success = false;
+  FlTextureProxy* texture = Unregister(texture_id, &success);
+  if (texture == nullptr) {
+    release();
+    return false;
+  }
+  // The engine may still be copying its pixels on its own thread: the texture, and
+  // what it reads, go once it has moved on.
+  retire(texture, std::move(release));
+  return success;
 }
 
 }  // namespace flutter

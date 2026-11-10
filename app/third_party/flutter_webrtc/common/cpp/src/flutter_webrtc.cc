@@ -5,6 +5,7 @@
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
 #ifdef __linux__
+#include <future>
 #include <thread>
 
 #include "camera_access.h"
@@ -252,16 +253,34 @@ void FlutterWebRTC::HandleMethodCall(
         SuppressNoise(findBoolean(params, "on"), findLongInt(params, "api"))));
 #ifdef __linux__
   } else if (method_call.method_name().compare("fogataSilentInput") == 0) {
-    // Fogata: the "Fogata silence" input, made or removed.
+    // Fogata: the "Fogata silence" input, made or removed. Off the platform
+    // thread, as making it waits up to 2 s for PipeWire's answer and a stalled
+    // server froze the window as a share started; one request after the other,
+    // in the order asked, so an "off" is never overtaken by the "on" before it.
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
-    const EncodableValue on = findEncodableValue(params, "on");
-    if (TypeIs<bool>(on) && GetValue<bool>(on)) {
-      result->Success(EncodableValue(SilentInput::Start()));
-    } else {
-      SilentInput::Stop();
-      result->Success(EncodableValue(true));
-    }
+    const EncodableValue on_value = findEncodableValue(params, "on");
+    const bool on = TypeIs<bool>(on_value) && GetValue<bool>(on_value);
+    // Only touched here, on the platform thread.
+    static std::shared_future<void> silent_turn;
+    std::shared_future<void> before = silent_turn;
+    auto done = std::make_shared<std::promise<void>>();
+    silent_turn = done->get_future().share();
+    std::shared_ptr<MethodResultProxy> answer(std::move(result));
+    std::shared_ptr<AnswerGate> gate = answer_gate_;
+    std::thread([before, done, on, answer, gate]() {
+      if (before.valid()) before.wait();
+      bool made = true;
+      if (on) {
+        made = SilentInput::Start();
+      } else {
+        SilentInput::Stop();
+      }
+      done->set_value();
+      // Only while the plugin is there, as for fogataSoundServer below.
+      std::lock_guard<std::mutex> guard(gate->lock);
+      if (gate->open) answer->Success(EncodableValue(made));
+    }).detach();
   } else if (method_call.method_name().compare("fogataSoundServer") == 0) {
     // Fogata: whether a sound server answers ("ready"), there is none ("none"),
     // it did not answer in time ("timeout") or this cannot tell ("unknown"),
@@ -677,6 +696,15 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string peerConnectionId = findString(params, "peerConnectionId");
     RTCPeerConnection* pc = PeerConnectionForId(peerConnectionId);
+    // Fogata: closed first, the connection is no longer listed (close lets go of
+    // it), but its observer still is, holding it and its event channel: found
+    // through the observer, both go now instead of staying until the app quits.
+    if (pc == nullptr) {
+      if (FlutterPeerConnectionObserver* observer =
+              PeerConnectionObserversForId(peerConnectionId)) {
+        pc = observer->peerconnection();
+      }
+    }
     if (pc == nullptr) {
       result->Success();
       return;

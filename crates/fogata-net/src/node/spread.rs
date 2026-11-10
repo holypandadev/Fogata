@@ -10,6 +10,10 @@
 //! connected to; a message from one of them is passed on to the members its sender is not
 //! known to be connected to. Something lost on the way is asked for by id: participants
 //! name their room's latest events in their presences (see room.rs).
+//!
+//! Nothing proves whom a message reached: a member could pass a message on first, naming
+//! every member, so that those it got to left the others to it. A later copy from another
+//! member that names fewer has it passed on to those, once each (see [`PassedOn`]).
 
 use std::{
     collections::{BTreeMap, HashSet},
@@ -32,6 +36,39 @@ const MAX_REACHED: usize = 64;
 /// How long a member's roster counts for leaving a member to it: rosters are asked for at
 /// every heartbeat.
 pub(super) const ROSTER_FRESH: Duration = Duration::from_secs(45);
+/// Spread messages whose way on is kept (see [`PassedOn`]), the latest.
+const PASSED_ON_KEPT: usize = 1024;
+
+/// A spread message this device passed on: its group, what it is (a hash of the message as
+/// sent, so that only the same message goes on again) and the members that have it from or
+/// through this device. A later copy of it that names fewer members than the first goes on
+/// to those this device would pass it on to now and did not, so that a member naming every
+/// member in the copy it sent first does not keep it from the others.
+pub(super) struct PassedOn {
+    group: GroupId,
+    hash: [u8; 32],
+    sent: HashSet<PeerId>,
+}
+
+/// What a group message is, as sent: a copy with the same id and anything else changed is
+/// another message.
+fn wire_hash(wire: &WireMessage) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    for part in [
+        &wire.group_id,
+        &wire.sender,
+        &wire.message_id,
+        &wire.nonce,
+        &wire.ciphertext,
+        &wire.signature,
+    ] {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.update(&wire.epoch.to_le_bytes());
+    hasher.update(&wire.timestamp_ms.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
 
 /// How a group message that arrived goes on.
 pub(super) enum Forward {
@@ -121,6 +158,9 @@ impl Node {
         };
         let id = sealed.header.message_id;
         if !matches!(forward, Forward::No) && self.seen.contains(&id) {
+            if let Forward::Spread(reached) = &forward {
+                self.spread_again(from, id, &wire, reached);
+            }
             return;
         }
         // A direct chat's group carries no room events.
@@ -175,11 +215,71 @@ impl Node {
         if !recent.is_empty() {
             self.ask_missing(group, sealed.header.sender, from, &recent);
         }
+        if matches!(forward, Forward::Spread(_)) && onward.is_some() {
+            let sent = onward.iter().flat_map(|(peers, _)| peers.iter().copied());
+            self.keep_passed_on(
+                id,
+                group,
+                &wire,
+                std::iter::once(from).chain(sent).collect(),
+            );
+        }
         if let Some((peers, reached)) = onward
             && !peers.is_empty()
         {
             tracing::trace!(count = peers.len(), "passing a group message on");
             self.send_group_message(&peers, &wire, &reached);
+        }
+    }
+
+    /// Keeps how spread message `id` went on from here (see [`PassedOn`]).
+    fn keep_passed_on(
+        &mut self,
+        id: [u8; 16],
+        group: GroupId,
+        wire: &WireMessage,
+        sent: HashSet<PeerId>,
+    ) {
+        let hash = wire_hash(wire);
+        if self
+            .passed_on
+            .insert(id, PassedOn { group, hash, sent })
+            .is_none()
+        {
+            self.passed_on_order.push_back(id);
+        }
+        while self.passed_on_order.len() > PASSED_ON_KEPT {
+            if let Some(old) = self.passed_on_order.pop_front() {
+                self.passed_on.remove(&old);
+            }
+        }
+    }
+
+    /// Another copy of spread message `id`, already passed on, from `from`, that reached
+    /// `reached`: it goes on to the members it would go to from this copy that it did not
+    /// go to from here yet, once each. Copies from honest members name at least those the
+    /// first named, so nothing more goes; one whose first copy named members it did not
+    /// reach no longer keeps it from them.
+    fn spread_again(&mut self, from: PeerId, id: [u8; 16], wire: &WireMessage, reached: &[u8]) {
+        let Some(kept) = self.passed_on.get_mut(&id) else {
+            return;
+        };
+        if kept.hash != wire_hash(wire) {
+            return;
+        }
+        kept.sent.insert(from);
+        let group = kept.group;
+        let (peers, reached) = self.pass_on(group, from, &id, reached);
+        let Some(kept) = self.passed_on.get_mut(&id) else {
+            return;
+        };
+        let peers: Vec<PeerId> = peers.into_iter().filter(|p| kept.sent.insert(*p)).collect();
+        if !peers.is_empty() {
+            tracing::debug!(
+                count = peers.len(),
+                "a later copy of a group message named fewer members; passing it on to them"
+            );
+            self.send_group_message(&peers, wire, &reached);
         }
     }
 
@@ -482,6 +582,84 @@ mod tests {
     /// alone: he pays for each once it comes. Marta does the same, but Bea passes on her
     /// leave, then her renames again: Marta pays for them, each time, and Bea, who passed
     /// them on, only for their place.
+    /// A member that passes a message on first, naming every member, keeps it from none: a
+    /// later copy from another member, naming only those it reached, has this device pass
+    /// it on to the rest, once; a copy that is not the same message has nothing go on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_first_copy_naming_everyone_keeps_the_message_from_nobody() {
+        use crate::node::tests::add_member;
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "Bea", 2).unwrap();
+        let group = log.group_id();
+        let (node, _events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let found = inspect(&node, move |n| {
+            let (liar, honest, cai, dan) = (
+                PeerId::random(),
+                PeerId::random(),
+                PeerId::random(),
+                PeerId::random(),
+            );
+            for peer in [liar, honest, cai, dan] {
+                add_member(n, group, peer);
+                crate::locked(&n.advertised).insert(peer, HashSet::from([SPREAD_PROTOCOL]));
+            }
+            let keys = n.groups[&group].ctx.current().cloned().unwrap();
+            let payload = GroupPayload::RoomLeave {
+                voice: fogata_state::FIRST_ROOM,
+                room: [3; 16],
+            };
+            let sealed =
+                SealedMessage::seal(&keys, &bea, crate::node::now_ms(), &payload.encode()).unwrap();
+            let wire = WireMessage::from(&sealed);
+            let ids = |list: &[PeerId]| list.iter().flat_map(short_id).collect::<Vec<u8>>();
+            let deliveries = |n: &Node, peer: PeerId| {
+                n.pending
+                    .values()
+                    .filter(|(p, k)| *p == peer && matches!(k, Pending::Deliver))
+                    .count()
+            };
+            n.receive(
+                liar,
+                wire.clone(),
+                Forward::Spread(ids(&[liar, honest, cai, dan, n.local_peer()])),
+            );
+            let first = (deliveries(n, cai), deliveries(n, dan));
+            // Another message under the same id: nothing goes on.
+            let mut other = wire.clone();
+            other.ciphertext[0] ^= 1;
+            n.receive(
+                honest,
+                other,
+                Forward::Spread(ids(&[honest, n.local_peer()])),
+            );
+            let forged = (deliveries(n, cai), deliveries(n, dan));
+            let reached = ids(&[honest, cai, n.local_peer()]);
+            n.receive(honest, wire.clone(), Forward::Spread(reached.clone()));
+            let later = (deliveries(n, cai), deliveries(n, dan));
+            n.receive(honest, wire, Forward::Spread(reached));
+            let again = (deliveries(n, cai), deliveries(n, dan), deliveries(n, liar));
+            (first, forged, later, again)
+        })
+        .await;
+        assert_eq!(found, ((0, 0), (0, 0), (0, 1), (0, 1, 0)));
+        node.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn entries_sent_ahead_of_their_parent_cost_their_author_once_refused() {
         let ana = Arc::new(DeviceIdentity::generate().unwrap());

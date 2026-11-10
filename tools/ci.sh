@@ -10,7 +10,7 @@
 # RustSec advisories, the release scripts' tests, THIRD-PARTY-NOTICES, the bridge code), the
 # libFuzzer targets built (cargo +nightly fuzz build; they are not run), the localizations
 # generated again (flutter gen-l10n) and nothing in the worktree changed by the
-# generators, flutter analyze, flutter test, and the integration tests that need one copy of
+# generators, the Dart code formatted (dart format), flutter analyze, flutter test, and the integration tests that need one copy of
 # the application and nothing else (tools/integration-tests.sh: each on an X display and a
 # null sound sink of its own; skipped when Xvfb or a sound server is missing). With --full,
 # also the tests of two copies talking to each other (call_test, direct_test, voice_test,
@@ -246,10 +246,12 @@ smoke_tests() {
 }
 # The libFuzzer targets (fuzz/, a workspace of its own the other steps never build) must at
 # least compile, with the nightly toolchain and cargo-fuzz; they are not run here.
+# FOGATA_FUZZ_TOOLCHAIN names the nightly (`nightly` by default; GitHub's job pins a dated one,
+# so a new nightly cannot break the run overnight).
 fuzz_build() {
     mkdir -p "$records/fuzz-target"
     [[ "${FOGATA_CI_FRESH:-0}" == 1 ]] || ln -s "$records/fuzz-target" fuzz/target
-    cd fuzz && ${slot[@]+"${slot[@]}"} nice -n 10 cargo +nightly fuzz build --fuzz-dir .
+    cd fuzz && ${slot[@]+"${slot[@]}"} nice -n 10 cargo "+${FOGATA_FUZZ_TOOLCHAIN:-nightly}" fuzz build --fuzz-dir .
 }
 linux=pass
 {
@@ -260,6 +262,7 @@ linux=pass
     step "fuzz targets build" fuzz_build &&
     step "gen-l10n" bash -c 'cd app && flutter gen-l10n' &&
     step "nothing generated differs" bash -c 'test -z "$(git status --porcelain --untracked-files=no)" || { git status --short; git diff --stat; exit 1; }' &&
+    step "dart format" bash -c 'cd app && dart format --output=none --set-exit-if-changed lib test integration_test test_driver packages/fogata_video' &&
     step "flutter analyze" bash -c 'cd app && flutter analyze' &&
     step "flutter test" bash -c 'cd app && "$@" nice -n 10 flutter test' _ ${slot[@]+"${slot[@]}"} &&
     integration_tests &&

@@ -243,6 +243,7 @@ exit "${SMOKE_EXIT:-0}"
     def setUp(self):
         super().setUp()
         self.stand_in("flutter", 'if [[ $1 == --version ]]; then echo "Flutter 9.9.9 • channel x"; fi')
+        self.stand_in("dart", 'exit "${DART_EXIT:-0}"')
         self.stand_in("rustc", 'echo "rustc 9.9.9 (test)"')
         self.stand_in("cargo", 'echo "cargo 9.9.9 (test)"; [[ "$*" == *fuzz* ]] && exit "${FUZZ_EXIT:-0}"; exit 0')
         self.repo_dir = self.repo({
@@ -441,6 +442,12 @@ exit "${SMOKE_EXIT:-0}"
         # Built like the application, after flutter test.
         self.assertIn("integration tests", calls)
         self.assertLess(calls.index("flutter test"), calls.index("integration tests"))
+        # The Dart code must be formatted, checked before flutter analyze.
+        self.assertLess(calls.index("dart format --output=none --set-exit-if-changed"),
+                        calls.index("flutter analyze"))
+        result = self.ci("--full", env={**legs, "DART_EXIT": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.fields()["linux"], self.fields()["result"]), ("fail", "fail"))
 
         # A failing integration test fails the run.
         result = self.ci("--full", env={**legs, "INTEGRATION_EXIT": "1"})
@@ -533,6 +540,7 @@ exit "${SMOKE_EXIT:-0}"
     def setUp(self):
         super().setUp()
         self.stand_in("flutter", "exit ${FLUTTER_EXIT:-0}")
+        self.stand_in("dart", 'exit "${DART_EXIT:-0}"')
         self.repo_dir = self.repo({
             "tools/ci-leg.sh": (TOOLS / "ci-leg.sh").read_text(),
             "tools/check.sh": '#!/usr/bin/env bash\necho "check.sh $*" >> "$CALLS"\nexit "${CHECK_EXIT:-0}"\n',
@@ -553,7 +561,9 @@ exit "${SMOKE_EXIT:-0}"
             result.stdout.splitlines()[-1],
             f"fogata-ci-leg: system=macos commit={self.sha} status=pass steps=check,analyze,test skipped=none")
         self.assertIn("check.sh --no-advisories --no-codegen", self.calls.read_text())
-        for env in ({"CHECK_EXIT": "1"}, {"FLUTTER_EXIT": "1"}):
+        self.assertIn("dart format --output=none --set-exit-if-changed lib test", self.calls.read_text())
+        # Dart code not formatted fails the leg like a failed check.
+        for env in ({"CHECK_EXIT": "1"}, {"FLUTTER_EXIT": "1"}, {"DART_EXIT": "1"}):
             result = self.leg(env)
             self.assertNotEqual(result.returncode, 0)
             self.assertNotIn("fogata-ci-leg:", result.stdout)

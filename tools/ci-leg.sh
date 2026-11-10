@@ -14,7 +14,8 @@
 # git does not ignore. Then it runs
 # tools/check.sh (formatting, clippy with warnings as errors, every test, cargo deny, the
 # tests of the scripts, THIRD-PARTY-NOTICES) without the RustSec advisories and the bridge
-# code, which tools/ci.sh checks on the computer that runs it, then `flutter analyze` and
+# code, which tools/ci.sh checks on the computer that runs it, then `dart format` (the Dart code
+# must be formatted already), `flutter analyze` and
 # `flutter test`. Only when every step passed it prints the line tools/ci.sh looks for:
 #
 #     fogata-ci-leg: system=macos commit=<commit> status=pass steps=<steps> skipped=<steps>
@@ -63,6 +64,7 @@ step() {
 join() { local IFS=,; echo "${*:-none}"; }
 
 step check tools/check.sh --no-advisories --no-codegen
-step analyze bash -c 'cd app && flutter pub get --offline && flutter analyze'
+step analyze bash -c 'cd app && flutter pub get --offline &&
+    dart format --output=none --set-exit-if-changed lib test integration_test test_driver packages/fogata_video && flutter analyze'
 step test bash -c 'cd app && flutter test'
 echo "fogata-ci-leg: system=$system commit=$sha status=pass steps=$(join ${steps[@]+"${steps[@]}"}) skipped=$(join ${skipped[@]+"${skipped[@]}"})"

@@ -11,7 +11,7 @@
 # every test of the workspace (the command line program also with its lab feature, which the
 # tests of the release commands need), the tests of the vendored crates, cargo deny (licences,
 # bans, sources), THIRD-PARTY-NOTICES up to date, the tests of the release scripts, then
-# `flutter analyze` and `flutter test`, and the smoke test (tools/smoke-windows.ps1: two copies
+# `dart format` (the Dart code must be formatted already), `flutter analyze` and `flutter test`, and the smoke test (tools/smoke-windows.ps1: two copies
 # through the main things a person does, the screen shared through Windows' own capture; for a
 # machine with virtual sound devices only). Only when every step passed it prints the line
 # tools/ci.sh looks for:
@@ -126,7 +126,7 @@ Step 'vendor-tests' {
     Invoke-Native 'cargo' @('test', '-p', $crate, '--lib', '--quiet')
   }
 }
-Step 'deny' { Invoke-Native 'cargo' @('deny', '--offline', '--log-level', 'error', 'check', 'licenses', 'bans', 'sources') }
+Step 'deny' { Invoke-Native 'cargo' @('deny', '--offline', 'check', '--hide-inclusion-graph', 'licenses', 'bans', 'sources') }
 Step 'notices' { Invoke-Python @('tools/third_party_notices.py', '--check') }
 # The tests of tools/ci.sh, check.sh and the hooks (tools/test_ci.py) run bash scripts and are
 # for Linux and macOS; the release scripts' own tests and the commit marker's run everywhere.
@@ -138,6 +138,8 @@ Step 'analyze' {
   Push-Location app
   try {
     Invoke-Native 'flutter' @('pub', 'get', '--offline')
+    Invoke-Native 'dart' @('format', '--output=none', '--set-exit-if-changed', 'lib', 'test',
+      'integration_test', 'test_driver', 'packages/fogata_video')
     Invoke-Native 'flutter' @('analyze')
   } finally { Pop-Location }
 }

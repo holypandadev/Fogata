@@ -73,6 +73,11 @@ pub(crate) type Playing =
 /// Space a room file fetched here leaves free on its disk.
 pub(crate) const SPACE_KEPT_FREE: u64 = 256 * 1024 * 1024;
 
+/// The memory the previews being fetched may take together, in KiB: each holds its file
+/// whole, and a room with many pictures asks for them all at once. Past it, a preview
+/// waits for one before it to end.
+pub(crate) const PREVIEWS_KIB: u32 = 48 * 1024;
+
 /// [`Core::fetch_to_play`]'s fetch: the video at its place in `dir`, unless it is there
 /// already. Given up, and what came of it removed, once this device is in no room of
 /// `group`: it left, was taken out, or the group went.
@@ -622,6 +627,7 @@ impl Core {
     ) -> Result<Vec<u8>> {
         let entry = self.room_file(group, file).await?;
         anyhow::ensure!(entry.info.size <= max_bytes, "too big for a preview");
+        let _turn = self.preview_turn(entry.info.size).await?;
         let mut last = anyhow::anyhow!("nobody connected has it");
         for holder in &entry.holders {
             let Ok(Some(peer)) = self.inner.node.member_peer(*holder).await else {
@@ -634,6 +640,13 @@ impl Core {
             }
         }
         Err(last)
+    }
+
+    /// Holds the memory of a preview of `size` bytes among the previews being fetched
+    /// ([`PREVIEWS_KIB`]), waiting for it if need be; one bigger than all of it holds all.
+    async fn preview_turn(&self, size: u64) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        let kib = size.div_ceil(1024).clamp(1, u64::from(PREVIEWS_KIB)) as u32;
+        Ok(self.inner.previews.acquire_many(kib).await?)
     }
 
     /// A file listed in one of a group's voice rooms, with who has it.
@@ -650,6 +663,42 @@ mod tests {
     use fogata_crypto::DeviceIdentity;
 
     use super::*;
+
+    /// Previews being fetched hold their memory together: past what they may take, the
+    /// next waits for one to end; one bigger than all of it still goes, alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn previews_share_a_memory_budget() {
+        let dir = std::env::temp_dir().join(format!("fogata-previews-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = crate::NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        };
+        let (core, _events) = Core::start(dir.clone(), options).unwrap();
+        let ten = 10 << 20;
+        let wait = std::time::Duration::from_millis(200);
+        let held: Vec<_> = futures::future::join_all((0..4).map(|_| core.preview_turn(ten)))
+            .await
+            .into_iter()
+            .map(Result::unwrap)
+            .collect();
+        assert!(
+            tokio::time::timeout(wait, core.preview_turn(ten))
+                .await
+                .is_err(),
+            "a fifth 10 MB preview did not wait"
+        );
+        // Small ones still fit beside them.
+        let small = tokio::time::timeout(wait, core.preview_turn(100_000)).await;
+        assert!(small.is_ok_and(|turn| turn.is_ok()));
+        drop(held);
+        let huge = tokio::time::timeout(wait, core.preview_turn(u64::MAX)).await;
+        assert!(huge.is_ok_and(|turn| turn.is_ok()));
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// A holder that always says "later" makes a download wait a few times, longer each
     /// time, and then stop: never without end, and never past an hour in all.

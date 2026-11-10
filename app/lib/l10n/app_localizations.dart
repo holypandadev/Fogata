@@ -4831,18 +4831,6 @@ abstract class L10n {
   /// **'Play'**
   String get directPlay;
 
-  /// Video player: tooltip of the button that turns the sound back on.
-  ///
-  /// In en, this message translates to:
-  /// **'Sound on'**
-  String get directSoundOn;
-
-  /// Video player: tooltip of the button that mutes the video's sound.
-  ///
-  /// In en, this message translates to:
-  /// **'Mute'**
-  String get directMute;
-
   /// Direct chat: title of the question before taking out files waiting to be sent (Esc).
   ///
   /// In en, this message translates to:

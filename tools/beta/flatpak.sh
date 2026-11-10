@@ -169,6 +169,8 @@ fi
 #                 sound goes out is a node made there (else the microphone opens). PipeWire
 #                 knows the application for a Flatpak and lets it see and link the session's
 #                 streams and devices, what the PulseAudio socket already lets it do.
+# tools/beta/test_release.py (FlatpakPermissions) pins this list and the runtime: change it
+# there too, on purpose.
 flatpak build-finish "$build" \
     --command=fogata \
     --share=network \

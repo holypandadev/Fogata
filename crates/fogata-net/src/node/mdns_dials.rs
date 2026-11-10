@@ -33,6 +33,19 @@ const MAX_MDNS_DIALLED: usize = 16;
 const MDNS_RETRIES: u8 = 2;
 const MDNS_RETRY_AFTER: Duration = Duration::from_secs(2);
 
+/// Whether `address`, which a response from `by` told of, may be dialled: one at `by`
+/// itself, or on a local network (see [`addr::is_lan`]). Loopback only from this very
+/// computer, never a public address another one names: a response's addresses are
+/// whatever its sender likes, and would otherwise make this device send packets to any
+/// host on the internet, or to services on this computer.
+fn mdns_address_ok(address: &Multiaddr, by: std::net::IpAddr) -> bool {
+    match addr::ip(address) {
+        Some(ip) if ip == by => true,
+        Some(_) => addr::is_lan(address),
+        None => false,
+    }
+}
+
 /// The dials mDNS findings started for one peer that have not ended, the addresses they
 /// were given, and those told of since past [`MAX_MDNS_DIALLED`], for when they end.
 #[derive(Default)]
@@ -94,7 +107,7 @@ impl Node {
             let Some(by) = by.filter(|by| !self.teller_muted(by)) else {
                 continue;
             };
-            if peer == self.local_peer() {
+            if peer == self.local_peer() || !mdns_address_ok(&address, by) {
                 continue;
             }
             let tellers = by_peer.entry(peer).or_default();
@@ -354,6 +367,44 @@ mod tests {
         limits,
         tests::{inspect, lone_member},
     };
+
+    /// A response names a peer at its own address, at local ones, and at public and loopback
+    /// ones of other hosts: only the first two are dialled.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mdns_dials_no_public_or_loopback_address_a_neighbour_names() {
+        let (node, _group) = lone_member();
+        let dialled = inspect(&node, |n| {
+            let neighbour = std::net::IpAddr::from([192, 168, 1, 66]);
+            let peer = PeerId::random();
+            let told = [
+                "/ip4/192.168.1.66/udp/4001/quic-v1",
+                "/ip4/10.1.2.3/udp/4001/quic-v1",
+                "/ip4/203.0.113.80/udp/443/quic-v1",
+                "/ip4/127.0.0.1/udp/22/quic-v1",
+                "/ip6/::1/udp/22/quic-v1",
+                "/ip6/2001:db8::80/udp/443/quic-v1",
+            ];
+            n.dial_mdns_found(
+                told.iter()
+                    .map(|a| (peer, a.parse().unwrap(), Some(neighbour)))
+                    .collect(),
+            );
+            n.mdns_dials
+                .iter()
+                .filter(|(p, _)| *p == peer)
+                .flat_map(|(_, a)| a.iter().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .await;
+        assert_eq!(
+            dialled,
+            [
+                "/ip4/192.168.1.66/udp/4001/quic-v1",
+                "/ip4/10.1.2.3/udp/4001/quic-v1"
+            ]
+        );
+        node.shutdown().await.unwrap();
+    }
 
     /// The peers mDNS tells of are counted by the address the response came from, not by
     /// the addresses it names, which are whatever its sender likes: a neighbour naming

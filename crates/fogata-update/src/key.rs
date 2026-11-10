@@ -49,8 +49,11 @@ const SEAL_LABEL: &[u8] = b"fogata/v1/release-key";
 /// program guessing passphrases.
 pub const ARGON2_MEMORY_KIB: u32 = 128 * 1024;
 pub const ARGON2_PASSES: u32 = 3;
-/// The fewest characters a passphrase may have.
-pub const MIN_PASSPHRASE: usize = 8;
+/// The fewest characters the passphrase of a new key may have: a sealed file that is stolen
+/// is open to guessing for as long as the thief likes, Argon2id only slows each guess.
+/// Sixteen characters, or a phrase of a few words, are out of reach. Only new keys are held
+/// to it: a key sealed before with a shorter passphrase still opens.
+pub const MIN_PASSPHRASE: usize = 16;
 
 /// The sealed secret file.
 #[derive(Serialize, Deserialize)]
@@ -204,7 +207,7 @@ fn private_mode(mode: u32, path: &Path) -> io::Result<()> {
     ))
 }
 
-/// Refuses a passphrase too short to be one.
+/// Refuses a passphrase too short for a new key.
 pub fn check_passphrase(passphrase: &str) -> io::Result<()> {
     if passphrase.chars().count() < MIN_PASSPHRASE {
         return Err(io::Error::new(
@@ -404,10 +407,37 @@ mod tests {
         }
     }
 
+    /// A key sealed before the passphrase had to be longer still opens with its own.
+    #[test]
+    fn a_key_sealed_with_a_shorter_passphrase_before_still_opens() {
+        let dir = folder("short-before");
+        fs::create_dir_all(&dir).unwrap();
+        let identity = DeviceIdentity::generate().unwrap();
+        let secret = dir.join(SECRET_FILE);
+        fs::write(
+            &secret,
+            seal(&identity.secret_bytes(), "eight ch")
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let key = load(&secret, || Ok(Zeroizing::new("eight ch".into()))).unwrap();
+        assert_eq!(key.public_key(), identity.public_key());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn a_sealed_key_opens_with_its_passphrase_only() {
         let dir = folder("sealed");
         assert!(generate(&dir, Some("short")).is_err());
+        // Fifteen characters are too few for a new key.
+        assert!(generate(&dir, Some("fifteen chars!!")).is_err());
         assert!(!dir.join(SECRET_FILE).exists());
         let public = generate(&dir, Some("correct horse battery")).unwrap();
         let secret = dir.join(SECRET_FILE);

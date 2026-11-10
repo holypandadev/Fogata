@@ -137,4 +137,39 @@ void main() {
       expect(find.text('Copied'), findsNothing);
     },
   );
+
+  testWidgets('many toasts at once show the newest few, a few lines each', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(960, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    final state = AppState('/nonexistent/fogata-toasts-test');
+    await tester.pumpWidget(
+      AppScope(
+        state: state,
+        child: MaterialApp(
+          theme: Fg.darkTokens.themeData,
+          home: const Material(child: SizedBox.expand()),
+          builder: withToasts,
+        ),
+      ),
+    );
+    // As many friend requests as others may send at once, with long names.
+    for (var i = 0; i < 30; i++) {
+      state.say('Request $i from ${'a very long name ' * 20}');
+    }
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(tester.takeException(), isNull);
+    expect(state.toasts.list, hasLength(ToastBoard.maxShown));
+    // The newest ones.
+    expect(state.toasts.list.last.text, startsWith('Request 29 '));
+    for (final text in tester.widgetList<Text>(
+      find.textContaining('Request '),
+    )) {
+      expect(text.maxLines, isNotNull);
+    }
+    await tester.pump(const Duration(seconds: 5));
+    expect(state.toasts.list, isEmpty);
+  });
 }

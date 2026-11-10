@@ -779,8 +779,6 @@
   "directCannotPlay": "Cet ordinateur ne peut pas lire cette vidéo.",
   "directPause": "Pause",
   "directPlay": "Lecture",
-  "directSoundOn": "Activer le son",
-  "directMute": "Couper le son",
   "directRemoveFilesTitle": "{n, plural, =0{Retirer les {n} fichiers ?} one{Retirer le fichier ?} other{Retirer les {n} fichiers ?}}",
   "directRemoveFilesText": "Ils sont retirés de ce message. Les fichiers sur ton ordinateur restent tels quels.",
   "directDraftKept": "Ce que tu écrivais reste ici pour quand tu pourras l’envoyer.",

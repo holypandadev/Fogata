@@ -235,7 +235,10 @@ pub(crate) async fn on_messages(
                     };
                     // Kept or not, it is confirmed, so it is not sent again.
                     receipt.push(id);
-                    if entry.chat.contains(&id) {
+                    // One removed here (deleted, or its time ran out) is not kept again:
+                    // it comes again only because the receipt for it did not reach the
+                    // friend.
+                    if entry.chat.contains(&id) || entry.chat.forgot(&id) {
                         continue;
                     }
                     let Some(item) = received(payload, now) else {
@@ -597,6 +600,9 @@ pub(crate) fn remove_items(
         sent.remove(id);
     }
     let gone = entry.chat.remove(ids);
+    entry
+        .chat
+        .forget(gone.iter().filter(|i| !i.mine).map(|i| i.id));
     let mut files = HashSet::new();
     for file in gone.iter().flat_map(Item::files) {
         if files.insert(file.id) && !entry.chat.refers_to(&file.id) {
@@ -624,7 +630,10 @@ mod tests {
     use fogata_crypto::GroupId;
 
     use super::*;
-    use crate::{Inner, direct::model::ItemId};
+    use crate::{
+        Inner,
+        direct::model::{DAY_MS, ItemId},
+    };
 
     /// A friend's chat told connected twice (its path changed, say) sends what waits once,
     /// not again at once: only a connection after it went sends it all again, and a resync,
@@ -687,6 +696,77 @@ mod tests {
         // Another group's member is no chat's.
         let other = GroupId::random().unwrap();
         assert!(!on_member_connected(&inner, other, friend).await);
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A friend's message deleted here, or whose time ran out, that the friend sends again
+    /// (its receipt did not get there: this device appeared offline, say) is confirmed and
+    /// not kept again, also after a restart.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_friends_message_removed_here_does_not_come_back_when_sent_again() {
+        let dir = std::env::temp_dir().join(format!("fogata-forgotten-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = || crate::NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        };
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        let group = GroupId::random().unwrap();
+        let message = |id: ItemId, ttl_ms| {
+            DirectPayload::Message {
+                id,
+                sent_ms: now_ms(),
+                text: "hello".into(),
+                files: Vec::new(),
+                ttl_ms,
+            }
+            .encode()
+        };
+        let holds = |inner: &Inner, id: &ItemId| {
+            inner
+                .direct
+                .lock()
+                .chats
+                .get(&friend)
+                .is_some_and(|e| e.chat.contains(id))
+        };
+        let (deleted, expiring): (ItemId, ItemId) = ([1; 16], [2; 16]);
+
+        let (core, _events) = crate::Core::start(dir.clone(), options()).unwrap();
+        let inner = core.inner.clone();
+        {
+            let mut chats = inner.direct.lock();
+            chats.chats.insert(friend, Default::default());
+            chats.by_group.insert(group, friend);
+        }
+        let payloads = vec![message(deleted, 0), message(expiring, DAY_MS)];
+        on_messages(&inner, group, friend, payloads.clone()).await;
+        assert!(holds(&inner, &deleted) && holds(&inner, &expiring));
+        core.delete_direct_message(friend, deleted).unwrap();
+        expire(&inner, now_ms() + 2 * DAY_MS);
+        assert!(!holds(&inner, &deleted) && !holds(&inner, &expiring));
+        on_messages(&inner, group, friend, payloads.clone()).await;
+        assert!(!holds(&inner, &deleted), "a deleted message came back");
+        assert!(!holds(&inner, &expiring), "an expired message came back");
+        // A new one is still kept.
+        on_messages(&inner, group, friend, vec![message([3; 16], 0)]).await;
+        assert!(holds(&inner, &[3; 16]));
+        inner.direct.written().await.unwrap();
+        core.shutdown().await.unwrap();
+        drop((inner, core, _events));
+
+        // Remembered on the disk.
+        let (core, _events) = crate::Core::start(dir.clone(), options()).unwrap();
+        let inner = core.inner.clone();
+        inner.direct.lock().by_group.insert(group, friend);
+        assert!(holds(&inner, &[3; 16]));
+        on_messages(&inner, group, friend, payloads).await;
+        assert!(!holds(&inner, &deleted) && !holds(&inner, &expiring));
         core.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

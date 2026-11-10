@@ -2236,24 +2236,65 @@ fn mark_moved(dir: &Path, moved: &Moved) -> Result<()> {
 
 /// The new computer uses the account now: this one keeps nothing that makes it that person
 /// (the identity, the friend secrets, the MLS state), only what the person may delete later.
+/// Each of those files is written over before it goes ([`wipe`]).
 fn deactivate(dir: &Path) -> Result<()> {
+    if vault::key_name(dir).is_none() {
+        tracing::warn!(
+            "the data in {} was not encrypted: what this computer kept of the account may \
+             still be read from the disk after it is deleted",
+            dir.display()
+        );
+    }
     for entry in fs::read_dir(dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         // The identity, the friend secrets, and the tickets of invites still waiting for a
         // manager (they name this device's identity).
         if name == "identity.key" || name.starts_with("friends.bin") || name == "joins.json" {
-            fs::remove_file(entry.path())?;
+            wipe(&entry.path())?;
         }
     }
-    let mls = dir.join("mls");
-    if mls.exists() {
-        fs::remove_dir_all(&mls)?;
-    }
-    let backup = dir.join(crate::store::BACKUP_DIR);
-    if backup.exists() {
-        fs::remove_dir_all(&backup)?;
+    for sub in ["mls", crate::store::BACKUP_DIR] {
+        let path = dir.join(sub);
+        if fs::symlink_metadata(&path).is_ok() {
+            wipe(&path)?;
+        }
     }
     Ok(())
+}
+
+/// Removes the file or folder at `path`, writing every file in it over with zeros first, so
+/// that a plain identity (in a folder without a key, or the copies made before sealing) is
+/// not left whole in the disk's free space while the account lives on another computer. Only
+/// as far as the disk lets: one that writes elsewhere (a copy-on-write file system, a flash
+/// drive's own mapping) may still keep the old blocks. A link is removed, never followed.
+fn wipe(path: &Path) -> Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if meta.is_dir() {
+        for entry in fs::read_dir(path)?.flatten() {
+            wipe(&entry.path())?;
+        }
+        return fs::remove_dir(path).with_context(|| format!("cannot remove {}", path.display()));
+    }
+    if meta.is_file() {
+        let written = fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|mut file| {
+                use std::io::Write as _;
+                let zeros = [0u8; 4096];
+                let mut left = meta.len();
+                while left > 0 {
+                    let n = left.min(zeros.len() as u64) as usize;
+                    file.write_all(&zeros[..n])?;
+                    left -= n as u64;
+                }
+                file.sync_all()
+            });
+        if let Err(e) = written {
+            tracing::debug!("cannot write over {}: {e}", path.display());
+        }
+    }
+    fs::remove_file(path).with_context(|| format!("cannot remove {}", path.display()))
 }
 
 /// What the reading thread hands over.
@@ -2781,6 +2822,35 @@ mod tests {
         left.sort();
         assert_eq!(left, ["logs", "moved.json"]);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The secrets a move leaves behind are written over before they go (a second name of
+    /// the same file shows it), and a link among them is removed without touching what it
+    /// points to.
+    #[cfg(unix)]
+    #[test]
+    fn what_a_move_leaves_behind_is_written_over() {
+        let dir = folder("wiped");
+        fs::create_dir_all(dir.join("mls")).unwrap();
+        let secret = b"0123456789abcdef0123456789abcdef";
+        fs::write(dir.join("identity.key"), secret).unwrap();
+        fs::write(dir.join("mls").join("g.bin"), secret).unwrap();
+        let outside = folder("wiped-outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("kept"), secret).unwrap();
+        std::os::unix::fs::symlink(outside.join("kept"), dir.join("friends.bin")).unwrap();
+        let (seen, seen_mls) = (outside.join("seen"), outside.join("seen-mls"));
+        fs::hard_link(dir.join("identity.key"), &seen).unwrap();
+        fs::hard_link(dir.join("mls").join("g.bin"), &seen_mls).unwrap();
+        deactivate(&dir).unwrap();
+        assert!(!dir.join("identity.key").exists());
+        assert!(fs::symlink_metadata(dir.join("friends.bin")).is_err());
+        assert!(!dir.join("mls").exists());
+        assert_eq!(fs::read(&seen).unwrap(), [0; 32]);
+        assert_eq!(fs::read(&seen_mls).unwrap(), [0; 32]);
+        assert_eq!(fs::read(outside.join("kept")).unwrap(), secret);
+        fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
     }
 
     #[test]

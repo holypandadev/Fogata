@@ -340,6 +340,7 @@ impl Node {
         self.typing_peer_gone(&peer);
         self.limits.peer_gone(&peer);
         self.quic_tried.remove(&peer);
+        self.quic_dialled.remove(&peer);
         self.peer_listening.remove(&peer);
         crate::locked(&self.advertised).remove(&peer);
         crate::locked(&self.shown).remove(&peer);

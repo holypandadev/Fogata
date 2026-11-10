@@ -232,6 +232,9 @@ struct ChatsState {
     /// Attachments that did not come by themselves: when they may be tried again by
     /// themselves, and how many times they did not come.
     retry: HashMap<(DevicePublicKey, FileId), (Instant, u32)>,
+    /// Attachments being sent, by how many sends use them: a copy one of them made is not
+    /// removed while another uses it (see `Copies` in sending.rs).
+    copying: HashMap<(DevicePublicKey, FileId), usize>,
 }
 
 /// The chats of this device. What changes in them is written on the files' thread

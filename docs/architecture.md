@@ -2,6 +2,44 @@
 
 Status: pre-release. Sections marked "later" are not implemented yet.
 
+**Start here.** Section 1 (the concepts) and section 2 (where the code is, and which crate may
+use which) are the map; section 7 is the threat model in short. Then read what your change
+touches: the network (3), calls (4), the group log and its rules (5.1 to 5.3), the
+application core (5c) and the app (5d). Each section names its crate and files. How a change
+is checked before it is pushed is in [ci.md](ci.md); fuzzing in [fuzzing.md](fuzzing.md);
+releases in [releasing-beta.md](releasing-beta.md). The sections are named by number and
+letter (5b, 5c...) and other documents and code comments refer to them by those names, so new
+sections take new letters rather than renaming old ones.
+
+**Contents**
+
+1. [Concepts](#1-concepts)
+2. [Repository layout](#2-repository-layout), [the crates and their layers](#21-the-crates-and-their-layers)
+3. [Connectivity](#3-connectivity): [rules](#31-rules), [network stack](#32-network-stack-fogata-net),
+   [finding each other](#33-finding-each-other), [connecting](#34-connecting),
+   [results in the network lab](#35-results-in-the-network-lab),
+   [membership proof](#36-membership-proof), [group messages](#37-group-messages),
+   [rooms](#38-rooms), [presence](#39-presence), [files](#310-files),
+   [direct calls](#311-direct-calls), [network check](#312-network-check),
+   [direct messages](#313-direct-messages), [typing indicators](#314-typing-indicators),
+   [capability levels](#315-capability-levels)
+4. [Voice and video](#4-voice-and-video): [topology](#41-topology),
+   [transport and encryption](#42-transport-and-encryption), [calls in rooms](#43-calls-in-rooms),
+   [realistic limits](#44-realistic-limits)
+5. [Group management](#5-group-management-fogata-state): [the group log](#51-the-group-log),
+   [the ladder](#52-the-ladder), [invites](#53-invites), [epochs and keys](#54-epochs-and-keys),
+   [MLS](#55-mls-in-progress)
+   - 5b. [Profiles and friends](#5b-profiles-and-friends-fogata-friends)
+   - 5c. [The application core](#5c-the-application-core-fogata-core)
+   - 5d. [The desktop application](#5d-the-desktop-application-app-fogata-ffi)
+   - 5e. [Moving an account to another computer](#5e-moving-an-account-to-another-computer-fogata-core-transfer)
+   - 5f. [Updates of pre-releases](#5f-updates-of-pre-releases-fogata-update-fogata-net-updates-fogata-core-updates)
+   - 5g. [Copies that restore an account without the keychain](#5g-copies-that-restore-an-account-without-the-keychain-fogata-core-recovery)
+6. [Cryptography](#6-cryptography-fogata-crypto)
+7. [Threat model summary](#7-threat-model-summary)
+8. [Testing](#8-testing)
+9. [The first milestone (done): the CLI prototype](#9-the-first-milestone-done-the-cli-prototype)
+
 Fogata is a text, voice and video chat for small groups of friends. Every device talks
 directly to the others. There are no accounts, no Fogata servers and no third-party relays.
 The only public infrastructure used is the IPFS DHT, and only as a phone book: devices look
@@ -67,9 +105,12 @@ Fogata/
     fogata-proto/         Wire messages and their versioning. No I/O.
     fogata-net/           libp2p swarm: transports, discovery, NAT traversal, member and
                           friend protocols.
-    fogata-cli/           Command-line client (first milestone, later a test tool).
+    fogata-cli/           The command-line program (`fogata`, docs/cli.md): a client on
+                          fogata-core, the release tooling (`fogata release`), and the
+                          network lab's peers.
     fogata-state/         Group log and the rules that apply it: members, roles, key epochs,
-                          the chain of MLS epochs. Later also room state and host election.
+                          the chain of MLS epochs, and a voice room's state (room.rs).
+                          `before/` is the crate as it was at level one, for its tests (5.1).
                           No I/O.
     fogata-mls/           MLS (RFC 9420) for group keys: its own crypto provider, a device's
                           MLS state for a group, the epoch secrets it exports (5.5). Not used
@@ -92,6 +133,10 @@ Fogata/
                           the release key's files, the package format (5f). No network.
     fogata-ffi/           The flutter_rust_bridge surface over fogata-core.
   app/                    The Flutter application.
+  vendor/                 Crates Fogata keeps a fork of (libp2p-quic, libp2p-mdns,
+                          libp2p-identify, turn, spake2), each with a FOGATA.md of its changes.
+  fuzz/                   The libFuzzer targets, a workspace of their own (docs/fuzzing.md).
+  tools/check.sh, ci.sh   The checks before every commit and every push (docs/ci.md).
   tools/netlab/           Simulated home and carrier NATs in Linux network namespaces.
   tools/release.py        Signed checksums of a release's packages (docs/releasing.md).
   tools/beta/             Pre-releases: the Flatpak, the release and first installs,
@@ -99,6 +144,31 @@ Fogata/
                           (docs/releasing-beta.md).
   docs/                   Architecture, threat model, decision records.
 ```
+
+### 2.1 The crates and their layers
+
+Each crate of the workspace has a layer and uses only crates below it; `tools/check.sh` runs
+`tools/crate_layers.py`, which reads `cargo metadata` and fails on any dependency between
+the workspace's crates that its list does not allow. A new edge is a change of that list,
+made on purpose and said why, never only a line in a `Cargo.toml`.
+
+| Layer | Crates | What they are |
+|---|---|---|
+| 0 | fogata-crypto, fogata-voice, fogata-denoise, fogata-tray | Pieces of their own, on nothing of Fogata's |
+| 1 | fogata-proto, fogata-state, fogata-friends, fogata-update | What is said and kept: wire formats, the group log, friends, releases (each on fogata-crypto) |
+| 2 | fogata-mls | MLS for group keys, on fogata-state's chain |
+| 3 | fogata-net | The node: transport, discovery, groups, friends, files and updates over the network |
+| 4 | fogata-media | Calls, on the node |
+| 5 | fogata-core | The application's logic and storage, on everything above |
+| 6 | fogata (fogata-cli), fogata-ffi | The programs: the command line and the bridge of the Flutter app |
+
+Tests may also use a crate of their own layer (fogata-state's compare it with its frozen
+copy, `fogata-state-before`) or further down, never one above. Two edges are there for
+history rather than by design and should not grow: the programs reach crates around
+fogata-core (the command line seven of them, the bridge six; the list in
+`tools/crate_layers.py` names each), and fogata-net holds more than a transport (files, groups,
+friends, strangers, rooms: 3.2), which a split into a transport crate and a node crate would
+make clearer.
 
 ## 3. Connectivity
 
@@ -599,8 +669,9 @@ Known limits:
   99.9 %). Those two
   devices need a member as bridge. With no member online, they cannot talk at that moment,
   and the app says so.
-- rust-libp2p 0.57 disables QUIC connection migration and QUIC datagrams. A network change
-  (Wi-Fi to mobile) means reconnecting and resuming, not a seamless move.
+- rust-libp2p 0.57 disables QUIC connection migration (and datagrams, which Fogata's copy of
+  libp2p-quic turns on for media, 4.2). A network change (Wi-Fi to mobile) means reconnecting
+  and resuming, not a seamless move.
 - Networks that block UDP leave TCP, where punching is less reliable.
 - A device behind a NAT that changes the port per destination cannot publish a usable
   address. It can still find members and dial out; members reach it through a member it is
@@ -2011,7 +2082,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   A fourth channel carries the screen's sound, also only to watchers, with its own volume
   per person. A screen's sound plays only while this device watches that screen, and its
   connection of its own (macOS, below) is refused otherwise, whoever sends it. On Linux it is every other application's sound, linked in PipeWire,
-  without Fogata's own, so nobody hears the call back. WebRTC opens the microphone for
+  without Fogata's own, so nobody hears the call back: an output is taken only once its
+  process or executable is known, and one found later to be Fogata's own is unlinked.
+  Without PipeWire (PulseAudio itself the sound server) a shared screen has no sound,
+  and the sound button does not show: what PulseAudio's output plays includes the call. WebRTC opens the microphone for
   any channel of sound that sends, so with the microphone off that channel only sends
   while WebRTC records from "Fogata silence", an input PipeWire runs for the app (a null
   sink shown as a source) that only gives silence; elsewhere it waits for the
@@ -2023,8 +2097,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   input while WebRTC records opens it at once, and a recording whose input goes away
   moves to the default microphone by itself. The
   voice never reaches the screen's channel: libwebrtc hands what it records only to the
-  microphone's track. On Linux a shared window goes with every other application's sound
-  too (the portal does not say which application a window belongs to). On Windows it is
+  microphone's track. On Linux a shared window goes without sound, and the sound button
+  does not show: the portal does not say which application a window belongs to, and
+  every other application's sound would go with it. The app does not ask for sound with
+  a window picked from its own list (X11), and under Wayland the portal's answer says
+  whether a window or a screen was chosen (a portal too old to say, offering windows,
+  counts as a window). On Windows it is
   every other application's sound for a screen, and only the shared window's program
   (with the processes it started) for a window, or none when that program cannot be
   found, and with the microphone off it waits for it. On both, the sound starts only once
@@ -2439,6 +2517,22 @@ places. The changes made between level one and level two (a `Join` dated after i
 expired, a member that does not manage rotating for a key sent in an entry that did not
 apply, a room rule judged by its place rather than by times, and `Level` entries) are
 written by honest devices only so that both keep them, that rule aside, clocks apart aside.
+
+**Later levels: saved logs in place of frozen copies.** A frozen copy of the crate per level
+does not scale: level three would need a copy of level two beside level one's, each copy is
+code to keep building, and a copy only tests the level next to it. The plan, for level three
+on: no new copy of `fogata-state`. Instead, before each release, logs written by that release
+are saved as fixtures (the corpus's four worlds, and the logs of the integration and netlab
+runs, written by the release's own command line: entries of every kind, on every level it
+writes), each with what that release kept, left waiting, ordered and applied of it, and the
+group it made, as `level-two.bin` and `level-two.txt` are now. The tests of every later
+version read every saved fixture and must judge each the way the release that wrote it did,
+at the level the log names, unless the difference is one a new level made and the log was
+raised to it. `crates/fogata-core/tests/previous_release.rs` (2.1, 8) checks the other
+direction against the last release's command line: what this version writes, the last
+release takes in. Once the fixtures of level one's behaviour cover what the comparison with
+`crates/fogata-state/before` checks (the random histories of honest devices included, saved
+as fixtures), that copy and its pinned hash in `tools/check.sh` can go.
 
 A device keeps the order and the group it worked out until its log changes
 (`fogata-state/src/cache.rs`). An entry signed on all the heads goes last and outranks
@@ -3289,345 +3383,17 @@ for that (`vendor/spake2`, see its FOGATA.md).
 Network findings carry a `Topic` besides the English text, so a screen can word them in its
 own language.
 
-## 5e. Moving an account to another computer (fogata-core `transfer`)
-
-The person shows a code on the new computer ("Bring your account from another computer" on
-the welcome page, or Settings → Move account) and types it on the old one (Settings → Move
-account → Move to another computer). The identity, the profile and friends, every group
-with its log and MLS state, the direct chats with their attachments and the settings go
-straight from one to the other, encrypted, and the old computer stops using the identity, so
-there is never a second copy of the person. The CLI does the same with `fogata transfer
-receive` and `fogata transfer send CODE` (and `status`, `forget`, `keep`, `discard`).
-
-In the application the core stops for the move and starts again after it, in the same process
-(`stop_core`, then `start`, which waits for the folder's lock): on the old computer when the
-code is typed, and again if the move does not happen; on the new one only when it replaces a
-profile, which after the move restarts the application as the account that came. The old
-computer then shows only that the account moved (with "Delete Fogata's data on this
-computer"), or, while the new one has not confirmed, a field for the code that finishes the
-move and, behind a warning, a way to keep using the account there; a new computer with an
-account that came whole but unfinished shows the code that finishes it.
-
-**The code** (`fogata-friends` `transfer.rs`): ten Crockford base32 characters,
-`XXXXX-XXXXX`, nine random and a check character (values weighted 1, 3, ... 17, summed modulo
-32), so a mistyped code is told at once ("that isn't a whole code"); every single wrong
-character is caught. It lasts 10 minutes. The first four characters (20 bits) are the
-*nameplate*: the rendezvous secret comes from them alone, so a DHT node that sees the
-rendezvous point can learn those four characters and nothing about the rest. All nine are
-the password of a SPAKE2 run (Ed25519 group), so nothing seen on the network lets anyone test
-guesses of the code offline: the rendezvous point, the run's messages and the encrypted
-transfer carry nothing to test a guess against. Guessing is online only, one guess per run:
-- the old computer makes **one run per code typed**: if the first computer that answers with
-  the code's nameplate fails the run, the move stops with "the other computer did not accept
-  the code", having sent nothing (it starts with a proof of the nameplate, so a computer on the same network
-  showing another code says so without the try being used);
-- the new computer counts a run that does not finish (a wrong proof, or none within 20 s
-  after its own answer, which may have told a guesser whether its guess was right) and stops
-  answering the code after three, showing a new one.
-A guesser therefore gets a handful of tries at 2^25 for the part it cannot see (about one in
-ten million). The application does not try a code that did not match a second time either.
-
-The nameplate's 20 bits are a trade-off: the code stays ten characters, and every bit given
-to the rendezvous point is taken from the 25 the guesser must find. 2^20 rendezvous points per
-6-hour window can be watched by someone with the means (about 50 DHT lookups a second): that
-watcher learns the address of computers showing a code at that moment, and can try to answer
-first. It still gets one guess per code typed (one in 33 million), which ends the move with
-"wrong code" when it fails, so it can only spoil moves, not take an account. A computer on the
-local network is tried first, and one found over the DHT only when none is there after five
-seconds, so a move between two computers at the same place does not reach a watcher at all. The run binds both transport identities (authenticated by the transport) and
-both SPAKE2 messages into a transcript, from which HKDF-SHA256 makes one key for each
-direction and a confirmation for each side; the new computer confirms first, and the old
-one only after checking it, so a computer that guessed the nameplate learns nothing from the
-old one but "no". The person on the old computer then sees the new computer's name and what
-moves, and says yes; the person on the new computer sees the old computer's name and what
-comes (and the profile it replaces there), and says yes too. Each computer tells the other
-its yes (`Go`), and nothing is sent until both did; a no on either ends the move with nothing
-changed.
-
-**Meeting.** Each side runs a node of its own for the move, with a new transport identity and
-no friend or group, so nobody sees it come online meanwhile: the old computer's own node is
-stopped first (the application quits its core), so nothing in the folder changes while it is
-read and the MLS state and logs move at the epochs they are at. Both announce under the
-rendezvous secret (6-hour keys as for groups) and look it up at every punch slot (10 s); what
-they find is dialled at once and at the punch slots, as members are (3.4), and on one local
-network mDNS finds it anyway. Their local addresses go in the announcements sealed (3.3) under
-a key made from the nameplate alone, so whoever watches the rendezvous point can read them
-(a key from the rest of the code, however slow to make, would let it test guesses of the code
-offline against them), and each opens and dials the other's: two routers at home with one public
-address and no way back in, where the device on the main router lets only its own port in, are
-crossed by the one behind the inner router (lab: `transfer-two-routers`, both ways). Each side
-listens on the port its folder keeps (the new computer picks the one the account will keep
-there when its folder has none), so a firewall rule for it serves the move too. The new
-computer takes streams of `/fogata/transfer/1`; the old one opens one
-to each connected peer that says it takes it, and, only while none does, to each it found
-under the code itself: the new computer lists the protocol only to computers it found (or on
-its local network), so one finding the other is enough
-(`a_move_needs_only_one_computer_to_find_the_other`). The code's one run is spent only on a
-computer that takes the protocol and runs the exchange: one that does not refuses the stream
-before anything is said. Two NATs that cannot be punched (one that
-picks a new port per destination) do not meet: after three minutes the old computer says the
-two could not reach each other, and the screens suggest the same network. A member of the
-person's groups does not carry a move: it would have to let a device that is no member through
-its relay (later).
-
-**What moves.** After the run every frame is encrypted with XChaCha20-Poly1305 under the
-direction's key, numbered by its nonce, so a frame changed, dropped, repeated or put out of
-order makes the move stop. The old computer sends a summary (the account's signed profile,
-how many friends, groups, chats and attachments, how many bytes), then, after both yeses, every
-file of the folder in the form a folder without a key keeps it: a sealed file is opened with
-the old folder's key, attachments as they are read. Each file goes as its path, its pieces
-(256 KiB) and the BLAKE3 of its contents, checked at the end. The new computer decides from
-the path alone what a file is and how to seal it (the identity, the friends file, the MLS
-states and the friends' profiles whole, a chat's journal and pins as chains, attachments as
-streams, the rest as they are), takes only paths of those kinds (no `..`, no root, at most four
-deep, never twice), and writes everything into `incoming/` of its folder (how far the move
-got is kept beside it in `incoming.json`, where nothing the old computer sends can land), sealed with a new
-data key that its own keychain keeps (plain only where the keychain keeps none, as for a new
-profile). Not moved: what belongs to the computer (`sealed.json`, the locks, `before-sealing/`,
-videos fetched to play, downloads cut short, the log in `diagnostics/`, the new versions of
-Fogata kept in `updates/` (made for this computer's system, up to hundreds of MB), how chats end as
-written with the old key, which the new folder works out again, and what was judged of the group
-logs, sealed with the old key, judged again there (5.1)); in `app.json` the microphone, speakers and camera chosen,
-and in `meta.json` the port, which the new computer keeps its own of.
-
-**The end, with never two copies.**
-1. The new computer checks `incoming/`: the identity opens and is the one in the summary, the
-   profile is its own, every group's log reads. It says `Staged`.
-2. The old computer writes `moved.json` ("moving"): from then on its store refuses to make or
-   read the identity and the core does not start. It says `Commit`.
-3. The new computer records the commit and puts `incoming/` in place: its folder's own files
-   go to `replaced/` (but the locks of the copy running there, `running.lock` and `window/`),
-   the new ones come out. Each step can be taken again, and a computer that stops in the
-   middle goes on at its next start. This work holds the folder's lock itself and always runs
-   to its end: throwing a staged move away while it runs finishes it instead. It says
-   `Active`, with a keyed hash of the move's id and of this run's own secret under the move's
-   secret: a key from the run that sent the account, which both computers keep (in
-   `moved.json` and `incoming.json`, then `moved-in.json`) and only the computer the account
-   went to can use. A later run that finishes the move tells the move's id to whatever
-   computer shows the code typed, which cannot prove anything with it. It says so as soon as the
-   account is in place, or once the commit is recorded when putting it in place has to wait
-   for the next start (a full disk, say); only then does `replaced/` go. The keychain key named
-   in it (a profile replaced from Settings, after a warning) goes as soon as its files are
-   aside, and again with `replaced/` if the keychain could not be reached then. If the commit cannot even
-   be recorded, it says so and the move stays staged. The old computer waits up to five
-   minutes for `Active`.
-4. The old computer checks that hash, marks itself "moved" without the move's secret, says
-   `Moved` (the new computer then empties the secret where it keeps it; without that word it
-   keeps it for a week, to finish the move with an old computer still waiting, and empties
-   it at the first start after) and deletes the identity,
-   the friends file and its copies, the MLS state, the tickets of invites waiting for a
-   manager (`joins.json`) and any plain copies left from sealing. Chats, files and logs stay, sealed,
-   until the person deletes them (`forget`: everything, and the folder's key in the keychain;
-   Fogata then starts there like new).
-
-Stopping a move: before the code checked out it simply goes; after, it stops where nothing is
-half done, on either computer and also while files come, the other one told why (the new
-computer throws `incoming/` away with the keychain key it made, before it lets go of the
-folder); once step 1 or 2 began it is not
-stopped any more, and the screens say it is too late. A failure after the old computer let
-go says that the account is put in place at the next start, not that nothing changed. While a
-move waits to be finished, no profile is made in the folder.
-
-Bounds on the new computer: the disk must hold what is announced (with room to spare; the
-application asks the system, `statvfs` on Linux and macOS and `GetDiskFreeSpaceExW` on
-Windows, in fogata-ffi's `disk.rs`; the command line asks `statvfs` too, in its own `disk.rs`,
-and elsewhere a full disk stops its move instead; an offer above 1 TiB is refused outright), at most the
-bytes announced and 64 MiB more come, at most 500,000 files, no empty piece, and the whole
-within ten minutes and a pace of 32 KiB/s. Names are ASCII letters, digits, `.`, `_` and `-`
-(an attachment's ending after its id excepted), never start with a dot, and are never one of
-the move's own (`incoming.json`, `moved.json`, `sealed.json`, the locks...); a path is refused
-when a disk without cases would take it for one of those or for a sealed kind
-(`IDENTITY.KEY`), when it could be a short form Windows gives another name (`INCOMI~1.JSO`), or
-when Windows cannot keep it (`:`, a trailing dot or space, device names such as `CON` or
-`COM1`); the old computer leaves such files where they are. Attachments are read as the store reads them, and
-other files as they are, whatever they start with.
-
-A move cut short before step 2 changes nothing: the new computer throws `incoming/` away (at
-once, or at its next start). When only its `Staged` was lost, it keeps `incoming/` as staged
-while the old computer goes on with the account; a code shown there again and typed on the
-old one moves the account anew, in place of what was staged (an offer of another account
-is refused while something is staged). Cut between 2 and 3 (the very last message lost), the old
-computer stays "moving" and the new one keeps `incoming/` as staged: showing a code there
-again and typing it on the old one finishes the move (`Resume`, by the move's random id,
-which only the two know; the old computer names that computer and asks again first). Only
-the person can make the old computer use the account again
-then (`keep_this_computer`, behind a warning), or make the new one throw it away. When the
-new computer's `Active` is what was lost, it runs the account and keeps the move's secret in
-`moved-in.json`; a code shown there (Settings, bring an account here) and typed on the old
-one finishes the move the same way, within the week the secret is kept.
-
-In the application the move belongs to the whole window, not to the settings' page: its
-question shows over whatever page is open, and its end brings the core back (or shows that
-the account moved) also when the page was left. The command line asks before `receive`
-replaces a profile and before `keep`, and `send` without a code reads it from its input, out
-of the shell's history and the list of processes.
-
-**Threat model.**
-- A DHT node or anyone on the path sees a rendezvous point and encrypted traffic between two
-  transport identities; it can learn the nameplate, and with it open the local addresses
-  and port in the two announcements. Nothing it sees allows a test of the rest of the code.
-- Someone who announces under the rendezvous point (a DHT node near it, a device on the same
-  network) can try one guess per code typed on the old computer and three against the new
-  one, each a 2^-25 chance; failing, it makes the move stop with "wrong code" (a nuisance,
-  not a leak). It can also keep the new computer busy, which only delays the move.
-- A frame changed or replayed on the way stops the move; nothing is applied.
-- A malicious new computer that won the code gets the account: that is what the code is for,
-  and why the old computer names it and asks first. A malicious old computer that won it
-  can fill the new folder with an account of its choice (only inside `incoming/`, and the
-  person sees whose account it is before it starts); it cannot write outside the folder.
-- The old computer keeps chats and attachments, sealed with its own key, until the person
-  deletes them; the identity and friend secrets are gone from it.
-
-## 5g. Copies that restore an account without the keychain (fogata-core `recovery`)
-
-The data folder is sealed with a key the system keychain keeps (6, `vault`). A keychain that
-is lost (reset, the program's signature changed, the user deleted) or a disk that dies takes
-the account with it, and a move (5e) needs both computers alive at once. A recovery copy is a
-file the person keeps where they like, which only a key they hold opens. The CLI has `fogata
-recovery on`, `export FILE [--attachments]`, `size`, `restore FILE [--replace]
-[--unencrypted]`, `status` and `forget-replaced`; the key is read from the input, never from
-the command line. `restore` shows whose account the copy holds and what the folder holds, and
-asks before it replaces anything; though the command line opens folders without sealing them,
-what it restores is sealed with a new key of the system keychain, as an account that moves in
-is (`--unencrypted` keeps it plain where no keychain keeps a key, for that restore only:
-nothing in the folder says so if it does not happen). It refuses a copy the disk has no room
-for, as its move does.
-
-**The recovery key** (`fogata-crypto` `recovery.rs`). Turning copies on makes an X25519 pair
-(`NewKey`). The secret half is the recovery key: 32 random bytes, shown once as 52 Crockford
-base32 characters in 13 groups of four and a check character (weighted as the move's code is,
-so every single wrong character is told at once), wiped from memory after and never written
-anywhere. It is taken (`turn_on`) only once the person typed two of its groups back; until
-then copies stay for the key they were for. The folder then keeps `recovery.bin`: the public
-half and an *auth key*, HKDF-SHA256 of the secret half (`fogata/v1/recovery-auth`), sealed
-with the folder's data key as the identity is (and sealed again by a move, which takes it
-along). Making a copy needs only what the folder keeps, so it can be made at any time; only
-restoring asks for the key. Being random and 256 bits long, the key needs no slow hashing,
-which a password the person chose would (and would still be weak against an attack on a
-stolen copy). Turning copies on again makes a new pair: copies made before open only with the
-old key. A short name of the key (`XXXX XXXX`, from its public half) is shown when it is made
-and with every copy, to compare.
-
-**What a copy holds** is what a move moves, with its list and exclusions (5e: never
-`sealed.json`, `sealing.json`, `running.lock` nor `before-sealing/`), each file in the form a
-folder without a key keeps it: the identity, the profile and friends, every group with its log
-and MLS state, the direct chats, the settings and `recovery.bin`. The attachments of chats
-only when the person asks (`size` says what they would add first). A copy is made with no core
-running on the folder, as a move is, so the files read are the folder at one moment.
-
-**The file** (`Fogata-YYYY-MM-DD.fogata-copy`):
-- a header in the clear, 63 bytes: `FOGATACOPY`, version 1, the first 16 bytes of
-  SHA-256(`fogata/v1/recovery-fingerprint` ‖ public key), the public half of a pair made for
-  this copy alone, and the day it was made (days since 1970, big-endian). Nothing of the
-  account: no name, profile, sizes nor count of files. The fingerprint lets the screens say
-  "this copy is for another key" before anything is tried;
-- the copy's key: HKDF-SHA256 of X25519(that pair, the public half), salted with the whole
-  header, info `fogata/v1/recovery-copy`;
-- frames: each its length (4 bytes, big-endian) and XChaCha20-Poly1305 under that key,
-  numbered by its nonce, with the whole header as associated data. A frame holds a kind byte
-  and a message in JSON or a piece of a file (256 KiB, as in a move). The first, at most
-  1 KiB, is the copy's proof: HMAC-SHA256 of the header under the auth key. The header holds
-  the public half of a pair made for that copy alone, whose secret only the computer that made
-  it knew, so the proof cannot be moved to another copy, and only a computer that holds the
-  account (or the recovery key) can make one. It is checked before anything larger is read.
-  The second is the list: every file with its size and BLAKE3, the account's device key and
-  name, and the version of Fogata that wrote it. Then each file in that order (its path, its pieces, its end), and last an end
-  that counts the files, after which nothing may follow. A byte of the header or of a frame
-  changed, a frame dropped, repeated or out of order, a copy cut short or with something after
-  its end: none opens;
-- it is written beside its name, under a new name of its own (`NAME.<random>.tmp`, never a
-  file or link already there), and takes the name only when whole, so a copy cut short never
-  looks like one and an older copy under that name stays as it was. The application writes
-  it straight into the file chosen instead (`export_into`), since the macOS sandbox lets it
-  write that file alone after a save dialog: never through a link there (`O_NOFOLLOW`), for
-  this user alone, removed if the copy fails; one cut short all the same lacks the end every
-  copy closes with, and is refused as damaged. A copy is not made inside
-  the data folder (it would go into the next copy and with a move), nor restored from inside
-  the folder it goes into (a restore empties it).
-
-**Restoring** (`restore`, the welcome page's "Restore from a copy"). `open_copy` says
-first, with the key, whose account a copy holds (its name and device fingerprint) and
-`account_in` what the folder holds, for the person to compare. The copy opens with the key,
-its proof checks, and its list is checked (names a folder takes, as in a move; each once; no more
-files nor bytes than a move takes, added up without overflowing; room for it on the disk, when
-the application can tell, as for a move) before anything in the folder changes. Then it goes
-in as a move's account does, with the same record (`incoming.json`): every file is written into
-`incoming/`, sealed with a new key of this computer's keychain (plain only where a new profile
-could be), its size and BLAKE3 checked against the list; then the identity must open and be
-the one the list names, the profile must be its own and signed by it, and every group's log
-must read. Any failure until then throws `incoming/` away with the key made for it, and the
-folder is as it was. Then the record says `commit` and the files are put in place as in a move
-(the folder's own aside to `replaced/`, the new ones out): a computer that stops in the middle
-finishes it at the next start, and one that stopped before throws it away, never leaving some
-of each (tested by making every write fail in turn). A folder that holds anything of an account
-(the identity, a profile even damaged, groups, MLS states, chats or the copies sealing left:
-anything a move takes but the settings a new folder starts with; not a data key alone, which
-the application makes for a new folder the first time it opens it, before any account, nor a
-device key alone, which the welcome page makes to show its fingerprint and nobody knows yet:
-that one is replaced unasked and deleted with the folder's key, not kept aside) is
-refused
-unless the person says to replace it, after a warning with its name; that account is then kept
-whole in `replaced/` with its keychain key (`restored.json` says so), through every start,
-until the person deletes it (`forget_replaced`). While it is kept, another restore or a move
-into the folder is refused rather than throw it away, and so is deleting what is left of an
-account that moved away (`forget`). Neither `replaced/` nor `restored.json`
-moves nor goes into a copy. A version of Fogata from before copies does not know
-`restored.json`, and going back to one removes the kept account at its first start. A `recovery.bin`
-that does not open keeps a folder from being sealed whole, as any secret does, until the
-person sets it aside; set aside, it goes neither with a move nor into a copy, and copies are
-turned on again.
-
-**In the application** (fogata-ffi `recovery`, `screens/recovery.dart`). Settings › Storage
-says whether copies are on and for which key, and turns them on or changes the key: the key
-is made in Rust and held in memory only, never on the disk, until the person typed two of its
-groups back (`recovery_turn_on` takes it by its short name; a key shown and not taken is
-dropped). Making a copy offers the files sent in chats (off, with their size), asks where with
-the system's save dialog (never in the data folder), and stops the core while it is made, as a
-move does, starting it again after, whatever happened; deleting the account a restore replaced
-does the same. The work that stopped the core owns the stop (`AppState.stoppedBy`): only it
-starts the core again, and neither a move nor another copy begins meanwhile.
-The welcome page's "Restore from a copy" picks the file (`inspect`: its day, and whether it is
-for another key than the folder's), asks the key with a live check, shows whose account it
-holds with the warning to restore only when no other computer uses it (with a way to move it
-instead) and what the folder holds that it replaces, then restores with the keychain the
-application chose; where that keychain cannot keep a key, it offers the welcome page's choice
-to go on unencrypted and restores again with `unencrypted`. An account an earlier restore kept
-aside is offered for deletion right there, since Settings cannot be reached without a profile;
-a copy checked whole that could not be put in place is finished by starting again, as a move's
-is. The key typed leaves its field once restored or when the card is left. The refusals and a copy's problems
-come typed (`UiRestoreRefusal`, `UiCopyProblem`, `UiKeyProblem`), so the screens word them in
-the person's language. Once restored, the application starts with the account, as after a
-move.
-
-**The same identity.** A restore brings back the same device key, as a move does: the device
-key is the identity (1), friends know it by it and groups have it in their members and MLS
-credentials, so a new key would be another person to all of them. A copy restored while
-another computer still uses the account makes two of the same person; the screens say to
-restore only when no other computer has it (and to move it otherwise), and two live sessions of
-one identity are told already (4.3). A copy made before the group went on to a new epoch comes
-back behind it: the log a member's sync brings has the new epochs' secrets sealed to the same
-device, so it reads and writes in the group again by itself (tested). With MLS (5.5, not used
-yet), a state put back follows the Commits it missed from where it was, unless the device
-itself committed after the copy (its weekly update, an add or a removal): then the state put
-back sees its own key write a link it did not make and is out of the tree, and only a resync
-from a member's GroupInfo brings it back (tested in fogata-mls). When MLS is wired in, a
-restored group in that case must resync like a device that lost its state.
-
-**Threat model.**
-- A stolen copy without the key: nothing but the header, and 256 bits to guess.
-- The key without a copy: nothing. Both together are the account, as an unsealed folder is;
-  the screens say to keep them apart. The key also makes copies a restore takes (it gives the
-  auth key), so a thief with it could hand the person a copy of another account; the
-  person sees whose it is before it replaces anything.
-- Someone who changes a copy cannot make it restore anything but what it held: every frame is
-  bound to its place and to the header, and a copy for another key does not open.
-- Someone who knows only the public half (a backup of a sealed folder shows nothing of it,
-  but one of a plain folder does) can make a copy that opens with the key, but not its proof:
-  the restore refuses it ("this copy was not made by this account").
-- Someone who writes in a sealed folder without its key cannot change what copies are made
-  for: `recovery.bin` must open with the folder's data key, or no copy is made. In a plain
-  folder (one whose person chose so, 5c) nothing protects it, as nothing protects the
-  identity there.
+**Layout of the data folder.** A file `layout` in the data folder holds the number of the
+layout the build that last ran in it writes (`store::LAYOUT`, 1 now; a folder without it is
+of layout 1, from before there was one). It is written as a core starts, never by opening a
+folder only to look or to restore into it. A folder whose layout is above the build's own is
+refused with a message to install the newer version again, rather than misread: an older
+build put over a newer one by hand (`drive/` installs; the updater never goes back). The
+number goes up only when an older build would misread what a newer one writes (a file moved,
+or written in another form). New files that older builds leave alone (`levels.json`) do not
+raise it, nor do the per-file fallbacks (`.bak`, `.damaged`) by which each file is read with
+care. A move to another computer (5e) does not carry the marker: the new computer writes its
+own.
 
 ## 5d. The desktop application (app/, fogata-ffi)
 
@@ -4162,6 +3928,195 @@ writes it where the person chooses. Nothing is sent by Fogata itself. The applic
 only `https:` and `mailto:` addresses in other programs (`openExternal`). Settings › Donate to Fogata opens the
 donation page in the browser (`kofiUrl` in `screens/donate.dart`).
 
+## 5e. Moving an account to another computer (fogata-core `transfer`)
+
+The person shows a code on the new computer ("Bring your account from another computer" on
+the welcome page, or Settings → Move account) and types it on the old one (Settings → Move
+account → Move to another computer). The identity, the profile and friends, every group
+with its log and MLS state, the direct chats with their attachments and the settings go
+straight from one to the other, encrypted, and the old computer stops using the identity, so
+there is never a second copy of the person. The CLI does the same with `fogata transfer
+receive` and `fogata transfer send CODE` (and `status`, `forget`, `keep`, `discard`).
+
+In the application the core stops for the move and starts again after it, in the same process
+(`stop_core`, then `start`, which waits for the folder's lock): on the old computer when the
+code is typed, and again if the move does not happen; on the new one only when it replaces a
+profile, which after the move restarts the application as the account that came. The old
+computer then shows only that the account moved (with "Delete Fogata's data on this
+computer"), or, while the new one has not confirmed, a field for the code that finishes the
+move and, behind a warning, a way to keep using the account there; a new computer with an
+account that came whole but unfinished shows the code that finishes it.
+
+**The code** (`fogata-friends` `transfer.rs`): ten Crockford base32 characters,
+`XXXXX-XXXXX`, nine random and a check character (values weighted 1, 3, ... 17, summed modulo
+32), so a mistyped code is told at once ("that isn't a whole code"); every single wrong
+character is caught. It lasts 10 minutes. The first four characters (20 bits) are the
+*nameplate*: the rendezvous secret comes from them alone, so a DHT node that sees the
+rendezvous point can learn those four characters and nothing about the rest. All nine are
+the password of a SPAKE2 run (Ed25519 group), so nothing seen on the network lets anyone test
+guesses of the code offline: the rendezvous point, the run's messages and the encrypted
+transfer carry nothing to test a guess against. Guessing is online only, one guess per run:
+- the old computer makes **one run per code typed**: if the first computer that answers with
+  the code's nameplate fails the run, the move stops with "the other computer did not accept
+  the code", having sent nothing (it starts with a proof of the nameplate, so a computer on the same network
+  showing another code says so without the try being used);
+- the new computer counts a run that does not finish (a wrong proof, or none within 20 s
+  after its own answer, which may have told a guesser whether its guess was right) and stops
+  answering the code after three, showing a new one.
+A guesser therefore gets a handful of tries at 2^25 for the part it cannot see (about one in
+ten million). The application does not try a code that did not match a second time either.
+
+The nameplate's 20 bits are a trade-off: the code stays ten characters, and every bit given
+to the rendezvous point is taken from the 25 the guesser must find. 2^20 rendezvous points per
+6-hour window can be watched by someone with the means (about 50 DHT lookups a second): that
+watcher learns the address of computers showing a code at that moment, and can try to answer
+first. It still gets one guess per code typed (one in 33 million), which ends the move with
+"wrong code" when it fails, so it can only spoil moves, not take an account. A computer on the
+local network is tried first, and one found over the DHT only when none is there after five
+seconds, so a move between two computers at the same place does not reach a watcher at all. The run binds both transport identities (authenticated by the transport) and
+both SPAKE2 messages into a transcript, from which HKDF-SHA256 makes one key for each
+direction and a confirmation for each side; the new computer confirms first, and the old
+one only after checking it, so a computer that guessed the nameplate learns nothing from the
+old one but "no". The person on the old computer then sees the new computer's name and what
+moves, and says yes; the person on the new computer sees the old computer's name and what
+comes (and the profile it replaces there), and says yes too. Each computer tells the other
+its yes (`Go`), and nothing is sent until both did; a no on either ends the move with nothing
+changed.
+
+**Meeting.** Each side runs a node of its own for the move, with a new transport identity and
+no friend or group, so nobody sees it come online meanwhile: the old computer's own node is
+stopped first (the application quits its core), so nothing in the folder changes while it is
+read and the MLS state and logs move at the epochs they are at. Both announce under the
+rendezvous secret (6-hour keys as for groups) and look it up at every punch slot (10 s); what
+they find is dialled at once and at the punch slots, as members are (3.4), and on one local
+network mDNS finds it anyway. Their local addresses go in the announcements sealed (3.3) under
+a key made from the nameplate alone, so whoever watches the rendezvous point can read them
+(a key from the rest of the code, however slow to make, would let it test guesses of the code
+offline against them), and each opens and dials the other's: two routers at home with one public
+address and no way back in, where the device on the main router lets only its own port in, are
+crossed by the one behind the inner router (lab: `transfer-two-routers`, both ways). Each side
+listens on the port its folder keeps (the new computer picks the one the account will keep
+there when its folder has none), so a firewall rule for it serves the move too. The new
+computer takes streams of `/fogata/transfer/1`; the old one opens one
+to each connected peer that says it takes it, and, only while none does, to each it found
+under the code itself: the new computer lists the protocol only to computers it found (or on
+its local network), so one finding the other is enough
+(`a_move_needs_only_one_computer_to_find_the_other`). The code's one run is spent only on a
+computer that takes the protocol and runs the exchange: one that does not refuses the stream
+before anything is said. Two NATs that cannot be punched (one that
+picks a new port per destination) do not meet: after three minutes the old computer says the
+two could not reach each other, and the screens suggest the same network. A member of the
+person's groups does not carry a move: it would have to let a device that is no member through
+its relay (later).
+
+**What moves.** After the run every frame is encrypted with XChaCha20-Poly1305 under the
+direction's key, numbered by its nonce, so a frame changed, dropped, repeated or put out of
+order makes the move stop. The old computer sends a summary (the account's signed profile,
+how many friends, groups, chats and attachments, how many bytes), then, after both yeses, every
+file of the folder in the form a folder without a key keeps it: a sealed file is opened with
+the old folder's key, attachments as they are read. Each file goes as its path, its pieces
+(256 KiB) and the BLAKE3 of its contents, checked at the end. The new computer decides from
+the path alone what a file is and how to seal it (the identity, the friends file, the MLS
+states and the friends' profiles whole, a chat's journal and pins as chains, attachments as
+streams, the rest as they are), takes only paths of those kinds (no `..`, no root, at most four
+deep, never twice), and writes everything into `incoming/` of its folder (how far the move
+got is kept beside it in `incoming.json`, where nothing the old computer sends can land), sealed with a new
+data key that its own keychain keeps (plain only where the keychain keeps none, as for a new
+profile). Not moved: what belongs to the computer (`sealed.json`, the locks, `before-sealing/`,
+videos fetched to play, downloads cut short, the log in `diagnostics/`, the new versions of
+Fogata kept in `updates/` (made for this computer's system, up to hundreds of MB), how chats end as
+written with the old key, which the new folder works out again, and what was judged of the group
+logs, sealed with the old key, judged again there (5.1)); in `app.json` the microphone, speakers and camera chosen,
+and in `meta.json` the port, which the new computer keeps its own of.
+
+**The end, with never two copies.**
+1. The new computer checks `incoming/`: the identity opens and is the one in the summary, the
+   profile is its own, every group's log reads. It says `Staged`.
+2. The old computer writes `moved.json` ("moving"): from then on its store refuses to make or
+   read the identity and the core does not start. It says `Commit`.
+3. The new computer records the commit and puts `incoming/` in place: its folder's own files
+   go to `replaced/` (but the locks of the copy running there, `running.lock` and `window/`),
+   the new ones come out. Each step can be taken again, and a computer that stops in the
+   middle goes on at its next start. This work holds the folder's lock itself and always runs
+   to its end: throwing a staged move away while it runs finishes it instead. It says
+   `Active`, with a keyed hash of the move's id and of this run's own secret under the move's
+   secret: a key from the run that sent the account, which both computers keep (in
+   `moved.json` and `incoming.json`, then `moved-in.json`) and only the computer the account
+   went to can use. A later run that finishes the move tells the move's id to whatever
+   computer shows the code typed, which cannot prove anything with it. It says so as soon as the
+   account is in place, or once the commit is recorded when putting it in place has to wait
+   for the next start (a full disk, say); only then does `replaced/` go. The keychain key named
+   in it (a profile replaced from Settings, after a warning) goes as soon as its files are
+   aside, and again with `replaced/` if the keychain could not be reached then. If the commit cannot even
+   be recorded, it says so and the move stays staged. The old computer waits up to five
+   minutes for `Active`.
+4. The old computer checks that hash, marks itself "moved" without the move's secret, says
+   `Moved` (the new computer then empties the secret where it keeps it; without that word it
+   keeps it for a week, to finish the move with an old computer still waiting, and empties
+   it at the first start after) and deletes the identity,
+   the friends file and its copies, the MLS state, the tickets of invites waiting for a
+   manager (`joins.json`) and any plain copies left from sealing. Chats, files and logs stay, sealed,
+   until the person deletes them (`forget`: everything, and the folder's key in the keychain;
+   Fogata then starts there like new).
+
+Stopping a move: before the code checked out it simply goes; after, it stops where nothing is
+half done, on either computer and also while files come, the other one told why (the new
+computer throws `incoming/` away with the keychain key it made, before it lets go of the
+folder); once step 1 or 2 began it is not
+stopped any more, and the screens say it is too late. A failure after the old computer let
+go says that the account is put in place at the next start, not that nothing changed. While a
+move waits to be finished, no profile is made in the folder.
+
+Bounds on the new computer: the disk must hold what is announced (with room to spare; the
+application asks the system, `statvfs` on Linux and macOS and `GetDiskFreeSpaceExW` on
+Windows, in fogata-ffi's `disk.rs`; the command line asks `statvfs` too, in its own `disk.rs`,
+and elsewhere a full disk stops its move instead; an offer above 1 TiB is refused outright), at most the
+bytes announced and 64 MiB more come, at most 500,000 files, no empty piece, and the whole
+within ten minutes and a pace of 32 KiB/s. Names are ASCII letters, digits, `.`, `_` and `-`
+(an attachment's ending after its id excepted), never start with a dot, and are never one of
+the move's own (`incoming.json`, `moved.json`, `sealed.json`, the locks...); a path is refused
+when a disk without cases would take it for one of those or for a sealed kind
+(`IDENTITY.KEY`), when it could be a short form Windows gives another name (`INCOMI~1.JSO`), or
+when Windows cannot keep it (`:`, a trailing dot or space, device names such as `CON` or
+`COM1`); the old computer leaves such files where they are. Attachments are read as the store reads them, and
+other files as they are, whatever they start with.
+
+A move cut short before step 2 changes nothing: the new computer throws `incoming/` away (at
+once, or at its next start). When only its `Staged` was lost, it keeps `incoming/` as staged
+while the old computer goes on with the account; a code shown there again and typed on the
+old one moves the account anew, in place of what was staged (an offer of another account
+is refused while something is staged). Cut between 2 and 3 (the very last message lost), the old
+computer stays "moving" and the new one keeps `incoming/` as staged: showing a code there
+again and typing it on the old one finishes the move (`Resume`, by the move's random id,
+which only the two know; the old computer names that computer and asks again first). Only
+the person can make the old computer use the account again
+then (`keep_this_computer`, behind a warning), or make the new one throw it away. When the
+new computer's `Active` is what was lost, it runs the account and keeps the move's secret in
+`moved-in.json`; a code shown there (Settings, bring an account here) and typed on the old
+one finishes the move the same way, within the week the secret is kept.
+
+In the application the move belongs to the whole window, not to the settings' page: its
+question shows over whatever page is open, and its end brings the core back (or shows that
+the account moved) also when the page was left. The command line asks before `receive`
+replaces a profile and before `keep`, and `send` without a code reads it from its input, out
+of the shell's history and the list of processes.
+
+**Threat model.**
+- A DHT node or anyone on the path sees a rendezvous point and encrypted traffic between two
+  transport identities; it can learn the nameplate, and with it open the local addresses
+  and port in the two announcements. Nothing it sees allows a test of the rest of the code.
+- Someone who announces under the rendezvous point (a DHT node near it, a device on the same
+  network) can try one guess per code typed on the old computer and three against the new
+  one, each a 2^-25 chance; failing, it makes the move stop with "wrong code" (a nuisance,
+  not a leak). It can also keep the new computer busy, which only delays the move.
+- A frame changed or replayed on the way stops the move; nothing is applied.
+- A malicious new computer that won the code gets the account: that is what the code is for,
+  and why the old computer names it and asks first. A malicious old computer that won it
+  can fill the new folder with an account of its choice (only inside `incoming/`, and the
+  person sees whose account it is before it starts); it cannot write outside the folder.
+- The old computer keeps chats and attachments, sealed with its own key, until the person
+  deletes them; the identity and friend secrets are gone from it.
+
 ## 5f. Updates of pre-releases (fogata-update, fogata-net `updates`, fogata-core `updates`)
 
 Pre-releases (the `beta` channel) travel over Fogata itself, from friend to friend, with no
@@ -4346,6 +4301,157 @@ folder, and `updates/installed.json`: a copy that starts still older than the bu
 installed says so (the install did not take) rather than offering it again. The data folder
 is never touched; later pre-releases open the data of earlier ones as every version does.
 
+## 5g. Copies that restore an account without the keychain (fogata-core `recovery`)
+
+The data folder is sealed with a key the system keychain keeps (6, `vault`). A keychain that
+is lost (reset, the program's signature changed, the user deleted) or a disk that dies takes
+the account with it, and a move (5e) needs both computers alive at once. A recovery copy is a
+file the person keeps where they like, which only a key they hold opens. The CLI has `fogata
+recovery on`, `export FILE [--attachments]`, `size`, `restore FILE [--replace]
+[--unencrypted]`, `status` and `forget-replaced`; the key is read from the input, never from
+the command line. `restore` shows whose account the copy holds and what the folder holds, and
+asks before it replaces anything; though the command line opens folders without sealing them,
+what it restores is sealed with a new key of the system keychain, as an account that moves in
+is (`--unencrypted` keeps it plain where no keychain keeps a key, for that restore only:
+nothing in the folder says so if it does not happen). It refuses a copy the disk has no room
+for, as its move does.
+
+**The recovery key** (`fogata-crypto` `recovery.rs`). Turning copies on makes an X25519 pair
+(`NewKey`). The secret half is the recovery key: 32 random bytes, shown once as 52 Crockford
+base32 characters in 13 groups of four and a check character (weighted as the move's code is,
+so every single wrong character is told at once), wiped from memory after and never written
+anywhere. It is taken (`turn_on`) only once the person typed two of its groups back; until
+then copies stay for the key they were for. The folder then keeps `recovery.bin`: the public
+half and an *auth key*, HKDF-SHA256 of the secret half (`fogata/v1/recovery-auth`), sealed
+with the folder's data key as the identity is (and sealed again by a move, which takes it
+along). Making a copy needs only what the folder keeps, so it can be made at any time; only
+restoring asks for the key. Being random and 256 bits long, the key needs no slow hashing,
+which a password the person chose would (and would still be weak against an attack on a
+stolen copy). Turning copies on again makes a new pair: copies made before open only with the
+old key. A short name of the key (`XXXX XXXX`, from its public half) is shown when it is made
+and with every copy, to compare.
+
+**What a copy holds** is what a move moves, with its list and exclusions (5e: never
+`sealed.json`, `sealing.json`, `running.lock` nor `before-sealing/`), each file in the form a
+folder without a key keeps it: the identity, the profile and friends, every group with its log
+and MLS state, the direct chats, the settings and `recovery.bin`. The attachments of chats
+only when the person asks (`size` says what they would add first). A copy is made with no core
+running on the folder, as a move is, so the files read are the folder at one moment.
+
+**The file** (`Fogata-YYYY-MM-DD.fogata-copy`):
+- a header in the clear, 63 bytes: `FOGATACOPY`, version 1, the first 16 bytes of
+  SHA-256(`fogata/v1/recovery-fingerprint` ‖ public key), the public half of a pair made for
+  this copy alone, and the day it was made (days since 1970, big-endian). Nothing of the
+  account: no name, profile, sizes nor count of files. The fingerprint lets the screens say
+  "this copy is for another key" before anything is tried;
+- the copy's key: HKDF-SHA256 of X25519(that pair, the public half), salted with the whole
+  header, info `fogata/v1/recovery-copy`;
+- frames: each its length (4 bytes, big-endian) and XChaCha20-Poly1305 under that key,
+  numbered by its nonce, with the whole header as associated data. A frame holds a kind byte
+  and a message in JSON or a piece of a file (256 KiB, as in a move). The first, at most
+  1 KiB, is the copy's proof: HMAC-SHA256 of the header under the auth key. The header holds
+  the public half of a pair made for that copy alone, whose secret only the computer that made
+  it knew, so the proof cannot be moved to another copy, and only a computer that holds the
+  account (or the recovery key) can make one. It is checked before anything larger is read.
+  The second is the list: every file with its size and BLAKE3, the account's device key and
+  name, and the version of Fogata that wrote it. Then each file in that order (its path, its pieces, its end), and last an end
+  that counts the files, after which nothing may follow. A byte of the header or of a frame
+  changed, a frame dropped, repeated or out of order, a copy cut short or with something after
+  its end: none opens;
+- it is written beside its name, under a new name of its own (`NAME.<random>.tmp`, never a
+  file or link already there), and takes the name only when whole, so a copy cut short never
+  looks like one and an older copy under that name stays as it was. The application writes
+  it straight into the file chosen instead (`export_into`), since the macOS sandbox lets it
+  write that file alone after a save dialog: never through a link there (`O_NOFOLLOW`), for
+  this user alone, removed if the copy fails; one cut short all the same lacks the end every
+  copy closes with, and is refused as damaged. A copy is not made inside
+  the data folder (it would go into the next copy and with a move), nor restored from inside
+  the folder it goes into (a restore empties it).
+
+**Restoring** (`restore`, the welcome page's "Restore from a copy"). `open_copy` says
+first, with the key, whose account a copy holds (its name and device fingerprint) and
+`account_in` what the folder holds, for the person to compare. The copy opens with the key,
+its proof checks, and its list is checked (names a folder takes, as in a move; each once; no more
+files nor bytes than a move takes, added up without overflowing; room for it on the disk, when
+the application can tell, as for a move) before anything in the folder changes. Then it goes
+in as a move's account does, with the same record (`incoming.json`): every file is written into
+`incoming/`, sealed with a new key of this computer's keychain (plain only where a new profile
+could be), its size and BLAKE3 checked against the list; then the identity must open and be
+the one the list names, the profile must be its own and signed by it, and every group's log
+must read. Any failure until then throws `incoming/` away with the key made for it, and the
+folder is as it was. Then the record says `commit` and the files are put in place as in a move
+(the folder's own aside to `replaced/`, the new ones out): a computer that stops in the middle
+finishes it at the next start, and one that stopped before throws it away, never leaving some
+of each (tested by making every write fail in turn). A folder that holds anything of an account
+(the identity, a profile even damaged, groups, MLS states, chats or the copies sealing left:
+anything a move takes but the settings a new folder starts with; not a data key alone, which
+the application makes for a new folder the first time it opens it, before any account, nor a
+device key alone, which the welcome page makes to show its fingerprint and nobody knows yet:
+that one is replaced unasked and deleted with the folder's key, not kept aside) is
+refused
+unless the person says to replace it, after a warning with its name; that account is then kept
+whole in `replaced/` with its keychain key (`restored.json` says so), through every start,
+until the person deletes it (`forget_replaced`). While it is kept, another restore or a move
+into the folder is refused rather than throw it away, and so is deleting what is left of an
+account that moved away (`forget`). Neither `replaced/` nor `restored.json`
+moves nor goes into a copy. A version of Fogata from before copies does not know
+`restored.json`, and going back to one removes the kept account at its first start. A `recovery.bin`
+that does not open keeps a folder from being sealed whole, as any secret does, until the
+person sets it aside; set aside, it goes neither with a move nor into a copy, and copies are
+turned on again.
+
+**In the application** (fogata-ffi `recovery`, `screens/recovery.dart`). Settings › Storage
+says whether copies are on and for which key, and turns them on or changes the key: the key
+is made in Rust and held in memory only, never on the disk, until the person typed two of its
+groups back (`recovery_turn_on` takes it by its short name; a key shown and not taken is
+dropped). Making a copy offers the files sent in chats (off, with their size), asks where with
+the system's save dialog (never in the data folder), and stops the core while it is made, as a
+move does, starting it again after, whatever happened; deleting the account a restore replaced
+does the same. The work that stopped the core owns the stop (`AppState.stoppedBy`): only it
+starts the core again, and neither a move nor another copy begins meanwhile.
+The welcome page's "Restore from a copy" picks the file (`inspect`: its day, and whether it is
+for another key than the folder's), asks the key with a live check, shows whose account it
+holds with the warning to restore only when no other computer uses it (with a way to move it
+instead) and what the folder holds that it replaces, then restores with the keychain the
+application chose; where that keychain cannot keep a key, it offers the welcome page's choice
+to go on unencrypted and restores again with `unencrypted`. An account an earlier restore kept
+aside is offered for deletion right there, since Settings cannot be reached without a profile;
+a copy checked whole that could not be put in place is finished by starting again, as a move's
+is. The key typed leaves its field once restored or when the card is left. The refusals and a copy's problems
+come typed (`UiRestoreRefusal`, `UiCopyProblem`, `UiKeyProblem`), so the screens word them in
+the person's language. Once restored, the application starts with the account, as after a
+move.
+
+**The same identity.** A restore brings back the same device key, as a move does: the device
+key is the identity (1), friends know it by it and groups have it in their members and MLS
+credentials, so a new key would be another person to all of them. A copy restored while
+another computer still uses the account makes two of the same person; the screens say to
+restore only when no other computer has it (and to move it otherwise), and two live sessions of
+one identity are told already (4.3). A copy made before the group went on to a new epoch comes
+back behind it: the log a member's sync brings has the new epochs' secrets sealed to the same
+device, so it reads and writes in the group again by itself (tested). With MLS (5.5, not used
+yet), a state put back follows the Commits it missed from where it was, unless the device
+itself committed after the copy (its weekly update, an add or a removal): then the state put
+back sees its own key write a link it did not make and is out of the tree, and only a resync
+from a member's GroupInfo brings it back (tested in fogata-mls). When MLS is wired in, a
+restored group in that case must resync like a device that lost its state.
+
+**Threat model.**
+- A stolen copy without the key: nothing but the header, and 256 bits to guess.
+- The key without a copy: nothing. Both together are the account, as an unsealed folder is;
+  the screens say to keep them apart. The key also makes copies a restore takes (it gives the
+  auth key), so a thief with it could hand the person a copy of another account; the
+  person sees whose it is before it replaces anything.
+- Someone who changes a copy cannot make it restore anything but what it held: every frame is
+  bound to its place and to the header, and a copy for another key does not open.
+- Someone who knows only the public half (a backup of a sealed folder shows nothing of it,
+  but one of a plain folder does) can make a copy that opens with the key, but not its proof:
+  the restore refuses it ("this copy was not made by this account").
+- Someone who writes in a sealed folder without its key cannot change what copies are made
+  for: `recovery.bin` must open with the folder's data key, or no copy is made. In a plain
+  folder (one whose person chose so, 5c) nothing protects it, as nothing protects the
+  identity there.
+
 ## 6. Cryptography (fogata-crypto)
 
 | Purpose | Primitive |
@@ -4475,7 +4581,15 @@ when the requester is online; cancelling the request ends that.
   the Flatpak's, each in a flatpak installation of its own: what flatpak takes from the
   loopback origin (`test-flatpak-origin.sh`) and where the data key is kept and how it moves
   there (`test-flatpak-keychain.sh`, in a session of its own).
-- `app/test`: unit tests (the reordering of video codecs in a description).
+- `app/test`: the app's unit and widget tests (about 160 files: every screen and widget,
+  the state the screens read, formatting, the order of video codecs in a description...),
+  run with `flutter test` on every system.
+- Compatibility between versions: the judgment of level two pinned on a corpus and compared
+  with the frozen level-one copy (5.1); `crates/fogata-core/tests/previous_release.rs`, the
+  command line of the last release against this version (weekly on GitHub, and before every
+  release: docs/releasing-beta.md); and `crates/fogata-core/tests/old_copy.rs`, copies from
+  before a given feature (run by hand where such a build is at hand). The plan for later
+  levels is under "Later levels" in 5.1.
 - `app/integration_test` (run on Linux, macOS and Windows): the application driven on a
   desktop with a fresh data folder:
   every screen (`screens_test.dart`), and a whole session with another device
@@ -4500,8 +4614,9 @@ when the requester is online; cancelling the request ends that.
   with a firewall may need a rule letting the machine's network reach that computer.
 - Real-world tests between devices on different networks.
 
-## 9. First milestone: CLI prototype
+## 9. The first milestone (done): the CLI prototype
 
+Kept as the record of where Fogata started; the command line of today is in docs/cli.md.
 Two machines on different networks find each other using only the group secret and exchange
 encrypted text messages.
 

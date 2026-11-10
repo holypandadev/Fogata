@@ -17,7 +17,7 @@ use zeroize::Zeroizing;
 use super::faults;
 use super::{
     DAMAGED, DoesNotOpen, MLS_DIR, Store, aside_path, copy_aside, key_lock, mls_context,
-    remove_copies, sealed_bytes, take_lock, write_private,
+    remove_copies, sealed_bytes, take_lock, with_suffix, write_private,
 };
 use crate::vault::{self, Keychain};
 
@@ -25,13 +25,26 @@ use crate::vault::{self, Keychain};
 pub const BACKUP_DIR: &str = "before-sealing";
 
 /// Where sealing a plain folder stands ([`SealPhase`]). It belongs to this computer: a move
-/// does not take it.
+/// does not take it. It is sealed with the folder's key ([`SEALING_CONTEXT`]) when sealing
+/// was begun by this version or it ended; earlier versions wrote it plain, and read a sealed
+/// one as none (they then check the whole folder again, and note it plain).
 pub const SEALING_FILE: &str = "sealing.json";
+
+/// What [`SEALING_FILE`] is sealed for.
+const SEALING_CONTEXT: &str = "sealing";
+
+/// Where the plain secrets found in a folder that keeps them sealed are moved, never read
+/// nor sealed (see [`PlainSecrets`]). It belongs to this computer: a move does not take it.
+pub const REFUSED_DIR: &str = "refused";
 
 /// A secret of the folder that the person chose to set aside, read at the next start
 /// ([`Store::set_aside_at_next_start`]). It belongs to this computer: a move does not take
 /// it.
 pub const SET_ASIDE_FILE: &str = "set-aside.json";
+
+/// What [`SET_ASIDE_FILE`] is sealed for: a note written without the folder's key would put
+/// a plain copy someone left in [`BACKUP_DIR`] in place of a secret they damaged.
+const SET_ASIDE_CONTEXT: &str = "set-aside";
 
 /// How far sealing a folder got, kept in [`SEALING_FILE`]: the folder counts as sealed only
 /// once every secret in it was found sealed and opening with its key, and until then its
@@ -45,6 +58,41 @@ pub(super) enum SealPhase {
     Failed { why: String },
     /// Every secret was found sealed and opening with the folder's key.
     Done,
+}
+
+/// Where sealing a folder stood when it was last noted, and whether that note was sealed with
+/// the folder's key: one that is not could have been written by anyone who can write the
+/// folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Noted {
+    phase: SealPhase,
+    by_key: bool,
+}
+
+/// What a start does with the plain secrets (the identity, the friends file and its copies,
+/// the recovery key, the MLS state) it finds in a folder that has a key.
+///
+/// Anyone who can write the folder but not read the keychain (a synced or backed-up copy, a
+/// computer left alone) can put plain files there. Sealing them as a folder being sealed
+/// does would take them in as the account's own: a recovery key of theirs would get every
+/// copy made from then on, the identity's secret and the chats in it. So a plain secret is
+/// sealed only while sealing is under way as a note sealed with the folder's key says,
+/// which only a copy of Fogata that holds the key writes (as it makes the key, before the
+/// folder is marked sealed). Once sealing ended, or when it is noted only in the clear
+/// (as earlier versions did), a plain secret was put there by someone else, and is refused:
+/// moved to [`REFUSED_DIR`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlainSecrets {
+    /// Sealing is under way, as noted with the key: plain secrets are the account's own.
+    Seal,
+    /// Sealing was begun by an earlier version, noted in the clear (or not at all), and
+    /// neither the identity nor the friends file is sealed yet: they and the MLS state are
+    /// sealed (taking them over gives nothing more than putting a whole other folder in this
+    /// one's place would), and a plain recovery key is refused: copies of what is sealed here
+    /// must not go to a key someone put next to it. Its person turns copies on again.
+    SealButRecovery,
+    /// Every plain secret is refused.
+    Refuse,
 }
 
 /// How a data folder's secrets would be kept, once asked ([`Store::sealing`]).
@@ -95,7 +143,8 @@ impl Store {
             match self.alone()? {
                 Some(_running) => self.seal_rest(&key),
                 None => {
-                    *self.phase.lock().unwrap_or_else(PoisonError::into_inner) = self.read_phase()
+                    *self.phase.lock().unwrap_or_else(PoisonError::into_inner) =
+                        self.read_phase(&key).map(|n| n.phase)
                 }
             }
             return Ok(Some(key));
@@ -123,7 +172,10 @@ impl Store {
         let Keychain::Seal(keys) = &self.keychain else {
             return Ok(None);
         };
-        let key = match vault::try_create(&self.dir, keys.as_ref()) {
+        // Sealing is noted as begun, with the key, before the folder is marked sealed: the
+        // plain secrets of a folder that has a key are taken as its own only so.
+        let begun = |key: &DataKey| self.write_phase(&SealPhase::Pending, Some(key));
+        let key = match vault::try_create_with(&self.dir, keys.as_ref(), begun) {
             Ok(Ok(key)) => key,
             // A folder that holds nothing of an account yet gets nothing secret written in
             // the clear until its person chooses so: an identity made now would stay readable
@@ -157,26 +209,42 @@ impl Store {
     /// reads, and the next start goes on with it. [`SEALING_FILE`] says so from before the
     /// first file is sealed, and the folder counts as sealed ([`Store::sealed`]) only once
     /// every secret in it was found sealed and opening with `key`, which is checked once,
-    /// when sealing ends; later starts only seal what they find plain. Then the plain
-    /// copies of the chats go at once: they would keep, in the clear, what disappears from
-    /// the chats meanwhile. The identity, the friends file and the MLS state keep theirs
-    /// until a later start opens the folder whole ([`Store::drop_backup`]): a keychain that
-    /// gave the key back once may still lose it (a reset keychain, an item tied to the
-    /// program's signature), and without those copies the account would be gone.
+    /// when sealing ends; later starts refuse the plain secrets they find ([`PlainSecrets`]).
+    /// Then the plain copies of the chats go at once: they would keep, in the clear, what
+    /// disappears from the chats meanwhile. The identity, the friends file and the MLS state
+    /// keep theirs until a later start opens the folder whole ([`Store::drop_backup`]): a
+    /// keychain that gave the key back once may still lose it (a reset keychain, an item
+    /// tied to the program's signature), and without those copies the account would be gone.
     fn seal_rest(&self, key: &DataKey) {
         self.set_aside_marked(key);
-        let done = self.read_phase() == Some(SealPhase::Done);
+        let noted = self.read_phase(key);
+        let done = noted.as_ref().is_some_and(|n| n.phase == SealPhase::Done);
+        let plain = match &noted {
+            Some(Noted {
+                phase: SealPhase::Done,
+                ..
+            }) => PlainSecrets::Refuse,
+            Some(Noted { by_key: true, .. }) => PlainSecrets::Seal,
+            _ if self.holds_no_sealed_account() => PlainSecrets::SealButRecovery,
+            _ => PlainSecrets::Refuse,
+        };
         self.done_before.store(done, Ordering::Relaxed);
-        if !done && let Err(e) = self.write_phase(&SealPhase::Pending) {
+        // Only a note sealed with the key lets later starts seal plain secrets: one written
+        // by a start that refused some, or that found sealing noted in the clear, stays in
+        // the clear until sealing ends.
+        let noting = (plain == PlainSecrets::Seal).then_some(key);
+        if !done && let Err(e) = self.write_phase(&SealPhase::Pending, noting) {
             tracing::warn!("cannot note that sealing began: {e:#}");
         }
         let sealed = self
-            .seal_plain(key)
+            .seal_plain(key, plain)
             .and_then(|()| if done { Ok(()) } else { self.check_sealed(key) });
         let phase = match sealed {
-            Ok(()) if done => SealPhase::Done,
-            Ok(()) => match self.write_phase(&SealPhase::Done) {
+            Ok(()) if done && noted.as_ref().is_some_and(|n| n.by_key) => SealPhase::Done,
+            // Ended now, or noted in the clear by an earlier version: noted with the key.
+            Ok(()) => match self.write_phase(&SealPhase::Done, Some(key)) {
                 Ok(()) => SealPhase::Done,
+                Err(_) if done => SealPhase::Done,
                 Err(e) => SealPhase::Failed {
                     why: format!("{e:#}"),
                 },
@@ -185,7 +253,7 @@ impl Store {
                 let failed = SealPhase::Failed {
                     why: format!("{e:#}"),
                 };
-                if let Err(e) = self.write_phase(&failed) {
+                if let Err(e) = self.write_phase(&failed, noting) {
                     tracing::debug!("cannot note that sealing failed: {e:#}");
                 }
                 failed
@@ -204,15 +272,42 @@ impl Store {
 
     /// Where sealing the folder stood when it was last noted; `None` when it never was (a
     /// plain folder, or one sealed by a version before [`SEALING_FILE`]) or it does not read.
-    fn read_phase(&self) -> Option<SealPhase> {
-        serde_json::from_slice(&fs::read(self.dir.join(SEALING_FILE)).ok()?).ok()
+    /// A note sealed with anything but `key` is none.
+    fn read_phase(&self, key: &DataKey) -> Option<Noted> {
+        let bytes = fs::read(self.dir.join(SEALING_FILE)).ok()?;
+        if sealed_form(&bytes).is_some() {
+            let plain = key.open_whole(SEALING_CONTEXT, &bytes).ok()?;
+            return Some(Noted {
+                phase: serde_json::from_slice(&plain).ok()?,
+                by_key: true,
+            });
+        }
+        Some(Noted {
+            phase: serde_json::from_slice(&bytes).ok()?,
+            by_key: false,
+        })
     }
 
-    fn write_phase(&self, phase: &SealPhase) -> Result<()> {
-        write_private(
-            &self.dir.join(SEALING_FILE),
-            &serde_json::to_vec_pretty(phase)?,
-        )
+    /// Notes `phase`, sealed with `key` when there is one, else in the clear.
+    fn write_phase(&self, phase: &SealPhase, key: Option<&DataKey>) -> Result<()> {
+        let json = Zeroizing::new(serde_json::to_vec_pretty(phase)?);
+        let bytes = match key {
+            Some(key) => key.seal_whole(SEALING_CONTEXT, &json)?,
+            None => json.to_vec(),
+        };
+        write_private(&self.dir.join(SEALING_FILE), &bytes)
+    }
+
+    /// Whether neither the identity nor the friends file (nor its copy) is there sealed:
+    /// sealing, which seals them first, did not get past them yet.
+    fn holds_no_sealed_account(&self) -> bool {
+        [
+            self.identity_path(),
+            self.friends_path(),
+            self.friends_copy_path(),
+        ]
+        .iter()
+        .all(|p| fs::read(p).map_or(true, |b| sealed_form(&b).is_none()))
     }
 
     /// Checks that every secret of the folder is sealed and opens with `key`: the identity,
@@ -279,18 +374,21 @@ impl Store {
     }
 
     /// Seals the folder's plain secrets with `key`, the identity and the friends file first;
-    /// each is copied to [`BACKUP_DIR`] before and read back after. It runs while the key is
-    /// first looked for, which every reader of these files waits for.
-    fn seal_plain(&self, key: &DataKey) -> Result<()> {
+    /// each is copied to [`BACKUP_DIR`] before and read back after. Those `plain` says are
+    /// not the account's own are refused instead. It runs while the key is first looked for,
+    /// which every reader of these files waits for.
+    fn seal_plain(&self, key: &DataKey, plain: PlainSecrets) -> Result<()> {
+        let refuse = plain == PlainSecrets::Refuse;
         self.name_key(key, &self.identity_path(), "identity")?;
         self.name_key(key, &self.friends_path(), "friends")?;
-        self.seal_whole(key, &self.identity_path(), "identity")?;
-        self.seal_whole(key, &self.friends_path(), "friends")?;
-        self.seal_whole(key, &self.friends_copy_path(), "friends")?;
+        self.seal_whole(key, &self.identity_path(), "identity", refuse)?;
+        self.seal_whole(key, &self.friends_path(), "friends", refuse)?;
+        self.seal_whole(key, &self.friends_copy_path(), "friends", refuse)?;
         self.seal_whole(
             key,
             &self.dir.join(crate::recovery::KEY_FILE),
             crate::recovery::KEY_CONTEXT,
+            plain != PlainSecrets::Seal,
         )?;
         for entry in fs::read_dir(&self.dir)?.flatten() {
             if entry
@@ -298,7 +396,7 @@ impl Store {
                 .to_string_lossy()
                 .starts_with("friends.bin.damaged")
             {
-                self.seal_whole(key, &entry.path(), DAMAGED)?;
+                self.seal_whole(key, &entry.path(), DAMAGED, refuse)?;
             }
         }
         for entry in fs::read_dir(self.dir.join(MLS_DIR))
@@ -308,14 +406,15 @@ impl Store {
         {
             let name = entry.file_name().to_string_lossy().into_owned();
             if let Some(group) = name.strip_suffix(".bin") {
-                self.seal_whole(key, &entry.path(), &mls_context(group))?;
+                self.seal_whole(key, &entry.path(), &mls_context(group), refuse)?;
             }
         }
         crate::direct::store::seal_plain(&self.dir, key, &|path, bytes| self.back_up(path, bytes))
     }
 
-    /// Seals the file at `path`, if it is there and plain, as one box for `context`.
-    fn seal_whole(&self, key: &DataKey, path: &Path, context: &str) -> Result<()> {
+    /// Seals the file at `path`, if it is there and plain, as one box for `context`; or,
+    /// when it is to be `refused`, moves it to [`REFUSED_DIR`] as it is.
+    fn seal_whole(&self, key: &DataKey, path: &Path, context: &str, refused: bool) -> Result<()> {
         let plain = match fs::read(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             read => {
@@ -324,6 +423,9 @@ impl Store {
         };
         if sealed_form(&plain).is_some() {
             return Ok(());
+        }
+        if refused {
+            return self.refuse(path);
         }
         self.back_up(path, &plain)?;
         write_private(path, &key.seal_whole(context, &plain)?)?;
@@ -334,6 +436,39 @@ impl Store {
             write_private(path, &plain)?;
             bail!("{} did not read back once sealed", path.display());
         }
+        Ok(())
+    }
+
+    /// Moves the plain secret at `path` to [`REFUSED_DIR`], under its path in the folder (with
+    /// `.2` and so on added when an earlier one is there): it is nothing of the account's.
+    fn refuse(&self, path: &Path) -> Result<()> {
+        let relative = path
+            .strip_prefix(&self.dir)
+            .with_context(|| format!("{} is not in the data folder", path.display()))?;
+        let first = self.dir.join(REFUSED_DIR).join(relative);
+        if let Some(parent) = first.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(
+                    self.dir.join(REFUSED_DIR),
+                    fs::Permissions::from_mode(0o700),
+                );
+            }
+        }
+        let to = std::iter::once(first.clone())
+            .chain((2..).map(|n| with_suffix(&first, &format!(".{n}"))))
+            .find(|p| fs::symlink_metadata(p).is_err())
+            .expect("some name is free");
+        fs::rename(path, &to).with_context(|| format!("cannot set {} aside", path.display()))?;
+        tracing::warn!(
+            "{} was plain in a folder that keeps it sealed, so it was put there without the \
+             folder's key: refused, and moved to {}",
+            path.display(),
+            to.display()
+        );
         Ok(())
     }
 
@@ -484,9 +619,13 @@ impl Store {
         if path == self.identity_path() && !self.dir.join(BACKUP_DIR).join(relative).is_file() {
             bail!("the identity does not open, and no copy of it from before sealing is left");
         }
+        let Some(Some(key)) = self.known_key() else {
+            bail!("the folder's key is not known");
+        };
+        let note = serde_json::to_vec(&relative.to_string_lossy())?;
         write_private(
             &self.dir.join(SET_ASIDE_FILE),
-            &serde_json::to_vec(&relative.to_string_lossy())?,
+            &key.seal_whole(SET_ASIDE_CONTEXT, &note)?,
         )
     }
 
@@ -509,12 +648,15 @@ impl Store {
     /// unless the file named still does not open with `key` now: one written again since
     /// (a friends file saved meanwhile, a chat that took new records) is not damaged any
     /// more. The damaged file is kept aside first (a link, or a copy), and only then is the
-    /// plain copy from before sealing put in its place, in one step, so the folder never
+    /// plain copy from before sealing put in its place, sealed, in one step, so the folder never
     /// lacks the file. Only the identity and the friends file are taken back so: an MLS
     /// state from before sealing would bring back an epoch, and keys, the group left behind,
     /// and chats keep no plain copy once sealed; those are only set aside.
     fn set_aside(&self, key: &DataKey, bytes: &[u8]) -> Result<()> {
-        let relative: String = serde_json::from_slice(bytes)?;
+        let note = key
+            .open_whole(SET_ASIDE_CONTEXT, bytes)
+            .context("the note was not written with the folder's key")?;
+        let relative: String = serde_json::from_slice(&note)?;
         let relative = Path::new(&relative);
         if relative.is_absolute()
             || relative
@@ -545,6 +687,12 @@ impl Store {
         } else {
             None
         };
+        // Sealed as it is put in place: a later start refuses a plain secret.
+        let context = if path == self.identity_path() {
+            "identity"
+        } else {
+            "friends"
+        };
         if path == self.identity_path() && plain.is_none() {
             bail!("the identity does not open, and no copy of it from before sealing is left");
         }
@@ -556,7 +704,7 @@ impl Store {
                     copy_aside(&path, &aside)
                         .with_context(|| format!("cannot keep {} aside", path.display()))?;
                 }
-                write_private(&path, plain)?;
+                write_private(&path, &key.seal_whole(context, plain)?)?;
                 tracing::warn!(
                     "{} did not open with its key: kept as {}, and taken back from before \
                      sealing",
@@ -789,6 +937,47 @@ mod tests {
         let aside = copy.with_file_name(format!("{name}.damaged"));
         assert_eq!(fs::read(&aside).unwrap(), bytes);
         assert!(sealed_form(&fs::read(&copy).unwrap()).is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A note to set a damaged secret aside that was not written with the folder's key
+    /// (someone who damaged the sealed identity and left a plain one of theirs as its copy
+    /// from before sealing) changes nothing: the identity stays as it is, and its "copy"
+    /// is never taken in.
+    #[test]
+    fn a_note_to_set_aside_written_without_the_key_is_ignored() {
+        let dir = folder("note-planted");
+        plain_folder(&dir);
+        let keys = Arc::new(MemoryKeyStore::default());
+        let open = || Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        let store = open();
+        store.identity().unwrap();
+        assert!(store.sealed());
+        let identity = store.identity_path();
+        drop(store);
+        // The start after the one that sealed the folder drops the copies made before.
+        let store = open();
+        store.identity().unwrap();
+        store.drop_backup();
+        drop(store);
+        assert!(!dir.join(BACKUP_DIR).exists());
+        let mut damaged = fs::read(&identity).unwrap();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 1;
+        fs::write(&identity, &damaged).unwrap();
+        let theirs = hex::encode(DeviceIdentity::generate().unwrap().secret_bytes());
+        fs::create_dir_all(dir.join(BACKUP_DIR)).unwrap();
+        fs::write(dir.join(BACKUP_DIR).join("identity.key"), &theirs).unwrap();
+        fs::write(
+            dir.join(SET_ASIDE_FILE),
+            serde_json::to_vec("identity.key").unwrap(),
+        )
+        .unwrap();
+        let store = open();
+        assert!(store.identity().is_err());
+        assert_eq!(fs::read(&identity).unwrap(), damaged);
+        assert!(!dir.join(SET_ASIDE_FILE).exists());
+        drop(store);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1053,12 +1242,13 @@ mod tests {
         let (me, friend, chat) = plain_folder(&dir);
         let plain = files_of(&dir);
         let keys = Arc::new(MemoryKeyStore::default());
-        Store::open_with(dir.clone(), Keychain::Seal(keys.clone()))
-            .unwrap()
-            .data_key()
-            .unwrap();
+        let first = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        let key = first.data_key().unwrap().unwrap();
         // As if the process had stopped once the identity and the friends file were
-        // sealed: the rest still plain, and the copies made so far still aside.
+        // sealed: the rest still plain, the copies made so far still aside, and sealing
+        // noted as begun.
+        first.write_phase(&SealPhase::Pending, Some(&key)).unwrap();
+        drop(first);
         let chat_dir = dir.join("direct").join(hex::encode(friend.as_bytes()));
         let backup = dir.join(BACKUP_DIR);
         for path in [dir.join("friends.bin.bak"), chat_dir.join("journal")] {
@@ -1207,7 +1397,14 @@ mod tests {
         fs::remove_file(dir.join(SEALING_FILE)).unwrap();
         let store = opens_whole(&dir, &keys, &made);
         assert!(store.sealed());
-        assert_eq!(store.read_phase(), Some(SealPhase::Done));
+        let key = store.data_key().unwrap().unwrap();
+        assert_eq!(
+            store.read_phase(&key),
+            Some(Noted {
+                phase: SealPhase::Done,
+                by_key: true
+            })
+        );
         assert!(secrets(&dir, &made.1).iter().all(|p| is_sealed(p)));
         store.drop_backup();
         assert!(dir.join(BACKUP_DIR).join("identity.key").exists());

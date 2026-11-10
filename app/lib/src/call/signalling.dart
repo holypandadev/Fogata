@@ -419,8 +419,15 @@ extension _Signalling on Call {
     }
     peer._offering = true;
     final number = ++peer._offerNumber;
-    final offer = await connection.createOffer({});
-    final sdp = await _describe(peer, connection, offer, 'offer');
+    final String sdp;
+    try {
+      final offer = await connection.createOffer({});
+      sdp = await _describe(peer, connection, offer, 'offer');
+    } catch (_) {
+      // Left offering, every later renegotiation would wait for this one forever.
+      if (peer.connection == connection) peer._offering = false;
+      rethrow;
+    }
     final message = {'t': 'offer', 'sdp': sdp, 'update': true, 'n': number};
     _signal(peer.id, message);
     _watchOffer(peer, number, message, 0);

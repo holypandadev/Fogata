@@ -67,7 +67,7 @@ extension _ScreenSound on Call {
     if (!want) {
       if (open == null) return;
       peer._soundOut = null;
-      await open.close();
+      await closeConnection(open);
       _signal(peer.id, {'t': 'sound-end'});
       return;
     }
@@ -78,7 +78,7 @@ extension _ScreenSound on Call {
     });
     // The call may have ended, or they been kept out, meanwhile.
     if (_closed || peers[peer.id] != peer || peer._keptOut) {
-      await connection.close();
+      await closeConnection(connection);
       return;
     }
     peer._soundOut = connection;
@@ -94,7 +94,10 @@ extension _ScreenSound on Call {
       }
       // Made again a moment later, if it is still wanted.
       peer._soundOut = null;
-      connection.close();
+      unawaited(
+        closeConnection(connection)
+            .catchError((Object e) => _trace('screen sound to ${peer.id}: $e')),
+      );
       Future<void>.delayed(const Duration(seconds: 3), () => _soundTo(peer));
     };
     final offer = await connection.createOffer({});
@@ -151,7 +154,7 @@ extension _ScreenSound on Call {
     await peer._closeSoundIn();
     final connection = await createPeerConnection(_network(peer.id));
     if (_closed || peers[peer.id] != peer || peer._keptOut) {
-      await connection.close();
+      await closeConnection(connection);
       return;
     }
     peer._soundIn = connection;

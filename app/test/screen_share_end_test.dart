@@ -174,7 +174,10 @@ void main() {
     // Another window, a screen, or a title that only has the name in it.
     expect(ownWindow(SourceType.Window, 'Terminal', linux: true), isFalse);
     expect(ownWindow(SourceType.Screen, 'Fogata', linux: true), isFalse);
-    expect(ownWindow(SourceType.Window, 'Fogata - Firefox', linux: true), isFalse);
+    expect(
+      ownWindow(SourceType.Window, 'Fogata - Firefox', linux: true),
+      isFalse,
+    );
     // macOS and Windows leave it out of the list themselves.
     expect(ownWindow(SourceType.Window, 'Fogata', linux: false), isFalse);
   });

@@ -42,6 +42,8 @@ impl Node {
         let peers: Vec<PeerId> = self.members.keys().copied().collect();
         for peer in peers {
             self.reserve_slot(peer);
+            // A QUIC link for media that was not due when it was wanted.
+            self.want_datagrams(peer);
         }
         for peer in std::mem::take(&mut self.presence.lost) {
             if self.members.contains_key(&peer) {
@@ -51,6 +53,7 @@ impl Node {
         let groups: Vec<GroupId> = self.groups.keys().copied().collect();
         for group in groups {
             let slot = self.groups.get_mut(&group).expect("listed above");
+            slot.forget_sent();
             // Two people have nobody to reach through each other: a direct chat's group
             // asks for no rosters.
             let members: Vec<PeerId> = if slot.direct {

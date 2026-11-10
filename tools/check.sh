@@ -9,9 +9,13 @@
 # whose last advisory is more than 14 days old fails, since it misses what came after), the
 # tests of the release scripts and of these checks, of the commit marker and of the CMake
 # file that bundles the library, of the copy of libwebrtc's notices, the Linux desktop
-# entry, the Linux player's tone mapping and row packing, and on a Mac of the Podfile's
+# entry, the Linux player's tone mapping and row packing (on Linux also built with ASan and
+# UBSan, with the players' other C++ tests), and on a Mac of the Podfile's
 # check of WebRTC-SDK and of the framework's codecs, the patches of fuzz/Cargo.toml the same
-# as the workspace's, THIRD-PARTY-NOTICES up to date, and the bridge code
+# as the workspace's and the crates of fuzz/Cargo.lock at versions Cargo.lock has (cargo deny
+# runs over the fuzz workspace too, with the advisories), the dependencies between the
+# workspace's crates within their layers (tools/crate_layers.py), the app's limits of what a
+# person types the same as the Rust ones (tools/limits.py), THIRD-PARTY-NOTICES up to date, and the bridge code
 # (flutter_rust_bridge) the same as the API it is generated from. Each --no-... skips one of
 # the last checks, for a computer that cannot run it; without it, a check that cannot run
 # fails.
@@ -149,15 +153,30 @@ cargo test -p libp2p-identify --lib --quiet
 cargo test -p libp2p-quic --lib --quiet
 cargo test -p turn --lib --quiet
 cargo test -p spake2 --lib --quiet
-cargo deny --offline --log-level error check licenses bans sources
+# Warnings are printed (two versions of one crate, an allowance no crate needs), not hidden;
+# only errors fail. One line per crate, without the tree of what pulls it in.
+cargo deny --offline check --hide-inclusion-graph licenses bans sources
+# fuzz/Cargo.lock must hold the crates it shares with Cargo.lock at versions Cargo.lock has,
+# so the fuzz targets fuzz what the app ships.
+python3 -I -B tools/fuzz_lock.py
+# The workspace's crates use only the crates their layer allows (docs/architecture.md), and
+# the app's limits of what a person types are the Rust ones.
+python3 -I -B tools/crate_layers.py
+python3 -I -B tools/limits.py
 if [[ $advisories == 1 ]]; then
-    cargo deny --offline --log-level error check advisories
+    cargo deny --offline check --hide-inclusion-graph advisories
+    # The fuzz workspace's own lock: its sources and its known vulnerabilities and yanked
+    # versions (not its licences: libfuzzer-sys is NCSA, and none of it ships). Here only, on
+    # the computer that builds the fuzz targets and so has their crates.
+    cargo deny --offline --manifest-path fuzz/Cargo.toml check --hide-inclusion-graph \
+        sources advisories
 fi
 python3 -I -B tools/beta/test_release.py
 python3 -I -B tools/test_ci.py
 python3 -I -B tools/test_native_build.py
 python3 -I -B tools/test_third_party_notices.py
 python3 -I -B tools/test_desktop_entry.py
+python3 -I -B tools/test_repo_checks.py
 tools/webrtc/test-check-archive.sh
 # The Linux player's HDR tone mapping is plain C++: tested on every system.
 app/packages/fogata_video/linux/test/run_tests.sh
@@ -174,6 +193,18 @@ if [[ $(uname) == Linux ]]; then
         -o "$open_test"
     "$open_test" app/integration_test/clip.mp4 > /dev/null
     rm -f "${open_test:?}"
+    # The same C++ tests again with AddressSanitizer and UndefinedBehaviorSanitizer, any
+    # finding fatal: a read past a buffer or an overflow that happens to give the right answer
+    # above fails here. (The video renderer's runs under ThreadSanitizer in tools/ci.sh.)
+    app/packages/fogata_video/linux/test/run_tests.sh --sanitize
+    sanitize=(-g -O1 -fno-omit-frame-pointer -fsanitize=address,undefined -fno-sanitize-recover=all)
+    c++ -std=c++17 -Wall -Wextra -Werror "${sanitize[@]}" \
+        app/packages/fogata_video/common/test/video_head_test.cpp -o "$head_test"
+    "$head_test" > /dev/null
+    c++ -std=c++17 -Wall -Wextra -Werror "${sanitize[@]}" \
+        app/packages/fogata_video/linux/test/open_video_test.cc -o "$open_test"
+    "$open_test" app/integration_test/clip.mp4 > /dev/null
+    rm -f "${head_test:?}" "${open_test:?}"
 fi
 if [[ $(uname) == Darwin ]]; then
     tools/beta/test-macos-updater.sh

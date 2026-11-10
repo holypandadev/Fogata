@@ -1779,6 +1779,61 @@ impl GroupLog {
             .collect()
     }
 
+    /// Invites `issuer` noted here, still open at `now_ms`, after which a device that managed
+    /// the group was made to stop managing it: it was demoted or removed, or the managers
+    /// were set to the first few (which may leave out some). That device keeps the log as it
+    /// was before, the invite in it, and can answer under the invite's token as the manager
+    /// it is there: the invited device, which knows the group only by the issuer's note of
+    /// the invite, would take that log for the group, and be let in where only that device
+    /// answers. Cancelled by the issuer, the invite brings the invited device a refusal it
+    /// believes from any member of the group. A manager that leaves by itself is not
+    /// counted: where everyone manages, as groups start, every leave would cancel every
+    /// invite. It changes nothing of what the log takes.
+    pub fn invites_a_manager_left_with(
+        &self,
+        issuer: &DevicePublicKey,
+        now_ms: u64,
+    ) -> Vec<[u8; 16]> {
+        let state = self.state();
+        let at: BTreeMap<&EntryHash, usize> = state
+            .applied
+            .iter()
+            .enumerate()
+            .map(|(i, h)| (h, i))
+            .collect();
+        let fewer_managers = state
+            .applied
+            .iter()
+            .rposition(|h| matches!(&self.entries[h].body, Body::SetManagers { first: Some(_) }));
+        let Some(last) = state
+            .manager_losses()
+            .filter(|(device, entry)| {
+                *device != issuer && !matches!(self.entries[*entry].body, Body::Leave)
+            })
+            .filter_map(|(_, entry)| at.get(entry).copied())
+            .chain(fewer_managers)
+            .max()
+        else {
+            return Vec::new();
+        };
+        state.applied[..last]
+            .iter()
+            .map(|h| &self.entries[h])
+            .filter_map(|e| match &e.body {
+                Body::Invite { ticket, .. }
+                    if e.author == *issuer
+                        && state
+                            .open_invites
+                            .get(&ticket.ticket_id)
+                            .is_some_and(|(_, expires)| now_ms <= *expires) =>
+                {
+                    Some(ticket.ticket_id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// What a device that was removed may still be shown: the entry that removed it and
     /// everything before it, in order. Nothing for a device that left by itself or is still
     /// in, and nothing that happened in the group after.
@@ -2006,6 +2061,50 @@ mod tests {
         let state = log.state();
         assert_eq!(state.ladder, [ana.key(), luis.key()]);
         assert!(state.is_manager(&luis.key()));
+    }
+
+    /// A weak key no device has, added as a member by a manager whose version writes it
+    /// anyway (this one does not: nothing seals to it): the log takes it, as every version
+    /// does, and new epochs and removals still go on, with no box for it.
+    #[test]
+    fn a_weak_key_added_as_a_member_keeps_no_epoch_from_starting() {
+        let ana = Device::new();
+        let bea = Device::new();
+        let leo = Device::new();
+        let mut log = GroupLog::create(&ana.id, "g", 1).unwrap();
+        log.add(&ana.id, bea.key(), "bea", 2).unwrap();
+        log.add(&ana.id, leo.key(), "leo", 3).unwrap();
+        let mut small = [0u8; 32];
+        small[0] = 1;
+        let weak = DevicePublicKey::from_bytes(&small).unwrap();
+        assert!(weak.is_weak());
+        assert!(log.add(&ana.id, weak, "nobody", 4).is_err());
+        let (epoch, _) = log.current_secret(&ana.id).unwrap();
+        let sealed = Sealed::seal(&ana.key(), b"anything", &[0; 32]).unwrap();
+        log.append(
+            &ana.id,
+            Body::Add {
+                member: weak,
+                name: "nobody".into(),
+                epoch,
+                secret: sealed,
+            },
+            4,
+        )
+        .unwrap();
+        assert!(log.state().is_member(&weak));
+        let rotated = log.rotate(&ana.id, 5).unwrap();
+        let Body::Rotate { rotation } = &rotated.body else {
+            unreachable!()
+        };
+        assert!(rotation.sealed.iter().all(|(k, _)| *k != weak));
+        assert_eq!(rotation.sealed.len(), 3);
+        log.remove(&ana.id, leo.key(), 6).unwrap();
+        assert!(log.current_keys(&bea.id).is_some());
+        assert!(log.current_keys(&leo.id).is_none());
+        // And the weak key itself goes like any member.
+        log.remove(&ana.id, weak, 7).unwrap();
+        assert!(!log.state().is_member(&weak));
     }
 
     #[test]

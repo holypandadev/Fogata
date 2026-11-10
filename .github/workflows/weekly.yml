@@ -1,0 +1,204 @@
+# Once a week, and by hand, what no push waits for (docs/ci.md, "Every week"):
+#
+#   advisories        cargo deny's RustSec advisories, online, over Cargo.lock and
+#                     fuzz/Cargo.lock: a new advisory against a crate already locked shows
+#                     here even when nothing is pushed.
+#   fuzz              every libFuzzer target of fuzz/ for a while (tools/fuzz.sh --libfuzzer),
+#                     the corpus kept from week to week, findings and logs kept as artifacts.
+#   previous-release  the command line of the last release tag against this commit
+#                     (crates/fogata-core/tests/previous_release.rs): what this version
+#                     writes to a group, the last release must take in.
+#   vendor            each vendored crate against the one published on crates.io
+#                     (tools/vendor_diff.py), and whether crates.io has a newer one. Report only.
+#   webrtc            tools/webrtc/pins.sh against Chrome's Stable channel
+#                     (tools/webrtc/check_stable.py): a warning one milestone behind, a
+#                     failure two behind.
+#
+# Nothing here signs, builds a release or writes to the repository: the token can only read.
+name: Weekly
+
+on:
+  schedule:
+    - cron: "17 4 * * 1" # Mondays, 04:17 UTC
+  workflow_dispatch:
+    inputs:
+      fuzz_minutes:
+        description: Minutes for each fuzz target (24 targets, 4 at a time)
+        default: "8"
+      old_tag:
+        description: Release tag to test against (by default the last one before this commit)
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: weekly-${{ github.ref }}
+  cancel-in-progress: false
+
+# `shell: bash` named makes GitHub run it with pipefail: a script piped into tee still fails
+# the step when it fails.
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: never
+  FOGATA_UPDATE_WEB: "off"
+  # The same dated nightly and cargo-fuzz as .github/workflows/ci.yml.
+  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-01
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  advisories:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2
+      # Online: the database is fetched fresh, and yanked versions are read from crates.io.
+      - name: cargo deny check advisories
+        run: |
+          cargo deny check --hide-inclusion-graph advisories
+          cargo deny --manifest-path fuzz/Cargo.toml check --hide-inclusion-graph advisories
+
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
+            libpipewire-0.3-dev libdbus-1-dev
+      - name: Install the Rust tools
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup toolchain install "$FOGATA_FUZZ_TOOLCHAIN" --profile minimal
+      # Built from source (see ci.yml); the build ci.yml keeps is read here, never written.
+      - name: Restore cargo-fuzz
+        id: cargo-fuzz
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/fogata-cargo-fuzz
+          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install cargo-fuzz
+        run: |
+          root=$HOME/.cache/fogata-cargo-fuzz
+          if [[ ! -x $root/bin/cargo-fuzz ]]; then
+              cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --root "$root"
+          fi
+          echo "$root/bin" >> "$GITHUB_PATH"
+      # What libFuzzer learnt in earlier weeks. Written only by this workflow's own runs on
+      # the default branch (a schedule or a run by hand), never by a pull request.
+      - name: Restore the corpus
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+          restore-keys: fuzz-corpus-
+      - name: tools/fuzz.sh --libfuzzer
+        env:
+          JOBS: "4"
+          MINUTES: ${{ inputs.fuzz_minutes || '8' }}
+        run: |
+          [[ $MINUTES =~ ^[0-9]+$ ]] || { echo "::error::fuzz_minutes must be a number"; exit 2; }
+          tools/fuzz.sh --libfuzzer "$MINUTES"
+      - name: Keep the corpus
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ github.run_id }}
+      - name: Keep the findings and logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-findings
+          path: |
+            fuzz/artifacts
+            fuzz/logs
+          if-no-files-found: ignore
+          retention-days: 30
+
+  previous-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Install the system packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
+            libpipewire-0.3-dev libdbus-1-dev
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+      # The last release tag before this commit (on a release's own commit, the one before
+      # it), or the one asked for.
+      - name: Find the previous release
+        id: tag
+        env:
+          ASKED: ${{ inputs.old_tag }}
+        run: |
+          git fetch --tags --force origin
+          if [[ -n $ASKED ]]; then
+              tag=$ASKED
+          else
+              tag=$(git describe --tags --abbrev=0 --match 'v*' "$(git rev-parse HEAD)^")
+          fi
+          git rev-parse --verify "refs/tags/$tag^{commit}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Testing against $tag" >> "$GITHUB_STEP_SUMMARY"
+      # In a worktree of its own, with its own Cargo.lock, toolchain and target folder.
+      - name: Build the command line of ${{ steps.tag.outputs.tag }}
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          git worktree add --detach "$RUNNER_TEMP/old" "refs/tags/$TAG"
+          cd "$RUNNER_TEMP/old"
+          rustup show active-toolchain || rustup toolchain install
+          CARGO_TARGET_DIR=$RUNNER_TEMP/old-target cargo build --release --locked -p fogata
+          echo "FOGATA_OLD_CLI=$RUNNER_TEMP/old-target/release/fogata" >> "$GITHUB_ENV"
+      - name: This commit against ${{ steps.tag.outputs.tag }}
+        run: cargo test --locked -p fogata-core --test previous_release -- --ignored
+
+  vendor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: tools/vendor_diff.py
+        run: |
+          python3 -I -B tools/vendor_diff.py --diff "$RUNNER_TEMP/vendor.diff" | tee report.txt
+          { echo '```'; cat report.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vendor-diff
+          path: ${{ runner.temp }}/vendor.diff
+          retention-days: 30
+
+  webrtc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: tools/webrtc/check_stable.py
+        run: python3 -I -B tools/webrtc/check_stable.py | tee -a "$GITHUB_STEP_SUMMARY"

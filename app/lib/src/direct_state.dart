@@ -105,6 +105,11 @@ class DirectChats extends Piece {
   /// it is there again on coming back to the chat.
   final Map<String, String> drafts = {};
 
+  /// Pictures of the chat shown read for the screen, by path (`direct.dart` reads and
+  /// trims them): only that chat's, and only of files still in it, since some were
+  /// sealed on disk and a message that disappeared should not stay in memory.
+  final Map<String, Uint8List> pictures = {};
+
   /// What the chats take here, with the settings, once read.
   dm.UiDirectStorage? storage;
 
@@ -220,11 +225,17 @@ class DirectChats extends Piece {
   Future<void> _loadPage({bool older = false}) async {
     final friend = open;
     if (friend == null) return;
+    // Numbered, as the room's refreshes are: one asked earlier that answers later (a send
+    // and an event at once, or a page read before more was asked for) is older news.
+    final asked = ++_pageAsked;
     try {
-      final loaded = await dm.directChat(deviceId: friend, limit: _limit);
+      final loaded = await loadChat(deviceId: friend, limit: _limit);
       if (open != friend) return;
+      if (asked < _pageShown) return;
+      _pageShown = asked;
       if (!older) _announceNew(page, loaded);
       page = loaded;
+      _keepPicturesOf(loaded);
       unawaited(voice.chatRead(friend, loaded));
     } catch (_) {
       return;
@@ -235,6 +246,27 @@ class DirectChats extends Piece {
       } catch (_) {}
     }
   }
+
+  /// Lets go of the pictures read for files no longer in [shown]: gone with their
+  /// message's timer, or deleted.
+  void _keepPicturesOf(dm.UiDirectPage shown) {
+    if (pictures.isEmpty) return;
+    final paths = {
+      for (final item in [...shown.items, ...shown.pinned])
+        for (final f in item.files) ?f.path,
+    };
+    pictures.removeWhere((path, _) => !paths.contains(path));
+  }
+
+  int _pageAsked = 0, _pageShown = 0;
+
+  /// Reads a chat's newest items; the tests put their own in its place.
+  @visibleForTesting
+  Future<dm.UiDirectPage> Function({
+    required String deviceId,
+    required int limit,
+  })
+  loadChat = dm.directChat;
 
   /// Tells a screen reader the friend's messages that came into the chat on screen
   /// since [before].
@@ -248,6 +280,7 @@ class DirectChats extends Piece {
     if (open != friend) {
       page = null;
       _limit = 200;
+      pictures.clear();
     }
     _bannersRead.remove(friend);
     open = friend;
@@ -489,6 +522,7 @@ class DirectChats extends Piece {
   /// Removes a chat's pictures, videos and files from this computer.
   Future<void> clearFiles(String friend) async {
     await app.attempt(() => dm.clearDirectFiles(deviceId: friend));
+    if (open == friend) pictures.clear();
     cleared.add(friend);
     await Future.wait([refresh(), loadStorage()]);
   }
@@ -496,6 +530,7 @@ class DirectChats extends Piece {
   /// Deletes a chat with someone who is no longer a friend, on this computer.
   Future<void> delete(String friend) async {
     await app.attempt(() => dm.deleteDirectChat(deviceId: friend));
+    if (open == friend) pictures.clear();
     drafts.remove(friend);
     outgoing.remove(friend);
     if (open == friend) {

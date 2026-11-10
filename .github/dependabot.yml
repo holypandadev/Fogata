@@ -1,0 +1,46 @@
+# Pull requests that move the pinned dependencies forward, once a week, one per ecosystem
+# (grouped), so that nothing ages unseen: the actions the workflows pin by commit, the
+# crates of Cargo.lock and fuzz/Cargo.lock, and the Dart packages of the app. Security
+# updates come as they are published, apart from this schedule, once the repository's
+# settings turn them on. Each pull request runs the CI like any other.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: cargo
+    directories:
+      - /
+      - /fuzz
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      crates:
+        patterns: ["*"]
+    # The crates Fogata keeps a fork of (vendor/, by [patch.crates-io]) move by hand, with
+    # their FOGATA.md (tools/vendor_diff.py says when crates.io has a newer one).
+    ignore:
+      - dependency-name: libp2p-quic
+      - dependency-name: libp2p-mdns
+      - dependency-name: libp2p-identify
+      - dependency-name: turn
+      - dependency-name: spake2
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: pub
+    directory: /app
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      dart:
+        patterns: ["*"]
+    open-pull-requests-limit: 5

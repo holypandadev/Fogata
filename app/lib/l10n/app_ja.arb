@@ -779,8 +779,6 @@
   "directCannotPlay": "このパソコンではこの動画を再生できません。",
   "directPause": "一時停止",
   "directPlay": "再生",
-  "directSoundOn": "音声をオン",
-  "directMute": "ミュート",
   "directRemoveFilesTitle": "{n, plural, =1{ファイルを取り除きますか？} other{{n}個のファイルを取り除きますか？}}",
   "directRemoveFilesText": "このメッセージから取り除かれます。パソコン上のファイルはそのまま残ります。",
   "directDraftKept": "書きかけの内容は、送信できるようになるまでここに残ります。",

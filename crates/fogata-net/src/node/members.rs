@@ -16,7 +16,6 @@ use fogata_state::{Entry, EntryHash, Ticket};
 use libp2p::{PeerId, request_response};
 
 use super::early::early_profile;
-use super::group_changes::banner_key;
 use super::member_reach::lan_quic;
 use super::proofs::MAX_TAGS;
 use super::spread::Forward;
@@ -51,7 +50,7 @@ fn hashes(list: &[serde_bytes::ByteBuf]) -> Vec<EntryHash> {
 }
 
 /// About what a sealed group message takes in an answer.
-fn wire_bytes(message: &fogata_proto::WireMessage) -> usize {
+pub(super) fn wire_bytes(message: &fogata_proto::WireMessage) -> usize {
     message.ciphertext.len()
         + message.signature.len()
         + message.nonce.len()
@@ -174,6 +173,22 @@ impl Node {
             tracing::debug!("{} asked for more than it may now", short_peer(&peer));
             None
         }
+    }
+
+    /// Whether a group's banner or picture record of `bytes` from member `peer` is looked at
+    /// now (see `limits::GROUP_RECORD_BYTES_BURST`).
+    fn take_group_record(&mut self, peer: PeerId, bytes: usize) -> bool {
+        let Some(device) = self.members.get(&peer).map(|m| m.device) else {
+            return false;
+        };
+        let taken = self.limits.take_group_record(device, bytes, Instant::now());
+        if !taken {
+            tracing::debug!(
+                "{} sent more group records than it may now",
+                short_peer(&peer)
+            );
+        }
+        taken
     }
 
     /// Charges member `device` for an answer of about `bytes` made for it.
@@ -328,24 +343,16 @@ impl Node {
                 } else {
                     slot.roster_heard.insert(peer);
                 }
-                // Banners only to versions that say they keep them.
+                // Banners only to versions that say they keep them. Each costs this device
+                // up to a few hundred KiB of upload: charged to the member, and sent once
+                // per record however often it asks (see `RecordSent`).
+                let mut served = 0;
                 if let Some(banner) = banner
                     && let Some(slot) = self.groups.get_mut(&group)
                 {
                     slot.banner_peers.insert(peer);
-                    let digest = banner_key(&slot.ctx.banner_digest());
-                    if banner.as_slice() != slot.ctx.banner_digest()
-                        && slot.banner_refused.get(&peer) != Some(&digest)
-                        && let Some(ours) = slot.ctx.encoded_banner()
-                    {
-                        self.request(
-                            peer,
-                            MemberRequest::GroupBanner {
-                                group_id: group_id.clone(),
-                                banner: ours,
-                            },
-                            Pending::Banner(group, digest),
-                        );
+                    if banner.as_slice() != slot.ctx.banner_digest() {
+                        served += self.send_banner_to(group, &[peer]);
                     }
                 }
                 // Picture records the same way.
@@ -353,45 +360,24 @@ impl Node {
                     && let Some(slot) = self.groups.get_mut(&group)
                 {
                     slot.picture_peers.insert(peer);
-                    let digest = banner_key(&slot.ctx.picture_digest());
-                    if picture.as_slice() != slot.ctx.picture_digest()
-                        && slot.picture_refused.get(&peer) != Some(&digest)
-                        && let Some(ours) = slot.ctx.encoded_picture()
-                    {
-                        self.request(
-                            peer,
-                            MemberRequest::GroupPicture {
-                                group_id: group_id.clone(),
-                                picture: ours,
-                            },
-                            Pending::Picture(group, digest),
-                        );
+                    if picture.as_slice() != slot.ctx.picture_digest() {
+                        served += self.send_picture_to(group, &[peer]);
                     }
                 }
                 let Some(slot) = self.groups.get(&group) else {
                     return MemberResponse::Refused;
                 };
+                let heads_digest = slot.ctx.heads_digest();
                 // The same log as here: it has this device's leave.
                 if slot.leaving.is_some()
-                    && heads
-                        .as_ref()
-                        .is_some_and(|h| h.as_slice() == slot.ctx.heads_digest())
+                    && heads.as_ref().is_some_and(|h| h.as_slice() == heads_digest)
                 {
                     self.leave_taken(group);
                     return MemberResponse::Refused;
                 }
-                let mut served = 0;
-                if heads.is_some_and(|h| h.as_slice() != slot.ctx.heads_digest()) {
-                    let have = bytes(slot.ctx.hashes());
-                    served += have.len() * 32;
-                    self.request(
-                        peer,
-                        MemberRequest::Sync {
-                            group_id: group_id.clone(),
-                            have,
-                        },
-                        Pending::Sync(group),
-                    );
+                // One sync at a time with each member: the answer asks for the next.
+                if heads.is_some_and(|h| h.as_slice() != heads_digest) {
+                    served += self.request_sync(peer, group);
                 }
                 let Some(slot) = self.groups.get(&group) else {
                     return MemberResponse::Refused;
@@ -454,6 +440,15 @@ impl Node {
                     return MemberResponse::Refused;
                 }
                 slot.banner_peers.insert(peer);
+                // Past the member's budget it is not looked at, but not refused either: an
+                // earlier version that hears a refusal would not send this banner again
+                // while connected. It comes again with the next roster that differs.
+                if !self.take_group_record(peer, banner.len()) {
+                    return MemberResponse::Ack;
+                }
+                let Some(slot) = self.groups.get_mut(&group) else {
+                    return MemberResponse::Refused;
+                };
                 let Ok(banner) = fogata_state::GroupBanner::decode(&banner) else {
                     return MemberResponse::Refused;
                 };
@@ -473,6 +468,13 @@ impl Node {
                     return MemberResponse::Refused;
                 }
                 slot.picture_peers.insert(peer);
+                // As a banner past the budget is.
+                if !self.take_group_record(peer, picture.len()) {
+                    return MemberResponse::Ack;
+                }
+                let Some(slot) = self.groups.get_mut(&group) else {
+                    return MemberResponse::Refused;
+                };
                 let Ok(picture) = fogata_state::GroupPicture::decode(&picture) else {
                     return MemberResponse::Refused;
                 };
@@ -822,6 +824,12 @@ impl Node {
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
+        // Whatever the answer, the next sync with that member may go.
+        if let Pending::Sync(group) = kind
+            && let Some(slot) = self.groups.get_mut(&group)
+        {
+            slot.syncing.remove(&peer);
+        }
         match (kind, response) {
             (Pending::Challenge(group, challenge), MemberResponse::Proof(wire)) => {
                 self.on_proof(peer, group, challenge, &wire)
@@ -874,7 +882,6 @@ impl Node {
                 // entries, all of them within the member's budget and none refused, the next
                 // is asked for at once rather than at the next roster.
                 let again = !new.is_empty() && entries.len() == sent && refused.is_empty();
-                let have = again.then(|| bytes(slot.ctx.hashes()));
                 // As much as one message carries: the rest goes at the next sync.
                 let want = hashes(&want);
                 let wanted: Vec<SharedBytes> = slot
@@ -895,15 +902,8 @@ impl Node {
                         Pending::Push,
                     );
                 }
-                if let Some(have) = have {
-                    self.request(
-                        peer,
-                        MemberRequest::Sync {
-                            group_id: group.as_bytes().to_vec(),
-                            have,
-                        },
-                        Pending::Sync(group),
-                    );
+                if again {
+                    self.request_sync(peer, group);
                 }
             }
             (Pending::Join(group), MemberResponse::JoinOffer { heads }) => {
@@ -1029,6 +1029,7 @@ impl Node {
             // sent this one again at every roster.
             (Pending::Banner(group, digest), response) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.banner_answered(peer, digest);
                     if matches!(response, MemberResponse::Refused) {
                         tracing::debug!("{} refused the group's banner", short_peer(&peer));
                         slot.banner_refused.insert(peer, digest);
@@ -1039,6 +1040,7 @@ impl Node {
             }
             (Pending::Picture(group, digest), response) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.picture_answered(peer, digest);
                     if matches!(response, MemberResponse::Refused) {
                         tracing::debug!("{} refused the group's picture", short_peer(&peer));
                         slot.picture_refused.insert(peer, digest);
@@ -1124,6 +1126,74 @@ mod tests {
         assert!(answered <= most, "{answered} answers");
         assert!(answered >= most / 2, "only {answered} answers");
         assert!(other);
+        node.shutdown().await.unwrap();
+    }
+
+    /// The member requests of `kind` to `peer` on their way or waiting their turn.
+    fn requests_of(n: &Node, peer: PeerId, kind: impl Fn(&Pending) -> bool) -> usize {
+        let on_its_way = n
+            .pending
+            .values()
+            .filter(|(p, k)| *p == peer && kind(k))
+            .count();
+        let waiting = n
+            .outbox
+            .get(&peer)
+            .map_or(0, |o| o.waiting.iter().filter(|(_, k)| kind(k)).count());
+        on_its_way + waiting
+    }
+
+    /// A member that asks for rosters again and again, each time naming a banner, a picture
+    /// record and heads other than this device's, is sent the banner and the picture once
+    /// and one sync at a time, not one of each per ask: each banner is up to a few hundred
+    /// KiB of this device's upload. Once a sync is answered, the next ask gets the next.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_asking_rosters_over_and_over_is_sent_the_banner_once() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_banner(Vec::new(), now_ms()).unwrap();
+            slot.ctx.set_picture(Vec::new(), now_ms()).unwrap();
+            let ask = |i: u8| MemberRequest::Roster {
+                group_id: group.as_bytes().to_vec(),
+                heads: Some(serde_bytes::ByteBuf::from(vec![i; 16])),
+                banner: Some(serde_bytes::ByteBuf::from(vec![i; 16])),
+                picture: Some(serde_bytes::ByteBuf::from(vec![i; 16])),
+            };
+            for i in 0..100 {
+                assert!(matches!(
+                    n.on_request(bea, ask(i)),
+                    MemberResponse::Roster { .. }
+                ));
+            }
+            let counts = |n: &Node| {
+                (
+                    requests_of(n, bea, |k| matches!(k, Pending::Banner(..))),
+                    requests_of(n, bea, |k| matches!(k, Pending::Picture(..))),
+                    requests_of(n, bea, |k| matches!(k, Pending::Sync(_))),
+                )
+            };
+            let before = counts(n);
+            // The sync is answered, with nothing: the next ask syncs again, and the banner,
+            // answered too, is still not sent again.
+            let digest =
+                super::super::group_changes::banner_key(&n.groups[&group].ctx.banner_digest());
+            n.on_response(
+                bea,
+                Pending::Sync(group),
+                MemberResponse::SyncReply {
+                    entries: Vec::new(),
+                    want: Vec::new(),
+                },
+            );
+            n.on_response(bea, Pending::Banner(group, digest), MemberResponse::Ack);
+            n.on_request(bea, ask(200));
+            (before, counts(n))
+        })
+        .await;
+        assert_eq!(found, ((1, 1, 1), (1, 1, 2)));
         node.shutdown().await.unwrap();
     }
 

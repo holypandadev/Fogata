@@ -308,6 +308,7 @@ pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents
         mdns_dialling: HashMap::new(),
         mdns_retry: HashMap::new(),
         quic_tried: HashSet::new(),
+        quic_dialled: HashMap::new(),
         lan_redialled: HashMap::new(),
         peer_listening: HashMap::new(),
         member_lan: HashMap::new(),
@@ -364,6 +365,8 @@ pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents
         public_contact: None,
         failed_public_dials: 0,
         seen: HashSet::new(),
+        passed_on: HashMap::new(),
+        passed_on_order: VecDeque::new(),
         seen_order: VecDeque::new(),
         provided: (Vec::new(), None),
         announce_retry: (None, 0),
@@ -510,6 +513,8 @@ enum Pending {
 struct Outbox {
     in_flight: usize,
     waiting: VecDeque<(MemberRequest, Pending)>,
+    /// About the bytes of the requests in `waiting` (see `outbox::MAX_WAITING_BYTES`).
+    waiting_bytes: usize,
     /// A direct chat's messages waiting for the ones before them: they go one request at a
     /// time, since requests on their way together can arrive in any order.
     direct: VecDeque<MemberRequest>,
@@ -560,6 +565,54 @@ struct PartsIn {
     count: u32,
     bytes: usize,
     parts: BTreeMap<u32, Vec<serde_bytes::ByteBuf>>,
+}
+
+/// A group's banner or picture record sent to a member: its digest, when it went, and
+/// whether it was answered. Each is up to a few hundred KiB, and a member's roster ask names
+/// the digest it has: a member could otherwise name another one at every ask and have this
+/// device upload the record for each.
+#[derive(Clone, Copy, Debug)]
+struct RecordSent {
+    digest: [u8; 32],
+    at: Instant,
+    answered: bool,
+}
+
+/// How long a record sent to a member is not sent to it again with the same digest: a
+/// member that took it has it, and one whose log was behind (the record's author not yet a
+/// manager there) gets it again a little later.
+const RECORD_AGAIN: Duration = Duration::from_secs(5 * 60);
+/// How long a request is taken to be still on its way at most: past the member protocol's
+/// request timeout (see behaviour.rs), whatever happened to it.
+const ON_ITS_WAY_AT_MOST: Duration = Duration::from_secs(60);
+
+impl RecordSent {
+    /// One sent now, not answered yet.
+    fn now(digest: [u8; 32]) -> Self {
+        Self {
+            digest,
+            at: Instant::now(),
+            answered: false,
+        }
+    }
+
+    /// Whether a record with `digest` may go to a member that was sent `sent`, `refused`
+    /// being what it refused (an earlier version that takes only smaller ones).
+    fn may_send(sent: Option<&Self>, refused: Option<&[u8; 32]>, digest: &[u8; 32]) -> bool {
+        if refused == Some(digest) {
+            return false;
+        }
+        match sent {
+            Some(s) if !s.answered && s.at.elapsed() < ON_ITS_WAY_AT_MOST => false,
+            Some(s) => s.digest != *digest || s.at.elapsed() >= RECORD_AGAIN,
+            None => true,
+        }
+    }
+
+    /// Whether what is kept of a record sent still counts.
+    fn counts(&self) -> bool {
+        self.at.elapsed() < RECORD_AGAIN
+    }
 }
 
 /// One group the node runs.
@@ -616,6 +669,14 @@ struct GroupSlot {
     /// The picture record (its digest) each member refused: it is not sent the same one
     /// again while it stays connected.
     picture_refused: HashMap<PeerId, [u8; 32]>,
+    /// The banner and the picture record last sent to each member (see [`RecordSent`]): a
+    /// member that asks again and again with a digest of its own gets them once, not once
+    /// per ask.
+    banner_sent: HashMap<PeerId, RecordSent>,
+    picture_sent: HashMap<PeerId, RecordSent>,
+    /// Members a `Sync` of this group is on its way to, and since when: one at a time to
+    /// each, however many rosters ask for one meanwhile (the answer asks for the next).
+    syncing: HashMap<PeerId, Instant>,
     /// The members each member said it is directly connected to (its roster), and when.
     rosters: HashMap<PeerId, (HashSet<PeerId>, Instant)>,
     /// Members that refused this device's last ask for their roster, not having counted it
@@ -659,6 +720,34 @@ struct GroupSlot {
 }
 
 impl GroupSlot {
+    /// The banner with `digest` sent to member `peer` is no longer on its way: answered, or
+    /// lost.
+    fn banner_answered(&mut self, peer: PeerId, digest: [u8; 32]) {
+        if let Some(sent) = self.banner_sent.get_mut(&peer)
+            && sent.digest == digest
+        {
+            sent.answered = true;
+        }
+    }
+
+    /// The picture record with `digest` sent to member `peer` is no longer on its way:
+    /// answered, or lost.
+    fn picture_answered(&mut self, peer: PeerId, digest: [u8; 32]) {
+        if let Some(sent) = self.picture_sent.get_mut(&peer)
+            && sent.digest == digest
+        {
+            sent.answered = true;
+        }
+    }
+
+    /// Lets go of what is kept of records sent and syncs on their way that no longer count.
+    fn forget_sent(&mut self) {
+        self.banner_sent.retain(|_, s| s.counts());
+        self.picture_sent.retain(|_, s| s.counts());
+        self.syncing
+            .retain(|_, at| at.elapsed() < ON_ITS_WAY_AT_MOST);
+    }
+
     /// `peer` is no longer a manager this device asked to let it in: what it sent of the
     /// log goes with it.
     fn stop_join_with(&mut self, peer: &PeerId) {
@@ -699,6 +788,9 @@ impl GroupSlot {
             banner_refused: HashMap::new(),
             picture_peers: HashSet::new(),
             picture_refused: HashMap::new(),
+            banner_sent: HashMap::new(),
+            picture_sent: HashMap::new(),
+            syncing: HashMap::new(),
             rosters: HashMap::new(),
             roster_refused: HashSet::new(),
             roster_heard: HashSet::new(),
@@ -799,6 +891,8 @@ struct Node {
     /// Members this node already tried to reach over QUIC because their only connection
     /// could not carry datagrams (media needs them).
     quic_tried: HashSet<PeerId>,
+    /// When a QUIC dial for each member's media last went (see `links::QUIC_REDIAL`).
+    quic_dialled: HashMap<PeerId, Instant>,
     /// When the local addresses each member sent were last dialled anew.
     lan_redialled: HashMap<PeerId, Instant>,
     /// Addresses peers said they listen on (identify), for reaching members over QUIC.
@@ -918,6 +1012,10 @@ struct Node {
     /// Dials to public addresses that failed since then.
     failed_public_dials: usize,
     seen: HashSet<[u8; 16]>,
+    /// The latest spread messages this device passed on, by id (see `spread::PassedOn`),
+    /// oldest first in `passed_on_order`.
+    passed_on: HashMap<[u8; 16], spread::PassedOn>,
+    passed_on_order: VecDeque<[u8; 16]>,
     seen_order: VecDeque<[u8; 16]>,
     /// Keys we announce under, and when we last did.
     provided: (Vec<RecordKey>, Option<Instant>),

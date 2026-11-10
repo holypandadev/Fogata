@@ -779,8 +779,6 @@
   "directCannotPlay": "Dieser Computer kann dieses Video nicht abspielen.",
   "directPause": "Pause",
   "directPlay": "Abspielen",
-  "directSoundOn": "Ton an",
-  "directMute": "Stummschalten",
   "directRemoveFilesTitle": "{n, plural, =1{Datei entfernen?} other{Die {n} Dateien entfernen?}}",
   "directRemoveFilesText": "Sie werden aus dieser Nachricht genommen. Die Dateien auf deinem Computer bleiben unverändert.",
   "directDraftKept": "Was du geschrieben hast, bleibt hier, bis du es senden kannst.",

@@ -64,8 +64,11 @@ the start) and its number.
 ## Coverage-guided, with libFuzzer
 
 `fuzz/` holds one libFuzzer target per entry of `TARGETS`. It is a workspace of its own, with
-its own `Cargo.lock`: the main workspace, `tools/check.sh` and `cargo deny` never see it or
-`libfuzzer-sys`. Its `[patch.crates-io]` must name every patch of the main `Cargo.toml` (the
+its own `Cargo.lock`, which the main workspace never sees. `tools/check.sh` checks that every
+crate of that lock the main lock has too is there at a version the main lock has
+(`tools/fuzz_lock.py`), so the targets fuzz the crates the app ships, and runs `cargo deny`
+over it too (its sources, the RustSec advisories and yanked versions; not its licences:
+`libfuzzer-sys` is NCSA, and nothing of `fuzz/` ships). Its `[patch.crates-io]` must name every patch of the main `Cargo.toml` (the
 vendored `libp2p-quic`, `libp2p-mdns`, `turn` and `spake2`), or the targets would not
 compile, or would fuzz other code than the app ships: `tools/check.sh` fails when the two
 lists differ, and `tools/ci.sh` builds the targets (`cargo +nightly fuzz build`) without
@@ -73,6 +76,10 @@ running them. It needs the nightly toolchain and cargo-fuzz, installed once:
 
     rustup toolchain install nightly --profile minimal
     cargo install cargo-fuzz
+
+`FOGATA_FUZZ_TOOLCHAIN` names another nightly for `tools/ci.sh` and `tools/fuzz.sh` (by
+default `nightly`); GitHub's jobs set it to a dated one (`.github/workflows/ci.yml`), moved
+forward by hand, so a new nightly never breaks a run on its own.
 
 Then:
 

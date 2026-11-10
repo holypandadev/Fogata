@@ -181,6 +181,29 @@ pub(super) const SERVED_LEAST: usize = 4 * 1024;
 /// video's first picture (64 KiB, as base64 in the payload).
 pub(super) const MAX_GROUP_MESSAGE_BYTES: usize = 192 * 1024;
 
+/// A group's banners and picture records one member may hand this device, in bytes (each
+/// counts at least [`GROUP_RECORD_LEAST`]), at once and each second after. Each is decoded,
+/// hashed and its signature checked on the node's one task before it is known whether it is
+/// newer than the one here, and a banner is up to 550 KiB: a member could otherwise keep
+/// the loop busy with them at the speed of its link. A burst covers a member that comes back
+/// with a new banner and picture for each of a few dozen groups; honest ones change rarely.
+const GROUP_RECORD_BYTES_BURST: f64 = 16.0 * 1024.0 * 1024.0;
+const GROUP_RECORD_BYTES_PER_SECOND: f64 = 64.0 * 1024.0;
+const GROUP_RECORD_LEAST: usize = 4 * 1024;
+
+/// Hellos one friend's device may send while online, at once and each second after: an
+/// honest one says hello once per connection, and each answer is sealed and signed.
+const FRIEND_HELLO_BURST: f64 = 8.0;
+const FRIEND_HELLOS_PER_SECOND: f64 = 0.1;
+/// This device's profile (up to 64 KiB) goes in an answer to a friend's hello at most this
+/// often to each friend: a friend saying it has an older one over and over would otherwise
+/// pull it again with each hello.
+const HELLO_PROFILE_AGAIN: Duration = Duration::from_secs(60);
+/// Groups and direct chats one friend's device may offer, in parts, at once and each second
+/// after: each is judged off the loop and may become an event for the application.
+const FRIEND_OFFER_BURST: f64 = 64.0;
+const FRIEND_OFFERS_PER_SECOND: f64 = 1.0;
+
 /// Peers new to this device that mDNS may tell of, from one address on the local network
 /// and from all of them: a burst, then a few each minute. Each is dialled and asked who it
 /// is, and anyone there can make up any number; a home or an office has a few devices.
@@ -241,6 +264,27 @@ impl Bucket {
         self.tokens = (self.tokens + elapsed * per_second).min(burst);
         self.at = now;
     }
+}
+
+/// Takes one from `key`'s bucket in `buckets`, kept up to 1024 of them (those full again go
+/// first).
+fn take_keyed<K: Hash + Eq>(
+    buckets: &mut HashMap<K, Bucket>,
+    key: K,
+    now: Instant,
+    burst: f64,
+    per_second: f64,
+) -> bool {
+    if buckets.len() > 1024 {
+        buckets.retain(|_, bucket| {
+            bucket.refill(now, burst, per_second);
+            bucket.tokens < burst
+        });
+    }
+    buckets
+        .entry(key)
+        .or_insert_with(|| Bucket::full(burst, now))
+        .take(now, burst, per_second)
 }
 
 /// Who a budget is kept for: a device once it is known (a member or a friend), so that
@@ -373,6 +417,10 @@ pub(super) struct Limits {
     author_messages: HashMap<DevicePublicKey, (Bucket, Bucket)>,
     room_logs: HashMap<Sender, Bucket>,
     served: HashMap<DevicePublicKey, Bucket>,
+    group_records: HashMap<DevicePublicKey, Bucket>,
+    friend_hellos: HashMap<DevicePublicKey, Bucket>,
+    hello_profiles: HashMap<DevicePublicKey, Instant>,
+    friend_offers: HashMap<DevicePublicKey, Bucket>,
     friend_updates: Held<(DevicePublicKey, u8), FriendUpdate>,
     member_profiles: Held<DevicePublicKey, Profile>,
     /// Animations of a picture or banner, from friends and members alike.
@@ -532,6 +580,72 @@ impl Limits {
             .or_insert_with(|| Bucket::full(SERVED_BYTES_BURST, now));
         bucket.refill(now, SERVED_BYTES_BURST, SERVED_BYTES_PER_SECOND);
         bucket.tokens = (bucket.tokens - bytes.max(SERVED_LEAST) as f64).max(-SERVED_BYTES_BURST);
+    }
+
+    /// Whether a group's banner or picture record of `bytes` that member `device` handed
+    /// over is looked at now (see [`GROUP_RECORD_BYTES_BURST`]).
+    pub(super) fn take_group_record(
+        &mut self,
+        device: DevicePublicKey,
+        bytes: usize,
+        now: Instant,
+    ) -> bool {
+        if self.group_records.len() > 1024 {
+            self.group_records.retain(|_, bucket| {
+                bucket.refill(now, GROUP_RECORD_BYTES_BURST, GROUP_RECORD_BYTES_PER_SECOND);
+                bucket.tokens < GROUP_RECORD_BYTES_BURST
+            });
+        }
+        self.group_records
+            .entry(device)
+            .or_insert_with(|| Bucket::full(GROUP_RECORD_BYTES_BURST, now))
+            .take_cost(
+                bytes.max(GROUP_RECORD_LEAST) as f64,
+                now,
+                GROUP_RECORD_BYTES_BURST,
+                GROUP_RECORD_BYTES_PER_SECOND,
+            )
+    }
+
+    /// Whether a hello from the friend `device`, online already, is answered now.
+    pub(super) fn take_friend_hello(&mut self, device: DevicePublicKey, now: Instant) -> bool {
+        take_keyed(
+            &mut self.friend_hellos,
+            device,
+            now,
+            FRIEND_HELLO_BURST,
+            FRIEND_HELLOS_PER_SECOND,
+        )
+    }
+
+    /// Whether this device's profile goes in an answer to a hello of the friend `device`
+    /// now (see [`HELLO_PROFILE_AGAIN`]); if so, it counts as sent.
+    pub(super) fn hello_profile(&mut self, device: DevicePublicKey, now: Instant) -> bool {
+        if self.hello_profiles.len() > 1024 {
+            self.hello_profiles
+                .retain(|_, at| now.saturating_duration_since(*at) < HELLO_PROFILE_AGAIN);
+        }
+        if self
+            .hello_profiles
+            .get(&device)
+            .is_some_and(|at| now.saturating_duration_since(*at) < HELLO_PROFILE_AGAIN)
+        {
+            return false;
+        }
+        self.hello_profiles.insert(device, now);
+        true
+    }
+
+    /// Whether a group or direct chat offered by the friend `device` (or a part of one) is
+    /// looked at now.
+    pub(super) fn take_friend_offer(&mut self, device: DevicePublicKey, now: Instant) -> bool {
+        take_keyed(
+            &mut self.friend_offers,
+            device,
+            now,
+            FRIEND_OFFER_BURST,
+            FRIEND_OFFERS_PER_SECOND,
+        )
     }
 
     /// Whether a step of a direct call from the friend `device` is taken now.
@@ -778,6 +892,51 @@ mod tests {
     use fogata_crypto::DeviceIdentity;
 
     use super::*;
+
+    /// A member handing over banners again and again has them looked at up to its budget
+    /// in bytes, then a few each second; another member still has its own.
+    #[test]
+    fn a_member_s_banners_are_looked_at_up_to_a_budget_in_bytes() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        let bea = DeviceIdentity::generate().unwrap().public_key();
+        let cai = DeviceIdentity::generate().unwrap().public_key();
+        let banner = 512 * 1024;
+        let taken = (0..1000)
+            .filter(|_| limits.take_group_record(bea, banner, start))
+            .count();
+        assert_eq!(taken, GROUP_RECORD_BYTES_BURST as usize / banner);
+        assert!(limits.take_group_record(cai, banner, start));
+        assert!(!limits.take_group_record(bea, banner, start + Duration::from_secs(1)));
+        assert!(limits.take_group_record(bea, banner, start + Duration::from_secs(8)));
+        // Small ones count as at least a few KiB each.
+        let taken = (0..100_000)
+            .filter(|_| limits.take_group_record(cai, 10, start))
+            .count();
+        assert!(taken <= GROUP_RECORD_BYTES_BURST as usize / GROUP_RECORD_LEAST);
+    }
+
+    /// A friend saying hello again and again is answered a few times, then one every few
+    /// seconds, and gets this device's profile once a minute; its offers are bounded too.
+    #[test]
+    fn a_friend_saying_hello_over_and_over_is_answered_a_few_times() {
+        let mut limits = Limits::default();
+        let start = Instant::now();
+        let bea = DeviceIdentity::generate().unwrap().public_key();
+        let answered = (0..1000)
+            .filter(|_| limits.take_friend_hello(bea, start))
+            .count();
+        assert_eq!(answered, FRIEND_HELLO_BURST as usize);
+        assert!(limits.take_friend_hello(bea, start + Duration::from_secs(10)));
+        let profiles = (0..100)
+            .filter(|i| limits.hello_profile(bea, start + Duration::from_secs(*i)))
+            .count();
+        assert_eq!(profiles, 2);
+        let offers = (0..1000)
+            .filter(|_| limits.take_friend_offer(bea, start))
+            .count();
+        assert_eq!(offers, FRIEND_OFFER_BURST as usize);
+    }
 
     #[test]
     fn mdns_tells_of_a_few_new_peers_from_each_address_and_in_all() {
