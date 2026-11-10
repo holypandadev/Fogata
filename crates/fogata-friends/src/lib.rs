@@ -54,6 +54,6 @@ pub use profile::{
 pub use secret::FriendSecret;
 pub use transfer::{
     CodeProblem, FrameOpener, FrameSealer, MAX_FAILED_TRANSFER_RUNS, ReceiverRun, RunError,
-    RunKeys, RunReply, RunStart, SenderRun, TRANSFER_CODE_LIFETIME_MS, TransferCode, run_reply,
-    run_start,
+    RunKeys, RunReply, RunStart, SenderProven, SenderRun, TRANSFER_CODE_LIFETIME_MS, TransferCode,
+    old_protocol_probe, run_reply, run_start,
 };

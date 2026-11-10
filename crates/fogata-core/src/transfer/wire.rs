@@ -1,6 +1,13 @@
-//! What the two computers say over `/fogata/transfer/1`: the code run in the clear (it
+//! What the two computers say over `/fogata/transfer/2`: the code run in the clear (it
 //! reveals nothing of the code), then frames encrypted with the run's keys, each a control
 //! message or a piece of a file.
+//!
+//! The run: the computer where the code was typed sends its start (the nameplate and its
+//! SPAKE2 message); the one showing the code answers with its SPAKE2 message alone (or that
+//! it shows another code); the first sends its proof of the code, and only once it checked
+//! out does the second send its own (or a no). `/fogata/transfer/1`, of versions up to
+//! 0.1.0-beta.7, had the second prove first in its answer; the two ways do not run with each
+//! other, and each side tells the other way apart (see the module above).
 
 use std::time::Duration;
 
@@ -12,6 +19,13 @@ use zeroize::Zeroizing;
 
 /// The protocol a new computer takes streams of while it shows a code.
 pub(crate) const PROTOCOL: fogata_net::StreamProtocol =
+    fogata_net::StreamProtocol::new("/fogata/transfer/2");
+
+/// The first way of running the code, of versions up to 0.1.0-beta.7: a new computer still
+/// takes its streams, only to tell a computer of that way showing its code to update, and
+/// the computer where the code was typed opens one only to tell a computer of that way
+/// showing it ([`fogata_friends::old_protocol_probe`]).
+pub(crate) const OLD_PROTOCOL: fogata_net::StreamProtocol =
     fogata_net::StreamProtocol::new("/fogata/transfer/1");
 
 /// Bytes of a file in one frame.
@@ -135,9 +149,7 @@ pub(crate) async fn send_reply<S: AsyncWrite + Unpin>(
 ) -> Result<()> {
     match reply {
         None => write_raw(io, &[0]).await,
-        Some(reply) => {
-            write_raw(io, &[&[1], reply.confirm.as_slice(), &reply.spake].concat()).await
-        }
+        Some(reply) => write_raw(io, &[&[1], reply.spake.as_slice()].concat()).await,
     }
 }
 
@@ -145,10 +157,38 @@ pub(crate) async fn read_reply<S: AsyncRead + Unpin>(io: &mut S) -> Result<Optio
     let bytes = read_raw(io, MAX_RUN_MESSAGE).await?;
     match bytes.split_first() {
         Some((0, [])) => Ok(None),
-        Some((1, rest)) if rest.len() > 32 => Ok(Some(RunReply {
-            confirm: rest[..32].try_into().expect("32 bytes"),
-            spake: rest[32..].to_vec(),
+        Some((1, spake)) if !spake.is_empty() => Ok(Some(RunReply {
+            spake: spake.to_vec(),
         })),
+        _ => bail!("a malformed answer"),
+    }
+}
+
+/// What a computer of the first way answered [`fogata_friends::old_protocol_probe`]:
+/// `true` when it shows another code. One showing the code drops the stream instead.
+pub(crate) async fn read_old_reply<S: AsyncRead + Unpin>(io: &mut S) -> Result<bool> {
+    let bytes = read_raw(io, MAX_RUN_MESSAGE).await?;
+    Ok(bytes == [0])
+}
+
+/// The new computer's word on the proof of the computer where the code was typed: its own
+/// proof when that one checked out, a no otherwise.
+pub(crate) async fn send_answer<S: AsyncWrite + Unpin>(
+    io: &mut S,
+    confirm: Option<&[u8; 32]>,
+) -> Result<()> {
+    match confirm {
+        None => write_raw(io, &[0]).await,
+        Some(confirm) => write_raw(io, &[&[1], confirm.as_slice()].concat()).await,
+    }
+}
+
+/// The new computer's proof, or `None` for its no.
+pub(crate) async fn read_answer<S: AsyncRead + Unpin>(io: &mut S) -> Result<Option<Vec<u8>>> {
+    let bytes = read_raw(io, MAX_RUN_MESSAGE).await?;
+    match bytes.split_first() {
+        Some((0, [])) => Ok(None),
+        Some((1, confirm)) => Ok(Some(confirm.to_vec())),
         _ => bail!("a malformed answer"),
     }
 }
@@ -303,7 +343,7 @@ impl std::fmt::Display for Failed {
 impl std::error::Error for Failed {}
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use fogata_friends::{TransferCode, run_reply, run_start};
     use futures::io::Cursor;
 
@@ -311,11 +351,30 @@ mod tests {
 
     /// Both ends' keys of a run of one code.
     fn keys() -> (RunKeys, RunKeys) {
-        let code = TransferCode::generate().unwrap();
-        let (sender, start) = run_start(&code, b"a", b"b");
-        let (receiver, reply) = run_reply(&code, b"b", b"a", &start).unwrap();
-        let (sender_keys, confirm) = sender.finish(&reply).unwrap();
-        (sender_keys, receiver.finish(&confirm).unwrap())
+        run_keys(&TransferCode::generate().unwrap())
+    }
+
+    /// Both ends' keys of a run of `code`, each step as it goes over the wire.
+    pub(crate) fn run_keys(code: &TransferCode) -> (RunKeys, RunKeys) {
+        futures::executor::block_on(async {
+            let (sender, start) = run_start(code, b"a", b"b");
+            let mut wire = Cursor::new(Vec::new());
+            send_start(&mut wire, &start).await.unwrap();
+            wire.set_position(0);
+            let start = read_start(&mut wire).await.unwrap();
+            let (receiver, reply) = run_reply(code, b"b", b"a", &start).unwrap();
+            let mut wire = Cursor::new(Vec::new());
+            send_reply(&mut wire, Some(&reply)).await.unwrap();
+            wire.set_position(0);
+            let reply = read_reply(&mut wire).await.unwrap().unwrap();
+            let (sender, proof) = sender.prove(&reply).unwrap();
+            let (receiver_keys, answer) = receiver.finish(&proof).unwrap();
+            let mut wire = Cursor::new(Vec::new());
+            send_answer(&mut wire, Some(&answer)).await.unwrap();
+            wire.set_position(0);
+            let answer = read_answer(&mut wire).await.unwrap().unwrap();
+            (sender.finish(&answer).unwrap(), receiver_keys)
+        })
     }
 
     /// What the sender's channel writes for `frames`.

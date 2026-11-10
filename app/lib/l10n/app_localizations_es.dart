@@ -2130,6 +2130,10 @@ class L10nEs extends L10n {
   String get roomShareSoundToo => 'Compartir también el sonido';
 
   @override
+  String get roomSoundNeedsPipeWire =>
+      'No se puede compartir el sonido desde este equipo: necesita PipeWire, que no se está ejecutando aquí. Solo se comparte la imagen.';
+
+  @override
   String get roomAddFriendToCall => 'Añadir un amigo a la llamada';
 
   @override
@@ -4374,6 +4378,10 @@ class L10nEs extends L10n {
   @override
   String get moveWrongCodeNote =>
       'El equipo nuevo no aceptó ese código, así que no se envió nada. Revísalo y vuelve a escribirlo. Si sigue fallando, consigue un código nuevo allí.';
+
+  @override
+  String get moveUpdateBoth =>
+      'El otro equipo tiene una versión anterior de Fogata. Actualiza los dos equipos a la misma versión y vuelve a intentarlo. No se movió nada.';
 
   @override
   String get moveCantReachNew => 'No se puede conectar con el equipo nuevo.';

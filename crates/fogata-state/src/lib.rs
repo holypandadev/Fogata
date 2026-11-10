@@ -26,8 +26,8 @@ pub use budget::{MAX_RUN_BYTES, MAX_RUN_ENTRIES, PAST_RUN};
 pub use chain::{Chain, Link, MIN_UPDATE_GAP_MS, Verdict};
 pub use entry::{
     Body, Changes, Entry, EntryHash, EpochId, EpochLink, FIRST_MLS_KIND, FIRST_ROOM, InviteToken,
-    MAX_KEY_PACKAGE_BYTES, PayloadDigest, Rotation, Ticket, VoiceRoomId, commitment, epoch_number,
-    invite_rendezvous, payload_digest,
+    MAX_KEY_PACKAGE_BYTES, NAMED_INVITE_KIND, NamedInvite, PayloadDigest, Rotation, Ticket,
+    VoiceRoomId, commitment, epoch_number, invite_rendezvous, payload_digest,
 };
 pub use fogata_crypto::codec::DecodeError;
 pub use log::{

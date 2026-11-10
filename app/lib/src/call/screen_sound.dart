@@ -49,6 +49,9 @@ extension _ScreenSound on Call {
 
   // ----- A screen's sound on a connection of its own -----
 
+  /// The one section of a screen's sound connection, as WebRTC numbers it.
+  static const _soundMid = 0;
+
   /// Opens or closes the connection that carries this device's screen sound to [peer]:
   /// open while they watch. This side always offers it, so offers never cross.
   Future<void> _soundTo(CallPeer peer) => peer._soundTurn = peer._soundTurn
@@ -101,10 +104,14 @@ extension _ScreenSound on Call {
       Future<void>.delayed(const Duration(seconds: 3), () => _soundTo(peer));
     };
     final offer = await connection.createOffer({});
-    // Only Opus, as on the call's connections ([onlyCallCodecs]).
+    // Only Opus, as on the call's connections ([onlyCallCodecs]), in two channels where
+    // the watcher takes them ([screenSoundStereo]).
     final sdp = await _withCandidates(
       connection,
-      RTCSessionDescription(onlyCallCodecs(offer.sdp ?? ''), 'offer'),
+      RTCSessionDescription(
+        screenSoundStereo(onlyCallCodecs(offer.sdp ?? ''), _soundMid),
+        'offer',
+      ),
     );
     if (peer._soundOut == connection) {
       final message = {'t': 'sound', 'sdp': sdp};
@@ -174,7 +181,10 @@ extension _ScreenSound on Call {
     final answer = await connection.createAnswer({});
     final mine = await _withCandidates(
       connection,
-      RTCSessionDescription(onlyCallCodecs(answer.sdp ?? ''), 'answer'),
+      RTCSessionDescription(
+        screenSoundStereo(onlyCallCodecs(answer.sdp ?? ''), _soundMid),
+        'answer',
+      ),
     );
     if (peer._soundIn == connection) {
       _signal(peer.id, {'t': 'sound-answer', 'sdp': mine});

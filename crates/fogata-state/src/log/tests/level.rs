@@ -13,6 +13,16 @@ use crate::{
     state::{LEVEL_NOT_HIGHER, LEVEL_UNKNOWN},
 };
 
+/// `f` run as a copy of the version that brought level two judges: one that knows no level
+/// after it. The corpus of level two holds `Level` entries naming later levels, which such a
+/// copy refuses, and which a copy that judges at them takes.
+fn as_level_two<T>(f: impl FnOnce() -> T) -> T {
+    crate::state::HIGHEST.with(|h| h.set(Level::Two));
+    let out = f();
+    crate::state::HIGHEST.with(|h| h.set(Level::CURRENT));
+    out
+}
+
 /// The entries of `log` in the order they came to it.
 fn as_they_came(log: &GroupLog) -> Vec<EntryHash> {
     let mut came: Vec<(u64, EntryHash)> = log.arrived.iter().map(|(h, (n, _))| (*n, *h)).collect();
@@ -336,22 +346,29 @@ fn the_group_judges_at_its_level_and_stops_at_one_it_does_not_know() {
         log.raise_level(&ana.id, Level::Two, 5),
         Err(StateError::NotAllowed(LEVEL_NOT_HIGHER))
     );
-    let three = Entry::sign(&ana.id, group, log.heads(), 5, Body::Level { level: 3 });
+    let next = Level::CURRENT.number() + 1;
+    let ahead = Entry::sign(&ana.id, group, log.heads(), 5, Body::Level { level: next });
     assert_eq!(
-        log.insert(three.clone()),
+        log.insert(ahead.clone()),
         Err(StateError::NotAllowed(LEVEL_UNKNOWN))
     );
     let on_it = Entry::sign(
         &ana.id,
         group,
-        vec![three.hash()],
+        vec![ahead.hash()],
         6,
         Body::Rename { name: "h".into() },
     );
     assert_eq!(log.insert(on_it.clone()), Ok(true));
     assert!(log.waiting().contains(&on_it.hash()));
     assert!(!log.ordered().contains(&on_it.hash()));
-    let by_carlos = Entry::sign(&carlos.id, group, log.heads(), 7, Body::Level { level: 3 });
+    let by_carlos = Entry::sign(
+        &carlos.id,
+        group,
+        log.heads(),
+        7,
+        Body::Level { level: next },
+    );
     assert_eq!(
         log.insert(by_carlos),
         Err(StateError::NotAllowed("author does not manage the group"))
@@ -979,7 +996,7 @@ fn judged(worlds: &[World]) -> String {
 fn the_judgment_of_level_two_never_changes() {
     let worlds = corpus_of(CORPUS);
     assert!(!worlds.is_empty());
-    let now = judged(&worlds);
+    let now = as_level_two(|| judged(&worlds));
     let then = judged_then();
     if now != then {
         let path = std::env::temp_dir().join("level-two-now.txt");
@@ -1007,7 +1024,7 @@ fn the_judgment_of_level_two_never_changes() {
 fn write_the_level_two_corpus() {
     let dir = std::env::var_os("FOGATA_LEVEL_TWO_CORPUS").expect("FOGATA_LEVEL_TWO_CORPUS");
     if !CORPUS.is_empty() {
-        assert_eq!(judged(&corpus_of(CORPUS)), judged_then());
+        assert_eq!(as_level_two(|| judged(&corpus_of(CORPUS))), judged_then());
     }
     let mut worlds: Vec<World> = [1, 2, 4].map(corpus_world).into();
     worlds.push(crafted_world());
@@ -1015,5 +1032,221 @@ fn write_the_level_two_corpus() {
     assert_eq!(corpus_of(&bytes).len(), worlds.len());
     let dir = std::path::Path::new(&dir);
     std::fs::write(dir.join("level-two.bin"), bytes).unwrap();
-    std::fs::write(dir.join("level-two.txt"), judged(&worlds)).unwrap();
+    std::fs::write(dir.join("level-two.txt"), as_level_two(|| judged(&worlds))).unwrap();
+}
+
+/// Ana's group with Bea managing too and Carlos a member (see `two_managers`), raised to
+/// level three.
+fn at_level_three() -> (GroupLog, Device, Device, Device) {
+    let (mut log, ana, bea, carlos) = two_managers();
+    log.raise_level(&ana.id, Level::Three, 5).unwrap();
+    assert_eq!(log.level(), Level::Three);
+    (log, ana, bea, carlos)
+}
+
+/// An invite that names who lets its device in travels as a kind level two does not know,
+/// in one encoding only; a group still at level two keeps it as such a kind, changing
+/// nothing, as copies of the version before do.
+#[test]
+fn a_named_invite_is_a_kind_level_two_does_not_know() {
+    let (mut log, ana, bea, _carlos) = two_managers();
+    let ticket = log.issue_ticket(&ana.id, 1_000).unwrap();
+    let invite = NamedInvite {
+        ticket: ticket.clone(),
+        token: [7; 16],
+        // Out of order, repeated, and the issuer named too: written once, sorted, without it.
+        welcomers: vec![bea.key(), ana.key(), bea.key()],
+    };
+    let body = invite.body();
+    let read = NamedInvite::of(&body).unwrap();
+    assert_eq!(read.welcomers, vec![bea.key()]);
+    assert!(read.lets_in(&ana.key()) && read.lets_in(&bea.key()));
+    let entry = Entry::sign(&ana.id, log.group_id(), log.heads(), 5, body.clone());
+    assert_eq!(Entry::decode(&entry.encode()).unwrap().body, body);
+    assert!(matches!(
+        before_level(&entry).body,
+        before::Body::Unknown { kind: 26, .. }
+    ));
+    // Another encoding of the same invite (the issuer named after Bea) is no invite.
+    let Body::Unknown { kind, mut bytes } = body else {
+        unreachable!("a named invite is a kind level two does not know")
+    };
+    let count = bytes.len() - 32 - 4;
+    bytes[count..count + 4].copy_from_slice(&2u32.to_be_bytes());
+    bytes.extend_from_slice(ana.key().as_bytes());
+    assert_eq!(NamedInvite::of(&Body::Unknown { kind, bytes }), None);
+    // At level two: kept, and no invite opens.
+    assert_eq!(log.insert(entry.clone()), Ok(true));
+    assert!(!log.state().applied.contains(&entry.hash()));
+    assert!(log.state().open_invites.is_empty());
+    assert!(!log.invited_with(&ticket));
+    assert_eq!(levels_disagree_on(&log, &at_the_level_before(&log)), vec![]);
+}
+
+/// A copy of the version that brought level two, given a group raised to level three,
+/// refuses the `Level` entry and waits on what is signed on it, as for any level it does
+/// not judge at; this version takes it, and judges what follows at level three.
+#[test]
+fn a_copy_of_level_two_stops_where_the_group_goes_up_to_level_three() {
+    let (mut log, ana, _bea, _carlos) = at_level_three();
+    log.invite(&ana.id, 1_000, 6).unwrap();
+    let old = as_level_two(|| {
+        let mut old = GroupLog::empty(log.group_id());
+        old.insert_all(log.entries().cloned());
+        assert_eq!(old.level(), Level::Two);
+        old
+    });
+    assert!(old.entries().all(|e| !matches!(e.body, Body::Level { .. })));
+    assert_eq!(old.waiting().len(), 1);
+    let mut new = GroupLog::empty(log.group_id());
+    new.insert_all(log.entries().cloned());
+    assert_eq!(new.level(), Level::Three);
+    assert_eq!(new.state().open_invites.len(), 1);
+}
+
+/// From level three, an invite names who may let its device in beside its issuer: the
+/// managers above the issuer on the ladder. Only they and the issuer do; the others do not
+/// even answer under its token. An invite that names nobody applies no more.
+#[test]
+fn at_level_three_only_the_issuer_or_a_manager_its_invite_names_lets_a_device_in() {
+    let (mut log, ana, bea, _carlos) = at_level_three();
+    let named = |log: &GroupLog, ticket: &Ticket| {
+        log.entries()
+            .find_map(|e| NamedInvite::of(&e.body).filter(|i| i.ticket == *ticket))
+            .expect("a named invite")
+            .welcomers
+    };
+    // Ana is first on the ladder: nobody else lets in whom she invites.
+    let (by_ana, token_ana) = log.invite(&ana.id, 1_000, 6).unwrap();
+    assert_eq!(named(&log, &by_ana), vec![]);
+    // Bea comes after Ana, who may let in whom Bea invites.
+    let (by_bea, token_bea) = log.invite(&bea.id, 1_000, 7).unwrap();
+    assert_eq!(named(&log, &by_bea), vec![ana.key()]);
+    let state = log.state();
+    assert_eq!(state.invite_tokens_for(&ana.key(), 8).len(), 2);
+    assert_eq!(state.invite_tokens_for(&bea.key(), 8), vec![token_bea]);
+    assert!(!state.invite_tokens_for(&bea.key(), 8).contains(&token_ana));
+    assert!(!state.may_let_in(&bea.key(), &by_ana));
+
+    let (xavi, yago) = (Device::new(), Device::new());
+    let x = join(&mut log, &xavi, by_ana.clone(), 9);
+    assert_eq!(
+        log.let_in(&bea.id, &x.hash(), 10),
+        Err(StateError::NotAllowed(crate::state::WELCOME_NOT_NAMED))
+    );
+    log.let_in(&ana.id, &x.hash(), 11).unwrap();
+    assert!(log.state().is_member(&xavi.key()));
+    assert!(log.admits_as_invited(&by_ana, &xavi.key()));
+    let y = join(&mut log, &yago, by_bea.clone(), 12);
+    log.let_in(&ana.id, &y.hash(), 13).unwrap();
+    assert!(log.admits_as_invited(&by_bea, &yago.key()));
+
+    // An invite that names nobody is one only level two writes.
+    let ticket = log.issue_ticket(&ana.id, 1_000).unwrap();
+    assert_eq!(
+        log.append(
+            &ana.id,
+            Body::Invite {
+                ticket,
+                token: [3; 16]
+            },
+            14
+        ),
+        Err(StateError::NotAllowed(crate::state::INVITE_NAMES_NOBODY))
+    );
+}
+
+/// A manager removed while an invite was open keeps the log up to the issuer's note of
+/// it, and in a copy of its own still manages the group. The invited device takes no log
+/// where it is let in by a manager the invite does not name, even when that copy signs the
+/// `Join` and `Welcome` on the group as it was before level three, so that they apply at
+/// level two there. In a group still at level two, whose invites name nobody, it cannot
+/// tell, as before.
+#[test]
+fn an_invited_device_takes_no_welcome_from_a_manager_its_invite_does_not_name() {
+    let (mut log, ana, bea, _carlos) = two_managers();
+    let before_three = log.clone();
+    log.raise_level(&ana.id, Level::Three, 5).unwrap();
+    let (ticket, _) = log.invite(&ana.id, 10_000, 6).unwrap();
+    log.remove(&ana.id, bea.key(), 7).unwrap();
+
+    // Bea's copy, as it was before level three: she still manages there.
+    let xavi = Device::new();
+    let mut fork = before_three.clone();
+    let join_entry = join(&mut fork, &xavi, ticket.clone(), 8);
+    let welcome = fork.let_in(&bea.id, &join_entry.hash(), 9).unwrap();
+    let mut shown = GroupLog::empty(log.group_id());
+    shown.insert_all(
+        log.entries()
+            .filter(|e| !matches!(e.body, Body::Remove { .. }))
+            .cloned()
+            .chain([join_entry, welcome]),
+    );
+    assert!(shown.invited_with(&ticket));
+    // Signed on entries before the group's level went up, they applied at level two.
+    assert!(shown.state().is_member(&xavi.key()));
+    assert!(!shown.admits_as_invited(&ticket, &xavi.key()));
+
+    // The real group, where Ana lets Xavi in, is taken.
+    let x = join(&mut log, &xavi, ticket.clone(), 10);
+    log.let_in(&ana.id, &x.hash(), 11).unwrap();
+    assert!(log.admits_as_invited(&ticket, &xavi.key()));
+
+    // At level two the same copy passes: its invite names nobody.
+    let (mut old, ana, bea, _carlos) = two_managers();
+    let before_invite = old.clone();
+    let (ticket, _) = old.invite(&ana.id, 10_000, 6).unwrap();
+    let mut fork = before_invite;
+    let join_entry = join(&mut fork, &xavi, ticket.clone(), 8);
+    let welcome = fork.let_in(&bea.id, &join_entry.hash(), 9).unwrap();
+    let mut shown = GroupLog::empty(old.group_id());
+    shown.insert_all(old.entries().cloned().chain([join_entry, welcome]));
+    assert!(shown.state().is_member(&xavi.key()));
+    assert!(shown.admits_as_invited(&ticket, &xavi.key()));
+}
+
+/// From level three a `Rotate` gives the new key to every member its author saw: one that
+/// leaves members out is not kept, whoever wrote it (at level two, a member that does not
+/// manage could start an epoch for itself alone once someone gone held the key, and leave
+/// the managers without it). [`GroupLog::rotate`] gives it to all.
+#[test]
+fn at_level_three_a_rotation_gives_the_new_key_to_every_member() {
+    let dani = Device::new();
+    let (mut two, ana, bea, carlos) = two_managers();
+    two.add(&ana.id, dani.key(), "dani", 5).unwrap();
+    let mut three = two.clone();
+    three.raise_level(&ana.id, Level::Three, 6).unwrap();
+    for log in [&mut two, &mut three] {
+        // Dani leaves holding the key: a member may rotate now.
+        log.append(&dani.id, Body::Leave, 7).unwrap();
+    }
+    let alone = |log: &GroupLog, by: &Device| {
+        let (rotation, _) = Rotation::new(&log.group_id(), [by.key()]).unwrap();
+        Entry::sign(
+            &by.id,
+            log.group_id(),
+            log.heads(),
+            8,
+            Body::Rotate { rotation },
+        )
+    };
+    let at_two = alone(&two, &carlos);
+    assert_eq!(two.insert(at_two.clone()), Ok(true));
+    assert!(two.state().applied.contains(&at_two.hash()));
+    assert!(two.current_keys(&ana.id).is_none());
+
+    for by in [&carlos, &ana] {
+        assert_eq!(
+            three.insert(alone(&three, by)),
+            Err(StateError::NotAllowed(crate::state::ROTATE_LEAVES_OUT))
+        );
+    }
+    three.rotate(&carlos.id, 9).unwrap();
+    let epoch = three.current_keys(&carlos.id).unwrap().epoch();
+    for device in [&ana, &bea] {
+        assert_eq!(
+            three.current_keys(&device.id).map(|k| k.epoch()),
+            Some(epoch)
+        );
+    }
 }

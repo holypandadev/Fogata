@@ -17,12 +17,12 @@ use crate::{
     budget::{RUN_ROOM, RunRoom},
     cache::{Cache, View},
     entry::{
-        Body, Entry, EntryHash, EpochId, InviteToken, MAX_ENTRY_BYTES, Rotation, Ticket,
-        VoiceRoomId, commitment, epoch_number, secret_context,
+        Body, Entry, EntryHash, EpochId, InviteToken, MAX_ENTRY_BYTES, NamedInvite, Rotation,
+        Ticket, VoiceRoomId, commitment, epoch_number, secret_context,
     },
     picture::{GroupPicture, is_group_picture},
     record::{MAX_RECORD_AHEAD_MS, RecordStamp},
-    state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, fair_name},
+    state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, ROTATE_LEAVES_OUT, fair_name},
 };
 
 /// Why an entry from a device the log never named is refused.
@@ -117,7 +117,7 @@ impl Work {
     /// from a copy newer than this one (see [`Level`]), and it is this copy that is behind.
     fn refuse(&mut self, entry: &Entry, why: &str) {
         if why == LEVEL_UNKNOWN
-            && matches!(entry.body, Body::Level { level } if level > Level::CURRENT.number())
+            && matches!(entry.body, Body::Level { level } if level > Level::highest().number())
         {
             return;
         }
@@ -787,8 +787,12 @@ impl GroupLog {
             let state = self.settled_cache().state.clone();
             // That the entries left out change nothing is a rule of the level: one where
             // they do judges on the view before the entry, as below.
+            // Level three changes none of that: the entries left out still change no member,
+            // and its invites are part of their runs.
             match state.level {
-                Level::Two => return Some(self.judge_on(entry, &state, &self.full().budget)),
+                Level::Two | Level::Three => {
+                    return Some(self.judge_on(entry, &state, &self.full().budget));
+                }
             }
         }
         *views = views.checked_sub(1)?;
@@ -810,6 +814,32 @@ impl GroupLog {
     ) -> Result<(), &'static str> {
         match view.level {
             Level::Two => self.judge_at_two(entry, view, budget),
+            Level::Three => self.judge_at_three(entry, view, budget),
+        }
+    }
+
+    /// [`Self::judge_on`] as [`Level::Three`] judges it: as level two, but for a
+    /// [`NamedInvite`], which level two keeps as a kind it does not know and level three
+    /// judges as the invite it is, and a `Rotate`, which gives the new key to every member
+    /// its author saw (but those whose key nothing can be sealed to): otherwise a member
+    /// could start an epoch for itself and a few, and leave the others without the current
+    /// key until a manager rotates again.
+    fn judge_at_three(
+        &self,
+        entry: &Entry,
+        view: &GroupState,
+        budget: &crate::budget::Budget,
+    ) -> Result<(), &'static str> {
+        if NamedInvite::of(&entry.body).is_some() {
+            budget.allows(self, entry)?;
+            let place = &self.full().order.place;
+            let before = |h: &EntryHash| self.is_before(place, &entry.parents, h);
+            return view.allows(entry, None, &before);
+        }
+        self.judge_at_two(entry, view, budget)?;
+        match &entry.body {
+            Body::Rotate { rotation } if !view.rotation_for_all(rotation) => Err(ROTATE_LEAVES_OUT),
+            _ => Ok(()),
         }
     }
 
@@ -1723,11 +1753,21 @@ impl GroupLog {
     }
 
     /// Starts a new epoch: a manager at any time; another member after someone left who
-    /// still holds the current secret (other rotations of members are ignored).
+    /// still holds the current secret (other rotations of members are ignored). The new key
+    /// goes to every member of the group the entry is signed on, which is what a group at
+    /// level three asks of it: the group as this log has it, unless there are more heads
+    /// than an entry names.
     pub fn rotate(&mut self, identity: &DeviceIdentity, now_ms: u64) -> Result<Entry, StateError> {
-        let state = self.state();
-        let (rotation, _) = Rotation::new(&self.group_id, state.members.keys().copied())?;
-        self.append(identity, Body::Rotate { rotation }, now_ms)
+        let parents = self.heads();
+        let members: Vec<DevicePublicKey> =
+            if self.level() >= Level::Three && self.heads_cache().len() > parents.len() {
+                let seen = self.state_of(self.ancestors_of(&parents).into_iter().collect());
+                seen.members.keys().copied().collect()
+            } else {
+                self.state().members.keys().copied().collect()
+            };
+        let (rotation, _) = Rotation::new(&self.group_id, members)?;
+        self.append_on(identity, parents, Body::Rotate { rotation }, now_ms)
     }
 
     /// The ticket a member last joined with, if it joined with one.
@@ -1747,11 +1787,61 @@ impl GroupLog {
     /// group has that manager's own entry, so a joining device can tell the log it is given
     /// is the group it was invited to and not one made up under the same id.
     pub fn invited_with(&self, ticket: &Ticket) -> bool {
-        self.state().applied.iter().any(|h| {
+        self.issuer_invite(ticket).is_some()
+    }
+
+    /// The issuer's own note of `ticket` that applies here, and the managers it names when it
+    /// is a [`NamedInvite`] (`None` for a [`Body::Invite`], which names nobody).
+    fn issuer_invite(&self, ticket: &Ticket) -> Option<Option<NamedInvite>> {
+        self.state().applied.iter().find_map(|h| {
             let entry = &self.entries[h];
-            entry.author == ticket.issuer
-                && matches!(&entry.body, Body::Invite { ticket: t, .. } if t == ticket)
+            if entry.author != ticket.issuer {
+                return None;
+            }
+            match &entry.body {
+                Body::Invite { ticket: t, .. } => (t == ticket).then_some(None),
+                body => NamedInvite::of(body)
+                    .filter(|i| i.ticket == *ticket)
+                    .map(Some),
+            }
         })
+    }
+
+    /// Joining device `me`: whether this log is the group of `ticket` ([`Self::invited_with`]),
+    /// and, when the issuer's invite names who lets its device in ([`NamedInvite`]), whether
+    /// the `Welcome` that let `me` in, if one did, is the issuer's or a named manager's.
+    ///
+    /// A manager removed while the invite was open keeps the log up to it, the issuer's note
+    /// of the invite included, and manages the group in a copy made of it: only the names
+    /// the issuer wrote tell that copy apart. Checked on the invite's own words rather than
+    /// on the group's level where the `Welcome` applies: that copy may sign its `Join` and
+    /// `Welcome` on entries before the group went up to level three, and so be judged at
+    /// level two there.
+    pub fn admits_as_invited(&self, ticket: &Ticket, me: &DevicePublicKey) -> bool {
+        let Some(invite) = self.issuer_invite(ticket) else {
+            return false;
+        };
+        let Some(invite) = invite else {
+            return true;
+        };
+        let state = self.state();
+        // A `Welcome` that let a device in applied just after its `Join`.
+        let joined = state.applied.iter().position(|h| {
+            let entry = &self.entries[h];
+            entry.author == *me
+                && matches!(&entry.body, Body::Join { ticket: t, .. } if t.ticket_id == ticket.ticket_id)
+        });
+        match joined {
+            None => true,
+            Some(at) => state
+                .applied
+                .get(at + 1)
+                .map(|h| &self.entries[h])
+                .is_some_and(|welcome| {
+                    matches!(&welcome.body, Body::Welcome { member, .. } if member == me)
+                        && invite.lets_in(&welcome.author)
+                }),
+        }
     }
 
     /// The issuing manager's own `Revoke` of `ticket`, when it applies here: the refusal a
@@ -1783,10 +1873,9 @@ impl GroupLog {
         };
         applied
             .iter()
-            .filter_map(|e| match &e.body {
-                Body::Invite { ticket, .. } if e.author == *issuer => Some(ticket.ticket_id),
-                _ => None,
-            })
+            .filter(|e| e.author == *issuer)
+            .filter_map(|e| invite_ticket(&e.body))
+            .map(|ticket| ticket.ticket_id)
             .filter(|t| revoked(t, false) && !revoked(t, true) && !used(t))
             .collect()
     }
@@ -1831,17 +1920,14 @@ impl GroupLog {
         state.applied[..last]
             .iter()
             .map(|h| &self.entries[h])
-            .filter_map(|e| match &e.body {
-                Body::Invite { ticket, .. }
-                    if e.author == *issuer
-                        && state
-                            .open_invites
-                            .get(&ticket.ticket_id)
-                            .is_some_and(|(_, expires)| now_ms <= *expires) =>
-                {
-                    Some(ticket.ticket_id)
-                }
-                _ => None,
+            .filter(|e| e.author == *issuer)
+            .filter_map(|e| invite_ticket(&e.body))
+            .map(|ticket| ticket.ticket_id)
+            .filter(|id| {
+                state
+                    .open_invites
+                    .get(id)
+                    .is_some_and(|(_, expires)| now_ms <= *expires)
             })
             .collect()
     }
@@ -1933,8 +2019,16 @@ impl GroupLog {
     }
 
     /// Manager: an invite valid until `expires_ms`, noted in the log so that every manager
-    /// announces itself under the invite's token while it is open. Returns the ticket and
-    /// the token, which go in the invite link.
+    /// that may let its device in announces itself under the invite's token while it is
+    /// open. Returns the ticket and the token, which go in the invite link.
+    ///
+    /// In a group at level three or later the note names who, beside this device, may let
+    /// the invited device in ([`NamedInvite`]): the managers above this device on the
+    /// ladder. They can already remove this device and cancel what it does, so naming them
+    /// trusts them with nothing new. The managers below it, whom this device could remove,
+    /// are left out: one removed while the invite is open could otherwise let the invited
+    /// device into a copy of the group as it was before (see [`Self::admits_as_invited`]).
+    /// So an invite of the first manager on the ladder waits for it to be online.
     pub fn invite(
         &mut self,
         identity: &DeviceIdentity,
@@ -1944,15 +2038,38 @@ impl GroupLog {
         let ticket = self.issue_ticket(identity, expires_ms)?;
         let mut token = [0u8; 16];
         fogata_crypto::random_bytes(&mut token)?;
-        self.append(
-            identity,
+        let body = if self.level() >= Level::Three {
+            let state = self.state();
+            let me = identity.public_key();
+            let welcomers = state
+                .ladder
+                .iter()
+                .take_while(|k| **k != me)
+                .filter(|k| state.is_manager(k))
+                .copied()
+                .collect();
+            NamedInvite {
+                ticket: ticket.clone(),
+                token,
+                welcomers,
+            }
+            .body()
+        } else {
             Body::Invite {
                 ticket: ticket.clone(),
                 token,
-            },
-            now_ms,
-        )?;
+            }
+        };
+        self.append(identity, body, now_ms)?;
         Ok((ticket, token))
+    }
+}
+
+/// The ticket of an invite, in either form ([`Body::Invite`], [`NamedInvite`]).
+fn invite_ticket(body: &Body) -> Option<Ticket> {
+    match body {
+        Body::Invite { ticket, .. } => Some(ticket.clone()),
+        body => NamedInvite::of(body).map(|invite| invite.ticket),
     }
 }
 

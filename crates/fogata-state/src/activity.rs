@@ -8,7 +8,7 @@ use fogata_crypto::DevicePublicKey;
 
 use crate::{
     budget::PAST_RUN,
-    entry::{Body, EntryHash, VoiceRoomId},
+    entry::{Body, EntryHash, NamedInvite, VoiceRoomId},
     log::GroupLog,
     state::{GroupState, Managers, OUTRANKED},
 };
@@ -469,6 +469,7 @@ fn did(body: &Body, before: &Before, after: &GroupState) -> Option<Did> {
             name: before.room.clone().unwrap_or_default(),
         },
         Body::Invite { .. } => Did::Invited,
+        body @ Body::Unknown { .. } if NamedInvite::of(body).is_some() => Did::Invited,
         Body::Revoke { .. } => Did::Revoked,
         _ => return None,
     })

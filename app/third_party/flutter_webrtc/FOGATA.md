@@ -219,6 +219,11 @@ others in a call would hear their own voices back. Instead:
   itself is the sound server), a shared screen has no sound: the package's PulseAudio
   monitor capture (removed) carried this application's own call sound back to everyone,
   and its stop could block the platform thread.
+- `common/cpp/src/flutter_webrtc.cc`, `linux/pipewire_apps_capturer.{h,cc}`: the method
+  `fogataScreenSoundServer` answers "pipewire" when the build has PipeWire and its server
+  takes a connection (`PipeWireAppsCapturer::Reachable`, which connects and lets go at
+  once, on a thread of its own), else "none", so the application can say why a shared
+  screen goes without sound.
 - `common/cpp/src/flutter_screen_capture.cc`: the portal path (Wayland) captures this
   sound too when `getDisplayMedia` asks for audio and the portal says a whole screen was
   chosen (`source_type`, `PortalScreenCapturer::SharesScreen`; a portal older than
@@ -321,7 +326,9 @@ floating-point format, that capture started and never got a packet, so a shared 
 went with no sound at all.
 
 - `windows/application_loopback_capturer.cc`: one process's capture asks for plain 16-bit
-  PCM at 48 kHz, two channels; a whole screen's keeps the endpoint's format.
+  PCM at 48 kHz, two channels; a whole screen's keeps the endpoint's format. Both channels
+  go to the source as they came (the package mixed them into one), as on Linux: a call
+  that agreed on stereo for the screen's sound encodes both.
 - `windows/loopback_capturer_factory.cc`: a window whose process cannot be found (closed
   meanwhile, an id that is no window) gets no sound at all; the package took the whole
   system's sound then.

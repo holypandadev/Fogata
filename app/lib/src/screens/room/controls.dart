@@ -297,6 +297,17 @@ class _ControlsState extends State<_Controls> {
                                     : (call.shareSound ? c.fg2 : c.fg3),
                                 on: call.sharingSound,
                               ),
+                            ] else if (call != null &&
+                                call.sharing &&
+                                call.soundNeedsPipeWire) ...[
+                              // Linux without PipeWire: no sound to share, and why.
+                              SizedBox(width: gap),
+                              tool(
+                                Ic.volumeOff,
+                                l10n.roomSoundNeedsPipeWire,
+                                null,
+                                color: c.fg3,
+                              ),
                             ],
                             if (direct != null &&
                                 direct.phase == UiCallPhase.connected) ...[

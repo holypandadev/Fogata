@@ -12,7 +12,9 @@
 mod frozen;
 
 use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId, Sealed, codec::Writer};
-use fogata_state::{Body, Changes, Entry, EpochLink, GroupBanner, GroupPicture, Rotation, Ticket};
+use fogata_state::{
+    Body, Changes, Entry, EpochLink, GroupBanner, GroupPicture, NamedInvite, Rotation, Ticket,
+};
 use frozen::{case, frozen};
 
 /// When everything here was signed.
@@ -303,6 +305,18 @@ fn bodies() -> Vec<(&'static str, u8, Body)> {
             },
         ),
         ("", 2, Body::Level { level: 2 }),
+        // An invite that names who lets its device in (level three): a kind level two does
+        // not know, so read as one.
+        (
+            "-named-invite",
+            2,
+            NamedInvite {
+                ticket: ticket(),
+                token: [31; 16],
+                welcomers: vec![key(3)],
+            }
+            .body(),
+        ),
         // A kind from a newer version, and an MLS kind in an encoding this version does
         // not write: both kept whole, as they came.
         (

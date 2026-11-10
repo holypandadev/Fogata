@@ -509,6 +509,25 @@ void PipeWireAppsCapturer::Stop() {
   Teardown(state_.get());
 }
 
+bool PipeWireAppsCapturer::Reachable() {
+  static const bool initialized = (pw_init(nullptr, nullptr), true);
+  (void)initialized;
+  pw_main_loop* loop = pw_main_loop_new(nullptr);
+  if (loop == nullptr) return false;
+  bool reachable = false;
+  pw_context* context = pw_context_new(pw_main_loop_get_loop(loop), nullptr, 0);
+  if (context != nullptr) {
+    pw_core* core = pw_context_connect(context, nullptr, 0);
+    if (core != nullptr) {
+      reachable = true;
+      pw_core_disconnect(core);
+    }
+    pw_context_destroy(context);
+  }
+  pw_main_loop_destroy(loop);
+  return reachable;
+}
+
 }  // namespace flutter_webrtc_plugin
 
 #endif  // HAVE_PIPEWIRE

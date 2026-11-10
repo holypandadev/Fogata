@@ -104,6 +104,64 @@ void main() {
     expect(cameraBitrate(cameraBitrate(sdp)), cameraBitrate(sdp));
   });
 
+  test('only the screen\'s sound goes in stereo, the voice in one channel', () {
+    final sdp = [
+      'v=0',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+      'a=mid:0',
+      'a=rtpmap:111 opus/48000/2',
+      'a=fmtp:111 minptime=10;useinbandfec=1',
+      'm=video 9 UDP/TLS/RTP/SAVPF 98',
+      'a=mid:1',
+      'a=rtpmap:98 VP8/90000',
+      'm=video 9 UDP/TLS/RTP/SAVPF 98',
+      'a=mid:2',
+      'a=rtpmap:98 VP8/90000',
+      'm=audio 9 UDP/TLS/RTP/SAVPF 111',
+      'a=mid:3',
+      'a=rtpmap:111 opus/48000/2',
+      'a=fmtp:111 minptime=10;useinbandfec=1',
+      '',
+    ].join('\r\n');
+    final stereo = screenSoundStereo(voiceDtx(sdp), 3);
+    final lines = stereo.split('\r\n');
+    expect(lines[4], 'a=fmtp:111 minptime=10;useinbandfec=1;usedtx=1');
+    expect(
+      lines[14],
+      'a=fmtp:111 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1',
+    );
+    expect(lines.where((l) => l.contains('stereo')), hasLength(1));
+    // Twice is the same as once, whichever was there first.
+    expect(screenSoundStereo(stereo, 3), stereo);
+    final sprop = sdp.replaceFirst(
+      'a=mid:3\r\na=rtpmap:111 opus/48000/2\r\na=fmtp:111 minptime=10;useinbandfec=1',
+      'a=mid:3\r\na=rtpmap:111 opus/48000/2\r\n'
+          'a=fmtp:111 minptime=10;useinbandfec=1;sprop-stereo=1',
+    );
+    expect(
+      screenSoundStereo(sprop, 3).split('\r\n')[14],
+      'a=fmtp:111 minptime=10;useinbandfec=1;sprop-stereo=1;stereo=1',
+    );
+    // A screen's sound connection has its one section first, and Opus without
+    // parameters gets them after its rtpmap line.
+    const own =
+        'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n'
+        'a=rtpmap:111 opus/48000/2\r\n';
+    expect(
+      screenSoundStereo(own, 0),
+      'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n'
+      'a=rtpmap:111 opus/48000/2\r\na=fmtp:111 stereo=1;sprop-stereo=1\r\n',
+    );
+    // What an older copy checks of a description it takes reads no format parameters:
+    // it takes these as before, and its own, without `stereo=1`, has WebRTC send it one
+    // channel.
+    expect(callSections(stereo), isTrue);
+    expect(callCodecs(stereo), isTrue);
+    expect(fairSignal({'t': 'offer', 'sdp': stereo}), isTrue);
+    expect(soundDescription(screenSoundStereo(own, 0)), isTrue);
+    expect(onlyCallCodecs(stereo), stereo);
+  });
+
   test('a description without VP8 stays as it was', () {
     const sdp =
         'v=0\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 H264/90000\r\n';

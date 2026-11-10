@@ -20,7 +20,7 @@ use libp2p::StreamProtocol;
 /// level of its number (see `fogata_state::Level`), so the level a device lists also says
 /// the levels it judges at: every one up to it. That is how a manager knows that every
 /// member's copy judges at a level before it raises a group to it.
-pub const CAPS_LEVEL: u32 = 2;
+pub const CAPS_LEVEL: u32 = 3;
 
 // This version judges at every level up to the one it lists.
 const _: () = assert!(fogata_state::Level::CURRENT.number() <= CAPS_LEVEL);
@@ -114,7 +114,7 @@ mod tests {
             ])),
             FIRST_LEVEL
         );
-        assert_eq!(caps_protocol(CAPS_LEVEL).as_ref(), "/fogata/caps/2");
+        assert_eq!(caps_protocol(CAPS_LEVEL).as_ref(), "/fogata/caps/3");
         assert_eq!(
             level_listed(&listed(&[caps_protocol(CAPS_LEVEL).as_ref()])),
             CAPS_LEVEL

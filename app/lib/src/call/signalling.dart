@@ -386,14 +386,17 @@ extension _Signalling on Call {
     RTCSessionDescription description,
     String type,
   ) async {
-    final sdp = voiceDtx(
-      cameraBitrate(
-        screenBitrate(
-          voiceRedFirst(
-            onlyCallCodecs(vp8First(description.sdp ?? ''), voiceRed: true),
+    final sdp = screenSoundStereo(
+      voiceDtx(
+        cameraBitrate(
+          screenBitrate(
+            voiceRedFirst(
+              onlyCallCodecs(vp8First(description.sdp ?? ''), voiceRed: true),
+            ),
           ),
         ),
       ),
+      _screenSound,
     );
     await connection.setLocalDescription(RTCSessionDescription(sdp, type));
     await peer._gathered.future.timeout(

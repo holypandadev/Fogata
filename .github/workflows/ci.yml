@@ -42,7 +42,7 @@ env:
   FOGATA_UPDATE_WEB: "off"
   # The nightly the fuzz targets are built with (tools/ci.sh, tools/fuzz.sh): a dated one, so
   # a new nightly cannot break the run overnight. Moved forward by hand, like the stable Rust.
-  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-01
+  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-10
   CARGO_FUZZ_VERSION: 0.13.2
 
 jobs:

@@ -57,6 +57,29 @@ void main() {
     );
   }
 
+  // Linux without PipeWire gives a screen no sound: the share says why, and only then.
+  test('a screen shared without sound for want of PipeWire is told apart', () {
+    bool needs({
+      bool linux = true,
+      bool sound = false,
+      bool window = false,
+      String? server = 'none',
+    }) => Call.needsPipeWire(
+      linux: linux,
+      sound: sound,
+      window: window,
+      server: server,
+    );
+    expect(needs(), isTrue);
+    // A server that takes the connection, a library too old to say, a capture with
+    // sound, a window (no sound whatever the server) or another system: no reason to give.
+    expect(needs(server: 'pipewire'), isFalse);
+    expect(needs(server: null), isFalse);
+    expect(needs(sound: true), isFalse);
+    expect(needs(window: true), isFalse);
+    expect(needs(linux: false), isFalse);
+  });
+
   test('macOS takes the screen\'s sound itself, whatever the capture', () {
     pinnedHost = HostSystem.macos;
     addTearDown(() => pinnedHost = HostSystem.linux);

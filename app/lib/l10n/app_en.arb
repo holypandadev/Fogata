@@ -2972,6 +2972,10 @@
   "@roomShareSoundToo": {
     "description": "Tooltip of the screen-sound button in a room's controls: also send the sound of the shared screen."
   },
+  "roomSoundNeedsPipeWire": "Sound can’t be shared from this computer: it needs PipeWire, which isn’t running here. Only the picture is shared.",
+  "@roomSoundNeedsPipeWire": {
+    "description": "Room: tooltip of the greyed sound button while sharing a screen on Linux without PipeWire."
+  },
   "roomAddFriendToCall": "Add a friend to the call",
   "@roomAddFriendToCall": {
     "description": "Tooltip of the button in a direct call's controls that opens the list of friends to add."
@@ -5957,6 +5961,10 @@
   "moveWrongCodeNote": "The new computer didn’t accept that code, so nothing was sent. Check it and type it again. If it still fails, get a new code there.",
   "@moveWrongCodeNote": {
     "description": "Move account: error after a wrong code."
+  },
+  "moveUpdateBoth": "The other computer has an older version of Fogata. Update both computers to the same version and try again. Nothing was moved.",
+  "@moveUpdateBoth": {
+    "description": "Move account: on either computer, when the other one has a version of Fogata from before moves changed (0.1.0-beta.7 or older)."
   },
   "moveCantReachNew": "Can’t reach the new computer.",
   "@moveCantReachNew": {

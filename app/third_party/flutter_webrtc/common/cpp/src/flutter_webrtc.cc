@@ -15,6 +15,9 @@
 #include "output_keeper.h"
 #include "silent_input.h"
 #include "test_camera.h"
+#ifdef HAVE_PIPEWIRE
+#include "pipewire_apps_capturer.h"
+#endif
 #endif
 
 namespace flutter_webrtc_plugin {
@@ -309,6 +312,25 @@ void FlutterWebRTC::HandleMethodCall(
       // the answer.
       std::lock_guard<std::mutex> guard(gate->lock);
       if (gate->open) answer->Success(EncodableValue(std::string(word)));
+    }).detach();
+  } else if (method_call.method_name().compare("fogataScreenSoundServer") == 0) {
+    // Fogata: whether a shared screen can take the other applications' sound
+    // here: "pipewire" when this build has PipeWire and its server takes a
+    // connection, "none" otherwise (a shared screen then goes without sound, see
+    // loopback_capturer_factory.cc), so the application can say why. On a thread
+    // of its own, as connecting may wait; answered as fogataSoundServer is.
+    std::shared_ptr<MethodResultProxy> answer(std::move(result));
+    std::shared_ptr<AnswerGate> gate = answer_gate_;
+    std::thread([answer, gate]() {
+#ifdef HAVE_PIPEWIRE
+      const bool reachable = PipeWireAppsCapturer::Reachable();
+#else
+      const bool reachable = false;
+#endif
+      std::lock_guard<std::mutex> guard(gate->lock);
+      if (gate->open) {
+        answer->Success(EncodableValue(std::string(reachable ? "pipewire" : "none")));
+      }
     }).detach();
   } else if (method_call.method_name().compare("fogataSoundsTo") == 0) {
     // Fogata: every sound of the application to the output `deviceId` (as

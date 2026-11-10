@@ -46,7 +46,7 @@ env:
   CARGO_TERM_COLOR: never
   FOGATA_UPDATE_WEB: "off"
   # The same dated nightly and cargo-fuzz as .github/workflows/ci.yml.
-  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-01
+  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-10
   CARGO_FUZZ_VERSION: 0.13.2
 
 jobs:

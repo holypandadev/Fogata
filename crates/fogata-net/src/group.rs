@@ -411,9 +411,11 @@ impl GroupContext {
             .filter_map(|n| self.keys.get(&n).map(|k| *k.rendezvous_secret()))
             .collect();
         if self.i_am_manager() {
+            // Only where this device may let the invited device in: an invite that names who
+            // does is answered by them alone (`GroupState::may_let_in`).
             out.extend(
                 self.state
-                    .open_invite_tokens(now_ms)
+                    .invite_tokens_for(&self.identity.public_key(), now_ms)
                     .iter()
                     .map(fogata_state::invite_rendezvous),
             );
@@ -671,6 +673,7 @@ impl GroupContext {
             && self.state.is_manager(&ticket.issuer)
             && !self.state.used_tickets.contains(&ticket.ticket_id)
             && now_ms <= ticket.expires_ms
+            && self.state.may_let_in(&self.identity.public_key(), ticket)
     }
 
     /// Whether `ticket` is one of this group's, signed by its issuer: checked before anything
@@ -996,6 +999,50 @@ impl GroupContext {
         }
     }
 
+    /// Managers: raises the group to the highest level of judgment this version knows
+    /// (`fogata_state::Level::CURRENT`) once every other member's copy was seen judging at
+    /// it: `seen` gives the highest capability level each device was seen at (see
+    /// [`crate::caps`]), which says the levels it judges at. A copy below it would refuse
+    /// the `Level` entry and wait on everything signed after it, so one member never seen at
+    /// that level keeps the group where it is. While a manager above this one is connected
+    /// (`one_above`), that one raises it. Returns the new entry.
+    pub(crate) fn raise_level_when_all_judge(
+        &mut self,
+        now_ms: u64,
+        one_above: bool,
+        seen: impl Fn(&DevicePublicKey) -> u32,
+    ) -> Vec<EntryHash> {
+        let level = fogata_state::Level::CURRENT;
+        if one_above || self.joining.is_some() || !self.i_am_manager() || self.log.level() >= level
+        {
+            return Vec::new();
+        }
+        let me = self.identity.public_key();
+        let all = self
+            .state
+            .members
+            .keys()
+            .filter(|device| **device != me)
+            .all(|device| crate::caps::judges_at(seen(device), level));
+        if !all {
+            return Vec::new();
+        }
+        match self.log.raise_level(&self.identity, level, now_ms) {
+            Ok(entry) => {
+                tracing::info!(
+                    "group raised to level {}: every member's copy judges at it",
+                    level.number()
+                );
+                self.refresh();
+                vec![entry.hash()]
+            }
+            Err(e) => {
+                tracing::debug!("cannot raise the group's level: {e}");
+                Vec::new()
+            }
+        }
+    }
+
     /// Manager whose box of the current epoch is missing or does not open: writes a new epoch
     /// for every member at once, at most once every [`MEND_EVERY_MS`]. Any member could
     /// otherwise lock everyone out with a rotation that gives the others nothing usable,
@@ -1125,7 +1172,8 @@ impl GroupContext {
     }
 
     /// Joining device: a log a manager sent is taken only if it is the group of the
-    /// invite, with the issuing manager's own note of it ([`AdmittedTrial::judge`]). Someone
+    /// invite, with the issuing manager's own note of it, and, when that note names who lets
+    /// this device in, a `Welcome` of one of them ([`AdmittedTrial::judge`]). Someone
     /// else can make up a log under the same id, but not that entry. That is judged on the
     /// whole log, on a copy of this one, away from the node's loop. `None` when this device
     /// is not joining, and the log is taken as any other.
@@ -1138,6 +1186,7 @@ impl GroupContext {
                 .filter_map(|bytes| Entry::decode(bytes).ok())
                 .collect(),
             ticket,
+            me: self.identity.public_key(),
         })
     }
 
@@ -1341,19 +1390,23 @@ pub(crate) struct AdmittedTrial {
     log: GroupLog,
     entries: Vec<Entry>,
     ticket: Ticket,
+    /// The joining device.
+    me: DevicePublicKey,
 }
 
 impl AdmittedTrial {
     /// The log with the entries sent, if it is the group of the invite, with the issuing
-    /// manager's own note of it. Judged whole, so away from the node's loop.
+    /// manager's own note of it, and this device let in, if it is, by someone that note
+    /// allows ([`GroupLog::admits_as_invited`]). Judged whole, so away from the node's loop.
     pub(crate) fn judge(self) -> Option<GroupLog> {
         let Self {
             mut log,
             entries,
             ticket,
+            me,
         } = self;
         log.insert_all(entries);
-        log.invited_with(&ticket).then_some(log)
+        log.admits_as_invited(&ticket, &me).then_some(log)
     }
 }
 
@@ -1843,6 +1896,103 @@ mod tests {
         let admin = ctx(&ana, &log);
         let valid = admin.join_valid(&late, &ticket.ticket_id, &log.heads(), 4_000);
         assert!(valid.is_some());
+    }
+
+    /// A manager raises the group to this version's level of judgment once every other
+    /// member was seen at it, never before, and only once; one with a manager above it
+    /// connected leaves it to that one.
+    #[test]
+    fn a_group_goes_up_a_level_once_every_member_judges_at_it() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let luis = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, luis.public_key(), "luis", 2).unwrap();
+        let level = fogata_state::Level::CURRENT;
+        let mut at_ana = ctx(&ana, &log);
+        let luis_key = luis.public_key();
+        let seen_at = |n: u32| move |d: &DevicePublicKey| if *d == luis_key { n } else { 0 };
+        assert!(
+            at_ana
+                .raise_level_when_all_judge(3, false, seen_at(level.number() - 1))
+                .is_empty()
+        );
+        assert!(
+            at_ana
+                .raise_level_when_all_judge(3, true, seen_at(level.number()))
+                .is_empty()
+        );
+        assert_eq!(
+            at_ana
+                .raise_level_when_all_judge(4, false, seen_at(level.number()))
+                .len(),
+            1
+        );
+        assert_eq!(at_ana.log().level(), level);
+        assert!(
+            at_ana
+                .raise_level_when_all_judge(5, false, seen_at(level.number()))
+                .is_empty()
+        );
+        // Luis does not manage once the managers are the first one.
+        log.append(&ana, fogata_state::Body::SetManagers { first: Some(1) }, 3)
+            .unwrap();
+        assert!(
+            ctx(&luis, &log)
+                .raise_level_when_all_judge(4, false, |_| level.number())
+                .is_empty()
+        );
+    }
+
+    /// From level three, a manager answers only under the tokens of the invites it may let
+    /// a device in with, and takes only the joins of those; the device invited takes a log
+    /// only where the issuer or a manager its invite names let it in.
+    #[test]
+    fn only_a_manager_an_invite_names_answers_it_and_is_believed() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let zed = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+        let before_three = log.clone();
+        log.raise_level(&ana, fogata_state::Level::Three, 3)
+            .unwrap();
+        // Ana is first: her invite names nobody else.
+        let (ticket, token) = log.invite(&ana, 5_000, 4).unwrap();
+        let secret = fogata_state::invite_rendezvous(&token);
+        assert!(ctx(&ana, &log).rendezvous_secrets(10).contains(&secret));
+        assert!(!ctx(&bea, &log).rendezvous_secrets(10).contains(&secret));
+        assert!(ctx(&ana, &log).ticket_acceptable(&ticket, 10));
+        assert!(!ctx(&bea, &log).ticket_acceptable(&ticket, 10));
+
+        let joining = GroupContext::new(
+            zed.clone(),
+            GroupSetup::Joining {
+                group_id: log.group_id(),
+                ticket: ticket.clone(),
+                rendezvous: secret,
+                name: "Zed".into(),
+            },
+        );
+        // Bea, in a copy of the group as it was before level three, lets Zed in there.
+        let mut fork = before_three;
+        let join = joining.sign_join(fork.heads(), 5).unwrap();
+        fork.insert(join.clone()).unwrap();
+        let welcome = fork.let_in(&bea, &join.hash(), 6).unwrap();
+        let shown: Vec<Vec<u8>> = log
+            .entries()
+            .chain([&join, &welcome])
+            .map(Entry::encode)
+            .collect();
+        let trial = joining.admitted_trial(&shown).unwrap();
+        assert!(trial.judge().is_none());
+        // Ana lets Zed in: taken.
+        let mut real = log.clone();
+        let join = joining.sign_join(real.heads(), 5).unwrap();
+        real.insert(join.clone()).unwrap();
+        real.let_in(&ana, &join.hash(), 6).unwrap();
+        let shown: Vec<Vec<u8>> = real.entries().map(Entry::encode).collect();
+        let taken = joining.admitted_trial(&shown).unwrap().judge().unwrap();
+        assert!(taken.state().is_member(&zed.public_key()));
     }
 
     #[test]

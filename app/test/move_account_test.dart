@@ -340,6 +340,39 @@ void main() {
     await _done(tester);
   });
 
+  testWidgets('either computer asks to update both when the other is older', (
+    tester,
+  ) async {
+    // The new computer, met by an old computer of a version that moves the old way.
+    final state = fakeRoom(people: 1)
+      ..accountMove = _move(MoveStep.failed, failure: 'old_version');
+    await _show(tester, const BringCard(), state);
+    const update =
+        'Update both computers to the same version and try again. Nothing was '
+        'moved.';
+    expect(find.textContaining(update), findsOneWidget);
+    expect(find.text('The move could not start'), findsOneWidget);
+    expect(state.accountMove!.failureWords, contains(update));
+    await _done(tester);
+
+    // The old computer, having found a new computer of that version.
+    final move = _move(MoveStep.looking, sending: true);
+    final old = fakeRoom(people: 1)..accountMove = move;
+    await _show(
+      tester,
+      const SizedBox(width: 700, child: MoveAccountPage()),
+      old,
+    );
+    move
+      ..step = MoveStep.failed
+      ..failure = 'old_version'
+      ..changed();
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(find.textContaining(update), findsOneWidget);
+    expect(find.textContaining('didn’t accept that code'), findsNothing);
+    await _done(tester);
+  });
+
   testWidgets('a code that did not match shows as the mockup says', (
     tester,
   ) async {

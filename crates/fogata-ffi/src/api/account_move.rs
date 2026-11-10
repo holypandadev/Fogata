@@ -120,7 +120,8 @@ pub struct UiMoveEvent {
     pub done: i64,
     pub total: i64,
     /// `wrong_code`, `expired`, `too_many_tries`, `no_contact`, `interrupted`,
-    /// `unconfirmed`, `cancelled`, `declined`, `later` or `other`.
+    /// `unconfirmed`, `cancelled`, `declined`, `later`, `old_version` (the other computer
+    /// moves accounts the way of an older version: update both) or `other`.
     pub failure: Option<String>,
     /// Why, when the screens word it.
     pub reason: Option<UiMoveReason>,
@@ -211,6 +212,9 @@ fn ui_event(event: TransferEvent) -> UiMoveEvent {
                     Failure::Cancelled => "cancelled",
                     Failure::Declined(_) => "declined",
                     Failure::Later(_) => "later",
+                    // The other computer runs a version that moves accounts another way: the
+                    // screens ask to update both.
+                    Failure::OldVersion => "old_version",
                     Failure::NoRoom { .. }
                     | Failure::TooLarge { .. }
                     | Failure::Busy

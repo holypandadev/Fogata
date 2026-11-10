@@ -21,6 +21,44 @@ void main() {
         );
   });
 
+  testWidgets(
+    'a screen shared without PipeWire says why it goes without sound',
+    (tester) async {
+      tester.view.physicalSize = const Size(1920, 1080);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final state = fakeRoom(people: 3);
+      final call = state.callState.call!;
+      await tester.pumpWidget(
+        AppScope(
+          state: state,
+          child: MaterialApp(
+            theme: Fg.darkTokens.themeData,
+            home: const Material(child: Shell()),
+          ),
+        ),
+      );
+      await tester.pump(const Duration(milliseconds: 500));
+      const why =
+          'Sound can’t be shared from this computer: it needs PipeWire, which isn’t '
+          'running here. Only the picture is shared.';
+      expect(find.byTooltip(why), findsNothing);
+      call
+        ..sharing = true
+        ..soundNeedsPipeWire = true;
+      state.callState.notifyListeners();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.byTooltip(why), findsOneWidget);
+      // Not the button that shares the sound.
+      expect(find.byTooltip('Share the sound too'), findsNothing);
+      call
+        ..sharing = false
+        ..soundNeedsPipeWire = false;
+      await tester.pumpWidget(const SizedBox());
+      await tester.pump(const Duration(minutes: 2));
+    },
+  );
+
   for (final size in const [Size(960, 640), Size(1920, 1080)]) {
     testWidgets(
       'files are shared from the chat, not the controls, ${size.width}',

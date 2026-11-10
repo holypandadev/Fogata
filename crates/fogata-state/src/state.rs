@@ -7,8 +7,8 @@ pub use fogata_crypto::names::hiding_mark;
 use fogata_crypto::{DevicePublicKey, GroupId, names::tidy};
 
 use crate::entry::{
-    Body, Entry, EntryHash, EpochId, FIRST_ROOM, InviteToken, Rotation, Ticket, VoiceRoomId,
-    epoch_number,
+    Body, Entry, EntryHash, EpochId, FIRST_ROOM, InviteToken, NamedInvite, Rotation, Ticket,
+    VoiceRoomId, epoch_number,
 };
 
 /// The most members a group takes, and the most it starts with.
@@ -56,6 +56,17 @@ pub const LEVEL_UNKNOWN: &str = "a level this version does not judge at";
 /// Why a `Level` entry that does not raise the group's level is ignored.
 pub const LEVEL_NOT_HIGHER: &str = "not above the group's level";
 
+/// Why, from level three, an invite that does not name who lets its device in is ignored.
+pub const INVITE_NAMES_NOBODY: &str = "an invite names who may let its device in";
+
+/// Why, from level three, a `Welcome` that would let a device in with an invite is ignored
+/// when its author is neither the invite's issuer nor a manager the invite names.
+pub const WELCOME_NOT_NAMED: &str =
+    "only the issuer or a manager its invite names lets a device in";
+
+/// Why, from level three, a `Rotate` that leaves out a member it saw is not kept.
+pub const ROTATE_LEAVES_OUT: &str = "a rotation gives the new key to every member";
+
 /// A level of judgment: the rules that decide what a log keeps and applies once a
 /// [`Body::Level`] entry naming it applied. The rules of a level never
 /// change once written: a change to what is kept or applied forks the log between copies
@@ -73,12 +84,19 @@ pub enum Level {
     /// that brought levels. A group that no `Level` entry raised judges at it.
     #[default]
     Two,
+    /// Level two, and (see the architecture document, 5.1 and 5.3):
+    /// - an invite names, beside its issuer, the managers who may let its device in
+    ///   ([`NamedInvite`]), and only they do; an invite that names nobody
+    ///   ([`Body::Invite`]) applies no more;
+    /// - a `Rotate` gives the new key to every member its author saw, but for keys nothing
+    ///   can be sealed to: one that leaves some out is not kept.
+    Three,
 }
 
 impl Level {
     /// The highest level this version judges at, and the one the groups it creates start
     /// at.
-    pub const CURRENT: Level = Level::Two;
+    pub const CURRENT: Level = Level::Three;
 
     /// The number this level has in a `Level` entry and among the network's capability
     /// levels: a level of judgment comes with the capability level of its number, so a
@@ -86,23 +104,39 @@ impl Level {
     pub const fn number(self) -> u32 {
         match self {
             Level::Two => 2,
+            Level::Three => 3,
         }
     }
 
     /// The level numbered `number`, if this version judges at it.
     pub fn numbered(number: u32) -> Option<Level> {
-        match number {
-            2 => Some(Level::Two),
-            _ => None,
+        let level = match number {
+            2 => Level::Two,
+            3 => Level::Three,
+            _ => return None,
+        };
+        (level <= Level::highest()).then_some(level)
+    }
+
+    /// The highest level judged at: [`Self::CURRENT`]; in the tests that pin how an
+    /// earlier level judges, that level, as a copy of the version that brought it.
+    pub(crate) fn highest() -> Level {
+        #[cfg(test)]
+        {
+            HIGHEST.with(std::cell::Cell::get)
+        }
+        #[cfg(not(test))]
+        {
+            Level::CURRENT
         }
     }
 
     /// The limits judging at this level reads. Judging reads them as the constants they are
-    /// at level two, the only level so far; a level with other limits has judging read
-    /// them from here instead.
+    /// at level two, and level three keeps them; a level with other limits has judging
+    /// read them from here instead.
     pub fn caps(self) -> Caps {
         match self {
-            Level::Two => Caps {
+            Level::Two | Level::Three => Caps {
                 members: MAX_MEMBERS,
                 in_room: MAX_IN_ROOM,
                 rooms: MAX_ROOMS,
@@ -119,6 +153,12 @@ impl Level {
             },
         }
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`Level::highest`]: set by a test, for the thread it runs on.
+    pub(crate) static HIGHEST: std::cell::Cell<Level> = const { std::cell::Cell::new(Level::CURRENT) };
 }
 
 /// The limits a level judges by (see [`Level::caps`]): a change to any of them changes what
@@ -285,6 +325,9 @@ pub struct GroupState {
     pub used_tickets: BTreeSet<[u8; 16]>,
     /// Invites not used yet, by ticket id: their token and when they expire.
     pub open_invites: BTreeMap<[u8; 16], (InviteToken, u64)>,
+    /// The issuer of each invite written as a [`NamedInvite`] and the managers it names, by
+    /// ticket id, until it is used or cancelled: only they let its device in.
+    welcomers: BTreeMap<[u8; 16], Vec<DevicePublicKey>>,
     /// Entries that applied, in order.
     pub applied: Vec<EntryHash>,
     /// Entries that were ignored, with the reason.
@@ -698,7 +741,7 @@ impl GroupState {
     /// [`Level`]), and what it changes if so.
     fn check_rule(&mut self, entry: &Entry, stand: RuleStand) -> Result<(), &'static str> {
         match self.level {
-            Level::Two => self.check_rule_at_two(entry, stand),
+            Level::Two | Level::Three => self.check_rule_at_two(entry, stand),
         }
     }
 
@@ -825,6 +868,16 @@ impl GroupState {
             .all(|(k, _)| self.is_member(k) && k != removed)
     }
 
+    /// Whether `rotation` gives its key to every member here, but those whose key nothing
+    /// can be sealed to ([`DevicePublicKey::is_weak`]): what a `Rotate` written here holds
+    /// from level three.
+    pub(crate) fn rotation_for_all(&self, rotation: &Rotation) -> bool {
+        self.members
+            .keys()
+            .filter(|k| !k.is_weak())
+            .all(|k| rotation.sealed.iter().any(|(to, _)| to == k))
+    }
+
     /// A copy to try one more entry on, as [`Self::apply`] would apply it: everything but the
     /// lists of the entries that applied and were refused, which only grow, and the
     /// picture, neither of which applying reads.
@@ -848,6 +901,7 @@ impl GroupState {
             epochs: self.epochs.clone(),
             used_tickets: self.used_tickets.clone(),
             open_invites: self.open_invites.clone(),
+            welcomers: self.welcomers.clone(),
             applied: Vec::new(),
             rejected: Vec::new(),
             rules: self.rules.clone(),
@@ -883,6 +937,7 @@ impl GroupState {
             epochs: self.epochs.clone(),
             used_tickets: self.used_tickets.clone(),
             open_invites: BTreeMap::new(),
+            welcomers: self.welcomers.clone(),
             applied: Vec::new(),
             rejected: Vec::new(),
             rules: RoomRules::default(),
@@ -926,7 +981,93 @@ impl GroupState {
     ) -> Result<Applied, &'static str> {
         match self.level {
             Level::Two => self.check_and_apply_at_two(hash, entry, rotation_needed, before),
+            Level::Three => self.check_and_apply_at_three(hash, entry, rotation_needed, before),
         }
+    }
+
+    /// [`Self::check_and_apply`] as [`Level::Three`] judges it: as level two, but for
+    /// invites, which name who lets their device in, and the `Welcome`s that let a device in
+    /// with one. (A `Rotate` that leaves out a member its author saw is not kept at all: see
+    /// the log's judgment.)
+    fn check_and_apply_at_three(
+        &mut self,
+        hash: EntryHash,
+        entry: &Entry,
+        rotation_needed: Option<bool>,
+        before: &dyn Fn(&EntryHash) -> bool,
+    ) -> Result<Applied, &'static str> {
+        if self.creator.is_some() {
+            match &entry.body {
+                Body::Invite { .. } => return Err(INVITE_NAMES_NOBODY),
+                body @ Body::Unknown { .. } => {
+                    if let Some(invite) = NamedInvite::of(body) {
+                        return self
+                            .apply_named_invite(entry, invite)
+                            .map(|()| Applied::Yes);
+                    }
+                }
+                Body::Welcome { member, .. } if self.is_manager(&entry.author) => {
+                    // The join it would let in, as level two picks it: its device may have
+                    // been invited by someone who named who lets it in.
+                    if let Some(join) = self.join_to_let_in(entry, member, before)
+                        && !self.may_let_in(&entry.author, &join.ticket)
+                    {
+                        return Err(WELCOME_NOT_NAMED);
+                    }
+                }
+                _ => {}
+            }
+        }
+        self.check_and_apply_at_two(hash, entry, rotation_needed, before)
+    }
+
+    /// Notes a [`NamedInvite`] as level two notes a [`Body::Invite`], with the managers it
+    /// names.
+    fn apply_named_invite(
+        &mut self,
+        entry: &Entry,
+        invite: NamedInvite,
+    ) -> Result<(), &'static str> {
+        self.require_manager(&entry.author)?;
+        let ticket = &invite.ticket;
+        if ticket.issuer != entry.author
+            || Some(ticket.group_id) != self.group_id
+            || !ticket.signature_valid()
+        {
+            return Err("invalid ticket");
+        }
+        if !self.used_tickets.contains(&ticket.ticket_id) {
+            self.open_invites
+                .insert(ticket.ticket_id, (invite.token, ticket.expires_ms));
+            let mut named = invite.welcomers;
+            named.push(ticket.issuer);
+            self.welcomers.insert(ticket.ticket_id, named);
+        }
+        Ok(())
+    }
+
+    /// Whether `device` may let in a device that joins with `ticket`: anyone who manages
+    /// the group, unless the ticket's invite was written as a [`NamedInvite`] (from level
+    /// three), which leaves that to its issuer and the managers it names.
+    pub fn may_let_in(&self, device: &DevicePublicKey, ticket: &Ticket) -> bool {
+        self.welcomers
+            .get(&ticket.ticket_id)
+            .is_none_or(|named| named.contains(device))
+    }
+
+    /// Tokens of the invites still open at `now_ms` that `device` may let their devices in
+    /// with ([`Self::may_let_in`]): where it answers them.
+    pub fn invite_tokens_for(&self, device: &DevicePublicKey, now_ms: u64) -> Vec<InviteToken> {
+        self.open_invites
+            .iter()
+            .filter(|(_, (_, expires))| now_ms <= *expires)
+            .filter(|(id, _)| {
+                self.welcomers
+                    .get(*id)
+                    .is_none_or(|named| named.contains(device))
+            })
+            .map(|(_, (token, _))| *token)
+            .collect()
     }
 
     /// [`Self::check_and_apply`] as [`Level::Two`] judges it.
@@ -1085,19 +1226,13 @@ impl GroupState {
                 }
                 let mut let_in = None;
                 if !self.is_member(member) {
-                    // The join it is signed on directly, the one the manager saw; else the
-                    // first before it in the order.
-                    let usable = |j: &&WaitingJoin| self.ticket_usable(&j.ticket);
-                    let joins = || self.waiting_joins.get(member).into_iter().flatten();
-                    let join = joins()
-                        .filter(usable)
-                        .find(|j| entry.parents.contains(&j.hash))
-                        .or_else(|| joins().filter(usable).find(|j| before(&j.hash)))
-                        .cloned()
+                    let join = self
+                        .join_to_let_in(entry, member, before)
                         .ok_or(NO_JOIN_TO_WELCOME)?;
                     self.require_room_for_one_more()?;
                     self.used_tickets.insert(join.ticket.ticket_id);
                     self.open_invites.remove(&join.ticket.ticket_id);
+                    self.welcomers.remove(&join.ticket.ticket_id);
                     self.admit(*member, Member { name: join.name });
                     let_in = Some(join.hash);
                 }
@@ -1186,6 +1321,7 @@ impl GroupState {
             Body::Revoke { ticket_id } => {
                 self.require_manager(&author)?;
                 self.open_invites.remove(ticket_id);
+                self.welcomers.remove(ticket_id);
                 self.used_tickets.insert(*ticket_id);
             }
             Body::Leave => {
@@ -1218,6 +1354,26 @@ impl GroupState {
             Body::Unknown { .. } => return Err("kind of entry unknown to this version"),
         }
         Ok(Applied::Yes)
+    }
+
+    /// The `Join` of `member`, no member, that `Welcome` entry `welcome` lets in: the one it
+    /// is signed on directly, the one its manager saw; else the first before it in the order.
+    fn join_to_let_in(
+        &self,
+        welcome: &Entry,
+        member: &DevicePublicKey,
+        before: &dyn Fn(&EntryHash) -> bool,
+    ) -> Option<WaitingJoin> {
+        if self.is_member(member) {
+            return None;
+        }
+        let usable = |j: &&WaitingJoin| self.ticket_usable(&j.ticket);
+        let joins = || self.waiting_joins.get(member).into_iter().flatten();
+        joins()
+            .filter(usable)
+            .find(|j| welcome.parents.contains(&j.hash))
+            .or_else(|| joins().filter(usable).find(|j| before(&j.hash)))
+            .cloned()
     }
 
     /// Starts the epoch of `rotation` if every recipient is a member at this point and no

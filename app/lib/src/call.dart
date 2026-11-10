@@ -698,6 +698,36 @@ class Call extends ChangeNotifier {
       _soundConnections ||
       (_displaySound && _screenStream?.getAudioTracks().isNotEmpty == true);
 
+  /// Linux: this device's shared screen goes without the other applications' sound
+  /// because no PipeWire server takes a connection here, which the share's sound button
+  /// says instead (see [needsPipeWire]). Known once a share without sound began.
+  bool soundNeedsPipeWire = false;
+
+  /// Whether a share that came without sound came so for want of PipeWire: on Linux,
+  /// for a screen ([window] is a window picked from the list: none has sound there,
+  /// whatever the server), and when the video library says no PipeWire server takes a
+  /// connection ([server], `fogataScreenSoundServer`; null when it could not be asked,
+  /// as with an older library, which says nothing then).
+  @visibleForTesting
+  static bool needsPipeWire({
+    required bool linux,
+    required bool sound,
+    required bool window,
+    required String? server,
+  }) => linux && !sound && !window && server == 'none';
+
+  /// The video library's word on PipeWire for a shared screen's sound (Linux).
+  static Future<String?> _screenSoundServer() async {
+    try {
+      return await WebRTC.invokeMethod<String, dynamic>(
+        'fogataScreenSoundServer',
+      );
+    } catch (e) {
+      _trace('screen sound server: $e');
+      return null;
+    }
+  }
+
   /// Sends the sound of the shared screen, or stops it, without stopping the picture.
   Future<void> setShareSound(bool on) async {
     shareSound = on;
@@ -1062,6 +1092,21 @@ class Call extends ChangeNotifier {
           stream.getVideoTracks().firstOrNull?.onEnded = () => stopSharing();
           if (source == null) await _portalRate(screenQuality.fps);
           await _screenSized();
+          // Asked only when that is the question: a share with sound, or of a window,
+          // has its answer.
+          final sound = stream.getAudioTracks().isNotEmpty;
+          final window = source?.type == SourceType.Window;
+          final server = onLinux && !sound && !window
+              ? await _screenSoundServer()
+              : null;
+          soundNeedsPipeWire =
+              _screenStream == stream &&
+              needsPipeWire(
+                linux: onLinux,
+                sound: sound,
+                window: window,
+                server: server,
+              );
         }
         await _resetFits();
         await _resend(_screen);
@@ -1081,6 +1126,7 @@ class Call extends ChangeNotifier {
     _source = null;
     _capturedAt = 0;
     _screenTooLarge = null;
+    soundNeedsPipeWire = false;
     localScreen.srcObject = null;
     final was = sharing;
     sharing = false;

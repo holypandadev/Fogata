@@ -46,8 +46,9 @@ use std::{
 use fogata_crypto::DevicePublicKey;
 
 use crate::{
-    entry::{Body, Entry, EntryHash},
+    entry::{Body, Entry, EntryHash, NamedInvite},
     log::GroupLog,
+    state::Level,
 };
 
 /// Most entries that count a device writes in one run: as many as a node takes from one
@@ -154,6 +155,9 @@ struct Run {
 #[derive(Clone, Default)]
 pub(crate) struct Budget {
     room: RunRoom,
+    /// The level the order is worked out at: from level three, a [`NamedInvite`] is part of
+    /// its author's run, as the invite it is, where level two knows no such kind.
+    level: Level,
     came_in: BTreeMap<DevicePublicKey, u64>,
     /// Who brought each device in, the last time it came in: the author of its `Add`, or
     /// the issuer of the ticket it joined with; none for the creator.
@@ -184,9 +188,10 @@ impl std::fmt::Debug for Budget {
 }
 
 impl Budget {
-    pub(crate) fn new(room: RunRoom) -> Self {
+    pub(crate) fn new(room: RunRoom, level: Level) -> Self {
         Self {
             room,
+            level,
             ..Self::default()
         }
     }
@@ -194,6 +199,11 @@ impl Budget {
     fn kind(&self, entry: &Entry) -> Kind {
         match &entry.body {
             Body::Create { .. } => Kind::Exempt,
+            body @ Body::Unknown { .. }
+                if self.level >= Level::Three && NamedInvite::of(body).is_some() =>
+            {
+                Kind::Counted
+            }
             Body::Unknown { .. }
             | Body::MlsKeyPackage { .. }
             | Body::MlsJoin { .. }

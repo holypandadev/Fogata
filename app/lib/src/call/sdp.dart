@@ -257,6 +257,22 @@ String cameraBitrate(String sdp) => _withParam(
 @visibleForTesting
 String voiceDtx(String sdp) => _withParam(sdp, _audio, 'opus', 'usedtx=1');
 
+/// Has a shared screen's sound go in two channels, in the section with [mid] (the fourth
+/// channel of a call's connection, or the one section of a screen's sound connection):
+/// `stereo=1` says this side takes two channels, `sprop-stereo=1` that it may send them.
+/// WebRTC encodes two channels only towards a side whose own description says
+/// `stereo=1`, so an older copy, which never says it, is sent one, mixed down by the
+/// sender's WebRTC; and an older copy takes this side's description as before (its
+/// checks read no format parameters), sending two channels where it captures them. The
+/// voice stays in one channel.
+@visibleForTesting
+String screenSoundStereo(String sdp, int mid) => _withParam(
+  _withParam(sdp, mid, 'opus', 'stereo=1'),
+  mid,
+  'opus',
+  'sprop-stereo=1',
+);
+
 /// Adds `param` (`name=value`) to the format parameters of every `codec` type in the
 /// section with `mid`, unless they have one with that name already.
 String _withParam(String sdp, int mid, String codec, String param) {
@@ -286,9 +302,14 @@ String _withParam(String sdp, int mid, String codec, String param) {
           m.group(1)!,
     };
     for (final line in section) {
-      final fmtp = RegExp(r'^a=fmtp:(\d+) ').firstMatch(line);
+      final fmtp = RegExp(r'^a=fmtp:(\d+) (.*)$').firstMatch(line);
       if (fmtp != null && types.contains(fmtp.group(1))) {
-        out.add(line.contains('$name=') ? line : '$line;$param');
+        // By its whole name: `stereo` is not `sprop-stereo`.
+        final has = fmtp
+            .group(2)!
+            .split(';')
+            .any((p) => p.trim().split('=').first == name);
+        out.add(has ? line : '$line;$param');
         types.remove(fmtp.group(1));
         continue;
       }

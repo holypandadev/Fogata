@@ -2022,6 +2022,10 @@ class L10nJa extends L10n {
   String get roomShareSoundToo => '音声も共有';
 
   @override
+  String get roomSoundNeedsPipeWire =>
+      'このパソコンからは音声を共有できません。PipeWireが必要ですが、ここでは動作していません。共有されるのは画面だけです。';
+
+  @override
   String get roomAddFriendToCall => '通話にフレンドを追加';
 
   @override
@@ -4034,6 +4038,10 @@ class L10nJa extends L10n {
   @override
   String get moveWrongCodeNote =>
       '新しいパソコンがそのコードを受け入れなかったため、何も送信されませんでした。確認して、もう一度入力してください。それでも失敗する場合は、そちらで新しいコードを表示してください。';
+
+  @override
+  String get moveUpdateBoth =>
+      'もう一方のパソコンのFogataは古いバージョンです。両方のパソコンを同じバージョンに更新してから、もう一度お試しください。何も移行されていません。';
 
   @override
   String get moveCantReachNew => '新しいパソコンに接続できません。';

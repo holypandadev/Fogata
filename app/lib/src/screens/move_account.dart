@@ -1053,6 +1053,8 @@ class _BringCardState extends State<BringCard> {
             l10n.moveCouldNotStartTitle,
             move.reasonWords ?? l10n.moveSomethingWrongHere,
           )
+        : failure == 'old_version'
+        ? (l10n.moveCouldNotStartTitle, l10n.moveUpdateBoth)
         : (l10n.moveHalfwayTitle, l10n.moveHalfwaySub);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1504,6 +1506,10 @@ class _MoveAccountPageState extends State<MoveAccountPage> {
         ),
       ),
       'declined' => _Note(icon: Ic.warning, child: Text(l10n.moveDeclinedNote)),
+      'old_version' => _Note(
+        icon: Ic.warning,
+        child: Text(l10n.moveUpdateBoth),
+      ),
       'other' => _Note(
         icon: Ic.warning,
         child: Text(move.reasonWords ?? l10n.moveCouldNotStart),

@@ -9,10 +9,23 @@
 //! nothing about the other five, which is not much to learn. All nine are the password of a
 //! SPAKE2 run between the two computers: whoever does not know the code gets one guess per
 //! run, and nothing seen on the network (the rendezvous point, the run's messages, the
-//! encrypted transfer) lets anyone test guesses offline. The computer where the code is
-//! typed makes one run per code typed, and the one showing it stops answering it after
-//! [`MAX_FAILED_TRANSFER_RUNS`] runs that did not finish, so a guesser gets a handful of
-//! tries at 2^25 possible codes for the part it does not know.
+//! encrypted transfer) lets anyone test guesses offline.
+//!
+//! The computer where the code is typed proves first that it knows the code
+//! ([`SenderRun::prove`]): the answer of the computer showing it is a SPAKE2 message alone,
+//! which tells nothing of the code to whoever sent the start, so a run that stops there (a
+//! stranger that learnt the nameplate and stalls, or goes) is not a guess and costs the
+//! code nothing. Only a wrong proof is one; the computer showing the code stops answering it
+//! after [`MAX_FAILED_TRANSFER_RUNS`] of those. Its own proof comes only after that, so a
+//! computer pretending to show the code learns from the one typing it whether its own guess
+//! was right, and no more: the computer where the code is typed makes one run per code
+//! typed. A guesser gets a handful of tries at 2^25 possible codes for the part it does not
+//! know.
+//!
+//! That is the second way of running the code (the move's protocol `/fogata/transfer/2`); the
+//! first had the computer showing the code prove first, and counted every run that did not
+//! finish. The two do not run with each other: [`old_protocol_probe`] tells a computer of the
+//! first way showing this code apart without spending anything on either side.
 //!
 //! The run is bound to the transport identities of both ends and ends with a key for each
 //! direction, which the transfer encrypts every frame with ([`FrameSealer`]).
@@ -32,7 +45,8 @@ use crate::secret::derive;
 
 /// How long a code shown on the new computer stays valid.
 pub const TRANSFER_CODE_LIFETIME_MS: u64 = 10 * 60 * 1000;
-/// Runs that did not finish after which the new computer stops answering a code.
+/// Runs whose proof of the code was wrong after which the new computer stops answering a
+/// code. A run that stops before its proof is not counted: it learnt nothing.
 pub const MAX_FAILED_TRANSFER_RUNS: u32 = 3;
 
 const CROCKFORD: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -41,7 +55,9 @@ const NAMEPLATE_LEN: usize = 4;
 const RENDEZVOUS: &[u8] = b"fogata/v1/transfer-rendezvous";
 const NAMEPLATE: &[u8] = b"fogata/v1/transfer-nameplate";
 const PASSWORD: &[u8] = b"fogata/v1/transfer-password";
-const TRANSCRIPT: &[u8] = b"fogata/v1/transfer-transcript";
+/// The transcript of a run of the second way (the computer typing the code proves first):
+/// another label than the first way's, so that no proof of one passes in the other.
+const TRANSCRIPT: &[u8] = b"fogata/v2/transfer-transcript";
 const KEYS: &[u8] = b"fogata/v1/transfer-keys";
 const SPAKE_SENDER: &[u8] = b"fogata/v1/transfer-sender";
 const LAN: &[u8] = b"fogata/v1/transfer-lan";
@@ -133,6 +149,12 @@ impl TransferCode {
         *derive(NAMEPLATE, &self.0[..NAMEPLATE_LEN], b"nameplate")
     }
 
+    /// Whether `start` is for this code, as far as its nameplate says: anyone who learnt the
+    /// rendezvous point may know it, so it proves nothing of the code.
+    pub fn named_by(&self, start: &RunStart) -> bool {
+        equal(&self.nameplate(), &start.nameplate)
+    }
+
     /// The secret the two computers seal their local addresses under in their DHT
     /// announcements: from the nameplate alone, like the rendezvous point. Whoever watches
     /// that point can open them; anything made from the rest of the code would let it test
@@ -178,12 +200,11 @@ pub struct RunStart {
     pub spake: Vec<u8>,
 }
 
-/// The answer of the computer showing the code: its SPAKE2 message and a proof that it
-/// holds the run's key.
+/// The answer of the computer showing the code: its SPAKE2 message alone, which tells
+/// nothing of the code to whoever sent the start; the proofs come after.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RunReply {
     pub spake: Vec<u8>,
-    pub confirm: [u8; 32],
 }
 
 /// The keys of a finished run, one for each direction.
@@ -217,7 +238,22 @@ impl fmt::Debug for SenderRun {
 /// The computer showing the code, waiting for the sender's proof.
 pub struct ReceiverRun {
     keys: RunKeys,
+    /// The proof the sender must send.
+    expected: Zeroizing<[u8; 32]>,
+    /// This computer's own, sent once the sender's checked out.
     confirm: Zeroizing<[u8; 32]>,
+}
+
+/// The computer where the code was typed, having sent its proof: waiting for the other's.
+pub struct SenderProven {
+    keys: RunKeys,
+    expected: Zeroizing<[u8; 32]>,
+}
+
+impl fmt::Debug for SenderProven {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SenderProven(..)")
+    }
 }
 
 impl fmt::Debug for ReceiverRun {
@@ -304,23 +340,35 @@ pub fn run_reply(
     Ok((
         ReceiverRun {
             keys: d.keys,
-            confirm: d.sender_confirm,
+            expected: d.sender_confirm,
+            confirm: d.receiver_confirm,
         },
-        RunReply {
-            spake: outbound,
-            confirm: *d.receiver_confirm,
-        },
+        RunReply { spake: outbound },
     ))
 }
 
+/// A start of the first way of running a code (`/fogata/transfer/1`, versions up to
+/// 0.1.0-beta.7) for `code`, which no computer can run: the nameplate of the code and a
+/// SPAKE2 message that is none. A computer of that way showing another code answers that
+/// it does; one showing this code drops the stream at once, without counting a run or
+/// telling anything, since the message is not one. So the computer where the code was
+/// typed can tell the person to update both computers, and neither side spends anything.
+pub fn old_protocol_probe(code: &TransferCode) -> RunStart {
+    RunStart {
+        nameplate: code.nameplate(),
+        spake: vec![0xff],
+    }
+}
+
 impl SenderRun {
-    /// Checks the answer: the run's keys and the proof to send back, or
-    /// [`RunError::WrongCode`] when the other computer used another code.
-    pub fn finish(self, reply: &RunReply) -> Result<(RunKeys, [u8; 32]), RunError> {
+    /// Takes the answer and proves this computer knows the code: the proof to send, and the
+    /// run waiting for the other computer's. [`RunError::Malformed`] for an answer that is no
+    /// SPAKE2 message; nothing here tells whether the other computer used the same code.
+    pub fn prove(self, reply: &RunReply) -> Result<(SenderProven, [u8; 32]), RunError> {
         let key = Zeroizing::new(
             self.spake
                 .finish(&reply.spake)
-                .map_err(|_| RunError::WrongCode)?,
+                .map_err(|_| RunError::Malformed)?,
         );
         let d = derived(
             &key,
@@ -329,20 +377,35 @@ impl SenderRun {
             &self.outbound,
             &reply.spake,
         );
-        if !equal(&d.receiver_confirm, &reply.confirm) {
+        Ok((
+            SenderProven {
+                keys: d.keys,
+                expected: d.receiver_confirm,
+            },
+            *d.sender_confirm,
+        ))
+    }
+}
+
+impl SenderProven {
+    /// Checks the other computer's proof: the run's keys, or [`RunError::WrongCode`] when it
+    /// used another code (or is not the computer this one connected to).
+    pub fn finish(self, confirm: &[u8]) -> Result<RunKeys, RunError> {
+        if !equal(&self.expected, confirm) {
             return Err(RunError::WrongCode);
         }
-        Ok((d.keys, *d.sender_confirm))
+        Ok(self.keys)
     }
 }
 
 impl ReceiverRun {
-    /// Checks the sender's proof: the run's keys, or [`RunError::WrongCode`].
-    pub fn finish(self, confirm: &[u8]) -> Result<RunKeys, RunError> {
-        if !equal(&self.confirm, confirm) {
+    /// Checks the sender's proof: the run's keys and this computer's own proof to send back,
+    /// or [`RunError::WrongCode`], a guess that missed.
+    pub fn finish(self, confirm: &[u8]) -> Result<(RunKeys, [u8; 32]), RunError> {
+        if !equal(&self.expected, confirm) {
             return Err(RunError::WrongCode);
         }
-        Ok(self.keys)
+        Ok((self.keys, *self.confirm))
     }
 }
 
@@ -443,8 +506,9 @@ mod tests {
     fn run(typed: &TransferCode, shown: &TransferCode) -> Result<(RunKeys, RunKeys), RunError> {
         let (sender, start) = run_start(typed, SENDER, RECEIVER);
         let (receiver, reply) = run_reply(shown, RECEIVER, SENDER, &start)?;
-        let (sender_keys, confirm) = sender.finish(&reply)?;
-        let receiver_keys = receiver.finish(&confirm)?;
+        let (sender, proof) = sender.prove(&reply)?;
+        let (receiver_keys, answer) = receiver.finish(&proof)?;
+        let sender_keys = sender.finish(&answer)?;
         Ok((sender_keys, receiver_keys))
     }
 
@@ -527,19 +591,46 @@ mod tests {
             }
         };
         assert_eq!(run(&other, &code).unwrap_err(), RunError::NotMine);
-        // The same nameplate and another rest: the run fails at the sender.
+        // The same nameplate and another rest: the run fails at the computer showing the
+        // code, on the sender's proof, before it proves anything itself.
         let mut same_place = code.0.clone();
         same_place[6] = if same_place[6] == b'0' { b'1' } else { b'0' };
         same_place[LEN - 1] = check_char(&same_place[..LEN - 1]);
         let guess = TransferCode(same_place);
         assert_eq!(run(&guess, &code).unwrap_err(), RunError::WrongCode);
         assert_eq!(code.rendezvous(), guess.rendezvous());
-        // A sender that guessed wrong cannot finish at the receiver either.
-        let (_, start) = run_start(&guess, SENDER, RECEIVER);
-        let (receiver, _) = run_reply(&code, RECEIVER, SENDER, &start).unwrap();
+        let (sender, start) = run_start(&guess, SENDER, RECEIVER);
+        let (receiver, reply) = run_reply(&code, RECEIVER, SENDER, &start).unwrap();
+        let (_, proof) = sender.prove(&reply).unwrap();
+        assert_eq!(receiver.finish(&proof).unwrap_err(), RunError::WrongCode);
+        // A computer pretending to show the code, with a guess, cannot prove it to the one
+        // where the code was typed.
+        let (sender, start) = run_start(&code, SENDER, RECEIVER);
+        let (pretender, reply) = run_reply(&guess, RECEIVER, SENDER, &start).unwrap();
+        let (sender, proof) = sender.prove(&reply).unwrap();
+        assert_eq!(pretender.finish(&proof).unwrap_err(), RunError::WrongCode);
+        assert_eq!(sender.finish(&[0u8; 32]).unwrap_err(), RunError::WrongCode);
+    }
+
+    /// The answer of the computer showing the code is its SPAKE2 message and nothing else:
+    /// whoever sent the start has nothing to check a guess against until it proves one, so
+    /// a run that stops there is not a guess. And the first way's proofs pass in no run of
+    /// this way.
+    #[test]
+    fn the_answer_to_a_start_tells_nothing_of_the_code() {
+        let code = TransferCode::generate().unwrap();
+        let (_, start) = run_start(&code, SENDER, RECEIVER);
+        let (_, reply) = run_reply(&code, RECEIVER, SENDER, &start).unwrap();
+        // A SPAKE2 message: one byte for its side and a point, nothing derived from the
+        // run's key.
+        assert_eq!(reply.spake.len(), 33);
+        // The probe of the first way is no SPAKE2 message: a computer of that way showing
+        // this code cannot run it, and one showing another tells it apart by the nameplate.
+        let probe = old_protocol_probe(&code);
+        assert!(code.named_by(&probe));
         assert_eq!(
-            receiver.finish(&[0u8; 32]).unwrap_err(),
-            RunError::WrongCode
+            run_reply(&code, RECEIVER, SENDER, &probe).unwrap_err(),
+            RunError::Malformed
         );
     }
 
@@ -566,7 +657,8 @@ mod tests {
         let code = TransferCode::generate().unwrap();
         let (sender, start) = run_start(&code, SENDER, RECEIVER);
         // Answered by a computer that is not the one the sender connected to.
-        let (_, reply) = run_reply(&code, b"someone else", SENDER, &start).unwrap();
-        assert_eq!(sender.finish(&reply).unwrap_err(), RunError::WrongCode);
+        let (receiver, reply) = run_reply(&code, b"someone else", SENDER, &start).unwrap();
+        let (_, proof) = sender.prove(&reply).unwrap();
+        assert_eq!(receiver.finish(&proof).unwrap_err(), RunError::WrongCode);
     }
 }

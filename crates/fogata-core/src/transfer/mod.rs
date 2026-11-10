@@ -54,7 +54,7 @@ use tokio::sync::mpsc;
 pub(crate) use self::files::{INCOMING_DIR, MOVED_FILE, REPLACED_DIR, STAGE_FILE};
 use self::{
     files::{Item, Kind, MOVED_IN_FILE, Sink, Source},
-    wire::{CHUNK, Channel, Frame, Msg, PROTOCOL, within},
+    wire::{CHUNK, Channel, Frame, Msg, OLD_PROTOCOL, PROTOCOL, within},
 };
 use crate::{
     NetOptions, Store, now_ms,
@@ -210,6 +210,10 @@ pub enum Failure {
     NothingToFinish,
     /// This computer's network stopped.
     NetworkStopped,
+    /// The other computer runs the code the way of versions up to 0.1.0-beta.7
+    /// (`/fogata/transfer/1`), which this one does not: both must run the same version.
+    /// Nothing was tried or sent on either side.
+    OldVersion,
     /// Something on this computer (its disk, its keychain).
     Other(String),
 }
@@ -318,6 +322,10 @@ impl std::fmt::Display for Failure {
                 f.write_str("this computer has no move to finish from that computer")
             }
             Failure::NetworkStopped => f.write_str("the network stopped"),
+            Failure::OldVersion => f.write_str(
+                "the other computer has an older version of Fogata: update both computers to \
+                 the same version",
+            ),
             Failure::Other(why) => f.write_str(why),
         }
     }
@@ -1076,6 +1084,8 @@ async fn receiving(
     });
     let node = start_node(options, Some(port))?;
     let mut incoming = node.streams().accept(PROTOCOL)?;
+    // Only to tell a computer of the first way showing this code apart.
+    let mut old_incoming = node.streams().accept(OLD_PROTOCOL)?;
     node.seek(Some(code.rendezvous()), Some(*code.lan_secret()))
         .await?;
     let _ = events.send(TransferEvent::Looking);
@@ -1090,12 +1100,21 @@ async fn receiving(
                     break TransferEvent::Failed(Failure::Cancelled);
                 }
             }
+            stream = old_incoming.next() => {
+                let Some((_, stream)) = stream else {
+                    break TransferEvent::Failed(Failure::NetworkStopped);
+                };
+                if let Some(end) = answer_old_run(&code, stream).await {
+                    break end;
+                }
+            }
             stream = incoming.next() => {
                 let Some((peer, stream)) = stream else {
                     break TransferEvent::Failed(Failure::NetworkStopped);
                 };
                 let lan = is_lan(&node, peer).await;
-                match answer_run(&code, &node, peer, stream).await {
+                let (local, remote) = (node.local_peer().to_bytes(), peer.to_bytes());
+                match answer_run(&code, &local, &remote, stream).await {
                     Ok(Some(channel)) => {
                         if let Err(e) = enter(Phase::Running) {
                             break TransferEvent::Failed(failure_of(e));
@@ -1169,20 +1188,20 @@ fn failure_of(e: anyhow::Error) -> Failure {
 impl std::error::Error for Failure {}
 
 /// Answers a run on `stream`: the channel when the code matched, `None` for a run of
-/// another code (not counted), an error otherwise; a run that does not finish in time
-/// counts as a wrong code, since its sender may have learnt whether its guess was right.
-async fn answer_run(
+/// another code, an error otherwise. Only a wrong proof of the code is
+/// [`RunError::WrongCode`], which counts: the answer to a start tells nothing of the code,
+/// so a run that stops before its proof (a stranger that learnt the nameplate and stalls)
+/// was no guess, and costs the code nothing.
+async fn answer_run<S: Link>(
     code: &TransferCode,
-    node: &NodeHandle,
-    peer: PeerId,
-    mut stream: fogata_net::Stream,
-) -> Result<Option<Channel<fogata_net::Stream>>, RunError> {
-    let local = node.local_peer().to_bytes();
-    let remote = peer.to_bytes();
+    local: &[u8],
+    remote: &[u8],
+    mut stream: S,
+) -> Result<Option<Channel<S>>, RunError> {
     let start = within(START_WAIT, wire::read_start(&mut stream))
         .await
         .map_err(|_| RunError::Malformed)?;
-    let (run, reply) = match run_reply(code, &local, &remote, &start) {
+    let (run, reply) = match run_reply(code, local, remote, &start) {
         Ok(answer) => answer,
         Err(RunError::NotMine) => {
             let _ = wire::send_reply(&mut stream, None).await;
@@ -1190,14 +1209,116 @@ async fn answer_run(
         }
         Err(e) => return Err(e),
     };
-    if wire::send_reply(&mut stream, Some(&reply)).await.is_err() {
-        return Err(RunError::WrongCode);
-    }
-    let confirm = within(RUN_WAIT, wire::read_confirm(&mut stream))
+    // Gone, or no proof in time: nothing was learnt of the code.
+    wire::send_reply(&mut stream, Some(&reply))
         .await
-        .map_err(|_| RunError::WrongCode)?;
-    let keys = run.finish(&confirm)?;
+        .map_err(|_| RunError::Malformed)?;
+    let proof = within(RUN_WAIT, wire::read_confirm(&mut stream))
+        .await
+        .map_err(|_| RunError::Malformed)?;
+    let (keys, answer) = match run.finish(&proof) {
+        Ok(done) => done,
+        Err(e) => {
+            let _ = wire::send_answer(&mut stream, None).await;
+            return Err(e);
+        }
+    };
+    wire::send_answer(&mut stream, Some(&answer))
+        .await
+        .map_err(|_| RunError::Malformed)?;
     Ok(Some(Channel::new(stream, &keys, false)))
+}
+
+/// A start of the first way of running the code (`/fogata/transfer/1`) on `stream`: when
+/// it names this code, a computer of a version up to 0.1.0-beta.7 is moving to this one, and
+/// the move stops so that the person updates both ([`Failure::OldVersion`]). Nothing is
+/// answered: that computer then tries again until it gives up on reaching this one, having
+/// spent nothing. A start for another code is told so, as that way does. Whoever learnt the
+/// nameplate can end the code this way, as it could with wrong proofs; it learns nothing.
+async fn answer_old_run(code: &TransferCode, mut stream: impl Link) -> Option<TransferEvent> {
+    let start = within(START_WAIT, wire::read_start(&mut stream))
+        .await
+        .ok()?;
+    if code.named_by(&start) {
+        tracing::info!("a computer with an older Fogata typed this code");
+        return Some(TransferEvent::Failed(Failure::OldVersion));
+    }
+    let _ = wire::send_reply(&mut stream, None).await;
+    None
+}
+
+/// Whether `peer`, a computer that takes only the first way of running the code, shows
+/// `code` ([`fogata_friends::old_protocol_probe`]): `Some(true)` when it does, `Some(false)`
+/// when it shows another, `None` when that could not be told (no stream, no answer in time).
+async fn shows_code_the_old_way(
+    node: &NodeHandle,
+    peer: PeerId,
+    code: &TransferCode,
+) -> Option<bool> {
+    let stream = node.streams().open_stream(peer, OLD_PROTOCOL).await.ok()?;
+    probe_old_way(code, stream).await
+}
+
+/// [`shows_code_the_old_way`] on `stream`.
+async fn probe_old_way(code: &TransferCode, mut stream: impl Link) -> Option<bool> {
+    wire::send_start(&mut stream, &fogata_friends::old_protocol_probe(code))
+        .await
+        .ok()?;
+    match tokio::time::timeout(START_WAIT, wire::read_old_reply(&mut stream)).await {
+        Ok(Ok(other)) => Some(!other),
+        // It dropped the stream on a start it could not run: it shows this code.
+        Ok(Err(_)) => Some(true),
+        Err(_) => None,
+    }
+}
+
+/// How a run of the code typed here ended ([`run_code`]).
+enum Ran<S> {
+    /// The two computers proved the code to each other.
+    Both(Channel<S>),
+    /// The other computer shows another code, or went before the code was tried on it: not
+    /// a try of the code.
+    Untried { other_code: bool },
+    /// This computer proved the code and the other did not: the code's one try is spent.
+    Wrong,
+    /// This computer proved the code and heard nothing back.
+    Lost,
+}
+
+/// Runs the code typed here on `stream`, to the computer at its other end: this computer
+/// proves the code first, and the code's one try is spent only then.
+async fn run_code<S: Link>(
+    code: &TransferCode,
+    local: &[u8],
+    remote: &[u8],
+    mut stream: S,
+) -> Ran<S> {
+    let (run, start) = run_start(code, local, remote);
+    let reply = async {
+        wire::send_start(&mut stream, &start).await?;
+        wire::read_reply(&mut stream).await
+    };
+    let reply = match within(RUN_WAIT, reply).await {
+        Ok(Some(reply)) => reply,
+        Ok(None) => return Ran::Untried { other_code: true },
+        Err(_) => return Ran::Untried { other_code: false },
+    };
+    // An answer that is no SPAKE2 message is no try of the code.
+    let Ok((run, proof)) = run.prove(&reply) else {
+        return Ran::Untried { other_code: false };
+    };
+    let answer = async {
+        wire::send_confirm(&mut stream, &proof).await?;
+        wire::read_answer(&mut stream).await
+    };
+    match within(RUN_WAIT, answer).await {
+        Ok(Some(answer)) => match run.finish(&answer) {
+            Ok(keys) => Ran::Both(Channel::new(stream, &keys, true)),
+            Err(_) => Ran::Wrong,
+        },
+        Ok(None) => Ran::Wrong,
+        Err(_) => Ran::Lost,
+    }
 }
 
 /// What runs over a move's connection.
@@ -1901,7 +2022,15 @@ async fn sending(
             break TransferEvent::Failed(Failure::Cancelled);
         }
         let candidates = node.move_candidates().await.unwrap_or_default();
-        let ready = to_try(node.peers_taking(&PROTOCOL), candidates, |p| {
+        let taking = node.peers_taking(&PROTOCOL);
+        // Those that take only the first way: told apart below, never run with.
+        let old_only: Vec<PeerId> = node
+            .peers_taking(&OLD_PROTOCOL)
+            .into_iter()
+            .filter(|p| !taking.contains(p))
+            .collect();
+        let listing = taking.iter().chain(&old_only).copied().collect();
+        let ready = to_try(listing, candidates, |p| {
             *p != local
                 && !other_code.contains(p)
                 && tried.get(p).is_none_or(|t| t.elapsed() >= RETRY_PEER)
@@ -1916,34 +2045,38 @@ async fn sending(
             continue;
         };
         tried.insert(peer, Instant::now());
-        let Ok(mut stream) = node.streams().open_stream(peer, PROTOCOL).await else {
+        let stream = match old_only.contains(&peer) {
+            true => None,
+            false => node.streams().open_stream(peer, PROTOCOL).await.ok(),
+        };
+        let Some(stream) = stream else {
+            // A computer of the first way (or one that takes neither yet): if it shows this
+            // code, both must run the same version. Nothing is tried on it.
+            match shows_code_the_old_way(&node, peer, code).await {
+                Some(true) => break TransferEvent::Failed(Failure::OldVersion),
+                Some(false) => {
+                    other_code.insert(peer);
+                }
+                None => {}
+            }
             continue;
         };
-        let (run, start) = run_start(code, &local.to_bytes(), &peer.to_bytes());
-        let reply = async {
-            wire::send_start(&mut stream, &start).await?;
-            wire::read_reply(&mut stream).await
-        };
-        let reply = match within(RUN_WAIT, reply).await {
-            Ok(Some(reply)) => reply,
+        // One run per code typed: once this computer's proof went, whatever answered, this
+        // was the code's only try.
+        let channel = match run_code(code, &local.to_bytes(), &peer.to_bytes(), stream).await {
+            Ran::Both(channel) => channel,
             // Another code, or a computer that went: the code was not tried on it.
-            Ok(None) => {
+            Ran::Untried { other_code: true } => {
                 other_code.insert(peer);
                 continue;
             }
-            Err(_) => continue,
-        };
-        // One run per code typed: whatever answered, this was the code's only try.
-        let Ok((keys, confirm)) = run.finish(&reply) else {
-            break TransferEvent::Failed(Failure::WrongCode);
+            Ran::Untried { other_code: false } => continue,
+            Ran::Wrong => break TransferEvent::Failed(Failure::WrongCode),
+            Ran::Lost => break TransferEvent::Failed(Failure::Interrupted(CONNECTION_LOST.into())),
         };
         if let Err(e) = enter(Phase::Running) {
             break TransferEvent::Failed(failure_of(e));
         }
-        if wire::send_confirm(&mut stream, &confirm).await.is_err() {
-            break TransferEvent::Failed(Failure::Interrupted(CONNECTION_LOST.into()));
-        }
-        let channel = Channel::new(stream, &keys, true);
         let lan = is_lan(&node, peer).await;
         let result = match &resume {
             Some(moved) => {
@@ -2400,6 +2533,194 @@ use std::io::Read as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One end of a connection in memory, as a move's stream is to the run.
+    struct End(tokio::io::DuplexStream);
+
+    impl futures::AsyncRead for End {
+        fn poll_read(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &mut [u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            let mut read = tokio::io::ReadBuf::new(buf);
+            tokio::io::AsyncRead::poll_read(std::pin::Pin::new(&mut self.0), cx, &mut read)
+                .map_ok(|()| read.filled().len())
+        }
+    }
+
+    impl futures::AsyncWrite for End {
+        fn poll_write(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+            buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            tokio::io::AsyncWrite::poll_write(std::pin::Pin::new(&mut self.0), cx, buf)
+        }
+
+        fn poll_flush(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            tokio::io::AsyncWrite::poll_flush(std::pin::Pin::new(&mut self.0), cx)
+        }
+
+        fn poll_close(
+            mut self: std::pin::Pin<&mut Self>,
+            cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            tokio::io::AsyncWrite::poll_shutdown(std::pin::Pin::new(&mut self.0), cx)
+        }
+    }
+
+    /// The two ends of a connection in memory.
+    fn ends() -> (End, End) {
+        let (a, b) = tokio::io::duplex(1 << 16);
+        (End(a), End(b))
+    }
+
+    /// A code with the nameplate of `code` (where the two meet) and another rest.
+    fn same_place(code: &TransferCode) -> TransferCode {
+        let text: Vec<char> = code.to_string().chars().filter(|c| *c != '-').collect();
+        let digits = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+        for other in digits.chars().filter(|c| *c != text[6]) {
+            for check in digits.chars() {
+                let mut guess = text.clone();
+                guess[6] = other;
+                guess[9] = check;
+                if let Ok(guess) = TransferCode::parse(&guess.iter().collect::<String>()) {
+                    return guess;
+                }
+            }
+        }
+        unreachable!("some check character fits")
+    }
+
+    /// The computer where the code is typed proves it first. The right code ends with the
+    /// two channels; a guess of the rest is one try, which the computer showing the code
+    /// counts and the one typing it hears as a no; a stranger that learnt the nameplate and
+    /// goes once it has the answer to its start learnt nothing, and costs the code nothing.
+    #[tokio::test]
+    async fn the_computer_typing_the_code_proves_it_first_and_only_a_wrong_proof_is_a_try() {
+        let code = TransferCode::generate().unwrap();
+        let (old, new) = ends();
+        let (ran, answered) = tokio::join!(
+            run_code(&code, b"old", b"new", old),
+            answer_run(&code, b"new", b"old", new)
+        );
+        let Ran::Both(mut sender) = ran else {
+            panic!("the right code runs")
+        };
+        let mut receiver = answered.unwrap().expect("the right code runs");
+        sender.send(&Msg::Go).await.unwrap();
+        assert_eq!(receiver.recv_msg().await.unwrap(), Msg::Go);
+
+        let guess = same_place(&code);
+        let (old, new) = ends();
+        let (ran, answered) = tokio::join!(
+            run_code(&guess, b"old", b"new", old),
+            answer_run(&code, b"new", b"old", new)
+        );
+        assert!(matches!(ran, Ran::Wrong));
+        assert_eq!(answered.err(), Some(RunError::WrongCode));
+
+        // The stranger: a start with the nameplate, then gone with the answer.
+        let (mut stranger, new) = ends();
+        let shown = code.clone();
+        let answering =
+            tokio::spawn(async move { answer_run(&shown, b"new", b"x", new).await.err() });
+        let (_, start) = run_start(&guess, b"x", b"new");
+        wire::send_start(&mut stranger, &start).await.unwrap();
+        let reply = wire::read_reply(&mut stranger).await.unwrap().unwrap();
+        // Its SPAKE2 message, and nothing made from the run's key to test a guess against.
+        assert_eq!(reply.spake.len(), 33);
+        drop(stranger);
+        assert_eq!(answering.await.unwrap(), Some(RunError::Malformed));
+
+        // Another code altogether: told so, no try either.
+        let other = loop {
+            let other = TransferCode::generate().unwrap();
+            if other.rendezvous() != code.rendezvous() {
+                break other;
+            }
+        };
+        let (old, new) = ends();
+        let (ran, answered) = tokio::join!(
+            run_code(&other, b"old", b"new", old),
+            answer_run(&code, b"new", b"old", new)
+        );
+        assert!(matches!(ran, Ran::Untried { other_code: true }));
+        assert!(matches!(answered, Ok(None)));
+    }
+
+    /// What a new computer of version 0.1.0-beta.7 or before (`/fogata/transfer/1`) does with
+    /// a start (its `answer_run`, with what this version still has of its run): another
+    /// code is told so; a start it cannot run (no SPAKE2 message) is dropped without an
+    /// answer and is not counted; any other is a run of that way, which it counts when it
+    /// does not finish. `true` when it counted one.
+    async fn as_beta7_new_computer(code: &TransferCode, mut stream: End) -> bool {
+        let Ok(start) = wire::read_start(&mut stream).await else {
+            return false;
+        };
+        match run_reply(code, b"new", b"old", &start) {
+            Err(RunError::NotMine) => {
+                let _ = wire::send_reply(&mut stream, None).await;
+                false
+            }
+            Err(_) => false,
+            Ok(_) => true,
+        }
+    }
+
+    /// The two ways of running a code meet only to tell each other apart, and stop with
+    /// [`Failure::OldVersion`], having spent and sent nothing. This version typing the code
+    /// on a computer of the first way that shows it: its probe is dropped there without a
+    /// try being counted, and a computer of that way showing another code says so. A
+    /// computer of the first way typing the code on this one: its start (the nameplate and
+    /// a SPAKE2 message) stops the code shown here, unanswered, so that computer goes on
+    /// looking until it gives up; one for another code is told so.
+    #[tokio::test]
+    async fn a_computer_of_the_first_way_and_this_one_tell_each_other_apart() {
+        let code = TransferCode::generate().unwrap();
+        let (old, new) = ends();
+        let (shows, counted) =
+            tokio::join!(probe_old_way(&code, old), as_beta7_new_computer(&code, new));
+        assert_eq!(shows, Some(true));
+        assert!(!counted, "the first way's computer counted a try");
+        let other = TransferCode::generate().unwrap();
+        let (old, new) = ends();
+        let (shows, counted) = tokio::join!(
+            probe_old_way(&code, old),
+            as_beta7_new_computer(&other, new)
+        );
+        assert_eq!(shows, Some(other.rendezvous() == code.rendezvous()));
+        assert!(!counted);
+
+        // A computer of the first way types the code shown here: its start, as it sends one.
+        let (mut old, new) = ends();
+        let (_, start) = run_start(&code, b"old", b"new");
+        wire::send_start(&mut old, &start).await.unwrap();
+        assert_eq!(
+            answer_old_run(&code, new).await,
+            Some(TransferEvent::Failed(Failure::OldVersion))
+        );
+        // Nothing came back: it hears that the stream ended, and tries again or gives up.
+        assert!(wire::read_reply(&mut old).await.is_err());
+        let (mut old, new) = ends();
+        let (_, start) = run_start(&other, b"old", b"new");
+        wire::send_start(&mut old, &start).await.unwrap();
+        let (told, reply) =
+            tokio::join!(answer_old_run(&code, new), wire::read_old_reply(&mut old));
+        if other.rendezvous() != code.rendezvous() {
+            assert_eq!(told, None);
+            assert!(reply.unwrap(), "told it shows another code");
+        }
+        assert_eq!(
+            Failure::OldVersion.to_string(),
+            "the other computer has an older version of Fogata: update both computers to \
+             the same version"
+        );
+    }
 
     #[test]
     fn the_other_computers_known_reasons_read_back_and_others_stay_words() {
@@ -3030,10 +3351,7 @@ mod tests {
     /// Takes `frames` into a new folder; what it says when it stops.
     async fn take(frames: Vec<wire::Frame>, declared: u64) -> String {
         let code = fogata_friends::TransferCode::generate().unwrap();
-        let (sender, start) = fogata_friends::run_start(&code, b"a", b"b");
-        let (receiver, reply) = fogata_friends::run_reply(&code, b"b", b"a", &start).unwrap();
-        let (keys, confirm) = sender.finish(&reply).unwrap();
-        let receiver_keys = receiver.finish(&confirm).unwrap();
+        let (keys, receiver_keys) = wire::tests::run_keys(&code);
         let bytes = sent_frames(&keys, frames);
         let mut channel = Channel::new(futures::io::Cursor::new(bytes), &receiver_keys, false);
         let dir = folder(&format!("take-{}", rand_name()));
@@ -3136,10 +3454,7 @@ mod tests {
     async fn cancelling_on_the_new_computer_stops_the_files_coming() {
         use wire::{Frame, Msg};
         let code = fogata_friends::TransferCode::generate().unwrap();
-        let (sender, start) = fogata_friends::run_start(&code, b"a", b"b");
-        let (receiver, reply) = fogata_friends::run_reply(&code, b"b", b"a", &start).unwrap();
-        let (keys, confirm) = sender.finish(&reply).unwrap();
-        let receiver_keys = receiver.finish(&confirm).unwrap();
+        let (keys, receiver_keys) = wire::tests::run_keys(&code);
         let summary = summary_of(1 << 20);
         let frames = vec![
             Frame::Msg(Msg::Offer {
@@ -3232,10 +3547,7 @@ mod tests {
     async fn an_offer_too_large_to_hold_is_refused() {
         use wire::{Frame, Msg};
         let code = fogata_friends::TransferCode::generate().unwrap();
-        let (sender, start) = fogata_friends::run_start(&code, b"a", b"b");
-        let (receiver, reply) = fogata_friends::run_reply(&code, b"b", b"a", &start).unwrap();
-        let (keys, confirm) = sender.finish(&reply).unwrap();
-        let receiver_keys = receiver.finish(&confirm).unwrap();
+        let (keys, receiver_keys) = wire::tests::run_keys(&code);
         for bytes in [u64::MAX, u64::MAX - SLACK_BYTES, MAX_BYTES + 1] {
             let summary = summary_of(bytes);
             let offer = Frame::Msg(Msg::Offer {

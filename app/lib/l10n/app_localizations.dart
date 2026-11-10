@@ -3015,6 +3015,12 @@ abstract class L10n {
   /// **'Share the sound too'**
   String get roomShareSoundToo;
 
+  /// Room: tooltip of the greyed sound button while sharing a screen on Linux without PipeWire.
+  ///
+  /// In en, this message translates to:
+  /// **'Sound can’t be shared from this computer: it needs PipeWire, which isn’t running here. Only the picture is shared.'**
+  String get roomSoundNeedsPipeWire;
+
   /// Tooltip of the button in a direct call's controls that opens the list of friends to add.
   ///
   /// In en, this message translates to:
@@ -5796,6 +5802,12 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'The new computer didn’t accept that code, so nothing was sent. Check it and type it again. If it still fails, get a new code there.'**
   String get moveWrongCodeNote;
+
+  /// Move account: on either computer, when the other one has a version of Fogata from before moves changed (0.1.0-beta.7 or older).
+  ///
+  /// In en, this message translates to:
+  /// **'The other computer has an older version of Fogata. Update both computers to the same version and try again. Nothing was moved.'**
+  String get moveUpdateBoth;
 
   /// Move account: bold first sentence of the note when the computers never connected.
   ///

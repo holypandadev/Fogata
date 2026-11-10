@@ -15,7 +15,7 @@ use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupSecret};
 
 use crate::{
     budget::{Budget, Entries, PAST_RUN},
-    entry::{Body, EntryHash, secret_context},
+    entry::{Body, EntryHash, NamedInvite, secret_context},
     log::GroupLog,
     state::{GroupState, Level, OUTRANKED, RuleStand},
 };
@@ -630,11 +630,11 @@ impl GroupLog {
                 }
             }
         }
-        let mut budget = Budget::new(self.run_room);
-        let mut ready: BTreeSet<(Reverse<u64>, EntryHash)> = BTreeSet::new();
         let level = self.order_level(before, &rest);
+        let mut budget = Budget::new(self.run_room, level);
+        let mut ready: BTreeSet<(Reverse<u64>, EntryHash)> = BTreeSet::new();
         let key = |hash: &EntryHash, budget: &Budget| match level {
-            Level::Two => budget.key(&self.entries[hash].author, *hash),
+            Level::Two | Level::Three => budget.key(&self.entries[hash].author, *hash),
         };
         ready.extend(ready_first.iter().map(|h| key(h, &budget)));
         for (i, hash) in before.iter().enumerate() {
@@ -883,6 +883,11 @@ impl GroupLog {
         state: &GroupState,
         over: &Entries,
     ) -> BTreeMap<EntryHash, EntryHash> {
+        // What a demotion outranks: from level three, an invite that names who lets its
+        // device in too, which level two reads as a kind it does not know.
+        let needs_rank = |body: &Body| {
+            body.needs_rank() || (state.level >= Level::Three && NamedInvite::of(body).is_some())
+        };
         // The device that lost something, the entry, and whether it lost only its place.
         let losses: Vec<(DevicePublicKey, EntryHash, bool)> = state
             .applied
@@ -918,7 +923,7 @@ impl GroupLog {
                 .get(&device)
                 .into_iter()
                 .flatten()
-                .filter(|i| !place_only || self.entries[&order.hashes[**i]].body.needs_rank())
+                .filter(|i| !place_only || needs_rank(&self.entries[&order.hashes[**i]].body))
                 .chain(invited.get(&device).into_iter().flatten())
                 .filter(|i| **i != at)
                 .copied()

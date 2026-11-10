@@ -64,9 +64,17 @@ impl Node {
             // Managers hand the current key to members a rotation missed, and make a new one
             // when they were not given it.
             let one_above = self.manager_above_here(group);
+            let levels = crate::locked(&self.levels).clone();
             let slot = self.groups.get_mut(&group).expect("listed above");
             let mut new = slot.ctx.welcome_lacking(now_ms());
             new.extend(slot.ctx.mend_key(now_ms(), one_above));
+            // Once every member's copy judges at this version's level, the group goes up.
+            new.extend(
+                slot.ctx
+                    .raise_level_when_all_judge(now_ms(), one_above, |d| {
+                        levels.get(d).copied().unwrap_or(crate::caps::FIRST_LEVEL)
+                    }),
+            );
             // A week-old key is replaced (not a call's: it lasts as long as the call).
             if !slot.call {
                 new.extend(slot.ctx.rotate_if_old(now_ms()));

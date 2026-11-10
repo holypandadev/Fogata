@@ -1582,8 +1582,8 @@ kept, never part of a group's log or a room's events, and nothing forwards it.
 
 ### 3.15 Capability levels
 
-Each version of Fogata's protocols has a level: every version before levels is 1, this one is
-2. A device lists `/fogata/caps/<level>` among its protocols (identify); a stream opened on
+Each version of Fogata's protocols has a level: every version before levels is 1, the one
+that brought them 2, this one 3 (level three of the group log, 5.1). A device lists `/fogata/caps/<level>` among its protocols (identify); a stream opened on
 it is closed at once, so nothing new goes on the wire and earlier versions only see one more
 protocol name. A peer that lists none is level 1; the highest level named counts. Like every
 Fogata protocol, it is listed only to members and friends: a peer that dialled this device
@@ -2080,12 +2080,19 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   the WebRTC statistics every 2 s: round-trip time and packets lost since the last reading
   (good under 150 ms and 2 %, poor past 400 ms or 8 %), with the picture's size and rate.
   A fourth channel carries the screen's sound, also only to watchers, with its own volume
-  per person. A screen's sound plays only while this device watches that screen, and its
+  per person, in two channels (Opus `stereo=1;sprop-stereo=1` in that section only, and
+  in the section of a Mac's connection for it; the voice stays in one): WebRTC encodes two
+  only towards a side whose description asks for them, so a version before it is sent
+  one, mixed down by the sender's WebRTC, and takes the descriptions as before. Linux and
+  Windows capture it in two; a Mac's capture mixes it into one. A screen's sound plays only while this device watches that screen, and its
   connection of its own (macOS, below) is refused otherwise, whoever sends it. On Linux it is every other application's sound, linked in PipeWire,
   without Fogata's own, so nobody hears the call back: an output is taken only once its
   process or executable is known, and one found later to be Fogata's own is unlinked.
   Without PipeWire (PulseAudio itself the sound server) a shared screen has no sound,
-  and the sound button does not show: what PulseAudio's output plays includes the call. WebRTC opens the microphone for
+  and the sound button does not show: what PulseAudio's output plays includes the call.
+  Instead, while a screen is shared, a sound button that cannot be pressed says why
+  (`fogataScreenSoundServer` asks whether PipeWire takes a connection, once a share came
+  without sound; a shared window, which has none for another reason, does not ask). WebRTC opens the microphone for
   any channel of sound that sends, so with the microphone off that channel only sends
   while WebRTC records from "Fogata silence", an input PipeWire runs for the app (a null
   sink shown as a source) that only gives silence; elsewhere it waits for the
@@ -2489,8 +2496,19 @@ author is not counted as writing what it could not. A level of judgment comes wi
 capability level of its number, so the capability level a device lists also says the levels
 it judges at; the one place a group's level goes up (`Core::raise_group_level`, which
 `GroupLog::raise_level` serves, `append` writing no `Level` entry) checks that every other
-member was seen at it. Nothing raises a group yet. Copies before levels kept a `Level` entry as a kind they do not know,
+member was seen at it. A manager's device raises its group by itself, at a heartbeat, once
+every other member was seen at the level this version judges at (`raise_level_when_all_judge`
+in fogata-net, the manager above it going first when connected): a group with a member on an
+older copy stays where it is, under the old rules, until that member updates. Copies before levels kept a `Level` entry as a kind they do not know,
 changing nothing: that one change came without a level, before any copy was handed out.
+
+Level three (capability level 3) changes two rules, and nothing else: invites name who may
+let their device in (`NamedInvite`, 5.3), and a `Rotate` gives the new key to every member
+its author saw. A copy of level two refuses the `Level` entry that raises a group to three,
+and waits on what is signed after it, so a group goes up only once every member's copy is at
+three. The corpus of level two is judged in its test as a copy of level two (one that knows
+no later level: the corpus holds `Level` entries naming three, which such a copy refuses),
+and still matches `level-two.txt`.
 
 The order of the entries, the shortcut that judges an entry signed on every head on the
 group as the log has it, and the limits judging reads (members, rooms, names, picture,
@@ -2566,8 +2584,9 @@ is joining with an invite) takes the log a manager sends only if the issuing man
 | `Welcome { member, secret }` | manager | Delivers the current epoch secret to a member who lacks it; signed on a `Join` of a device that is no member, with a ticket still unused, lets that device in with it first. |
 | `Remove { member, rotation }` | a member above `member` | Removes a device and starts a new epoch. |
 | `Leave { }` | the leaving member, any, the first too | Removes the author; the ladder closes up and the members then rotate (below). |
-| `Rotate { rotation }` | manager; another member only when, in the log as it was when it wrote the entry, a device that is no longer a member held the current secret (given it by an entry that applied, or sent it while no member by one that did not) | Starts a new epoch. Devices rotate for a key sent by an entry that did not apply only when they manage, as versions before those counted need. |
-| `Invite { ticket, token }` | the manager that issued the ticket | Opens an invite: managers announce under its token until it is used or expires (5.3). |
+| `Rotate { rotation }` | manager; another member only when, in the log as it was when it wrote the entry, a device that is no longer a member held the current secret (given it by an entry that applied, or sent it while no member by one that did not) | Starts a new epoch. Devices rotate for a key sent by an entry that did not apply only when they manage, as versions before those counted need. From level three it is kept only when it gives the new key to every member of the group as its author saw it (but keys nothing can be sealed to): a member could otherwise start an epoch for itself and a few, and leave the managers without the current key. |
+| `Invite { ticket, token }` | the manager that issued the ticket; to level two only | Opens an invite: managers announce under its token until it is used or expires (5.3). From level three it applies no more. |
+| `NamedInvite { ticket, token, welcomers }` | the manager that issued the ticket; from level three (kind 26, which level two keeps as a kind it does not know) | Opens an invite as `Invite` does, naming the managers (beside the issuer) who may let its device in: only they announce under its token, and only their `Welcome` lets the device in (5.3). |
 | `SetIcon { icon }` | manager | One of the preset icons the application draws. |
 | `SetPicture { picture }` | manager | A PNG or JPEG of at most 48 KiB shown instead of the icon, or none. Anything else applies but shows the icon. Written by earlier versions; this one writes only a `SetPicture` with none (see the group's picture below). |
 | `SetLimits { members, room }` | manager | The most members (2 to 20, 20 at first, never below the members in) and people per voice room (2 to 8, 8 at first). `Add` and `Join` past the first are ignored. A limit set at the same time as an `Add` by a member that came in later applies after it, and is refused if it would leave someone already in out. |
@@ -2857,6 +2876,32 @@ connection). A group offered by a friend (5b) goes in the same parts, at most 4 
 The joining device only takes `Admitted` from a manager it sent its `Join` to, and only a log in
 which the issuing manager's `Invite` for its ticket applies: someone who saw the invite could
 otherwise answer with a group of its own under the same id.
+
+That entry does not tell the real group from a copy of it made by a manager removed or
+demoted while the invite was open: that manager keeps the log up to the invite, the
+issuer's entry included, knows the token, and in a copy made of that log still manages the
+group, so it can let the device into a branch only it answers, with the group's name and
+history, where the issuer's `Revoke` never comes. From level three (5.1) the invite says who
+may let its device in: a manager writes it as a `NamedInvite` (kind 26, read only by levels
+that know it: level two keeps it as a kind it does not know), which names, beside the
+issuer, the managers above the issuer on the ladder; an `Invite` that names nobody applies no
+more. Only the issuer and those named announce under its token and take its joins, the group
+applies only their `Welcome` letting its device in, and the joining device takes a log in
+which it was let in only when that `Welcome` is the issuer's or a named manager's. The
+device judges that on the invite's own words, not on the group's level where the `Welcome`
+applies: a copy can sign its `Join` and `Welcome` on the group as it was before it went up to
+level three, and be judged at level two there.
+
+Why those managers: whoever an invite names can still make such a copy if it loses its
+rights while the invite is open, so naming is trust for the invite's life (a day). The
+managers above the issuer can already remove it and cancel its invites, so naming them hands
+them nothing new; the managers below it, whom the issuer itself can remove, which is the case
+above, are left out. The group goes on while the issuer is offline (messages, calls, keys,
+every other change); only the device invited waits until the issuer or a manager above it is
+online to be let in, and an invite of the first manager on the ladder waits for that manager.
+Naming every manager would keep today's reach but protect from nothing: the one removed is
+one of them. A group below level three (one with a member whose copy does not judge at it)
+keeps the invites that name nobody, and that limit.
 
 A no is checked the same way. The device knows only the manager who wrote its invite (the
 ticket names it), so it believes a refusal only when it carries that manager's signed
@@ -3955,16 +4000,37 @@ character is caught. It lasts 10 minutes. The first four characters (20 bits) ar
 rendezvous point can learn those four characters and nothing about the rest. All nine are
 the password of a SPAKE2 run (Ed25519 group), so nothing seen on the network lets anyone test
 guesses of the code offline: the rendezvous point, the run's messages and the encrypted
-transfer carry nothing to test a guess against. Guessing is online only, one guess per run:
-- the old computer makes **one run per code typed**: if the first computer that answers with
-  the code's nameplate fails the run, the move stops with "the other computer did not accept
-  the code", having sent nothing (it starts with a proof of the nameplate, so a computer on the same network
-  showing another code says so without the try being used);
-- the new computer counts a run that does not finish (a wrong proof, or none within 20 s
-  after its own answer, which may have told a guesser whether its guess was right) and stops
-  answering the code after three, showing a new one.
+transfer carry nothing to test a guess against. Guessing is online only, one guess per run,
+and the old computer proves the code first (`/fogata/transfer/2`):
+- the old computer sends the nameplate and its SPAKE2 message; the new one answers with its
+  own SPAKE2 message alone, which tells nothing of the code to whoever sent the start; the
+  old one sends its proof, and only once that checked out does the new one send its own;
+- the old computer makes **one run per code typed**: once its proof went, if the computer
+  that answered with the code's nameplate does not prove it back, the move stops with "the
+  other computer did not accept the code", having sent nothing (it starts with a proof of
+  the nameplate, so a computer on the same network showing another code says so without the
+  try being used);
+- the new computer counts only a wrong proof, a guess that missed, and stops answering the
+  code after three, showing a new one. A run that stops before its proof (a stranger that
+  learnt the nameplate and stalls, or goes once it has the answer) learnt nothing and costs
+  the code nothing: under the first way, where the new computer proved first in its answer,
+  such a run had to count, so three of them ended any code whose nameplate was found.
 A guesser therefore gets a handful of tries at 2^25 for the part it cannot see (about one in
 ten million). The application does not try a code that did not match a second time either.
+
+**Versions.** The first way (`/fogata/transfer/1`, versions up to 0.1.0-beta.7) and this one
+do not run with each other, and each side tells the other apart before anything is tried or
+sent, so neither is left half moved. The new computer also takes streams of the first way:
+a start there that names its code stops the move with "update both computers to the same
+version" (`Failure::OldVersion`, `old_version` to the screens), unanswered, so the older old
+computer goes on looking and gives up after three minutes ("could not reach each other"),
+its code's try unspent; a start for another code is told so. Whoever learnt the nameplate
+can end a code that way, as it could with three wrong proofs; it learns nothing. The old
+computer, finding a computer that takes only the first way, sends it the nameplate and a
+SPAKE2 message that is none (`old_protocol_probe`): a computer of that way showing another
+code says so, and one showing this code drops the stream without counting a try (it cannot
+run the message), and the move stops with the same words; the older new computer keeps
+showing its code until it runs out.
 
 The nameplate's 20 bits are a trade-off: the code stays ten characters, and every bit given
 to the rendezvous point is taken from the 25 the guesser must find. 2^20 rendezvous points per
@@ -3975,9 +4041,11 @@ first. It still gets one guess per code typed (one in 33 million), which ends th
 local network is tried first, and one found over the DHT only when none is there after five
 seconds, so a move between two computers at the same place does not reach a watcher at all. The run binds both transport identities (authenticated by the transport) and
 both SPAKE2 messages into a transcript, from which HKDF-SHA256 makes one key for each
-direction and a confirmation for each side; the new computer confirms first, and the old
-one only after checking it, so a computer that guessed the nameplate learns nothing from the
-old one but "no". The person on the old computer then sees the new computer's name and what
+direction and a confirmation for each side; the old computer confirms first, and the new
+one only after checking it, so a computer that starts a run with the nameplate and a guess
+learns nothing from the new one but "no", and only by sending its proof; one that answers
+the old computer with a guess learns from its proof whether that guess was right, and no
+more, and cannot prove it back. The person on the old computer then sees the new computer's name and what
 moves, and says yes; the person on the new computer sees the old computer's name and what
 comes (and the profile it replaces there), and says yes too. Each computer tells the other
 its yes (`Go`), and nothing is sent until both did; a no on either ends the move with nothing
@@ -3997,8 +4065,8 @@ address and no way back in, where the device on the main router lets only its ow
 crossed by the one behind the inner router (lab: `transfer-two-routers`, both ways). Each side
 listens on the port its folder keeps (the new computer picks the one the account will keep
 there when its folder has none), so a firewall rule for it serves the move too. The new
-computer takes streams of `/fogata/transfer/1`; the old one opens one
-to each connected peer that says it takes it, and, only while none does, to each it found
+computer takes streams of `/fogata/transfer/2` (and of `/1`, see Versions above); the old one
+opens one to each connected peer that says it takes it, and, only while none does, to each it found
 under the code itself: the new computer lists the protocol only to computers it found (or on
 its local network), so one finding the other is enough
 (`a_move_needs_only_one_computer_to_find_the_other`). The code's one run is spent only on a

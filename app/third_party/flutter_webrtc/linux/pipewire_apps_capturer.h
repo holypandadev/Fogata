@@ -18,6 +18,12 @@ class PipeWireAppsCapturer : public LoopbackCapturer {
   bool Start(scoped_refptr<RTCAudioSource> source) override;
   void Stop() override;
 
+  // Whether a PipeWire server takes a connection here: without one a shared
+  // screen goes without sound (see loopback_capturer_factory.cc), which the
+  // application then says. Connects and disconnects at once; may wait as long as
+  // connecting to the server's socket does.
+  static bool Reachable();
+
   struct State;
 
  private:

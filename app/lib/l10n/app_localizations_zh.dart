@@ -1994,6 +1994,10 @@ class L10nZh extends L10n {
   String get roomShareSoundToo => '同时共享声音';
 
   @override
+  String get roomSoundNeedsPipeWire =>
+      '无法从这台电脑共享声音：需要 PipeWire，但这里没有运行它。只会共享画面。';
+
+  @override
   String get roomAddFriendToCall => '添加好友到通话';
 
   @override
@@ -3978,6 +3982,10 @@ class L10nZh extends L10n {
   @override
   String get moveWrongCodeNote =>
       '新电脑不接受这个迁移码，因此没有发送任何内容。请检查后重新输入。如果仍然失败，请在那台电脑上获取新的迁移码。';
+
+  @override
+  String get moveUpdateBoth =>
+      '另一台电脑上的 Fogata 版本较旧。请将两台电脑更新到同一版本后再试一次。没有迁移任何内容。';
 
   @override
   String get moveCantReachNew => '无法连接新电脑。';

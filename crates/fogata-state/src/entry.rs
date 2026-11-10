@@ -44,6 +44,11 @@ const SET_MANAGERS_KIND: u8 = 24;
 /// The kind of [`Body::Level`].
 const LEVEL_KIND: u8 = 25;
 
+/// The kind of a [`NamedInvite`]: an invite that names who may let its device in. Level two
+/// does not know it, so it stays a [`Body::Unknown`] as it reads, and level two judges it as
+/// the kinds it does not know; only a group judged at level three or later reads it.
+pub const NAMED_INVITE_KIND: u8 = 26;
+
 /// Digest of an MLS message kept beside the log (a Commit, a Welcome): the entry that
 /// carries it signs this, not the bytes, which can go once nobody needs them.
 pub type PayloadDigest = [u8; 32];
@@ -865,6 +870,83 @@ impl Body {
                 })
             }
         })
+    }
+}
+
+/// An invite that names, beside its issuer, the managers whose `Welcome` lets its device in:
+/// what a manager writes for an invite in a group judged at level three or later, in place
+/// of [`Body::Invite`]. A manager removed while an invite is open still has the log up to
+/// it, and in a copy of its own, made of that log, it still manages the group; the invited
+/// device knows the group only by the issuer's own entry, which that copy has too. So the
+/// invited device takes only a `Welcome` signed by the issuer or by a manager named here,
+/// and the group lets in nobody else with the invite.
+///
+/// It travels as a [`Body::Unknown`] of kind [`NAMED_INVITE_KIND`]: reading it as a kind of
+/// its own would change what level two keeps and applies of it (how entries are read is not
+/// judged by level), and level two must judge it as copies before it do, as a kind they do
+/// not know. Levels that know it read it with [`NamedInvite::of`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NamedInvite {
+    pub ticket: Ticket,
+    pub token: InviteToken,
+    /// Managers other than the issuer, sorted, without duplicates, at most
+    /// [`crate::MAX_MEMBERS`].
+    pub welcomers: Vec<DevicePublicKey>,
+}
+
+impl NamedInvite {
+    /// The body that carries this invite. The managers named are sorted and deduplicated,
+    /// and the issuer left out (it is always allowed).
+    pub fn body(&self) -> Body {
+        let mut welcomers = self.welcomers.clone();
+        welcomers.retain(|k| *k != self.ticket.issuer);
+        welcomers.sort_unstable();
+        welcomers.dedup();
+        let mut w = Writer::default();
+        self.ticket.write(&mut w);
+        w.raw(&self.token).u32(welcomers.len() as u32);
+        for key in &welcomers {
+            w.key(key);
+        }
+        Body::Unknown {
+            kind: NAMED_INVITE_KIND,
+            bytes: w.into_bytes(),
+        }
+    }
+
+    /// The invite `body` carries, if it is one in the one encoding [`Self::body`] writes.
+    pub fn of(body: &Body) -> Option<Self> {
+        let Body::Unknown {
+            kind: NAMED_INVITE_KIND,
+            bytes,
+        } = body
+        else {
+            return None;
+        };
+        let mut r = Reader::new(bytes);
+        let ticket = Ticket::read(&mut r).ok()?;
+        let token = r.array().ok()?;
+        let n = r.count(32).ok()?;
+        if n > usize::from(crate::state::MAX_MEMBERS) {
+            return None;
+        }
+        let welcomers = (0..n)
+            .map(|_| r.key())
+            .collect::<Result<Vec<_>, _>>()
+            .ok()?;
+        r.finish().ok()?;
+        let invite = Self {
+            ticket,
+            token,
+            welcomers,
+        };
+        // Out of order, repeated, or naming the issuer: another encoding of the same invite.
+        (invite.body() == *body).then_some(invite)
+    }
+
+    /// Whether `device` may let in the device invited: the issuer or a manager named.
+    pub fn lets_in(&self, device: &DevicePublicKey) -> bool {
+        *device == self.ticket.issuer || self.welcomers.contains(device)
     }
 }
 

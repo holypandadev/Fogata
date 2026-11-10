@@ -207,6 +207,8 @@ class AccountMove extends ChangeNotifier {
       'declined' => l10n.accountMoveDeclined,
       'later' when why != null => l10n.accountMoveLaterWhy(why),
       'later' => l10n.accountMoveLater,
+      // The other computer moves accounts the way of an older version.
+      'old_version' => l10n.moveUpdateBoth,
       _ => why ?? l10n.accountMoveDidNotFinish,
     };
   }

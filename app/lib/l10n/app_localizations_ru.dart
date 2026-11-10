@@ -2187,6 +2187,10 @@ class L10nRu extends L10n {
   String get roomShareSoundToo => 'Передавать и звук';
 
   @override
+  String get roomSoundNeedsPipeWire =>
+      'С этого компьютера нельзя передавать звук: для этого нужен PipeWire, а он здесь не запущен. Передаётся только изображение.';
+
+  @override
   String get roomAddFriendToCall => 'Добавить друга в звонок';
 
   @override
@@ -4402,6 +4406,10 @@ class L10nRu extends L10n {
   @override
   String get moveWrongCodeNote =>
       'Новый компьютер не принял этот код, поэтому ничего не отправлено. Проверьте его и введите снова. Если не получится, получите там новый код.';
+
+  @override
+  String get moveUpdateBoth =>
+      'На другом компьютере более старая версия Fogata. Обновите оба компьютера до одной и той же версии и попробуйте снова. Ничего не перенесено.';
 
   @override
   String get moveCantReachNew => 'Не удаётся связаться с новым компьютером.';

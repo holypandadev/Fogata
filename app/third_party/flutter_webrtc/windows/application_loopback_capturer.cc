@@ -177,8 +177,11 @@ bool ApplicationLoopbackCapturer::Start(
 
   // Cache audio format for FeederThread (mix_format_ lives on this thread).
   cached_sample_rate_  = static_cast<int>(mix_format_->nSamplesPerSec);
-  cached_out_channels_ = 1;
-  // Initialise ring buffer: 500 ms of mono int16 samples.
+  // Fogata: two channels, as Linux sends them: a call that agreed on stereo for
+  // the screen's sound (stereo=1 in its description) encodes both; one that did
+  // not (an older copy) has WebRTC mix them into one.
+  cached_out_channels_ = 2;
+  // Initialise ring buffer: 500 ms of int16 frames, each of the channels above.
   {
     const size_t frames_per_20ms =
         static_cast<size_t>(cached_sample_rate_) / 50;
@@ -517,7 +520,8 @@ void ApplicationLoopbackCapturer::CaptureThread() {
                 : left;
                 
             // Write to our stereo output buffer
-            conv[f] = static_cast<int16_t>((static_cast<int32_t>(left) + right) / 2);
+            conv[f * out_channels] = left;
+            conv[f * out_channels + 1] = right;
           }
         }
         {
@@ -573,7 +577,7 @@ void ApplicationLoopbackCapturer::FeederThread() {
   HANDLE task = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
 
   const int    sample_rate     = cached_sample_rate_;
-  const size_t out_channels    = 1;
+  const size_t out_channels    = cached_out_channels_;
 
   // 480 samples = one 10 ms frame at 48 kHz.
   const size_t frames_per_10ms = static_cast<size_t>(sample_rate) / 100;
