@@ -90,15 +90,13 @@ set_target_properties(${BINARY_NAME}
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+# The jni package (an FFI plugin some dependency brings, for Android) builds its library
+# only where CMake finds a Java runtime, and links it to that runtime's libjvm.so with a
+# RUNPATH into it: on a computer with a JDK, as GitHub's, the bundle would carry a library
+# that needs Java and looks for it outside the application, which release.py refuses.
+# Fogata uses no Java on Linux, so the build never looks for one, as on a computer without.
+set(CMAKE_DISABLE_FIND_PACKAGE_JNI TRUE)
 include(flutter/generated_plugins.cmake)
-
-# The jni package's library (libdartjni.so, an FFI plugin's, so not given the settings
-# above) links with the compiler's defaults, and those differ: on Ubuntu 24.04 it came out
-# without BIND_NOW, which release.py refuses. The same relocations made read-only at load
-# as the runner and the other plugins.
-if(TARGET jni)
-  target_link_options(jni PRIVATE -Wl,-z,relro -Wl,-z,now -Wl,-z,noexecstack)
-endif()
 # The bundle gets the plugins as they were built: they look for the libraries they need
 # next to them, in lib/, and carry no path of the computer that built them. Linking the
 # runner still finds those libraries (libwebrtc.so) where the build has them.
