@@ -3179,7 +3179,12 @@ mod tests {
             let store = DirectStore::open_sealed(&dir, key.clone());
             store.save_group(&friend.public_key(), &log).unwrap();
             let (_, judging) = judged_from_nothing(&store.group_path(&friend.public_key()));
-            let (loaded, took) = timed(|| store.load(&friend.public_key()).unwrap());
+            // The best of a few reads: what a read costs, without the waits of a computer
+            // busy with the other tests (one slow read on CI took 2.4 times less than judging).
+            let (loaded, mut took) = timed(|| store.load(&friend.public_key()).unwrap());
+            for _ in 0..2 {
+                took = took.min(timed(|| store.load(&friend.public_key()).unwrap()).1);
+            }
             assert_same(&loaded.group.unwrap(), &log);
             assert!(
                 took * 5 < judging,
