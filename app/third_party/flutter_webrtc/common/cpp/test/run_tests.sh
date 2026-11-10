@@ -46,7 +46,8 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/video_renderer_test"
 if command -v Xvfb > /dev/null; then
   Xvfb -displayfd 3 -screen 0 1024x768x24 -nolisten tcp 3> "$out/display" 2> /dev/null &
   xvfb=$!
-  for _ in $(seq 50); do [ -s "$out/display" ] && break; sleep 0.1; done
+  # Up to 20 s: on a busy computer (a CI runner building other things) Xvfb takes seconds.
+  for _ in $(seq 200); do [ -s "$out/display" ] && break; sleep 0.1; done
   display=$(tr -dc 0-9 < "$out/display")
   if [ -z "$display" ]; then
     kill "$xvfb" 2> /dev/null
