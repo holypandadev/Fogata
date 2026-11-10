@@ -15,7 +15,19 @@ void main() {
     root = Directory.systemTemp.createTempSync('fogata_show');
     folder = Directory('${root.path}/window')..createSync();
   });
-  tearDown(() => root.deleteSync(recursive: true));
+  // Windows lets go of a watched folder a moment after its watch is cancelled: until
+  // then it cannot be deleted.
+  tearDown(() async {
+    for (var tries = 1; ; tries++) {
+      try {
+        root.deleteSync(recursive: true);
+        return;
+      } on FileSystemException {
+        if (tries == 50) rethrow;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      }
+    }
+  });
 
   /// Writes a new request every so often until [done] holds: the system's watch begins
   /// some time after it is asked for (later on a busy computer), and a request written
