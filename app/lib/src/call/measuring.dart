@@ -175,6 +175,7 @@ extension _Measuring on Call {
         if (encoder != null) encoders[peer.id] = encoder;
       }
       _fitCamera(peer, reports, now);
+      _traceVoice(peer, reports);
       _flushLateVoice(peer, reports);
       final after = quality.linkOf(peer.id);
       if (after != before) {
@@ -210,6 +211,32 @@ extension _Measuring on Call {
         if (!_closed) _measure(quiet);
       });
     }
+  }
+
+  /// With the call's log on, the voice each way with [peer] every 2 s: what the microphone
+  /// reads, what goes out, what comes in and what is played, so a voice that is lost on
+  /// the way can be told from one never sent.
+  void _traceVoice(CallPeer peer, List<StatsReport> reports) {
+    if (!_verbose) return;
+    final parts = <String>[];
+    for (final r in reports) {
+      final v = r.values;
+      if (r.type == 'media-source' && v['kind'] == 'audio') {
+        parts.add(
+          'mic level ${v['audioLevel']} read ${v['totalSamplesDuration']}',
+        );
+      } else if (r.type == 'outbound-rtp' && '${v['mid']}' == '$_audio') {
+        parts.add('out ${v['packetsSent']} packets ${v['bytesSent']} bytes');
+      } else if (r.type == 'inbound-rtp' && '${v['mid']}' == '$_audio') {
+        parts.add(
+          'in ${v['packetsReceived']} packets level ${v['audioLevel']} '
+          'played ${v['totalSamplesReceived']} concealed ${v['concealedSamples']}',
+        );
+      }
+    }
+    _trace(
+      'voice with ${peer.id.substring(0, 8)}: mic $mic, ${parts.join('; ')}',
+    );
   }
 
   /// Who talks, every 600 ms. A reading that takes longer (many participants, a busy

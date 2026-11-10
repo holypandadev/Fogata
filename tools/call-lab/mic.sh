@@ -16,6 +16,8 @@
 #            a slow one answers the second time), then as for broken
 #   late     a's microphone opens 8 s after its room does, so b connects first; b must
 #            hear it without a muting and unmuting
+#   alone    a is alone in the call for 6 s before b enters (its own level read through a
+#            loop of its own meanwhile); b must hear it without a muting and unmuting
 #   quit     a quits the application as it enters the room with its microphone on, after
 #            QUIT_AFTER ms (default 0); it must end by itself within 15 s, without a crash
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
@@ -85,7 +87,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late broken alsa hang quit:0 quit:300 quit:1500)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone broken alsa hang quit:0 quit:300 quit:1500)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }

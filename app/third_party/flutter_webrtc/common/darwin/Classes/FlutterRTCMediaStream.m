@@ -7,6 +7,9 @@
 #import "VideoProcessingAdapter.h"
 #import "LocalVideoTrack.h"
 #import "LocalAudioTrack.h"
+#if TARGET_OS_OSX
+#import "FogataPlayout.h"
+#endif
 
 @implementation RTCMediaStreamTrack (Flutter)
 
@@ -176,6 +179,11 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   [self.localTracks setObject:localAudioTrack forKey:trackId];
 
   [self ensureAudioSession];
+
+#if TARGET_OS_OSX
+  // The microphone permission was just asked for: the input may be usable now.
+  [FogataPlayout inputMayHaveChanged];
+#endif
 
   successCallback(mediaStream);
 }
@@ -754,6 +762,7 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   for (RTCIODevice* device in inputDevices) {
     if ([deviceId isEqualToString:device.deviceId]) {
       [audioDeviceModule setInputDevice:device];
+      [FogataPlayout inputMayHaveChanged];
       if (result)
         result(nil);
       return;

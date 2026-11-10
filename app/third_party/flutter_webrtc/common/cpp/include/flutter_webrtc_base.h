@@ -62,6 +62,18 @@ class FlutterWebRTCBase {
 
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
 
+  // Fogata: the track `id` as the application holds it, `owner` being the track's own
+  // peerConnectionId ("local" for this device's own tracks): the tracks that connection
+  // received come first, then the plain lookup (a sender's track is held with its
+  // connection's id, and is found as before). A connection that receives a track sent by
+  // another connection of this same application (mic_test.dart's LevelLoop, which reads
+  // the microphone's level while alone in a call) gets it under the same id: a received
+  // track is named after the sender's msid. The plain lookup, local tracks first, then
+  // gave the microphone for the received track, and muting the loop's playback disabled
+  // the microphone in every call until it was opened again.
+  scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id,
+                                               const std::string& owner);
+
   // Fogata: records from the input at `index` of the list, whose id is `id` (for the
   // list's first entry, the system's default, nothing more is kept). WebRTC keeps only
   // the index, and on Linux it reads the list again each time it starts recording, so

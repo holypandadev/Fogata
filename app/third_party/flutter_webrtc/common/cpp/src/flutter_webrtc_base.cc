@@ -303,6 +303,17 @@ scoped_refptr<RTCMediaTrack> FlutterWebRTCBase ::MediaTrackForId(const std::stri
   return nullptr;
 }
 
+scoped_refptr<RTCMediaTrack> FlutterWebRTCBase::MediaTrackForId(
+    const std::string& id,
+    const std::string& owner) {
+  auto it = peerconnection_observers_.find(owner);
+  if (it != peerconnection_observers_.end()) {
+    if (auto received = it->second->MediaTrackForId(id))
+      return received;
+  }
+  return MediaTrackForId(id);
+}
+
 void FlutterWebRTCBase::RemoveMediaTrackForId(const std::string& id) {
   auto it = local_tracks_.find(id);
   if (it != local_tracks_.end())

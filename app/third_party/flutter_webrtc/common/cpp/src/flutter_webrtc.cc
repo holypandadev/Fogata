@@ -665,7 +665,9 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string track_id = findString(params, "trackId");
     const EncodableValue enable = findEncodableValue(params, "enabled");
-    RTCMediaTrack* track = MediaTrackForId(track_id);
+    // Fogata: by its owner, so a local track never stands for a received one.
+    RTCMediaTrack* track =
+        MediaTrackForId(track_id, findString(params, "peerConnectionId"));
     if (track != nullptr) {
       track->set_enabled(GetValue<bool>(enable));
     }
@@ -794,7 +796,9 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    RTCMediaTrack* track = MediaTrackForId(trackId);
+    // Fogata: by its owner, as for mediaStreamTrackSetEnable.
+    RTCMediaTrack* track =
+        MediaTrackForId(trackId, findString(params, "peerConnectionId"));
     if (nullptr == track) {
       result->Error("setVolume", "setVolume() Unable to find provided track");
       return;

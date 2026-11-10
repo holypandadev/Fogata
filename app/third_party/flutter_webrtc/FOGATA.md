@@ -391,6 +391,67 @@ the application's own short sounds included, for as long as the call lasts.
   The log says which: "Fogata: advanced ducking on" or "... not offered by this audio
   module".
 
+## The others' voices play without a microphone (macOS)
+
+WebRTC-SDK's AudioEngine audio module plays and records with one AVAudioEngine. Asked to
+record while it plays (WebRTC does as soon as a channel of sound sends), it stops the engine
+to add the input, and when the input then cannot be opened (no input device, as on a Mac
+mini without one or before an iPhone's microphone is there; no format yet; the microphone
+permission not granted) it rolls back without starting the engine again and without
+changing its state: it still counts itself as playing, so asking it to play does nothing,
+and nobody's voice is played (`totalSamplesReceived` 0 while packets arrive) until
+something makes the engine again.
+
+- `macos/flutter_webrtc/Sources/flutter_webrtc/FogataPlayout.{h,m}` (new, macOS):
+  - Tells the module its input is not available (`setEngineAvailability:`) while it
+    could not be opened: no permission granted, no input device (the module's first input,
+    "default", has an empty name then), or one that is gone, has no input channels or no
+    rate. The module then plays alone and keeps WebRTC's requests to record for when the
+    input is available. The input is looked at again when the system's devices or its
+    default input change (after 600 ms of quiet, past the module's own 500 ms), when
+    `getUserMedia` takes a microphone and when one is chosen (`FlutterRTCMediaStream.m`,
+    both copies, identical); a microphone that became usable is opened at once.
+  - As the module's observer (unless an embedding plugin registered one): when the engine
+    stops while playout goes on, it looks once the module's change is done, and again
+    500 ms later; an engine still stopped while the module counts itself as playing is
+    released and made again with the speaker alone, and the input is not tried again
+    until one of the changes above (three times in a row at most).
+  - Its work runs on a queue of its own (the module's calls wait for its thread, up to
+    two seconds while an engine starts); `stop` waits for it before the factory goes.
+  - The log says "Fogata: microphone not usable, playing only: ...", "microphone usable",
+    "microphone could not be opened" and "the audio engine stopped while playing; made
+    again without the microphone".
+- `FlutterWebRTCPlugin.m` (both copies, identical; macOS only): made with the factory,
+  stopped in `dealloc`.
+- A headless check outside the app (the module of `app/macos/WebRTC-SDK.podspec`, its
+  input refused through the observer, platform voice processing off so no microphone is
+  opened): alone, the module goes on counting itself as playing with its engine stopped,
+  and `startPlayout` changes nothing; with this, the engine runs again within a second,
+  recording asked later leaves it running, and a microphone that fails again is handled
+  the same way.
+
+## A received track is found as the connection that received it (all platforms)
+
+A connection that receives a track another connection of this same application sends
+gets it under the same id (libwebrtc names a received track after the sender's msid). The
+application has such a loop: `lib/src/mic_test.dart`'s `LevelLoop`, which reads the
+microphone's level while the person is alone in a call (and in the settings' microphone
+test), and keeps the received track disabled so it does not play. The package looked a
+track up among the local tracks first, so disabling the received track disabled the
+microphone itself: every call that started alone then sent only silence (the microphone's
+`audioLevel` still read, as WebRTC measures it before a disabled track is muted) until the
+microphone was turned off and on, which opens a new track.
+
+- `common/cpp/include/flutter_webrtc_base.h`, `common/cpp/src/flutter_webrtc_base.cc`:
+  `MediaTrackForId(id, owner)` looks among the tracks the connection `owner` (the track's
+  own `peerConnectionId`) received first, then as before (a sender's track is held with its
+  connection's id). `common/cpp/src/flutter_webrtc.cc`: `mediaStreamTrackSetEnable` and
+  `setVolume` use it.
+- `FlutterWebRTCPlugin.m` (both copies, identical; macOS): `trackForId:peerConnectionId:`
+  the same.
+- Checked by `tools/call-lab/mic.sh alone` (Linux): copy a is alone in the call for 6 s
+  before b enters, and b must hear its voice.
+
 ## A renderer freed while its stream changes
 
 - `lib/src/native/rtc_video_renderer_impl.dart`: setting `srcObject` tells the renderer

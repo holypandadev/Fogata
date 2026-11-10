@@ -28,6 +28,7 @@
 #endif
 #if TARGET_OS_OSX
 #import "FogataDenoise.h"
+#import "FogataPlayout.h"
 #import "FogataScreenSound.h"
 #endif
 
@@ -109,6 +110,9 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
   AudioManager* _audioManager;
 #if TARGET_OS_IPHONE || TARGET_OS_OSX
   FlutterRTCVideoPlatformViewFactory *_platformViewFactory;
+#endif
+#if TARGET_OS_OSX
+  FogataPlayout* _fogataPlayout;
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
@@ -491,6 +495,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
                 [audioDeviceModule setOutputDevice:defaultOutput];
                 NSLog(@"CoreAudio ADM: Selected output device: %@", defaultOutput.name);
             }
+
+            // The others' voices must play when the microphone cannot be opened (none,
+            // not ready yet, permission refused): see FogataPlayout.h. It becomes the
+            // module's observer unless an embedding plugin registered one.
+            _fogataPlayout = [[FogataPlayout alloc] initWithModule:audioDeviceModule
+                                                           observe:gAudioDeviceModuleObserver == nil];
         }
 #endif
 
@@ -2017,6 +2027,10 @@ static void FlutterWebRTCApplyFieldTrials(void) {
 }
 
 - (void)dealloc {
+#if TARGET_OS_OSX
+  [_fogataPlayout stop];
+  _fogataPlayout = nil;
+#endif
   [_localTracks removeAllObjects];
   _localTracks = nil;
   [_localStreams removeAllObjects];
@@ -2186,6 +2200,27 @@ static void FlutterWebRTCApplyFieldTrials(void) {
 }
 
 - (RTCMediaStreamTrack*)trackForId:(NSString*)trackId peerConnectionId:(NSString*)peerConnectionId {
+  // Fogata: the tracks received by the connection the track's own peerConnectionId names
+  // ("local" for this device's own) come before the local tracks. A connection receiving
+  // a track that another connection of this application sends (mic_test.dart's
+  // LevelLoop, reading the microphone's level while alone in a call) gets it under the
+  // same id, named after the sender's msid: local tracks first gave the microphone for
+  // it, and muting the loop's playback disabled the microphone in every call until it was
+  // opened again. A sender's track (held with its connection's id) is found as before.
+  if (peerConnectionId != nil && _peerConnections[peerConnectionId] != nil) {
+    RTCPeerConnection* peerConnection = _peerConnections[peerConnectionId];
+    RTCMediaStreamTrack* received = peerConnection.remoteTracks[trackId];
+    if (!received) {
+      for (RTCRtpTransceiver* transceiver in peerConnection.transceivers) {
+        if (transceiver.receiver.track != nil &&
+            [transceiver.receiver.track.trackId isEqual:trackId]) {
+          received = transceiver.receiver.track;
+          break;
+        }
+      }
+    }
+    if (received) return received;
+  }
   id<LocalTrack> track = _localTracks[trackId];
   RTCMediaStreamTrack *mediaStreamTrack = nil;
   if (!track) {

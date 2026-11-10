@@ -92,7 +92,14 @@ class StreamQualityCard extends StatelessWidget {
           width: 76,
           child: Text(label, style: tx(c.fg2, size: 13, weight: w500)),
         ),
-        choice,
+        // A long choice (the source's own height, other languages) shrinks to fit.
+        Flexible(
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: choice,
+          ),
+        ),
       ],
     );
     return Container(

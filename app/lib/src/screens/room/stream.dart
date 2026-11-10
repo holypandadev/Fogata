@@ -667,7 +667,9 @@ class _DockVolumeState extends State<_DockVolume> {
             ),
             AnimatedContainer(
               duration: springTime,
-              curve: spring,
+              // The spring overshoots: closing with it would ask for a width below
+              // zero, which breaks the layout and, in a debug build, the pointer.
+              curve: _open ? spring : Curves.easeOutCubic,
               width: _open ? 118 : 0,
               child: ClipRect(
                 child: OverflowBox(

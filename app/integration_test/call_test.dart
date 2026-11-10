@@ -50,9 +50,9 @@
 // FOGATA_TEST_MEASURE=<seconds> measures instead the call as it is, with every copy's voice
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
-// one thing of the microphone (muted, switch, unplug, late, broken, quit); see _micCase. Both are
-// run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the microphone open only that
-// long after the room does, so the others connect first.
+// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit); see
+// _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
+// microphone open only that long after the room does, so the others connect first.
 
 import 'dart:async';
 import 'dart:convert';
@@ -500,12 +500,31 @@ Future<void> _call(WidgetTester tester) async {
   // it: what they hear must not depend on which comes first.
   final late = int.tryParse(_env['FOGATA_TEST_MIC_LATE'] ?? '');
   if (late != null) micOpensAfter = Duration(seconds: late);
+  // Copy b enters only once a has been alone in the call a while (see below).
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'alone' && _role == 'b') {
+    await _until(
+      tester,
+      'a alone in the call',
+      () => File('$_dir/mark-a-alone').existsSync(),
+      seconds: 300,
+    );
+  }
   await state.openRoom(state.contacts.groups.first.id);
   if (const ['broken', 'alsa', 'hang'].contains(_env['FOGATA_TEST_MIC_CASE'])) {
     await _noSoundServer(tester, state, _env['FOGATA_TEST_MIC_CASE']!);
     return;
   }
   await _until(tester, 'in the call', () => state.callState.call != null);
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'alone' && _role == 'a') {
+    // Alone in the call a while, as when the others join later: the call reads this
+    // device's own level through a loop of its own meanwhile (AloneLevel). Copy b enters
+    // only once this is marked.
+    await _wait(tester, const Duration(seconds: 6));
+    if (state.callState.call!.peers.values.any((p) => p.connected)) {
+      throw StateError('not alone in the call');
+    }
+    _mark('alone');
+  }
   await _until(
     tester,
     'connected to everyone',
@@ -3831,9 +3850,10 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       } else {
         await _hear(tester, state, ['mic done'], seconds: 180);
       }
-    case 'late':
-      // Copy a's microphone opens only after b connected (FOGATA_TEST_MIC_LATE): b hears it
-      // without anyone muting and unmuting, which agrees on the connection again.
+    case 'late' || 'alone':
+      // Copy a's microphone opens only after b connected (FOGATA_TEST_MIC_LATE), or a was
+      // alone in the call before b came (alone): b hears it without anyone muting and
+      // unmuting, which agrees on the connection again and opens the microphone anew.
       if (_role == 'a') {
         await _hear(tester, state, ['heard'], seconds: 120);
       } else {
@@ -3845,6 +3865,17 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
           () => peer.speaking,
           seconds: 40,
         );
+        if (name == 'alone') {
+          // And keeps coming as a voice, not as the silence Opus sends now and then
+          // (a few hundred bytes in 4 s): a's microphone track disabled sent only that.
+          final before = await _voiceBytesFrom(peer);
+          await _wait(tester, const Duration(seconds: 4));
+          final bytes = await _voiceBytesFrom(peer) - before;
+          _log('voice from a: $bytes bytes in 4 s');
+          if (bytes < 4000) {
+            throw StateError('only $bytes bytes of voice from a in 4 s');
+          }
+        }
         await _say(state, 'heard');
       }
     case 'switch':
@@ -3897,6 +3928,17 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
     default:
       throw StateError('no microphone check called $name');
   }
+}
+
+/// The bytes of voice received so far from [peer] (its voice channel, mid 0).
+Future<int> _voiceBytesFrom(CallPeer peer) async {
+  var bytes = 0;
+  for (final r in await peer.connection?.getStats() ?? const <StatsReport>[]) {
+    if (r.type == 'inbound-rtp' && '${r.values['mid']}' == '0') {
+      bytes += (r.values['bytesReceived'] as num? ?? 0).toInt();
+    }
+  }
+  return bytes;
 }
 
 /// Copy a talks (the tone) while b listens; a then changes to the silent input and back
