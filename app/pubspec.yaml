@@ -45,6 +45,10 @@ dev_dependencies:
     sdk: flutter
 
 flutter:
+  # CocoaPods only: flutter_webrtc's Swift package would add webrtc-sdk's WebRTC beside
+  # Fogata's own (macos/WebRTC-SDK.podspec), and the app would carry both.
+  config:
+    enable-swift-package-manager: false
   uses-material-design: true
   generate: true
   assets:

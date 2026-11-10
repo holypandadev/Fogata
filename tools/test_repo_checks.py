@@ -237,6 +237,15 @@ class WebrtcStable(unittest.TestCase):
                                               self.BRANCHES)[0], "error")
 
 
+class MacosWebrtc(unittest.TestCase):
+    """The Mac app carries Fogata's WebRTC only: with Swift packages on, flutter_webrtc's
+    package would add webrtc-sdk's beside it, and the build fails or ships the wrong one."""
+
+    def test_swift_packages_are_off_for_the_app(self):
+        pubspec = (TOOLS.parent / "app" / "pubspec.yaml").read_text()
+        self.assertRegex(pubspec, r"\nflutter:\n(  .*\n|\s*#.*\n)*?  config:\n    enable-swift-package-manager: false\n")
+
+
 class Workflows(unittest.TestCase):
     """The workflows in .github/workflows, as the repository's settings cannot enforce from a
     file: every action pinned by its full commit (a tag can be moved to other code), only the
