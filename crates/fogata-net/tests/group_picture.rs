@@ -169,7 +169,15 @@ async fn a_managers_picture_reaches_the_members_and_only_the_newest_a_newcomer()
     // No picture went into the log.
     for node in [&node_a, &node_b, &node_c] {
         let kept = node.group(group).await.unwrap().unwrap();
-        assert_eq!(kept.hashes_in_order(), log.hashes_in_order());
+        // A manager may also have raised the group's level once every copy judged at it
+        // (`raise_level_when_all_judge`): that entry is no picture's.
+        let kept_hashes: Vec<_> = kept
+            .entries_in_order()
+            .into_iter()
+            .filter(|e| !matches!(e.body, fogata_state::Body::Level { .. }))
+            .map(|e| e.hash())
+            .collect();
+        assert_eq!(kept_hashes, log.hashes_in_order());
         assert!(!has_picture_entries(&kept));
     }
 }

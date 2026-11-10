@@ -100,9 +100,21 @@ async fn a_managers_banner_reaches_the_members() {
     // Bea does not manage the group.
     assert!(node_b.set_group_banner(group, second).await.is_err());
 
-    // The entries are the same as without banners: what older versions keep.
+    // The entries are the same as without banners: what older versions keep. Ana, the
+    // manager, may also have raised the group's level once she saw Bea's copy judge at it
+    // (`raise_level_when_all_judge`), when the heartbeat came in time: that entry is
+    // no banner's.
     let a = node_a.group(group).await.unwrap().unwrap();
     let b = node_b.group(group).await.unwrap().unwrap();
-    assert_eq!(a.hashes_in_order(), log.hashes_in_order());
-    assert_eq!(b.hashes_in_order(), log.hashes_in_order());
+    assert_eq!(without_level_raises(&a), log.hashes_in_order());
+    assert_eq!(without_level_raises(&b), log.hashes_in_order());
+}
+
+/// The hashes of `log` in order, but for the entries that raise the group's level.
+fn without_level_raises(log: &GroupLog) -> Vec<fogata_state::EntryHash> {
+    log.entries_in_order()
+        .into_iter()
+        .filter(|e| !matches!(e.body, fogata_state::Body::Level { .. }))
+        .map(|e| e.hash())
+        .collect()
 }
