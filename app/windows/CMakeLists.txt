@@ -71,6 +71,12 @@ add_subdirectory("runner")
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+# The jni package (an FFI plugin some dependency brings, for Android) builds dartjni.dll
+# only where CMake finds a Java runtime: on GitHub's computer, which has one, it was built
+# with the compiler's defaults, without Control Flow Guard and the other mitigations
+# release.py asks of every DLL. Fogata uses no Java on Windows, so the build never looks for
+# one, as on a computer without.
+set(CMAKE_DISABLE_FIND_PACKAGE_JNI TRUE)
 include(flutter/generated_plugins.cmake)
 
 
