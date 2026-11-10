@@ -158,4 +158,45 @@ void main() {
     expect(FocusManager.instance.primaryFocus, focus);
     expect(ring, findsOneWidget);
   });
+
+  testWidgets('what is under the pointer still shows it after a click', (
+    tester,
+  ) async {
+    var hovered = false;
+    var taps = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: Fg.darkTokens.themeData,
+        home: Material(
+          child: Center(
+            child: Pressable(
+              onTap: () => taps++,
+              builder: (context, on) {
+                hovered = on;
+                return const SizedBox(width: 80, height: 40);
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+    await mouse.addPointer(location: Offset.zero);
+    addTearDown(mouse.removePointer);
+    final at = tester.getCenter(find.byType(Pressable));
+    await mouse.moveTo(at);
+    await tester.pump();
+    expect(hovered, isTrue);
+    // A click turns the focus rings off (above), and what is under the pointer stays so.
+    await mouse.down(at);
+    await tester.pump();
+    await mouse.up();
+    await tester.pump(const Duration(milliseconds: 50));
+    expect(taps, 1);
+    expect(FocusManager.instance.highlightMode, FocusHighlightMode.touch);
+    expect(hovered, isTrue);
+    await mouse.moveTo(Offset.zero);
+    await tester.pump();
+    expect(hovered, isFalse);
+  });
 }

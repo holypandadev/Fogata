@@ -181,54 +181,64 @@ impl Web {
         let count = artifact.chunk_count();
         let mut next = have / chunk;
         progress(have);
-        if next < count {
-            let mut request = self.client.get(url);
-            if have > 0 {
-                request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
-            }
-            let mut response = request
-                .send()
-                .await
-                .and_then(|r| r.error_for_status())
-                .map_err(unreachable)?;
-            // A server that sends the whole file in place of the range asked for: what is
-            // here already is skipped as it comes again.
-            let mut skip = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
-                0
-            } else {
-                have
-            };
-            let mut buf: Vec<u8> = Vec::with_capacity(chunk as usize);
-            while next < count {
-                let Some(mut piece) = response.chunk().await.map_err(unreachable)? else {
-                    return Err(FetchError::Io(std::io::ErrorKind::UnexpectedEof.into()));
-                };
-                if skip > 0 {
-                    let n = skip.min(piece.len() as u64);
-                    let _ = piece.split_to(n as usize);
-                    skip -= n;
+        // The good chunks written so far are kept for the next try, whatever stops this one:
+        // they are on the disk before the error goes up, not still on their way there.
+        let fetched: Result<(), FetchError> = async {
+            if next < count {
+                let mut request = self.client.get(url);
+                if have > 0 {
+                    request = request.header(reqwest::header::RANGE, format!("bytes={have}-"));
                 }
-                while !piece.is_empty() && next < count {
-                    let want = artifact.chunk_len(next) as usize - buf.len();
-                    let take = want.min(piece.len());
-                    buf.extend_from_slice(&piece.split_to(take));
-                    if buf.len() < artifact.chunk_len(next) as usize {
-                        continue;
+                let mut response = request
+                    .send()
+                    .await
+                    .and_then(|r| r.error_for_status())
+                    .map_err(unreachable)?;
+                // A server that sends the whole file in place of the range asked for: what is
+                // here already is skipped as it comes again.
+                let mut skip = if response.status() == reqwest::StatusCode::PARTIAL_CONTENT {
+                    0
+                } else {
+                    have
+                };
+                let mut buf: Vec<u8> = Vec::with_capacity(chunk as usize);
+                while next < count {
+                    let Some(mut piece) = response.chunk().await.map_err(unreachable)? else {
+                        return Err(FetchError::Io(std::io::ErrorKind::UnexpectedEof.into()));
+                    };
+                    if skip > 0 {
+                        let n = skip.min(piece.len() as u64);
+                        let _ = piece.split_to(n as usize);
+                        skip -= n;
                     }
-                    if Some(*blake3::hash(&buf).as_bytes()) != artifact.chunk_hash(next) {
+                    while !piece.is_empty() && next < count {
+                        let want = artifact.chunk_len(next) as usize - buf.len();
+                        let take = want.min(piece.len());
+                        buf.extend_from_slice(&piece.split_to(take));
+                        if buf.len() < artifact.chunk_len(next) as usize {
+                            continue;
+                        }
+                        if Some(*blake3::hash(&buf).as_bytes()) != artifact.chunk_hash(next) {
+                            return Err(FetchError::Damaged);
+                        }
+                        whole.update(&buf);
+                        file.write_all(&buf).await?;
+                        buf.clear();
+                        next += 1;
+                        progress((next * chunk).min(artifact.size));
+                    }
+                    if !piece.is_empty() {
+                        // More than the package's size.
                         return Err(FetchError::Damaged);
                     }
-                    whole.update(&buf);
-                    file.write_all(&buf).await?;
-                    buf.clear();
-                    next += 1;
-                    progress((next * chunk).min(artifact.size));
-                }
-                if !piece.is_empty() {
-                    // More than the package's size.
-                    return Err(FetchError::Damaged);
                 }
             }
+            Ok(())
+        }
+        .await;
+        if let Err(e) = fetched {
+            let _ = file.flush().await;
+            return Err(e);
         }
         file.flush().await?;
         file.sync_data().await?;

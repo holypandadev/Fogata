@@ -518,34 +518,44 @@ pub async fn fetch(
     let count = artifact.chunk_count();
     let mut next = have / CHUNK;
     progress(have);
-    if next < count {
-        let mut stream = open(node, peer).await?;
-        let mut out = vec![FETCH];
-        out.extend_from_slice(&build.to_be_bytes());
-        put_name(&mut out, platform);
-        out.extend_from_slice(&(next as u32).to_be_bytes());
-        match send(&mut stream, &out).await? {
-            DATA => {}
-            NOT_HERE => return Err(FetchError::NotHere),
-            BUSY => return Err(FetchError::Busy),
-            _ => return Err(FetchError::Io(io::ErrorKind::InvalidData.into())),
-        }
-        let mut buf = vec![0u8; CHUNK as usize];
-        while next < count {
-            let len = read_u32(&mut stream).await? as u64;
-            if len != artifact.chunk_len(next) {
-                return Err(FetchError::Damaged);
+    // The good chunks written so far are kept for the next try, whatever stops this one:
+    // they are on the disk before the error goes up, not still on their way there.
+    let fetched: Result<(), FetchError> = async {
+        if next < count {
+            let mut stream = open(node, peer).await?;
+            let mut out = vec![FETCH];
+            out.extend_from_slice(&build.to_be_bytes());
+            put_name(&mut out, platform);
+            out.extend_from_slice(&(next as u32).to_be_bytes());
+            match send(&mut stream, &out).await? {
+                DATA => {}
+                NOT_HERE => return Err(FetchError::NotHere),
+                BUSY => return Err(FetchError::Busy),
+                _ => return Err(FetchError::Io(io::ErrorKind::InvalidData.into())),
             }
-            let chunk = &mut buf[..len as usize];
-            idle(stream.read_exact(chunk)).await?;
-            if Some(*blake3::hash(chunk).as_bytes()) != artifact.chunk_hash(next) {
-                return Err(FetchError::Damaged);
+            let mut buf = vec![0u8; CHUNK as usize];
+            while next < count {
+                let len = read_u32(&mut stream).await? as u64;
+                if len != artifact.chunk_len(next) {
+                    return Err(FetchError::Damaged);
+                }
+                let chunk = &mut buf[..len as usize];
+                idle(stream.read_exact(chunk)).await?;
+                if Some(*blake3::hash(chunk).as_bytes()) != artifact.chunk_hash(next) {
+                    return Err(FetchError::Damaged);
+                }
+                whole.update(chunk);
+                file.write_all(chunk).await?;
+                next += 1;
+                progress((next * CHUNK).min(artifact.size));
             }
-            whole.update(chunk);
-            file.write_all(chunk).await?;
-            next += 1;
-            progress((next * CHUNK).min(artifact.size));
         }
+        Ok(())
+    }
+    .await;
+    if let Err(e) = fetched {
+        let _ = file.flush().await;
+        return Err(e);
     }
     file.flush().await?;
     file.sync_data().await?;

@@ -68,7 +68,6 @@ class _PressableState extends State<Pressable> {
       mouseCursor: enabled
           ? SystemMouseCursors.click
           : SystemMouseCursors.basic,
-      onShowHoverHighlight: (v) => setState(() => _hovered = v),
       onShowFocusHighlight: (v) => setState(() => _focused = v),
       actions: {
         ActivateIntent: CallbackAction<ActivateIntent>(
@@ -78,16 +77,23 @@ class _PressableState extends State<Pressable> {
           },
         ),
       },
-      child: GestureDetector(
-        behavior: HitTestBehavior.opaque,
-        onTap: widget.onTap,
-        child: Semantics(
-          button: true,
-          enabled: enabled,
-          selected: widget.selected,
-          expanded: widget.expanded,
-          label: widget.label ?? widget.tooltip,
-          child: widget.builder(context, _hovered && enabled),
+      // The pointer on it, from the pointer itself: the detector's own hover highlight
+      // goes with the focus rings, which a click turns off (KeyboardFocus), and nothing
+      // would show under the pointer after the first click.
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovered = true),
+        onExit: (_) => setState(() => _hovered = false),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTap: widget.onTap,
+          child: Semantics(
+            button: true,
+            enabled: enabled,
+            selected: widget.selected,
+            expanded: widget.expanded,
+            label: widget.label ?? widget.tooltip,
+            child: widget.builder(context, _hovered && enabled),
+          ),
         ),
       ),
     );
