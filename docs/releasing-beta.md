@@ -147,7 +147,12 @@ refuses a folder that holds any key already.
    in whole, or a group splits between those who updated and those who did not (see
    docs/architecture.md, 3.15 and 5.1). The tests of `crates/fogata-core/tests/old_copy.rs`
    need copies from before given features, older than any published tag: run them too when
-   the change touches what they cover and such a build is at hand.
+   the change touches what they cover and such a build is at hand. The `golden` tests of
+   fogata-proto, fogata-state, fogata-friends and fogata-net (in the ordinary test run) hold
+   the bytes of every wire message, log entry and signed record as released versions write
+   them, in each crate's `tests/data`: a fixture changed since the last tag is a change of
+   the wire or the log, which must have gone through a capability level
+   (`fogata-proto/tests/frozen/mod.rs` says how they are written anew).
 2. Build on each system, release builds only. The Rust is the one `rust-toolchain.toml`
    names (rustup installs it the first time), and the crates the ones `Cargo.lock` names;
    libopus is built with CMake (Windows uses Visual Studio's own; on macOS install it once

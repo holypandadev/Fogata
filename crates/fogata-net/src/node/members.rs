@@ -449,6 +449,13 @@ impl Node {
                 let Some(slot) = self.groups.get_mut(&group) else {
                     return MemberResponse::Refused;
                 };
+                // Only a newer one is taken: an older one is dropped before its signature is
+                // checked over up to half a megabyte, which reading its date does not cost.
+                match slot.ctx.banner_may_be_newer(&banner) {
+                    Err(_) => return MemberResponse::Refused,
+                    Ok(false) => return MemberResponse::Ack,
+                    Ok(true) => {}
+                }
                 let Ok(banner) = fogata_state::GroupBanner::decode(&banner) else {
                     return MemberResponse::Refused;
                 };
@@ -475,6 +482,12 @@ impl Node {
                 let Some(slot) = self.groups.get_mut(&group) else {
                     return MemberResponse::Refused;
                 };
+                // As an older banner is.
+                match slot.ctx.picture_may_be_newer(&picture) {
+                    Err(_) => return MemberResponse::Refused,
+                    Ok(false) => return MemberResponse::Ack,
+                    Ok(true) => {}
+                }
                 let Ok(picture) = fogata_state::GroupPicture::decode(&picture) else {
                     return MemberResponse::Refused;
                 };
@@ -1452,5 +1465,69 @@ mod tests {
         );
         ana.shutdown().await.unwrap();
         bea.shutdown().await.unwrap();
+    }
+
+    /// A banner or picture record older than the one kept is dropped before its signature is
+    /// checked: one whose signature is broken is answered as any older one, while a newer
+    /// one is checked and refused, and a newer one well signed is taken, as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_older_record_is_dropped_before_its_signature_is_checked() {
+        use fogata_state::{GroupBanner, GroupPicture};
+        let (node, group) = lone_member();
+        let answers = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            let now = now_ms();
+            let gif = b"GIF89a".to_vec();
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_banner(gif.clone(), now).unwrap();
+            slot.ctx.set_picture(gif.clone(), now).unwrap();
+            let identity = n.identity.clone();
+            // Forged: dated as signed, but the date changed after.
+            let forged_banner = |time_ms: u64| {
+                let mut banner = GroupBanner::sign(&identity, group, gif.clone(), 1).unwrap();
+                banner.time_ms = time_ms;
+                MemberRequest::GroupBanner {
+                    group_id: group.as_bytes().to_vec(),
+                    banner: banner.encode(),
+                }
+            };
+            let forged_picture = |time_ms: u64| {
+                let mut picture = GroupPicture::sign(&identity, group, gif.clone(), 1).unwrap();
+                picture.time_ms = time_ms;
+                MemberRequest::GroupPicture {
+                    group_id: group.as_bytes().to_vec(),
+                    picture: picture.encode(),
+                }
+            };
+            let newer = MemberRequest::GroupBanner {
+                group_id: group.as_bytes().to_vec(),
+                banner: GroupBanner::sign(&identity, group, Vec::new(), now + 1)
+                    .unwrap()
+                    .encode(),
+            };
+            let damaged = MemberRequest::GroupBanner {
+                group_id: group.as_bytes().to_vec(),
+                banner: vec![1, 2, 3],
+            };
+            let answers = [
+                forged_banner(now - 1),
+                forged_picture(now - 1),
+                forged_banner(now + 1),
+                forged_picture(now + 1),
+                damaged,
+                newer,
+            ]
+            .map(|request| matches!(n.on_request(bea, request), MemberResponse::Ack));
+            let taken = n.groups[&group]
+                .ctx
+                .log()
+                .banner_record()
+                .is_some_and(|b| b.time_ms == now + 1 && b.picture.is_empty());
+            (answers, taken)
+        })
+        .await;
+        assert_eq!(answers, ([true, true, false, false, false, true], true));
+        node.shutdown().await.unwrap();
     }
 }

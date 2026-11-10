@@ -21,7 +21,7 @@ use crate::{
         VoiceRoomId, commitment, epoch_number, secret_context,
     },
     picture::{GroupPicture, is_group_picture},
-    record::MAX_RECORD_AHEAD_MS,
+    record::{MAX_RECORD_AHEAD_MS, RecordStamp},
     state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, fair_name},
 };
 
@@ -309,10 +309,16 @@ impl GroupLog {
         self.banner.as_ref()
     }
 
+    /// Whether a banner of `stamp` ([`GroupBanner::peek`]) would replace the one here: the
+    /// first thing [`Self::take_banner`] asks, before it checks the signature.
+    pub fn banner_older_than(&self, stamp: &RecordStamp) -> bool {
+        self.banner.as_ref().is_none_or(|b| *stamp > b.stamp())
+    }
+
     /// Takes a banner received from anywhere when it is newer than the one here, of this
     /// group, signed by a device that manages it now. Returns whether it was taken.
     pub fn take_banner(&mut self, banner: GroupBanner) -> bool {
-        let newer = self.banner.as_ref().is_none_or(|b| banner.replaces(b));
+        let newer = self.banner_older_than(&banner.stamp());
         if !newer
             || banner.group_id != self.group_id
             || !banner.verify()
@@ -384,10 +390,16 @@ impl GroupLog {
         self.picture.as_ref()
     }
 
+    /// Whether a picture record of `stamp` ([`GroupPicture::peek`]) would replace the one
+    /// here, as [`Self::banner_older_than`].
+    pub fn picture_older_than(&self, stamp: &RecordStamp) -> bool {
+        self.picture.as_ref().is_none_or(|p| *stamp > p.stamp())
+    }
+
     /// Takes a picture record received from anywhere when it is newer than the one here, of
     /// this group, signed by a device that manages it now. Returns whether it was taken.
     pub fn take_picture(&mut self, picture: GroupPicture) -> bool {
-        let newer = self.picture.as_ref().is_none_or(|p| picture.replaces(p));
+        let newer = self.picture_older_than(&picture.stamp());
         if !newer
             || picture.group_id != self.group_id
             || !picture.verify()

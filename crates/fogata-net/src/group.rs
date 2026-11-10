@@ -490,6 +490,17 @@ impl GroupContext {
 
     /// Takes a banner received from anywhere, when it is newer and its author a manager.
     /// Returns whether it was taken.
+    /// Whether a banner record encoded as `bytes` may be newer than the one here: false for
+    /// one this device would drop as older, read without checking its signature, and an
+    /// error for bytes that are no record (see [`fogata_state::GroupRecord::peek`]).
+    pub(crate) fn banner_may_be_newer(
+        &self,
+        bytes: &[u8],
+    ) -> Result<bool, fogata_state::DecodeError> {
+        let stamp = fogata_state::GroupBanner::peek(bytes)?;
+        Ok(self.log.banner_older_than(&stamp))
+    }
+
     pub(crate) fn take_banner(&mut self, banner: fogata_state::GroupBanner) -> bool {
         self.log.take_banner_at(banner, wall_clock_ms())
     }
@@ -518,6 +529,15 @@ impl GroupContext {
 
     /// Takes a picture record received from anywhere, when it is newer and its author an
     /// manager. Returns whether it was taken.
+    /// [`Self::banner_may_be_newer`] for a picture record.
+    pub(crate) fn picture_may_be_newer(
+        &self,
+        bytes: &[u8],
+    ) -> Result<bool, fogata_state::DecodeError> {
+        let stamp = fogata_state::GroupPicture::peek(bytes)?;
+        Ok(self.log.picture_older_than(&stamp))
+    }
+
     pub(crate) fn take_picture(&mut self, picture: fogata_state::GroupPicture) -> bool {
         self.log.take_picture_at(picture, wall_clock_ms())
     }

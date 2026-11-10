@@ -37,7 +37,7 @@ pub use log::{
 pub use picture::{
     GroupPicture, MAX_RECORD_PICTURE_BYTES, PictureKind, is_group_picture, is_record_picture,
 };
-pub use record::{GroupRecord, MAX_RECORD_AHEAD_MS, RecordKind};
+pub use record::{GroupRecord, MAX_RECORD_AHEAD_MS, RecordKind, RecordStamp};
 pub use room::{
     AWAY_MS, ChatLine, EVENT_SLACK_BYTES, FileInfo, GRACE_MS, HERE_INTERVAL_MS, MAX_CHAT_CHARS,
     MAX_JOIN_BYTES, MAX_SHARE_BYTES, MAX_SHARES_EACH, MAX_THUMB_BYTES, Participant, Room,
