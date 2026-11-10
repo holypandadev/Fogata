@@ -1497,5 +1497,8 @@
   "reachSymmetricNat": "Ton routeur donne un port public différent pour chaque destination (un NAT symétrique) : aucun chemin direct ne peut s’ouvrir à travers lui. Les amis derrière un autre routeur ne te joignent qu’à travers un membre d’un groupe que vous partagez.",
   "reachNoIpv6": "Il n’y a pas non plus d’IPv6 qui fonctionne, qui permettrait de contourner le routeur.",
   "reachFineFriend": "Ton réseau semble convenir à Fogata : ce qui vous sépare est donc probablement du côté de {name} (hors ligne, ou son réseau).",
-  "reachFineOthers": "Ton réseau semble convenir à Fogata : ce qui vous sépare est donc probablement de l’autre côté."
+  "reachFineOthers": "Ton réseau semble convenir à Fogata : ce qui vous sépare est donc probablement de l’autre côté.",
+  "directDropTitle": "Dépose pour envoyer à {name}",
+  "directDropNote": "Ils attendent dans la zone de message, où tu pourras ajouter un message et les vérifier avant l’envoi.",
+  "directPrivateLeftOut": "{n, plural, =0{{n} fichiers cachés ou privés ont été laissés de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour les envoyer, choisis-les avec le bouton +.} one{Un fichier caché ou privé a été laissé de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour l’envoyer, choisis-le avec le bouton +.} other{{n} fichiers cachés ou privés ont été laissés de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour les envoyer, choisis-les avec le bouton +.}}"
 }

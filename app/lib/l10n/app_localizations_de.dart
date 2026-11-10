@@ -6516,4 +6516,25 @@ class L10nDe extends L10n {
   @override
   String get reachFineOthers =>
       'Dein Netzwerk scheint für Fogata in Ordnung zu sein, also liegt das, was euch trennt, wahrscheinlich auf der anderen Seite.';
+
+  @override
+  String directDropTitle(String name) {
+    return 'Zum Senden an $name ablegen';
+  }
+
+  @override
+  String get directDropNote =>
+      'Sie warten im Nachrichtenfeld, wo du eine Nachricht hinzufügen und die Dateien vor dem Senden prüfen kannst.';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n versteckte oder private Dateien wurden weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.',
+      one: 'Eine versteckte oder private Datei wurde weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.',
+    );
+    return '$_temp0';
+  }
 }

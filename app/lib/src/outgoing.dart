@@ -16,18 +16,72 @@ import 'theme.dart';
 import 'typing.dart' show styledSpans;
 import 'widgets.dart';
 
-/// Files dragged over the room: the room dims and says where they go. Dropped, they wait
-/// in the chat for Send, with a message.
+/// Where files dropped on a [DropZone] go: what the zone says while they are dragged over
+/// it, and how they are added.
+class DropTo {
+  const DropTo({
+    required this.title,
+    required this.note,
+    required this.leftOut,
+    required this.at,
+    required this.add,
+  });
+
+  /// The room's chat: the files wait there for Send, with a message.
+  factory DropTo.room(AppState state) => DropTo(
+    title: l10n.outgoingDropTitle(
+      state.contacts.group(state.roomState.roomGroup)?.name ??
+          l10n.outgoingTheRoom,
+    ),
+    note: l10n.outgoingDropNote,
+    leftOut: l10n.outgoingPrivateLeftOut,
+    at: () => state.roomState.roomGroup,
+    add: state.addOutgoing,
+  );
+
+  /// The direct chat shown, with the friend called [name]: the files wait in its message
+  /// box.
+  factory DropTo.direct(AppState state, String name) => DropTo(
+    title: l10n.directDropTitle(name),
+    note: l10n.directDropNote,
+    leftOut: l10n.directPrivateLeftOut,
+    at: () => state.direct.open,
+    add: state.direct.addOutgoing,
+  );
+
+  /// The big title over what files are dragged on.
+  final String title;
+
+  /// What happens to them, under the title.
+  final String note;
+
+  /// The error said when `n` hidden or private files were left out of a drop.
+  final String Function(int n) leftOut;
+
+  /// The chat the files go to now. Looking at a drop's files takes a moment: when this
+  /// changed meanwhile, the drop is not added to the chat shown since.
+  final Object? Function() at;
+
+  /// Adds the files to that chat.
+  final Future<void> Function(List<String> paths) add;
+}
+
+/// Files dragged over a chat (the room, or a direct chat): it dims and says where they
+/// go. Dropped, they wait in the chat for Send, with a message.
 class DropZone extends StatefulWidget {
   const DropZone({
     super.key,
     required this.state,
     required this.enabled,
     required this.child,
+    this.to,
   });
   final AppState state;
   final bool enabled;
   final Widget child;
+
+  /// Where the files go: the room when null.
+  final DropTo? to;
 
   @override
   State<DropZone> createState() => _DropZoneState();
@@ -39,39 +93,38 @@ class _DropZoneState extends State<DropZone> {
   /// The drops being added, one after the other, so they wait in the order they came.
   Future<void> _adding = Future.value();
 
+  DropTo get _to => widget.to ?? DropTo.room(widget.state);
+
   /// Adds what was dropped, after the drops before it.
   void _add(List<String> paths) {
     if (paths.isEmpty) return;
-    final group = widget.state.roomState.roomGroup;
-    _adding = _adding.then((_) => _addTo(group, paths)).catchError((_) {});
+    final to = _to;
+    final at = to.at();
+    _adding = _adding.then((_) => _addTo(to, at, paths)).catchError((_) {});
   }
 
-  /// Adds what was dropped on the room [group]. A web page can start a drag whose list
-  /// names any file of this computer, whatever the browser, so those that are hidden or in
-  /// a private place ([privatePaths], which also follows links and `..`) are never added
-  /// by dragging: the rest is, and the person is told how to share such a file on purpose
-  /// (picked with the paperclip, which no page can do for them).
-  Future<void> _addTo(String? group, List<String> paths) async {
-    final state = widget.state;
+  /// Adds what was dropped on the chat [at]. A web page can start a drag whose list names
+  /// any file of this computer, whatever the browser, so those that are hidden or in a
+  /// private place ([privatePaths], which also follows links and `..`) are never added by
+  /// dragging: the rest is, and the person is told how to share such a file on purpose
+  /// (picked with the chat's own button, which no page can do for them).
+  Future<void> _addTo(DropTo to, Object? at, List<String> paths) async {
     final private = (await privatePaths(paths)).toSet();
-    // The room may have changed meanwhile.
-    if (!mounted || state.roomState.roomGroup != group) return;
+    // The chat may have changed meanwhile.
+    if (!mounted || to.at() != at) return;
     if (private.isNotEmpty) {
-      state.say(l10n.outgoingPrivateLeftOut(private.length), error: true);
+      widget.state.say(to.leftOut(private.length), error: true);
     }
     final chosen = [
       for (final p in paths)
         if (!private.contains(p)) p,
     ];
-    if (chosen.isNotEmpty) await state.addOutgoing(chosen);
+    if (chosen.isNotEmpty) await to.add(chosen);
   }
 
   @override
   Widget build(BuildContext context) {
-    final state = widget.state;
-    final group =
-        state.contacts.group(state.roomState.roomGroup)?.name ??
-        l10n.outgoingTheRoom;
+    final to = _to;
     return DropTarget(
       enable: widget.enabled,
       onDragEntered: (_) => setState(() => _over = true),
@@ -93,7 +146,7 @@ class _DropZoneState extends State<DropZone> {
               child: IgnorePointer(
                 child: ColoredBox(
                   color: const Color(0xB8000000),
-                  child: Center(child: _DropCard(group: group)),
+                  child: Center(child: _DropCard(to: to)),
                 ),
               ),
             ),
@@ -104,8 +157,8 @@ class _DropZoneState extends State<DropZone> {
 }
 
 class _DropCard extends StatelessWidget {
-  const _DropCard({required this.group});
-  final String group;
+  const _DropCard({required this.to});
+  final DropTo to;
 
   @override
   Widget build(BuildContext context) {
@@ -135,7 +188,7 @@ class _DropCard extends StatelessWidget {
             ),
             const SizedBox(height: 14),
             Text(
-              l10n.outgoingDropTitle(group),
+              to.title,
               textAlign: TextAlign.center,
               style: tx(c.fg, size: 22, weight: w600, spacing: -.2),
             ),
@@ -143,7 +196,7 @@ class _DropCard extends StatelessWidget {
             ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 440),
               child: Text(
-                l10n.outgoingDropNote,
+                to.note,
                 textAlign: TextAlign.center,
                 style: tx(c.fg2),
               ),

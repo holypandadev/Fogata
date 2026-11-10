@@ -6148,4 +6148,25 @@ class L10nJa extends L10n {
   @override
   String get reachFineOthers =>
       'お使いのネットワークはFogataには問題なさそうです。つながらない原因はおそらく相手側にあります。';
+
+  @override
+  String directDropTitle(String name) {
+    return 'ドロップして$nameに送る';
+  }
+
+  @override
+  String get directDropNote =>
+      'ファイルはメッセージ欄で待機します。送る前にメッセージを添えたり、ファイルを確認したりできます。';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '隠しファイルまたは非公開のファイル$n個を追加しませんでした。Webページがドラッグを始めることもあるため、このようなファイルはドラッグでは追加されません。送るには、+ボタンで選んでください。',
+      one: '隠しファイルまたは非公開のファイルを追加しませんでした。Webページがドラッグを始めることもあるため、このようなファイルはドラッグでは追加されません。送るには、+ボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
 }

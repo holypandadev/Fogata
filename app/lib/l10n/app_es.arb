@@ -1497,5 +1497,8 @@
   "reachSymmetricNat": "Tu router da un puerto público distinto para cada destino (un NAT simétrico), así que no se puede abrir un camino directo a través de él. Los amigos detrás de otro router solo te alcanzan a través de un miembro de un grupo en común.",
   "reachNoIpv6": "Tampoco hay IPv6 que funcione, que permitiría sortear el router.",
   "reachFineFriend": "Tu red parece estar bien para Fogata, así que el problema probablemente está del lado de {name} (sin conexión, o su red).",
-  "reachFineOthers": "Tu red parece estar bien para Fogata, así que el problema probablemente está del otro lado."
+  "reachFineOthers": "Tu red parece estar bien para Fogata, así que el problema probablemente está del otro lado.",
+  "directDropTitle": "Suelta para enviar a {name}",
+  "directDropNote": "Esperan en el cuadro de mensaje, donde puedes añadir un mensaje y revisarlos antes de que se envíen.",
+  "directPrivateLeftOut": "{n, plural, =1{Se dejó fuera un archivo oculto o privado: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlo, elígelo con el botón +.} other{Se dejaron fuera {n} archivos ocultos o privados: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlos, elígelos con el botón +.}}"
 }

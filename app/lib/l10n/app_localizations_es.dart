@@ -6567,4 +6567,25 @@ class L10nEs extends L10n {
   @override
   String get reachFineOthers =>
       'Tu red parece estar bien para Fogata, así que el problema probablemente está del otro lado.';
+
+  @override
+  String directDropTitle(String name) {
+    return 'Suelta para enviar a $name';
+  }
+
+  @override
+  String get directDropNote =>
+      'Esperan en el cuadro de mensaje, donde puedes añadir un mensaje y revisarlos antes de que se envíen.';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Se dejaron fuera $n archivos ocultos o privados: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlos, elígelos con el botón +.',
+      one: 'Se dejó fuera un archivo oculto o privado: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlo, elígelo con el botón +.',
+    );
+    return '$_temp0';
+  }
 }

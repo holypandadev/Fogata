@@ -9150,6 +9150,24 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Your network looks fine for Fogata, so what keeps you apart is probably on the other side.'**
   String get reachFineOthers;
+
+  /// Big title over a direct chat while files are dragged over it. {name} is the friend's name.
+  ///
+  /// In en, this message translates to:
+  /// **'Drop to send to {name}'**
+  String directDropTitle(String name);
+
+  /// Under the drop title while files are dragged over a direct chat: what happens to the files.
+  ///
+  /// In en, this message translates to:
+  /// **'They wait in the message box, where you can add a message and check them before they go.'**
+  String get directDropNote;
+
+  /// Error toast: files dragged onto a direct chat were left out because they are hidden (their name starts with a dot) or in a private place such as a keychain, a browser's profile or the system's folders; a web page can start a drag that names such a file. {n} is how many. "the + button" is the button beside the message box that picks files to send.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To send it, pick it with the + button.} other{{n} hidden or private files were left out: files like these are not added by dragging, since a web page can start a drag. To send them, pick them with the + button.}}'**
+  String directPrivateLeftOut(int n);
 }
 
 class _L10nDelegate extends LocalizationsDelegate<L10n> {

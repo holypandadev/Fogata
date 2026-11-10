@@ -6554,4 +6554,27 @@ class L10nFr extends L10n {
   @override
   String get reachFineOthers =>
       'Ton réseau semble convenir à Fogata : ce qui vous sépare est donc probablement de l’autre côté.';
+
+  @override
+  String directDropTitle(String name) {
+    return 'Dépose pour envoyer à $name';
+  }
+
+  @override
+  String get directDropNote =>
+      'Ils attendent dans la zone de message, où tu pourras ajouter un message et les vérifier avant l’envoi.';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n fichiers cachés ou privés ont été laissés de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour les envoyer, choisis-les avec le bouton +.',
+      one: 'Un fichier caché ou privé a été laissé de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour l’envoyer, choisis-le avec le bouton +.',
+      zero:
+          '$n fichiers cachés ou privés ont été laissés de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour les envoyer, choisis-les avec le bouton +.',
+    );
+    return '$_temp0';
+  }
 }

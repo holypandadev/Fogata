@@ -6383,4 +6383,25 @@ class L10nEn extends L10n {
   @override
   String get reachFineOthers =>
       'Your network looks fine for Fogata, so what keeps you apart is probably on the other side.';
+
+  @override
+  String directDropTitle(String name) {
+    return 'Drop to send to $name';
+  }
+
+  @override
+  String get directDropNote =>
+      'They wait in the message box, where you can add a message and check them before they go.';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n hidden or private files were left out: files like these are not added by dragging, since a web page can start a drag. To send them, pick them with the + button.',
+      one: 'A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To send it, pick it with the + button.',
+    );
+    return '$_temp0';
+  }
 }

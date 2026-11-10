@@ -1497,5 +1497,8 @@
   "reachSymmetricNat": "Dein Router gibt jedem Ziel einen anderen öffentlichen Port (ein symmetrisches NAT), daher lässt sich durch ihn kein direkter Weg öffnen. Freunde hinter einem anderen Router erreichen dich nur über ein Mitglied einer gemeinsamen Gruppe.",
   "reachNoIpv6": "Es gibt auch kein funktionierendes IPv6, mit dem es am Router vorbeiginge.",
   "reachFineFriend": "Dein Netzwerk scheint für Fogata in Ordnung zu sein, also liegt das, was euch trennt, wahrscheinlich auf der Seite von {name} (offline oder ein Netzwerkproblem).",
-  "reachFineOthers": "Dein Netzwerk scheint für Fogata in Ordnung zu sein, also liegt das, was euch trennt, wahrscheinlich auf der anderen Seite."
+  "reachFineOthers": "Dein Netzwerk scheint für Fogata in Ordnung zu sein, also liegt das, was euch trennt, wahrscheinlich auf der anderen Seite.",
+  "directDropTitle": "Zum Senden an {name} ablegen",
+  "directDropNote": "Sie warten im Nachrichtenfeld, wo du eine Nachricht hinzufügen und die Dateien vor dem Senden prüfen kannst.",
+  "directPrivateLeftOut": "{n, plural, =1{Eine versteckte oder private Datei wurde weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.} other{{n} versteckte oder private Dateien wurden weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.}}"
 }

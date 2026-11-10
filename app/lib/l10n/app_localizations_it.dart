@@ -6505,4 +6505,25 @@ class L10nIt extends L10n {
   @override
   String get reachFineOthers =>
       'La tua rete sembra andare bene per Fogata, quindi ciò che vi separa è probabilmente dall’altra parte.';
+
+  @override
+  String directDropTitle(String name) {
+    return 'Rilascia per inviare a $name';
+  }
+
+  @override
+  String get directDropNote =>
+      'Restano in attesa nella casella del messaggio, dove puoi aggiungere un messaggio e controllarli prima che partano.';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n file nascosti o privati sono stati lasciati fuori: file come questi non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarli, sceglili con il pulsante +.',
+      one: 'Un file nascosto o privato è stato lasciato fuori: file come questo non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarlo, sceglilo con il pulsante +.',
+    );
+    return '$_temp0';
+  }
 }

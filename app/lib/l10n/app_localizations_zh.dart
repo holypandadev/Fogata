@@ -6060,4 +6060,23 @@ class L10nZh extends L10n {
 
   @override
   String get reachFineOthers => '你的网络对Fogata来说看起来正常，所以你们连不上的原因很可能在对方那边。';
+
+  @override
+  String directDropTitle(String name) {
+    return '拖放到此处，发送给$name';
+  }
+
+  @override
+  String get directDropNote => '文件会在消息框中等待，发送前你可以添加消息并检查它们。';
+
+  @override
+  String directPrivateLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n个隐藏或私密的文件未被添加：网页也能发起拖动，所以这类文件不能通过拖动添加。要发送它们，请用 + 按钮选择。',
+      one: '一个隐藏或私密的文件未被添加：网页也能发起拖动，所以这类文件不能通过拖动添加。要发送它，请用 + 按钮选择。',
+    );
+    return '$_temp0';
+  }
 }
