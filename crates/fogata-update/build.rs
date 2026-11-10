@@ -143,6 +143,12 @@ fn commit() -> Option<String> {
         "--",
     ];
     status.extend(sources);
+    // CocoaPods writes Podfile.lock again on every install, with its own version and the
+    // checksums it works out on that computer, so a fresh checkout on another Mac changed it
+    // while building the very commit. What it locks is checked elsewhere: every other pod is
+    // a folder of this checkout (counted above), and WebRTC-SDK's archive and installed files
+    // are checked by their SHA-256 (app/macos/WebRTC-SDK.podspec and the Podfile).
+    status.push(":(exclude)app/macos/Podfile.lock");
     let dirty = !git(&status)?.is_empty();
     Some(if dirty { format!("{sha}+dirty") } else { sha })
 }

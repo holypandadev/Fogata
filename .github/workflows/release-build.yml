@@ -257,9 +257,11 @@ jobs:
       - name: Check the build
         run: |
           app=app/build/macos/Build/Products/Release/Fogata.app
-          # What the release build reads (fogata-update's build.rs): a change there is +dirty.
+          # What the release build reads (fogata-update's build.rs): a change there is +dirty,
+          # but for Podfile.lock, which CocoaPods writes again (shown, for the record).
           git status --porcelain --untracked-files=normal -- crates vendor app Cargo.toml \
             Cargo.lock .cargo rust-toolchain.toml
+          git diff -- app/macos/Podfile.lock
           python3 -I tools/beta/ci_builds.py check-marker "$app" "$GITHUB_SHA"
           for binary in "$app/Contents/MacOS/Fogata" "$app/Contents/Library/Helpers/Fogata Updater.app/Contents/MacOS/Fogata Updater"; do
             archs=$(lipo -archs "$binary")
