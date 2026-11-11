@@ -366,6 +366,11 @@ void FlutterPeerConnection::CreateRTCPeerConnection(
     std::unique_ptr<MethodResultProxy> result) {
   // std::cout << " configuration = " << configurationMap.StringValue() <<
   // std::endl;
+  // Fogata: each connection from its own configuration. Parsed over the last one's,
+  // whatever this one leaves out was the last one's: after a call (its media bridge as
+  // relay-only TURN server), the microphone test's loop, which names no ICE server, kept
+  // that server and policy and never connected, so it never recorded or measured.
+  base_->configuration_ = RTCConfiguration();
   base_->ParseRTCConfiguration(configurationMap, base_->configuration_);
   // std::cout << " constraints = " << constraintsMap.StringValue() <<
   // std::endl;
@@ -385,6 +390,9 @@ void FlutterPeerConnection::CreateRTCPeerConnection(
                                         event_channel, uuid));
 
   base_->peerconnection_observers_[uuid] = std::move(observer);
+  // Fogata: the voice engine this connection started stays when it is freed, and with
+  // it the list of microphones and speakers.
+  base_->KeepVoiceEngine();
 
   EncodableMap params;
   params[EncodableValue("peerConnectionId")] = EncodableValue(uuid);
@@ -414,6 +422,8 @@ void FlutterPeerConnection::RTCPeerConnectionDispose(
     // alive until native teardown completes, then detach it before deletion.
     pc->Close();
     pc->DeRegisterRTCPeerConnectionObserver();
+    // Fogata: the factory lists every connection it made, until told to forget one.
+    base_->factory_->Delete(pc);
     base_->peerconnection_observers_.erase(it);
   }
 

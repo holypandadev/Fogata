@@ -2,7 +2,7 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|broken|alsa|hang|quit>
+Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|broken|alsa|hang|quit>
 """
 
 import pathlib
@@ -129,6 +129,9 @@ elif check == "unplug":
         if not re.search(r"told: Your microphone is back", log("a")):
             problems.append("a was not told its microphone came back")
         notes += said
+elif check == "devices":
+    # a's own result says whether its devices stayed listed; its log, what each list held.
+    notes += re.findall(r"(devices [^\n]*|memory over[^\n]*)", log("a"))
 elif check in ("late", "alone"):
     if "laba_mic" not in sources_between("a", 0, 1e12):
         problems.append("a never recorded from its microphone")

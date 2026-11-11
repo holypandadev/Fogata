@@ -779,3 +779,55 @@ freed until the application quit.
   `peerConnectionDispose` finds a closed connection through its observer
   (`FlutterPeerConnectionObserver::peerconnection`), so the observer is detached and both
   go. macOS keeps a closed connection listed until its dispose, and needed no change.
+
+## The voice engine stays (all platforms)
+
+WebRTC M156 starts its voice engine with the first connection and stops it when the last
+one is freed (`ConnectionContext::ReleaseMediaEngine`, `WebRtcVoiceEngine::Terminate`),
+which terminates the audio device too. On Linux and Windows the wrapper's audio device then
+answers -1 for the number of inputs and outputs (`AudioDeviceModuleImpl`, not initialized),
+so `getSources` listed no microphone and no speaker at all; the wrapper initializes the
+device once when the factory is made, never again. After the settings' microphone test, or
+a call, freed its connections, the settings showed only "System default" until the
+application was restarted. On macOS the audio module stops following the system's devices
+(its listeners go with `Terminate`), so a device plugged in or out afterwards was never
+listed or left the list. Everywhere, the engine made again by the next connection went back
+to the system's default devices.
+
+- `common/cpp/include/flutter_webrtc_base.h`, `common/cpp/src/flutter_webrtc_base.cc`,
+  `common/cpp/src/flutter_peerconnection.cc` (Linux, Windows): `KeepVoiceEngine` makes an
+  idle connection of the plugin's own (no ICE servers, nothing added) right after the
+  first connection the application makes, and keeps it until the plugin goes, so the
+  engine never stops. Not before: without a sound server, starting the engine ends the
+  application ("No call without a sound server"), and the application makes its first
+  connection only once it knows there is one. Recording and playing still stop with the
+  last channel that sends or receives sound; only the device stays initialized.
+- `FlutterWebRTCPlugin.m` (both copies, identical; macOS): `keepVoiceEngine`, the same,
+  for connections of the plugin's own factory (not the screen sound's).
+- `common/cpp/src/flutter_peerconnection.cc`: `peerConnectionDispose` also has the factory
+  forget the connection (`Delete`): the wrapper's factory lists every connection it makes,
+  and kept each one until the application quit.
+- The application chooses the system's default devices by their own ids when none is
+  chosen (`app/lib/src/call.dart`), as the engine now keeps the devices it was given last
+  from one call or microphone test to the next.
+- A sound server restarted while the application runs is not reached again by the audio
+  device, as before for a server restarted before the first call ended (and for
+  `linux/input_watcher.cc`'s own connection).
+- Checked by `tools/call-lab/mic.sh devices` (Linux).
+
+## Each connection from its own configuration (Linux, Windows)
+
+`createPeerConnection` parsed each connection's configuration over one kept in the plugin
+(`configuration_`), so whatever a connection's map left out stayed as the connection
+before had it: ICE servers, the ICE transport policy, the bundle policy. After a call
+(its media bridge as the only, relay-only TURN server), the settings' microphone test,
+whose loop names no ICE server (`app/lib/src/mic_test.dart`), made both its connections
+relay-only through a bridge no longer there: they never connected, nothing was recorded,
+and the test's meter stayed empty until the application was restarted. The same held for
+the loop that reads this device's level while it is alone in a call, once a connection to
+someone had been made before it.
+
+- `common/cpp/src/flutter_peerconnection.cc`: `CreateRTCPeerConnection` starts from a
+  fresh `RTCConfiguration` each time. macOS already made a new one for each connection.
+- Checked by `tools/call-lab/mic.sh devices` (Linux): every microphone test after the call
+  must hear the tone.

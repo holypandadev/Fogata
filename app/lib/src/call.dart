@@ -417,12 +417,13 @@ class Call extends ChangeNotifier {
     if (_closed) return;
     _bridge = bridge;
     // WebRTC's voice engine starts with the first connection, picking the system's default
-    // devices, and stops with the last one. An idle connection kept for the whole call
-    // keeps it running, so the devices chosen here stay.
+    // devices; our copy of flutter_webrtc keeps it running from then on (its FOGATA.md,
+    // "The voice engine stays"). An idle connection kept for the whole call keeps it
+    // running all the same, so the devices chosen here stay.
     _engine = await createPeerConnection({});
     if (_closed) return;
     await suppressNoise(noiseSuppression);
-    if (output != null) await _select(output, Helper.selectAudioOutput);
+    await _chooseOutput();
     await _chooseInput();
     if (mic && !_closed) await _openMic();
     if (camera && !_closed) await _openCamera();
@@ -445,20 +446,31 @@ class Call extends ChangeNotifier {
     notifyListeners();
   });
 
-  /// Chooses the input the call records from. Where a silent input can be made (Linux),
-  /// the system's default is chosen too, by its own id: WebRTC keeps the input it was
-  /// last given from one call to the next, and that may be a silent input left by a call
-  /// that ended as it was being chosen; recording from it, every call after would send
-  /// only silence, and nothing would notice. Elsewhere the voice engine starts with the
-  /// system's default itself.
+  /// Chooses the input the call records from; the system's default too, by its own id (the
+  /// first listed): the voice engine keeps the input it was last given from one call to
+  /// the next, and from a microphone test to a call. That may be another microphone, or
+  /// (Linux) a silent input left by a call that ended as it was being chosen; recording
+  /// from it, every call after would send only silence, and nothing would notice.
   Future<void> _chooseInput() async {
-    final id = input ?? (_silentInputs ? await _first('audioinput') : null);
-    await _select(id, Helper.selectAudioInput);
+    await _select(input ?? await _first('audioinput'), Helper.selectAudioInput);
+  }
+
+  /// Chooses the output the call plays through, the system's default too, as
+  /// [_chooseInput] does.
+  Future<void> _chooseOutput() async {
+    await _select(
+      output ?? await _first('audiooutput'),
+      Helper.selectAudioOutput,
+    );
   }
 
   /// Chooses the input as [start] does, for tests.
   @visibleForTesting
   Future<void> chooseInputForTests() => _chooseInput();
+
+  /// Chooses the output as [start] does, for tests.
+  @visibleForTesting
+  Future<void> chooseOutputForTests() => _chooseOutput();
 
   Future<void> _prepareRenderers() async {
     await localCamera.initialize();

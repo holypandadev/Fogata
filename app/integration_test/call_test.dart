@@ -50,8 +50,8 @@
 // FOGATA_TEST_MEASURE=<seconds> measures instead the call as it is, with every copy's voice
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
-// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit); see
-// _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
+// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices);
+// see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
 
 import 'dart:async';
@@ -87,6 +87,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart'
 import 'package:fogata/src/app_state.dart';
 import 'package:fogata/src/call.dart';
 import 'package:fogata/src/l10n.dart' show l10n;
+import 'package:fogata/src/mic_test.dart' show micTest;
 import 'package:fogata/src/quality.dart';
 import 'package:fogata/src/rust/api/app.dart' as api;
 import 'package:fogata/src/rust/api/types.dart';
@@ -495,6 +496,9 @@ Future<void> _call(WidgetTester tester) async {
   if (_env['FOGATA_TEST_MIC_CASE'] == 'quit' && _role == 'a') {
     await _quitWhileOpening(tester, state);
     return;
+  }
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'devices' && _role == 'a') {
+    await _listedAroundTest(tester, state, 'before any call');
   }
   // The microphone opening only after the others connected, as on a system slow to open
   // it: what they hear must not depend on which comes first.
@@ -3831,6 +3835,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 ///   meanwhile is logged.
 /// - broken, alsa, hang: see [_noSoundServer].
 /// - quit: see [_quitWhileOpening]; copy b only waits for a to go.
+/// - devices: see [_listedAfterCall]; copy b only stays in the call.
 Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
   final call = state.callState.call!;
   switch (name) {
@@ -3925,6 +3930,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
     case 'quit':
       // Copy a quits on its own while entering; nothing more to do here.
       break;
+    case 'devices':
+      if (_role == 'a') await _listedAfterCall(tester, state);
     default:
       throw StateError('no microphone check called $name');
   }
@@ -4072,6 +4079,145 @@ Future<String> _inputs() async => [
   for (final d in await navigator.mediaDevices.enumerateDevices())
     if (d.kind == 'audioinput') d.label,
 ].join(' | ');
+
+/// What the checks of the devices listed found wrong, said at the end ([_listedAfterCall]).
+final _unlisted = <String>[];
+
+/// Lists the sound devices as the settings do, and notes ([when]) whether this copy's own
+/// microphone and speaker (FOGATA_TEST_DEVICES) are among them, or with [micGone] its
+/// speaker and not its microphone. Tried again for up to [within]: a device plugged in or
+/// out is listed a moment later.
+Future<void> _checkListed(
+  WidgetTester tester,
+  String when, {
+  bool micGone = false,
+  Duration within = Duration.zero,
+}) async {
+  final suffix = _env['FOGATA_TEST_DEVICES'] ?? '';
+  final end = DateTime.now().add(within);
+  while (true) {
+    final inputs = <String>[], outputs = <String>[];
+    Object? error;
+    try {
+      for (final d in await navigator.mediaDevices.enumerateDevices()) {
+        if (d.kind == 'audioinput') inputs.add(d.label);
+        if (d.kind == 'audiooutput') outputs.add(d.label);
+      }
+    } catch (e) {
+      error = e;
+    }
+    final mic = inputs.any((l) => l.contains('FogataMic$suffix'));
+    final speaker = outputs.any((l) => l.contains('FogataTest$suffix'));
+    final ok = speaker && mic != micGone;
+    if (ok || !DateTime.now().isBefore(end)) {
+      _log(
+        'devices $when: ${ok ? 'as expected' : 'WRONG'}; '
+        '${inputs.length} inputs $inputs, ${outputs.length} outputs $outputs'
+        '${error == null ? '' : ', error $error'}',
+      );
+      if (!ok) {
+        _unlisted.add(
+          '$when: ${inputs.length} inputs, ${outputs.length} outputs listed',
+        );
+      }
+      return;
+    }
+    await _wait(tester, const Duration(milliseconds: 250));
+  }
+}
+
+/// Runs the settings' microphone test as its button does, on this copy's own devices,
+/// until it hears the tone (5 s at most), and stops it.
+Future<void> _micTestOnce(WidgetTester tester, AppState state) async {
+  await micTest.start(
+    input: state.prefs.audioInput,
+    output: state.prefs.audioOutput,
+  );
+  final end = DateTime.now().add(const Duration(seconds: 5));
+  while (micTest.level.value <= 0 && DateTime.now().isBefore(end)) {
+    await _wait(tester, const Duration(milliseconds: 100));
+  }
+  final heard = micTest.level.value > 0 && !micTest.failed;
+  await micTest.stop();
+  if (!heard) _unlisted.add('a microphone test heard nothing');
+}
+
+/// The lists before a microphone test, right after it and a few seconds later.
+Future<void> _listedAroundTest(
+  WidgetTester tester,
+  AppState state,
+  String when,
+) async {
+  await _checkListed(tester, '$when, before the microphone test');
+  await _micTestOnce(tester, state);
+  await _checkListed(tester, '$when, right after the microphone test');
+  await _wait(tester, const Duration(seconds: 5));
+  await _checkListed(tester, '$when, 5 s after the microphone test');
+}
+
+/// This process's resident memory in kB (Linux), or 0.
+int _residentKb() {
+  final line = File('/proc/self/status')
+      .readAsLinesSync()
+      .firstWhere((l) => l.startsWith('VmRSS:'), orElse: () => '');
+  return int.tryParse(line.replaceAll(RegExp('[^0-9]'), '')) ?? 0;
+}
+
+/// Copy a, in a call with b after a microphone test before it ([_listedAroundTest]): its
+/// call ends, and the lists must still hold its devices at once and a few seconds later,
+/// around another microphone test, after 20 more (over which the memory must not keep
+/// growing), with its microphone unplugged and plugged in again (by mic.sh), and around a
+/// last test. The settings list the devices this way while nothing else runs.
+Future<void> _listedAfterCall(WidgetTester tester, AppState state) async {
+  await _wait(tester, const Duration(seconds: 3));
+  await _checkListed(tester, 'in the call');
+  await state.endCallForTests();
+  await _checkListed(tester, 'right after the call');
+  await _wait(tester, const Duration(seconds: 5));
+  await _checkListed(tester, '5 s after the call');
+  await _listedAroundTest(tester, state, 'after the call');
+  // A few tests first, for what only the first ones make; then 20 counted.
+  for (var i = 0; i < 3; i++) {
+    await _micTestOnce(tester, state);
+  }
+  await _wait(tester, const Duration(seconds: 2));
+  final before = _residentKb();
+  for (var i = 0; i < 20; i++) {
+    await _micTestOnce(tester, state);
+  }
+  await _wait(tester, const Duration(seconds: 2));
+  final after = _residentKb();
+  _log(
+    'memory over 20 microphone tests: $before kB to $after kB, '
+    '${((after - before) / 20).round()} kB a test',
+  );
+  // Three connections a test kept until the application quit (their calls, threads and
+  // buffers) would pass this several times over.
+  if (after - before > 20 * 1024) {
+    _unlisted.add('memory grew by ${after - before} kB over 20 tests');
+  }
+  await _checkListed(tester, 'after 20 more microphone tests');
+  _mark('unplug-ready');
+  await _rig(tester, 'unplugged');
+  await _checkListed(
+    tester,
+    'with the microphone unplugged',
+    micGone: true,
+    within: const Duration(seconds: 10),
+  );
+  _mark('replug-ready');
+  await _rig(tester, 'replugged');
+  await _checkListed(
+    tester,
+    'with the microphone plugged in again',
+    within: const Duration(seconds: 10),
+  );
+  await _listedAroundTest(tester, state, 'at the end');
+  if (state.callState.call != null) _unlisted.add('a call started again');
+  if (_unlisted.isNotEmpty) {
+    throw StateError('devices not as expected: ${_unlisted.join('; ')}');
+  }
+}
 
 /// Copy a enters the room with its microphone on and quits the application
 /// FOGATA_TEST_QUIT_AFTER milliseconds later (0 when left out), while the microphone may

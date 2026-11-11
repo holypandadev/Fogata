@@ -110,6 +110,11 @@ FlutterWebRTCBase::~FlutterWebRTCBase() {
 #ifdef __linux__
   InputWatcher::Stop();
 #endif
+  if (voice_engine_keeper_) {
+    voice_engine_keeper_->Close();
+    factory_->Delete(voice_engine_keeper_);
+    voice_engine_keeper_ = nullptr;
+  }
   if (webrtc_initialized_) {
     LibWebRTC::Terminate();
   }
@@ -248,6 +253,13 @@ void FlutterWebRTCBase::KeepRecordingDevice() {
   // As in SelectRecordingDevice: refused, it is tried again on the next change.
   recording_device_selected_ = audio_device_->SetRecordingDevice(found) == 0;
   if (recording_device_selected_) recording_device_index_ = found;
+}
+
+void FlutterWebRTCBase::KeepVoiceEngine() {
+  if (voice_engine_keeper_ || !factory_) return;
+  // No ICE servers and nothing added: it never gathers candidates, sends or receives.
+  RTCConfiguration idle;
+  voice_engine_keeper_ = factory_->Create(idle, RTCMediaConstraints::Create());
 }
 
 bool FlutterWebRTCBase::SuppressNoise(bool on, int64_t api) {

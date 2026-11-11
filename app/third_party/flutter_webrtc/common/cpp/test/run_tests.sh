@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
 # renderer's with ThreadSanitizer, the check of the noise suppression table, and libwebrtc
-# taking a local offer with a section rejected as call.dart rejects one, screen sharing's
-# choice of desktop and libwebrtc's screen and window lists (on an Xvfb display of its own
+# taking a local offer with a section rejected as call.dart rejects one, its voice engine
+# stopping with the last connection unless one is kept (voice_engine_test.cc), screen
+# sharing's choice of desktop and libwebrtc's screen and window lists (on an Xvfb display of its own
 # when Xvfb is there), and the way the cameras are reached (camera_portal_test.cc; its part
 # through the Camera portal runs in tools/beta/test-flatpak-camera.sh). Needs
 # libwebrtc's headers and library, which the first Linux build of the app unpacks into
@@ -35,6 +36,11 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/video_renderer_test"
 # program otherwise), but no track is added: nothing is played or recorded, and no camera
 # is opened.
 "$out/rejected_section_test"
+# The voice engine stops with the last connection, and the audio device's lists with it,
+# unless an idle connection is kept (KeepVoiceEngine): the same sound server, no track.
+"${CXX:-clang++}" -std=c++17 -g -O1 -I"$webrtc/include" "$here/voice_engine_test.cc" \
+  -L"$lib" -Wl,-rpath,"$lib" -lwebrtc -lpthread -o "$out/voice_engine_test"
+"$out/voice_engine_test"
 # Which desktop is a Wayland session, and libwebrtc's screen and window lists where it can
 # make no capturer and on an X display of its own (Xvfb, when there is one): the same sound
 # server as above.

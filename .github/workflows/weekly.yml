@@ -76,15 +76,22 @@ jobs:
         with:
           persist-credentials: false
       - name: Install the system packages
+        timeout-minutes: 20
         run: |
-          # GitHub's image tries Azure's mirror of Ubuntu first, and when that name does not
-          # resolve apt gives up rather than go on to the next mirror: left out then.
-          getent hosts azure.archive.ubuntu.com > /dev/null || {
+          # GitHub's image tries Azure's mirror of Ubuntu first. When it does not answer
+          # (its name not resolving, or resolving to nothing that answers), apt neither
+          # gives up nor goes on to the next mirror in good time: one job sat here for two
+          # hours. So the mirror is asked first and left out when it gives nothing within
+          # 15 s, and apt itself waits at most 30 s for anything.
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          curl -fsS --max-time 15 -o /dev/null \
+              "http://azure.archive.ubuntu.com/ubuntu/dists/$codename/InRelease" || {
             [[ ! -f /etc/apt/apt-mirrors.txt ]] ||
               sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
           }
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
             libpipewire-0.3-dev libdbus-1-dev
       - name: Install the Rust tools
@@ -146,15 +153,22 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
       - name: Install the system packages
+        timeout-minutes: 20
         run: |
-          # GitHub's image tries Azure's mirror of Ubuntu first, and when that name does not
-          # resolve apt gives up rather than go on to the next mirror: left out then.
-          getent hosts azure.archive.ubuntu.com > /dev/null || {
+          # GitHub's image tries Azure's mirror of Ubuntu first. When it does not answer
+          # (its name not resolving, or resolving to nothing that answers), apt neither
+          # gives up nor goes on to the next mirror in good time: one job sat here for two
+          # hours. So the mirror is asked first and left out when it gives nothing within
+          # 15 s, and apt itself waits at most 30 s for anything.
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          curl -fsS --max-time 15 -o /dev/null \
+              "http://azure.archive.ubuntu.com/ubuntu/dists/$codename/InRelease" || {
             [[ ! -f /etc/apt/apt-mirrors.txt ]] ||
               sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
           }
-          sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
             libpipewire-0.3-dev libdbus-1-dev
       - name: Install the Rust of rust-toolchain.toml

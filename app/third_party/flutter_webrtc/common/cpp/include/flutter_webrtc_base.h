@@ -87,6 +87,14 @@ class FlutterWebRTCBase {
   // comes back.
   void KeepRecordingDevice();
 
+  // Fogata: keeps WebRTC's voice engine running from now until the plugin goes, with an
+  // idle connection of its own; called once a connection has been made, so the engine
+  // has started (made first, without a sound server it would end the application). The
+  // engine stops when the last connection is freed, and the audio device with it: it
+  // then lists no microphone and no speaker, forgets the ones chosen, and follows no
+  // device plugged in or out, until a connection starts it again.
+  void KeepVoiceEngine();
+
   // Fogata: turns the microphone's noise suppression on or off, from the next 10 ms.
   // The first call makes the suppressor with the table of functions at `api`, which the
   // application hands over; false if there is none to make it with.
@@ -153,6 +161,9 @@ class FlutterWebRTCBase {
   scoped_refptr<RTCDesktopDevice> desktop_device_;
   scoped_refptr<RTCAudioProcessing> audio_processing_;
   RTCConfiguration configuration_;
+  // Fogata: an idle connection of the plugin's own, made with the first connection and
+  // kept until the plugin goes: see KeepVoiceEngine().
+  scoped_refptr<RTCPeerConnection> voice_engine_keeper_;
 
   std::map<std::string, scoped_refptr<RTCPeerConnection>> peerconnections_;
   std::map<std::string, scoped_refptr<RTCMediaStream>> local_streams_;

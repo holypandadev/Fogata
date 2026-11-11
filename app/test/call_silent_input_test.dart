@@ -78,6 +78,11 @@ class _Engine {
               'label': 'Desk microphone',
               'kind': 'audioinput',
             },
+            {
+              'deviceId': 'speaker-1',
+              'label': 'Desk speakers',
+              'kind': 'audiooutput',
+            },
           ],
         };
       case 'fogataSilentInput':
@@ -90,6 +95,9 @@ class _Engine {
         final id = args!['deviceId'] as String;
         asked.add('select ${id == _silenceId ? 'silence' : id}');
         if (id == _silenceId) await holdSelect?.future;
+        return null;
+      case 'selectAudioOutput':
+        asked.add('output ${args!['deviceId']}');
         return null;
       case 'fogataScreenSound':
         asked.add('screen sound ${args!['on'] == true ? 'on' : 'off'}');
@@ -202,6 +210,26 @@ void main() {
       input: 'usb-2',
     ).chooseInputForTests();
     expect(engine.asked, ['select usb-2']);
+  });
+
+  test('a call with the system defaults chooses them by their own ids on every '
+      'system: the voice engine keeps the devices it was given last, from a '
+      'microphone test or a call before', () async {
+    for (final system in [
+      HostSystem.linux,
+      HostSystem.macos,
+      HostSystem.windows,
+    ]) {
+      pinnedHost = system;
+      engine.asked.clear();
+      final call = Call(group: 'g', me: 'me', mic: false);
+      await call.chooseOutputForTests();
+      await call.chooseInputForTests();
+      expect(engine.asked, [
+        'output speaker-1',
+        'select mic-1',
+      ], reason: '$system');
+    }
   });
 
   test('a call that ends while its screen sound starts (macOS) stops taking '

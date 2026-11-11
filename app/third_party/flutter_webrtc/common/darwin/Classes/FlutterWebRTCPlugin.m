@@ -113,6 +113,9 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
 #endif
 #if TARGET_OS_OSX
   FogataPlayout* _fogataPlayout;
+  // Fogata: an idle connection of the plugin's own, made with the first connection and
+  // kept until the plugin goes: see keepVoiceEngine.
+  RTCPeerConnection* _voiceEngineKeeper;
 #endif
 
   RTC_OBJC_TYPE(RTCCallbackLogger) * loggerCallback;
@@ -624,6 +627,10 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     [peerConnection.eventChannel setStreamHandler:peerConnection];
 
     self.peerConnections[peerConnectionId] = peerConnection;
+#if TARGET_OS_OSX
+    // Fogata: the voice engine this connection started stays when it is freed.
+    if (factory == self.peerConnectionFactory) [self keepVoiceEngine];
+#endif
     result(@{@"peerConnectionId" : peerConnectionId});
 #if TARGET_OS_OSX
   } else if ([@"fogataNoiseSuppression" isEqualToString:call.method]) {
@@ -2026,10 +2033,30 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     }
 }
 
+#if TARGET_OS_OSX
+// Fogata: keeps WebRTC's voice engine running from now until the plugin goes, with an
+// idle connection of its own (no ICE servers and nothing added: it never gathers, sends or
+// receives). The engine stops when the last connection is freed, and the audio module
+// with it: its list of microphones and speakers then no longer follows a device plugged
+// in or out, and the ones chosen are forgotten, until a connection starts it again.
+// Recording and playing still stop with the last channel that sent or received sound.
+- (void)keepVoiceEngine {
+  if (_voiceEngineKeeper != nil || self.peerConnectionFactory == nil) return;
+  RTCMediaConstraints* none = [[RTCMediaConstraints alloc] initWithMandatoryConstraints:nil
+                                                                 optionalConstraints:nil];
+  _voiceEngineKeeper =
+      [self.peerConnectionFactory peerConnectionWithConfiguration:[[RTCConfiguration alloc] init]
+                                                      constraints:none
+                                                         delegate:nil];
+}
+#endif
+
 - (void)dealloc {
 #if TARGET_OS_OSX
   [_fogataPlayout stop];
   _fogataPlayout = nil;
+  [_voiceEngineKeeper close];
+  _voiceEngineKeeper = nil;
 #endif
   [_localTracks removeAllObjects];
   _localTracks = nil;

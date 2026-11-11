@@ -2038,12 +2038,16 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   does: signals to a member that is not connected are dropped.
 - Devices: the microphone, speakers and camera can be chosen in Settings or from the room,
   also in the middle of a call. WebRTC's voice engine starts with the first connection,
-  picking the system's default devices, and stops with the last one; the call keeps an idle
-  connection open for its whole length so a chosen device stays in use. WebRTC keeps the
-  chosen microphone only as its place in the list of inputs and, on Linux, reads the list
-  again each time it starts recording (when someone comes into a room where this device
-  was alone, say); our copy of flutter_webrtc selects it again at its new place whenever
-  an input comes or goes, so it never becomes another microphone or the default one.
+  picking the system's default devices, and would stop with the last one, taking the list
+  of microphones and speakers with it (after a microphone test or a call, the settings
+  listed none); our copy of flutter_webrtc keeps an idle connection of its own from the
+  first connection on, so the engine runs until the application quits. A call or a
+  microphone test therefore chooses its devices each time, the system's default by its own
+  id too: the engine keeps those it was given last. WebRTC keeps the chosen microphone only
+  as its place in the list of inputs and, on Linux, reads the list again each time it
+  starts recording (when someone comes into a room where this device was alone, say); our
+  copy of flutter_webrtc selects it again at its new place whenever an input comes or
+  goes, so it never becomes another microphone or the default one.
 - Noise suppression (Settings, under the microphone; off by default, kept in `app.json`)
   is RNNoise (`crates/fogata-denoise`, nnnoiseless: a small neural network that tells
   speech from noise in 22 bands and lowers the bands that hold noise, so a fan, a hum,

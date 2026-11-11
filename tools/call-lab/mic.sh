@@ -20,6 +20,9 @@
 #            loop of its own meanwhile); b must hear it without a muting and unmuting
 #   quit     a quits the application as it enters the room with its microphone on, after
 #            QUIT_AFTER ms (default 0); it must end by itself within 15 s, without a crash
+#   devices  a lists its sound devices as the settings do around the settings' microphone
+#            test, before a call and after it ends, 20 tests (memory must not keep growing)
+#            and its microphone unplugged and plugged in again: its own must stay listed
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
 #        300 and 1500). Build first as for measure.sh. Prints PASS or FAIL for each and the
 #        run folders; exits non-zero when one failed.
@@ -56,7 +59,7 @@ if [ "${1:-}" = --inside ]; then
     done
   }
   case "$CHECK" in
-    unplug)
+    unplug | devices)
       if wait_mark mark-a-unplug-ready 900; then
         lab_unplug a
         now > "$M/unplugged"
@@ -87,7 +90,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone broken alsa hang quit:0 quit:300 quit:1500)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices broken alsa hang quit:0 quit:300 quit:1500)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }
