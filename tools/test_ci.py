@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Tests of the checks before a push: tools/check.sh's check of the RustSec database,
-tools/ci.sh's record, the pre-push hook that reads it, and tools/install-hooks.sh. Each runs
+tools/ci.sh's record, the pre-push hook that reads it, tools/install-hooks.sh, and
+tools/toolchain.sh, the note of what the workflows' builds were made with. Each runs
 the real script in a repository made for the test, with stand-ins for cargo, rustc and
 flutter, so nothing is built.
 
@@ -240,6 +241,13 @@ esac
 exit "${SMOKE_EXIT:-0}"
 """
 
+    # Notes its call and passes unless CHECK_BUILD_EXIT says otherwise.
+    CHECK_BUILD = """import os, sys
+with open(os.environ["CALLS"], "a") as calls:
+    calls.write("ci_builds.py " + " ".join(sys.argv[1:]) + "\\n")
+sys.exit(int(os.environ.get("CHECK_BUILD_EXIT", "0")))
+"""
+
     def setUp(self):
         super().setUp()
         self.stand_in("flutter", 'if [[ $1 == --version ]]; then echo "Flutter 9.9.9 • channel x"; fi')
@@ -253,6 +261,7 @@ exit "${SMOKE_EXIT:-0}"
                 '#!/usr/bin/env bash\necho "native tests" >> "$CALLS"\nexit "${NATIVE_EXIT:-0}"\n',
             "tools/integration-tests.sh": self.INTEGRATION,
             "tools/integration-pairs.sh": self.PAIRS,
+            "tools/beta/ci_builds.py": self.CHECK_BUILD,
             "tools/smoke-linux.sh": self.SMOKE,
             "tools/hooks/pre-push": (TOOLS / "hooks/pre-push").read_text(),
             "app/pubspec.yaml": "name: app\n",
@@ -464,6 +473,21 @@ exit "${SMOKE_EXIT:-0}"
         self.assertEqual((record["native"], record["integration"]), ("fail", "not run"))
         self.assertEqual(record["result"], "fail")
 
+    def test_the_bundle_must_pass_the_checks_of_release_py(self):
+        legs = {"FOGATA_CI_MAC": MAC_SAYS, "FOGATA_CI_WINDOWS": WINDOWS_SAYS}
+        self.assertEqual(self.ci("--full", env=legs).returncode, 0)
+        calls = self.calls.read_text()
+        self.assertIn("ci_builds.py check-build linux app/build/linux/x64/release/bundle", calls)
+        # Right after the build it checks, before the tests.
+        self.assertLess(calls.index("flutter build linux --release"), calls.index("check-build"))
+        self.assertLess(calls.index("check-build"), calls.index("native tests"))
+        result = self.ci("--full", env={**legs, "CHECK_BUILD_EXIT": "1"})
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("release checks of the bundle FAILED", result.stderr)
+        record = self.fields()
+        self.assertEqual((record["linux"], record["native"], record["result"]),
+                         ("fail", "not run", "fail"))
+
     def test_the_fuzz_targets_must_build(self):
         legs = {"FOGATA_CI_MAC": MAC_SAYS, "FOGATA_CI_WINDOWS": WINDOWS_SAYS}
         self.assertEqual(self.ci("--full", env=legs).returncode, 0)
@@ -605,6 +629,105 @@ exit "${SMOKE_EXIT:-0}"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("git status failed", result.stderr)
         self.assertNotIn("fogata-ci-leg:", result.stdout)
+
+
+class Toolchain(Sandbox):
+    """tools/toolchain.sh, the note of what a build was made with."""
+
+    def test_it_names_each_tool_and_what_cannot_be_asked(self):
+        self.stand_in("flutter", 'echo \'{\n  "frameworkVersion": "9.1.2",\n'
+                      '  "frameworkRevision": "f00d",\n  "engineRevision": "e11e",\n'
+                      '  "dartSdkVersion": "3.9.9"\n}\'')
+        self.stand_in("rustc", 'echo "rustc 9.9.9 (test)"')
+        self.stand_in("cmake", 'echo "cmake version 9.0.0"; echo "more"')
+        self.stand_in("clang", 'echo "clang version 99"')
+        self.stand_in("dpkg-query", '[[ ${@: -1} == libpulse-dev ]] && exit 1; echo "1.${@: -1}"')
+        result = self.run_in(self.tmp, TOOLS / "toolchain.sh", "linux",
+                             env={"ImageOS": "ubuntu24", "ImageVersion": "20261101.360"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), [
+            "image: ubuntu24 20261101.360",
+            "flutter: 9.1.2 (framework f00d, engine e11e, dart 3.9.9)",
+            "rustc: rustc 9.9.9 (test)",
+            "cmake: cmake version 9.0.0",
+            "clang: clang version 99",
+            "libgtk-3-dev: 1.libgtk-3-dev",
+            "libpipewire-0.3-dev: 1.libpipewire-0.3-dev",
+            "libpulse-dev: missing",
+        ])
+
+    def test_the_windows_toolset_and_sdk_are_read_from_the_build(self):
+        build = self.tmp / "build"
+        write(build / "runner/fogata.vcxproj",
+              "<Project>\r\n  <PlatformToolset>v145</PlatformToolset>\r\n"
+              "  <WindowsTargetPlatformVersion>10.0.26100.0</WindowsTargetPlatformVersion>\r\n")
+        write(build / "CMakeFiles/4.1.2/CMakeCXXCompiler.cmake",
+              'set(CMAKE_CXX_COMPILER_VERSION "19.50.35717.0")\n')
+        result = self.run_in(self.tmp, TOOLS / "toolchain.sh", "windows", build)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("msvc of the build: 19.50.35717.0", lines)
+        self.assertIn("platform toolset of the build: v145", lines)
+        self.assertIn("windows sdk of the build: 10.0.26100.0", lines)
+        self.assertNotEqual(self.run_in(self.tmp, TOOLS / "toolchain.sh", "beos").returncode, 0)
+
+
+class PreviousRelease(Sandbox):
+    """tools/previous-release.sh and the record tools/beta/release.py reads."""
+
+    def setUp(self):
+        super().setUp()
+        # Notes its call with where it ran and FOGATA_OLD_CLI; the test says what
+        # TEST_SAYS says and exits with TEST_EXIT.
+        self.stand_in("cargo", 'echo "cargo $* in $(basename "$PWD") old=${FOGATA_OLD_CLI-}" >> "$CALLS"\n'
+                      'if [[ $1 == test ]]; then echo "${TEST_SAYS-test result: ok. 1 passed; 0 failed}"; '
+                      'exit "${TEST_EXIT:-0}"; fi')
+        self.repo_dir = self.repo({
+            "tools/previous-release.sh": (TOOLS / "previous-release.sh").read_text(),
+            "Cargo.toml": "[workspace]\n",
+        })
+        self.old = self.git(self.repo_dir, "rev-parse", "HEAD")
+        self.git(self.repo_dir, "tag", "v0.1.0-beta.1")
+        write(self.repo_dir / "Cargo.toml", "[workspace]\n# newer\n")
+        self.git(self.repo_dir, "commit", "-q", "-am", "second")
+        self.sha = self.git(self.repo_dir, "rev-parse", "HEAD")
+        self.record = self.repo_dir / ".git/fogata-ci" / f"{self.sha}.previous-release"
+
+    def run_it(self, *args, env=None):
+        return self.run_in(self.repo_dir, "tools/previous-release.sh", *args,
+                           env={"FOGATA_PREVIOUS_TARGET": str(self.tmp / "target"),
+                                **(env or {})})
+
+    def fields(self):
+        return dict(line.split(": ", 1) for line in self.record.read_text().splitlines())
+
+    def test_a_pass_is_recorded_for_the_commit_against_the_last_tag(self):
+        result = self.run_it()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        record = self.fields()
+        self.assertEqual(record["commit"], self.sha)
+        self.assertEqual(record["tag"], f"v0.1.0-beta.1 ({self.old})")
+        self.assertEqual(record["result"], "pass")
+        calls = [line for line in self.calls.read_text().splitlines() if " in " in line]
+        # The old command line built in a worktree of the tag, the test run here against it.
+        self.assertTrue(calls[0].startswith("cargo build --release --locked -p fogata in old"))
+        self.assertEqual(calls[1], "cargo test --locked -p fogata-core --test previous_release "
+                         f"-- --ignored in repo old={self.tmp / 'target'}/release/fogata")
+        self.assertEqual(self.git(self.repo_dir, "worktree", "list").count("\n"), 0)
+
+    def test_a_failure_or_no_test_run_records_no_pass(self):
+        for env in ({"TEST_EXIT": "101"}, {"TEST_SAYS": "test result: ok. 0 passed; 0 failed"}):
+            with self.subTest(env=env):
+                result = self.run_it(env=env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(self.fields()["result"], "fail")
+
+    def test_a_checkout_with_changes_is_refused(self):
+        write(self.repo_dir / "Cargo.toml", "[workspace]\n# changed\n")
+        result = self.run_it()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("has changes", result.stderr)
+        self.assertFalse(self.record.exists())
 
 
 class InstallHooks(Sandbox):

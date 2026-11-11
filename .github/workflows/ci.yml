@@ -9,11 +9,18 @@
 #            skipped, as on any other computer without one. Its legs for macOS and Windows
 #            are the two jobs below, so ci.sh records them as skipped; the job passes only
 #            when everything else in the record passed and was checked.
-#   macos    tools/ci-leg.sh macos, then a debug build of the application (the native
-#            plugins, the updater helper and the macOS WebRTC.xcframework).
+#   macos    with the Xcode of XCODE_VERSION and the CocoaPods of Podfile.lock:
+#            tools/ci-leg.sh macos, then the release build of the application, universal
+#            (the native plugins, the macOS WebRTC.xcframework, the Rust library for both
+#            Macs) with its updater helper, checked as tools/beta/release.py checks it.
 #   windows  tools/ci-leg.ps1, without the smoke test, which needs virtual sound devices,
-#            then a debug build of the application (the native plugins and the Windows
-#            libwebrtc, which flutter test never compiles).
+#            then the release build of the application (the native plugins with the
+#            release-only mitigations, the Windows libwebrtc, which flutter test never
+#            compiles), checked as tools/beta/release.py checks it.
+#
+# The Linux bundle is checked so too, in ci.sh (tools/beta/ci_builds.py check-build): a
+# build release.py would refuse fails here, at the push, not at the release. Each job writes
+# what it built with (tools/toolchain.sh) to the run's summary.
 #
 # Nothing here signs, builds a release or touches the releases page: the job's token can only
 # read the repository.
@@ -37,6 +44,9 @@ concurrency:
 
 env:
   FLUTTER_VERSION: 3.47.8
+  # The Xcode of the macOS builds, among those GitHub's image has: the image's default
+  # changes with it. The same in release-build.yml.
+  XCODE_VERSION: "16.4"
   CARGO_TERM_COLOR: never
   # The copies the checks start never read the releases page on GitHub.
   FOGATA_UPDATE_WEB: "off"
@@ -64,8 +74,8 @@ jobs:
 
       - name: Install the system packages
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb dbus-x11 pipewire pipewire-pulse \
             wireplumber pulseaudio-utils pipewire-alsa libasound2-plugins \
@@ -161,6 +171,11 @@ jobs:
           cargo deny fetch db
           git status --porcelain
 
+      - name: Record the toolchain
+        run: |
+          { echo '### Toolchain (linux)'; echo '```'; tools/toolchain.sh linux; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: tools/ci.sh --full
         id: ci
         run: tools/ci.sh --full "$GITHUB_SHA"
@@ -208,6 +223,32 @@ jobs:
         with:
           persist-credentials: false
 
+      # DEVELOPER_DIR, which xcode-select, xcodebuild, xcrun and Flutter follow, for every
+      # step after this one (no sudo, nothing changed outside the job).
+      - name: Use the Xcode of XCODE_VERSION
+        run: |
+          xcode=/Applications/Xcode_$XCODE_VERSION.app
+          [[ -d $xcode ]] || {
+            echo "::error::no $xcode on this image; it has: $(ls -d /Applications/Xcode_*.app | xargs -n1 basename | tr '\n' ' ')"
+            exit 1
+          }
+          echo "DEVELOPER_DIR=$xcode/Contents/Developer" >> "$GITHUB_ENV"
+
+      # The CocoaPods that wrote Podfile.lock, not the image's: it writes the Pods project the
+      # build is made from. Installed for this user, beside the image's, and run as that
+      # version alone (a gem's `pod _<version>_`).
+      - name: Use the CocoaPods of Podfile.lock
+        run: |
+          version=$(sed -n 's/^COCOAPODS: \([0-9.]*\)$/\1/p' app/macos/Podfile.lock)
+          [[ -n $version ]] || { echo "::error::Podfile.lock names no CocoaPods version"; exit 1; }
+          gem install --user-install --no-document cocoapods -v "$version"
+          bin=$RUNNER_TEMP/cocoapods-bin
+          mkdir -p "$bin"
+          printf '#!/bin/sh\nexec "%s/bin/pod" _%s_ "$@"\n' "$(ruby -e 'print Gem.user_dir')" "$version" > "$bin/pod"
+          chmod +x "$bin/pod"
+          [[ $("$bin/pod" --version) == "$version" ]] || { echo "::error::pod is not $version"; exit 1; }
+          echo "$bin" >> "$GITHUB_PATH"
+
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -220,8 +261,11 @@ jobs:
         with:
           tool: cargo-deny@0.20.2
 
+      # The release build is universal: the Rust library is built for both Mac targets.
       - name: Install the Rust of rust-toolchain.toml
-        run: rustup show active-toolchain || rustup toolchain install
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
       # The crates and the builds of the dependencies, saved only by a push to main (see the
       # Linux job).
@@ -244,12 +288,30 @@ jobs:
           FOGATA_TEST_NO_MULTICAST: "1"
         run: FOGATA_CI_SHA=$GITHUB_SHA tools/ci-leg.sh macos
 
-      # The application itself, which flutter test never compiles: the native plugins, the
-      # Swift updater helper and the macOS WebRTC.xcframework, downloaded from the releases of
-      # fogata-libwebrtc and checked by its SHA-256 (app/macos/WebRTC-SDK.podspec). Signed to
-      # run here only, as a debug build is.
-      - name: Build the application
-        run: cd app && flutter build macos --debug
+      # The application itself, which flutter test never compiles, as release-build.yml
+      # builds it: release, universal (both slices of every native part, the Rust library's
+      # through cargokit and the objective_c hook's too), the macOS WebRTC.xcframework
+      # downloaded from the releases of fogata-libwebrtc and checked by its SHA-256
+      # (app/macos/WebRTC-SDK.podspec), and the updater helper (with no team pinned: the
+      # release pins one). Signed ad hoc, to run here only. Instead of the debug build CI made
+      # before, not beside it.
+      - name: Build the application (release)
+        run: |
+          (cd app && flutter build macos --release)
+          tools/beta/macos-updater.sh
+
+      - name: Record the toolchain
+        if: always()
+        run: |
+          { echo '### Toolchain (macos)'; echo '```'; tools/toolchain.sh macos; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+
+      # What release.py checks before it packs the app: a release build, universal, its
+      # Info.plist naming this build. Podfile.lock is shown if CocoaPods wrote it again.
+      - name: Check the build as release.py will
+        run: |
+          git diff -- app/macos/Podfile.lock
+          python3 -I -B tools/beta/ci_builds.py check-build macos app/build/macos/Build/Products/Release/Fogata.app
 
   windows:
     runs-on: windows-2025
@@ -317,13 +379,29 @@ jobs:
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci-leg.ps1
           exit $LASTEXITCODE
 
-      # The application itself, which flutter test never compiles: the native plugins (CMake
-      # and MSVC), the Rust library through cargokit, and the Windows libwebrtc, downloaded
-      # from the release libwebrtc_version.ini names and refused unless its SHA-256 matches.
-      # After the leg, which needs a clone with nothing new in it.
-      - name: Build the application (debug)
+      # The application itself, which flutter test never compiles, as release-build.yml
+      # builds it: release, so the native plugins (CMake and MSVC) get the mitigations only a
+      # release build has (Control Flow Guard, EH continuation metadata:
+      # app/windows/CMakeLists.txt), with the Rust library through cargokit and the Windows
+      # libwebrtc, downloaded from the release libwebrtc_version.ini names and refused unless
+      # its SHA-256 matches. Instead of the debug build CI made before, not beside it. After
+      # the leg, which needs a clone with nothing new in it.
+      - name: Build the application (release)
         shell: pwsh
         working-directory: app
         run: |
-          flutter build windows --debug
+          flutter build windows --release
           exit $LASTEXITCODE
+
+      - name: Record the toolchain
+        if: always()
+        shell: bash
+        run: |
+          { echo '### Toolchain (windows)'; echo '```'; tools/toolchain.sh windows app/build/windows/x64; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+
+      # What release.py checks before it packs the application: a release build, every .exe
+      # and .dll with its mitigations.
+      - name: Check the build as release.py will
+        shell: bash
+        run: python -I -B tools/beta/ci_builds.py check-build windows app/build/windows/x64/runner/Release

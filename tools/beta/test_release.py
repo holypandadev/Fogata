@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Tests of tools/beta/release.py: unpacking the zips of other systems, the check of debug and
 profile builds, the Windows list of files, the hardening of the Windows and Linux binaries,
-the keys a release needs.
+the keys a release needs, and what must say that the commit passed CI and the test against
+the last release (with a stand-in for gh).
 
     python3 -I tools/beta/test_release.py
 """
@@ -886,6 +887,132 @@ class Checkout(unittest.TestCase):
             git("add", "lib.rs")
             with self.assertRaises(SystemExit):
                 release.checked_out(repo)
+
+
+class Tested(unittest.TestCase):
+    """A release only of a commit that passed CI and the test against the last release, as
+    GitHub's runs or the records of this computer say."""
+
+    COMMIT = "c" * 40
+
+    def setUp(self):
+        self.records = pathlib.Path(tempfile.mkdtemp(prefix="fogata-tested-test-"))
+        # What gh answers: runs of each workflow, the jobs of each run; None: no gh.
+        self.runs = {"ci.yml": [], "weekly.yml": []}
+        self.jobs = {}
+        self.calls = []
+
+    def tearDown(self):
+        shutil.rmtree(self.records)
+
+    def gh(self, *args):
+        self.calls.append(args)
+        if self.runs is None:
+            return None
+        if args[:2] == ("run", "list"):
+            # Only what gh 2.46 has: --repo, --workflow, --limit, --json.
+            self.assertEqual(args[args.index("--repo") + 1], "holypandadev/Fogata")
+            self.assertEqual(args[args.index("--json") + 1], "databaseId,headSha,status,conclusion")
+            self.assertNotIn("--commit", args)
+            return self.runs[args[args.index("--workflow") + 1]]
+        if args[:2] == ("run", "view"):
+            self.assertEqual(args[args.index("--json") + 1], "jobs")
+            return {"jobs": self.jobs.get(args[2], [])}
+        raise AssertionError(f"unexpected gh {args}")
+
+    def run_of(self, number, status="completed", conclusion="success", commit=None):
+        return {"databaseId": number, "headSha": commit or self.COMMIT, "status": status,
+                "conclusion": conclusion}
+
+    def record(self, name, *lines):
+        (self.records / name).write_text("".join(f"{line}\n" for line in lines))
+
+    def check(self, ci=True, previous=True):
+        release.check_commit_tested(self.COMMIT, ci, previous, self.records, self.gh)
+
+    def refused(self, says, **kwargs):
+        with self.assertRaises(SystemExit) as stop:
+            self.check(**kwargs)
+        self.assertIn(says, str(stop.exception))
+
+    def test_github_runs_that_passed_are_enough(self):
+        self.runs["ci.yml"] = [self.run_of(9, commit="d" * 40), self.run_of(8, "in_progress", ""),
+                               self.run_of(7)]
+        # The weekly run as a whole failed (a fuzz finding); its previous-release job passed.
+        self.runs["weekly.yml"] = [self.run_of(5, conclusion="failure")]
+        self.jobs["5"] = [{"name": "fuzz", "conclusion": "failure"},
+                          {"name": "previous-release", "conclusion": "success"}]
+        self.check()
+
+    def test_a_ci_run_that_failed_or_runs_still_is_refused_whatever_the_record_says(self):
+        self.record(self.COMMIT, f"commit: {self.COMMIT}", "result: pass")
+        self.record(f"{self.COMMIT}.previous-release", f"commit: {self.COMMIT}", "result: pass")
+        for state in [("completed", "failure"), ("in_progress", ""), ("completed", "cancelled")]:
+            with self.subTest(state=state):
+                self.runs["ci.yml"] = [self.run_of(7, *state)]
+                self.refused("GitHub's CI has not passed")
+        self.check(ci=False)
+
+    def test_without_github_the_records_of_this_computer_decide(self):
+        for runs in (None, {"ci.yml": [self.run_of(1, commit="d" * 40)], "weekly.yml": []}):
+            with self.subTest(gh="offline" if runs is None else "no run of the commit"):
+                self.runs = runs
+                self.refused("tools/ci.sh has no record")
+                self.record(self.COMMIT, f"commit: {self.COMMIT}", "result: incomplete")
+                self.refused("tools/ci.sh has no record")
+                # A record of another commit, copied under this name, is no record.
+                self.record(self.COMMIT, f"commit: {'d' * 40}", "result: pass")
+                self.refused("tools/ci.sh has no record")
+                self.record(self.COMMIT, f"commit: {self.COMMIT}", "linux: pass",
+                            "result: pass")
+                self.refused("test against the last release")
+                self.record(f"{self.COMMIT}.previous-release", f"commit: {self.COMMIT}",
+                            "result: fail")
+                self.refused("test against the last release")
+                self.record(f"{self.COMMIT}.previous-release", f"commit: {self.COMMIT}",
+                            "tag: v0.1.0-beta.8 (x)", "result: pass")
+                self.check()
+                for name in (self.COMMIT, f"{self.COMMIT}.previous-release"):
+                    (self.records / name).unlink()
+
+    def test_a_weekly_run_whose_previous_release_job_failed_does_not_count(self):
+        self.runs["ci.yml"] = [self.run_of(7)]
+        self.runs["weekly.yml"] = [self.run_of(5), self.run_of(4, "in_progress", "")]
+        self.jobs["5"] = [{"name": "previous-release", "conclusion": "failure"}]
+        self.jobs["4"] = [{"name": "previous-release", "conclusion": "success"}]
+        self.refused("--no-previous-check")
+        # A run still going is not asked for its jobs.
+        self.assertNotIn(("run", "view", "4"), [call[:3] for call in self.calls])
+
+    def test_each_check_left_out_is_said_loudly(self):
+        import contextlib
+        import io
+        said = io.StringIO()
+        with contextlib.redirect_stderr(said):
+            self.check(ci=False, previous=False)
+        self.assertIn("--no-ci-check given: NOT CHECKED", said.getvalue())
+        self.assertIn("--no-previous-check given: NOT CHECKED", said.getvalue())
+        self.assertEqual(self.calls, [])
+
+    def test_gh_missing_or_failing_is_no_answer(self):
+        import unittest.mock
+        with unittest.mock.patch.object(release.subprocess, "run",
+                                        side_effect=FileNotFoundError("gh")):
+            self.assertIsNone(release.ask_github("run", "list"))
+        failed = subprocess.CompletedProcess(["gh"], 1, "", "not logged in")
+        with unittest.mock.patch.object(release.subprocess, "run", return_value=failed):
+            self.assertIsNone(release.ask_github("run", "list"))
+        garbled = subprocess.CompletedProcess(["gh"], 0, "<html>", "")
+        with unittest.mock.patch.object(release.subprocess, "run", return_value=garbled):
+            self.assertIsNone(release.ask_github("run", "list"))
+
+    def test_the_records_are_in_the_git_folder_all_worktrees_share(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = pathlib.Path(tmp) / "repo"
+            env = dict(os.environ, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+            subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
+            self.assertEqual(release.records_folder(repo),
+                             (repo / ".git/fogata-ci").resolve())
 
 
 class SigningProgram(unittest.TestCase):

@@ -5,6 +5,10 @@ version: 0.1.0+8
 
 environment:
   sdk: ^3.13.5
+  # Exactly the Flutter the workflows build with (FLUTTER_VERSION in .github/workflows,
+  # which tools/test_repo_checks.py holds to this): its engine goes into the application,
+  # so pub refuses any other, on every computer.
+  flutter: 3.47.8
 
 dependencies:
   flutter:

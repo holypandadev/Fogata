@@ -145,9 +145,15 @@ fn commit() -> Option<String> {
     status.extend(sources);
     // CocoaPods writes Podfile.lock again on every install, with its own version and the
     // checksums it works out on that computer, so a fresh checkout on another Mac changed it
-    // while building the very commit. What it locks is checked elsewhere: every other pod is
-    // a folder of this checkout (counted above), and WebRTC-SDK's archive and installed files
-    // are checked by their SHA-256 (app/macos/WebRTC-SDK.podspec and the Podfile).
+    // while building the very commit. What it locks is pinned elsewhere: the pods of
+    // app/third_party, app/packages and app/rust_builder are folders of this checkout
+    // (counted above); those of
+    // the plugins pub fetches into its cache (file_selector_macos, screen_retriever_macos,
+    // window_manager) are pinned by their SHA-256 in app/pubspec.lock, counted above too;
+    // FlutterMacOS comes with the Flutter SDK, whose version app/pubspec.yaml pins; and
+    // WebRTC-SDK's archive and installed files are checked by their SHA-256
+    // (app/macos/WebRTC-SDK.podspec and the Podfile). Nothing re-reads pub's cache here: a
+    // package changed in it by hand is not seen.
     status.push(":(exclude)app/macos/Podfile.lock");
     let dirty = !git(&status)?.is_empty();
     Some(if dirty { format!("{sha}+dirty") } else { sha })

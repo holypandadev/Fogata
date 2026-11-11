@@ -14,11 +14,26 @@ them out for release.py: the Linux bundle unpacked (--linux-bundle), the Windows
 zips (--macos-zip): the commands to run are printed at the end. With --macos-team, the team
 pinned into the macOS updater must be that one.
 
+Each build's toolchain record (toolchain-<system>.txt: the runner image, Flutter's engine,
+Rust, CMake and each system's compilers and SDKs, uploaded beside the zip, outside it) is
+copied into the folder too, so the release keeps it. It is not attested: a note, not a check.
+
     python3 -I tools/beta/ci_builds.py check-marker <folder> <commit>
 
 What the workflow runs on each build: every commit marker in the files of <folder>
 (fogata_update::COMMIT_MARKER, in the release build of the library) must say <commit>, with
 no `+dirty`, or release.py would refuse the build later.
+
+    python3 -I tools/beta/ci_builds.py check-build <linux|windows|macos> <folder>
+
+What release.py checks of each build before it packs it, with release.py's own code, so that
+the release workflow and CI (.github/workflows/ci.yml, tools/ci.sh) refuse what release.py
+would: <folder> is the Linux bundle, the Windows application folder (runner\\Release) or
+Fogata.app with its updater (tools/beta/macos-updater.sh). Each must be a release build, not
+debug or profile; the Linux and Windows programs and libraries must carry their hardening
+(and the Linux WebRTC plugin link PipeWire and PulseAudio); the Mac app must be universal,
+its Info.plist naming Fogata and THIS_BUILD of crates/fogata-update/src/lib.rs. It runs on
+Linux, macOS and Windows: the checks read the files themselves, with no system tool.
 """
 
 import argparse
@@ -43,6 +58,13 @@ BUILDS = {
     "windows": ("fogata-windows-x64", "Fogata-windows-x64.zip"),
     "macos": ("fogata-macos-unsigned", "Fogata-macos-unsigned.zip"),
 }
+SYSTEMS = tuple(BUILDS)
+
+
+def toolchain_file(system):
+    """The toolchain record each build job uploads beside its zip (tools/toolchain.sh)."""
+    return f"toolchain-{system}.txt"
+
 MARKER = re.compile(rb"fogata-commit-marker:([0-9a-f]{40}(?:\+dirty)?|unknown);")
 TEAM_MARKER = re.compile(rb"fogata-updater-team:([A-Z0-9]*);")
 
@@ -52,7 +74,7 @@ def fail(text):
 
 
 def load_release():
-    """tools/beta/release.py, for its unpacking of zips."""
+    """tools/beta/release.py, for its unpacking of zips and its checks of the builds."""
     sys.dont_write_bytecode = True  # no __pycache__ in the repository
     spec = importlib.util.spec_from_file_location("beta_release", REPO / "tools/beta/release.py")
     module = importlib.util.module_from_spec(spec)
@@ -76,6 +98,32 @@ def check_marker(folder, commit):
              f"from {commit} with no changes: a file the build reads changed in the checkout "
              "(git status says which)")
     print(f"{folder}: built from {commit}")
+
+
+def check_build(system, folder, release=None):
+    """Stops unless the application built in `folder` passes what release.py checks of a
+    `system` build before packing it (release.py's own functions, not copies of them)."""
+    release = release or load_release()
+    folder = pathlib.Path(folder)
+    if system not in SYSTEMS:
+        fail(f"check-build takes {', '.join(SYSTEMS)}, not {system}")
+    if not folder.is_dir():
+        fail(f"no {folder}")
+    release.refuse_debug_folder(folder)
+    if system == "linux":
+        release.check_linux_hardening(folder)
+    elif system == "windows":
+        release.check_windows_hardening(folder)
+    else:
+        if not (folder / "Contents/Info.plist").is_file():
+            fail(f"{folder} is no Mac app: give Fogata.app")
+        if not (folder / "Contents/Library/Helpers/Fogata Updater.app").is_dir():
+            fail("Fogata.app has no updater: run tools/beta/macos-updater.sh first")
+        build, _ = release.this_build()
+        release.check_macos_info(folder, build)
+        # Universal, as release.py takes it without --macos-arch.
+        release.macos_platforms(release.macos_archs(folder), None)
+    print(f"{folder}: a {system} release build that release.py would take")
 
 
 def sha256(path):
@@ -197,6 +245,11 @@ def fetch(run, out, commit, only, macos_team=None, gh=gh):
         else:
             laid[system] = out / name
             shutil.copy(path, laid[system])
+        record = download / artifact / toolchain_file(system)
+        if record.is_file():
+            shutil.copy(record, out / toolchain_file(system))
+        else:
+            print(f"{artifact}: no {toolchain_file(system)} (a run from before it was kept)")
     with open(out / SUMS_FILE, "w") as file:
         for system in only:
             name = BUILDS[system][1]
@@ -217,10 +270,16 @@ def main():
     marker = commands.add_parser("check-marker")
     marker.add_argument("folder", type=pathlib.Path)
     marker.add_argument("commit")
+    build = commands.add_parser("check-build")
+    build.add_argument("system", choices=SYSTEMS)
+    build.add_argument("folder", type=pathlib.Path)
     args = parser.parse_args()
 
     if args.command == "check-marker":
         check_marker(args.folder, args.commit)
+        return
+    if args.command == "check-build":
+        check_build(args.system, args.folder)
         return
     only = [system for system in args.only.split(",") if system]
     unknown = [system for system in only if system not in BUILDS]
@@ -231,7 +290,8 @@ def main():
         fail(f"{commit} is not a full commit")
     out = args.out.resolve()
     laid = fetch(args.run, out, commit, only, args.macos_team)
-    print(f"\nVerified builds of {commit} in {out} (SHA-256 in {out / SUMS_FILE}).")
+    print(f"\nVerified builds of {commit} in {out} (SHA-256 in {out / SUMS_FILE}; what "
+          "each was built with in toolchain-<system>.txt: keep them with the release).")
     if "macos" in laid:
         print("On the Mac, at that commit, sign the app and zip it (docs/releasing-beta.md):\n"
               f'  tools/sign-macos.sh "<identity>" {laid["macos"]}\n'

@@ -13,8 +13,11 @@ The binary is `target/release/fogata`.
 
 ## The desktop application
 
-Requires Flutter 3.47 or newer (releases are built with the exact version the workflows
-name, `FLUTTER_VERSION` in `.github/workflows`) and, on Linux, clang, cmake, ninja and the
+Requires the exact Flutter the workflows build with (`FLUTTER_VERSION` in
+`.github/workflows`, now 3.47.8): `app/pubspec.yaml` names it under `environment:`, and
+`flutter pub get` refuses any other, since another Flutter builds another engine into the
+application. A new Flutter is taken by changing both together (`tools/test_repo_checks.py`
+checks that they agree). On Linux it needs clang, cmake, ninja and the
 development files of GTK 3, PulseAudio, PipeWire, ALSA and liblzma (on Ubuntu:
 `libgtk-3-dev libpulse-dev libpipewire-0.3-dev libasound2-dev liblzma-dev`). A release or
 profile build stops without PulseAudio's or PipeWire's: it would have no watch on the sound

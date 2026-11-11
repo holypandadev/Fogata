@@ -130,18 +130,29 @@ refuses a folder that holds any key already.
    `git bundle` or a push, never by copying files). Every build of the release comes from
    that commit, with no changes. Then check it against the last release: build the command
    line at the last release's tag, in a worktree and a target folder of its own, and run
-   the test of the two together (the weekly workflow on GitHub does the same, job
-   `previous-release`; it must have passed for this commit or be run here):
+   the test of the two together: the weekly workflow on GitHub does it, job
+   `previous-release`, started by hand on this commit (`gh workflow run weekly.yml --repo
+   holypandadev/Fogata --ref main` once the commit is the head of `main`), or here:
 
    ```sh
    git fetch --tags
-   git worktree add --detach ../fogata-previous v0.1.0-beta.1   # the last release's tag
-   (cd ../fogata-previous && CARGO_TARGET_DIR=$HOME/fogata-previous-target \
-       cargo build --release --locked -p fogata)
-   FOGATA_OLD_CLI=$HOME/fogata-previous-target/release/fogata \
-       cargo test -p fogata-core --test previous_release -- --ignored
-   git worktree remove ../fogata-previous
+   tools/previous-release.sh            # or: tools/previous-release.sh v0.1.0-beta.1
    ```
+
+   It builds the command line of the last release tag before the commit (or the tag given)
+   in a worktree of its own, with its target folder in `~/fogata-previous-target`, runs
+   `cargo test -p fogata-core --test previous_release -- --ignored` against it, and writes
+   `<git dir>/fogata-ci/<commit>.previous-release`, which says `result: pass` only when a
+   test ran and passed in a checkout with no changes.
+
+   `release.py` (step 3) refuses to make the release unless both hold for the commit
+   checked out: CI passed, as GitHub's `CI` workflow says (asked with `gh run list`; when
+   gh is missing or offline, or GitHub has no run of the commit, `tools/ci.sh`'s record
+   here must say `result: pass`; a run on GitHub that failed or is still going refuses it
+   whatever the record says), and the test against the last release passed (the job
+   `previous-release` of a weekly run at this commit, or the record of
+   `tools/previous-release.sh`). `--no-ci-check` and `--no-previous-check` leave each out,
+   for a reason you know; `release.py` then says so in large letters.
 
    It must pass: what this version writes to a group, copies of the last release must take
    in whole, or a group splits between those who updated and those who did not (see
@@ -182,8 +193,15 @@ refuses a folder that holds any key already.
       zipped with its links), Windows (`flutter build windows --release`, the contents of
       `Release` zipped) and macOS (`flutter build macos --release`, universal, and
       `tools/beta/macos-updater.sh --team <team>`; signed only to run there, not with your
-      identity), from a fresh clone, with no cache of an earlier run. Each job stops unless
-      its library's commit marker is the commit with no changes. Then a last job, which runs
+      identity), from a fresh clone, with no cache of an earlier run; the Mac with the
+      Xcode `XCODE_VERSION` names and the CocoaPods version of `Podfile.lock`. Each job stops
+      unless its library's commit marker is the commit with no changes, and unless its build
+      passes what `release.py` checks before packing it (`tools/beta/ci_builds.py
+      check-build`, the same code: docs/ci.md), so a build `release.py` would refuse fails
+      here, and CI has made the same checks at every push. Each job writes what it built
+      with (`tools/toolchain.sh`: the image, Flutter's engine, Rust, CMake, the compilers
+      and SDKs) to the run's summary and as `toolchain-<system>.txt` beside its zip, outside
+      it. Then a last job, which runs
       none of the build's code, lists the SHA-256 of the three zips (in the run's summary)
       and has GitHub attest each: a build provenance attestation (SLSA), signed through
       Sigstore, saying that `release-build.yml` of this repository made that file from that
@@ -201,7 +219,9 @@ refuses a folder that holds any key already.
       and keeps a build only when `gh attestation verify` finds GitHub's attestation of it
       (by `release-build.yml` of holypandadev/Fogata, from this commit, not on a self-hosted
       computer) and its SHA-256 is the one the run listed. It leaves
-      `linux/bundle` (for `--linux-bundle`), `Fogata-windows-x64.zip` and `SHA256SUMS`.
+      `linux/bundle` (for `--linux-bundle`), `Fogata-windows-x64.zip`, `SHA256SUMS`, and
+      each build's `toolchain-<system>.txt` (not attested: a note of what built it); keep
+      them with the release.
 
    c. On the Mac, at the same commit, the same for macOS, then sign it there (see 2d for
       the identity and the team) and zip it:
@@ -252,6 +272,10 @@ refuses a folder that holds any key already.
         lasts a year: `security find-certificate -c "<identity>" -p | openssl x509 -noout
         -enddate` says when; before that day, make a new one in Xcode (same team) and sign the
         next release with it.
+
+      Each build made by hand can be checked as `release.py` will check it before it is
+      carried to the Linux computer: `python3 -I tools/beta/ci_builds.py check-build
+      <linux|windows|macos> <the bundle, the Release folder or Fogata.app>`.
 3. Bring the builds to the Linux computer and run (the paths of 2b; by hand, the bundle is
    `app/build/linux/x64/release/bundle`):
 
@@ -265,7 +289,9 @@ refuses a folder that holds any key already.
 
    (`--build-linux` in place of `--linux-bundle` builds the Linux bundle there, from a clean
    worktree of the commit checked out.) It refuses to go on while `RELEASE_KEYS` lacks a release key or a rescue key (no copy would
-   take the release), while the checkout has changes not committed, or while the command-line
+   take the release), while the checkout has changes not committed, while nothing says the
+   commit passed CI and the test against the last release (step 1; `--no-ci-check`,
+   `--no-previous-check`), or while the command-line
    program that packs and signs (`target/release/fogata`, or `--fogata`) was built from
    another commit or with changes (its own commit marker says which: build it again after
    every commit), refuses debug and

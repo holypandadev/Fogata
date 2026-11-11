@@ -4,7 +4,9 @@
 #     tools/ci.sh [--full] [--no-advisories] [--no-codegen] [--no-notices] [<commit>]   (by default HEAD)
 #
 # In a clean temporary worktree of that commit: a release build of the Linux application,
-# the native tests of the WebRTC plugin's shared C++ code (the video renderer's built with
+# checked as tools/beta/release.py checks a bundle before it packs it (tools/beta/ci_builds.py
+# check-build: a release build, every program and library with its hardening, the WebRTC
+# plugin linking PipeWire and PulseAudio), the native tests of the WebRTC plugin's shared C++ code (the video renderer's built with
 # ThreadSanitizer against the libwebrtc that build unpacks, and the noise suppression
 # table's), tools/check.sh (strict: formatting, clippy, every test, cargo deny with the
 # RustSec advisories, the release scripts' tests, THIRD-PARTY-NOTICES, the bridge code), the
@@ -257,6 +259,7 @@ linux=pass
 {
     step "flutter pub get" bash -c 'cd app && flutter pub get --offline' &&
     step "linux build" bash -c 'cd app && "$@" nice -n 10 flutter build linux --release' _ ${slot[@]+"${slot[@]}"} &&
+    step "release checks of the bundle" python3 -I -B tools/beta/ci_builds.py check-build linux app/build/linux/x64/release/bundle &&
     native_tests &&
     step "check.sh" ${slot[@]+"${slot[@]}"} nice -n 10 tools/check.sh ${skips[@]+"${skips[@]}"} &&
     step "fuzz targets build" fuzz_build &&

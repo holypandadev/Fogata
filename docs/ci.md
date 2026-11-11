@@ -15,12 +15,33 @@ What GitHub's computers cover, and what they do not:
   push, through the pre-push hook.
 - macOS: `tools/check.sh --no-advisories --no-codegen`, `dart format`, `flutter analyze` and
   `flutter test`;
-  no integration, pair or smoke test; then a debug build of the application (`flutter build
-  macos --debug`), which compiles the native plugins and the updater helper and downloads and
-  checks `WebRTC.xcframework` (see `app/macos/WebRTC-SDK.podspec`).
-- Windows: `tools/ci-leg.ps1` without the smoke test (it needs virtual sound devices), and a
-  debug build of the application (`flutter build windows --debug`), which compiles the native
-  plugins and downloads and checks the Windows libwebrtc.
+  no integration, pair or smoke test; then the application built as a release is
+  (`flutter build macos --release`, universal: the Rust library, the native plugins and the
+  `objective_c` hook for both Macs, so the Intel slice is compiled at every push, not first
+  at a release; `WebRTC.xcframework` downloaded and checked, see
+  `app/macos/WebRTC-SDK.podspec`), with its updater helper (`tools/beta/macos-updater.sh`,
+  no team pinned), checked as `tools/beta/release.py` checks it (below). The job uses the
+  Xcode `XCODE_VERSION` names (the workflow's `env`, the same in `release-build.yml`; it
+  stops if GitHub's image no longer has it) and the CocoaPods version `Podfile.lock` names,
+  installed for the job, rather than the image's.
+- Windows: `tools/ci-leg.ps1` without the smoke test (it needs virtual sound devices), and
+  the application built as a release is (`flutter build windows --release`: Control Flow
+  Guard and EH continuation metadata are release-only flags of `app/windows/CMakeLists.txt`),
+  which compiles the native plugins and downloads and checks the Windows libwebrtc, checked
+  as `tools/beta/release.py` checks it.
+
+Each built application, the Linux bundle of `tools/ci.sh` too, goes through
+`python3 -I tools/beta/ci_builds.py check-build <linux|windows|macos> <folder>`: the checks
+`release.py` runs before it packs a build, with its own code (a release build, not debug or
+profile; every Linux and Windows program and library with its hardening, the Linux WebRTC
+plugin linking PipeWire and PulseAudio; the Mac app universal, with its updater, its
+`Info.plist` naming `THIS_BUILD`). A build `release.py` would refuse fails at the push, not
+at the release. Each build job also writes `tools/toolchain.sh` to the run's summary: the
+runner image, Flutter's engine revision, Rust, CMake, and clang and the dev packages (Linux),
+Xcode, its SDK, Swift and CocoaPods (macOS), Visual Studio, the MSVC toolset and the Windows
+SDK the build used (Windows). The macOS and Windows jobs take some 10 to 15 minutes longer than
+with the debug builds they replace (the release profile's whole-program optimisation, twice
+on the Mac); the run still ends with the Linux job, the longest.
 
 A newer push to a pull request cancels the run of the one before; every push to `main` keeps
 its own run. The Rust builds of the dependencies are cached (`Swatinem/rust-cache`), saved
@@ -39,7 +60,9 @@ tools/install-hooks.sh        # once per clone: installs the pre-push hook
 and runs there, in this order:
 
 1. `flutter pub get --offline`;
-2. a release build of the Linux application (`flutter build linux --release`);
+2. a release build of the Linux application (`flutter build linux --release`), then the
+   checks `tools/beta/release.py` makes of the bundle before it packs it
+   (`tools/beta/ci_builds.py check-build linux`, see above);
 3. the native tests of the WebRTC plugin's shared C++ code
    (`app/third_party/flutter_webrtc/common/cpp/test/run_tests.sh`): the video renderer's,
    built with ThreadSanitizer against the libwebrtc the build unpacked, and the noise
@@ -188,7 +211,9 @@ token that can only read; a failure there is for the maintainers to look at, it 
   last release takes in whole, and both meet in its voice room). The tests of
   `crates/fogata-core/tests/old_copy.rs` are not run there: each needs a copy from before a
   given feature (banners, MLS, picture records...), older than every published tag, so they
-  run only where such a build is at hand.
+  run only where such a build is at hand. `tools/previous-release.sh` runs the same test on
+  your computer and records it; `tools/beta/release.py` takes a release only of a commit
+  for which this job, or that record, passed (docs/releasing-beta.md, step 1).
 - `vendor`: `tools/vendor_diff.py`, each vendored crate against the one published on
   crates.io at the version it records: the files changed, which `FOGATA.md` must name, and
   whether crates.io has a newer version. The whole diff is the `vendor-diff` artifact. Report

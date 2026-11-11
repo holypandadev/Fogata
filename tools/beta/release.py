@@ -31,6 +31,11 @@ Writes into --out (made new):
 THIS_BUILD and THIS_VERSION in crates/fogata-update/src/lib.rs must be --build and
 --version, RELEASE_KEYS must name a release key and a rescue key, or no copy would take the
 release (--allow-no-keys for tests), and the checkout must have no changes to its files.
+The commit must have passed CI: GitHub's `CI` workflow (asked with gh), or, when GitHub
+cannot be asked or has no run of it, tools/ci.sh's record here saying `result: pass`; and the
+test against the last release: the job previous-release of a run of the weekly workflow at
+this commit, or tools/previous-release.sh's record here. --no-ci-check and
+--no-previous-check leave each out, said loudly.
 Every build must be a release build (not debug or profile) made from the commit checked out
 here with no changes, holding that build and trusting exactly the keys RELEASE_KEYS names
 (`fogata release pack --expect-build --expect-key --expect-rescue-key --expect-commit`): a
@@ -47,6 +52,7 @@ folder of a release or rescue key (refused); GnuPG asks for that passphrase. Eve
 import argparse
 import hashlib
 import importlib.util
+import json
 import os
 import pathlib
 import plistlib
@@ -262,6 +268,127 @@ def checked_out(repo=REPO):
         fail("the checkout has changes not committed; commit them and build every system "
              f"from that commit:\n{changed}")
     return git("rev-parse", "--verify", "HEAD^{commit}")
+
+
+GITHUB_REPO = "holypandadev/Fogata"
+# How many of a workflow's latest runs are searched for the commit: a release's commit is
+# among the newest pushed. (`gh run list --commit` is newer than some gh still in use.)
+RUNS_SEARCHED = 200
+
+
+def ask_github(*args):
+    """gh's answer as JSON, or None when gh is not installed or cannot answer (offline, not
+    logged in, an old gh without what is asked)."""
+    try:
+        result = subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return json.loads(result.stdout)
+    except ValueError:
+        return None
+
+
+def runs_of(workflow, commit, gh):
+    """The runs on GitHub of `workflow` (its file name) for `commit`, newest first, or None
+    when GitHub cannot be asked."""
+    runs = gh("run", "list", "--repo", GITHUB_REPO, "--workflow", workflow, "--limit",
+              str(RUNS_SEARCHED), "--json", "databaseId,headSha,status,conclusion")
+    if not isinstance(runs, list):
+        return None
+    return [run for run in runs if isinstance(run, dict) and run.get("headSha") == commit]
+
+
+def records_folder(repo=REPO):
+    """Where tools/ci.sh and tools/previous-release.sh keep their records: the folder
+    fogata-ci of the git folder all worktrees share."""
+    result = subprocess.run(["git", "-C", str(repo), "rev-parse", "--git-common-dir"],
+                            capture_output=True, text=True)
+    if result.returncode != 0:
+        fail(f"git rev-parse --git-common-dir: {result.stderr.strip()}")
+    return (pathlib.Path(repo) / result.stdout.strip()).resolve() / "fogata-ci"
+
+
+def record_passes(path, commit):
+    """Whether the record at `path` is of `commit` and says `result: pass`."""
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return False
+    return f"commit: {commit}" in lines and "result: pass" in lines
+
+
+def ci_passed(commit, records, gh=ask_github):
+    """(True, how) when the commit passed CI, else (False, why). GitHub's CI workflow
+    decides when GitHub can be asked and has run it for the commit; when it cannot be asked
+    or has no run of the commit, the record of tools/ci.sh on this computer does."""
+    runs = runs_of("ci.yml", commit, gh)
+    if runs:
+        for run in runs:
+            if (run.get("status"), run.get("conclusion")) == ("completed", "success"):
+                return True, f"GitHub's CI passed for {commit} (run {run.get('databaseId')})"
+        states = ", ".join(f"run {run.get('databaseId')} {run.get('status')} / "
+                           f"{run.get('conclusion') or 'none'}" for run in runs)
+        return False, (f"GitHub's CI has not passed for {commit} ({states}): wait for it, or "
+                       "make it pass")
+    asked = "has no CI run of it" if runs is not None else "cannot be asked (gh missing or offline)"
+    if record_passes(records / commit, commit):
+        return True, f"GitHub {asked}; tools/ci.sh's record {records / commit} says pass"
+    return False, (f"GitHub {asked}, and tools/ci.sh has no record of {commit} that says "
+                   f"result: pass ({records / commit}): push it and let CI pass, or run "
+                   "tools/ci.sh --full with the macOS and Windows legs")
+
+
+PREVIOUS_JOB = "previous-release"
+
+
+def previous_record(records, commit):
+    """The record tools/previous-release.sh writes of a run for `commit`."""
+    return records / f"{commit}.previous-release"
+
+
+def previous_release_passed(commit, records, gh=ask_github):
+    """(True, how) when the test against the last release (job previous-release of the
+    weekly workflow, or tools/previous-release.sh here) passed for the commit, else (False,
+    why)."""
+    runs = runs_of("weekly.yml", commit, gh) or []
+    for run in runs:
+        if run.get("status") != "completed":
+            continue
+        # The run as a whole may fail for another job (a fuzz finding): only this one counts.
+        view = gh("run", "view", str(run.get("databaseId")), "--repo", GITHUB_REPO,
+                  "--json", "jobs")
+        jobs = view.get("jobs", []) if isinstance(view, dict) else []
+        if any(isinstance(job, dict) and job.get("name") == PREVIOUS_JOB
+               and job.get("conclusion") == "success" for job in jobs):
+            return True, (f"the weekly workflow's {PREVIOUS_JOB} passed for {commit} (run "
+                          f"{run.get('databaseId')})")
+    record = previous_record(records, commit)
+    if record_passes(record, commit):
+        return True, f"tools/previous-release.sh's record {record} says pass"
+    return False, (f"no record that the test against the last release passed for {commit}: "
+                   "run tools/previous-release.sh here, or the weekly workflow on GitHub at "
+                   "this commit (docs/releasing-beta.md, step 1)")
+
+
+def check_commit_tested(commit, ci_check, previous_check, records, gh=ask_github):
+    """Stops unless the commit passed CI and the test against the last release; a check left
+    out by its flag is said loudly."""
+    checks = [(ci_check, "--no-ci-check", "CI", ci_passed),
+              (previous_check, "--no-previous-check", "the test against the last release",
+               previous_release_passed)]
+    for check, flag, what, passed in checks:
+        if not check:
+            line = "!" * 78
+            print(f"\n{line}\nrelease.py: {flag} given: NOT CHECKED that {commit} passed "
+                  f"{what}\n{line}\n", file=sys.stderr)
+            continue
+        ok, how = passed(commit, records, gh)
+        if not ok:
+            fail(f"{how} (or give {flag}, if you know why)")
+        print(how)
 
 
 def check_cli_commit(fogata, commit):
@@ -774,6 +901,12 @@ def main():
                         help="publish a macOS app built for this architecture only (a "
                              "universal one goes out for both without it)")
     parser.add_argument("--out", type=pathlib.Path, required=True)
+    parser.add_argument("--no-ci-check", action="store_true",
+                        help="make the release although neither GitHub's CI nor tools/ci.sh "
+                             "says the commit passed (said loudly)")
+    parser.add_argument("--no-previous-check", action="store_true",
+                        help="make the release although no run says the test against the last "
+                             "release passed for the commit (said loudly)")
     args = parser.parse_args()
 
     commit = checked_out()
@@ -781,6 +914,8 @@ def main():
     if (build, version) != (args.build, args.version):
         fail(f"the source says build {build} ({version}); set THIS_BUILD, THIS_VERSION and "
              "BUILD_MARKER first and build every system from that commit")
+    check_commit_tested(commit, not args.no_ci_check, not args.no_previous_check,
+                        records_folder())
     if not release_keys_named() and not args.allow_no_keys:
         fail("RELEASE_KEYS in crates/fogata-update/src/lib.rs names no key: no build takes "
              "releases. Add the key (fogata release keygen prints the line) and build again")

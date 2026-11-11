@@ -3,8 +3,9 @@
 against the main one (tools/fuzz_lock.py), the layers of the workspace's crates
 (tools/crate_layers.py), the app's limits against the Rust ones (tools/limits.py), and the
 offline parts of the comparison of the vendored crates with crates.io (tools/vendor_diff.py)
-and of the WebRTC pins with Chrome's Stable channel (tools/webrtc/check_stable.py); and what
-the GitHub workflows may use.
+and of the WebRTC pins with Chrome's Stable channel (tools/webrtc/check_stable.py); the
+Flutter every computer builds with, the setting that keeps the jni plugin out of the Linux
+and Windows builds, and what the GitHub workflows may use.
 
     python3 -I tools/test_repo_checks.py
 """
@@ -244,6 +245,82 @@ class MacosWebrtc(unittest.TestCase):
     def test_swift_packages_are_off_for_the_app(self):
         pubspec = (TOOLS.parent / "app" / "pubspec.yaml").read_text()
         self.assertRegex(pubspec, r"\nflutter:\n(  .*\n|\s*#.*\n)*?  config:\n    enable-swift-package-manager: false\n")
+
+
+class Toolchains(unittest.TestCase):
+    """What the builds are made with, the same everywhere."""
+
+    def test_every_computer_builds_with_the_flutter_of_the_workflows(self):
+        pubspec = (TOOLS.parent / "app/pubspec.yaml").read_text()
+        environment = re.search(r"(?m)^environment:\n((?:  .*\n|\s*#.*\n)*)", pubspec)
+        self.assertIsNotNone(environment)
+        pinned = re.search(r"(?m)^  flutter: (\S+)$", environment.group(1))
+        self.assertIsNotNone(pinned, "app/pubspec.yaml names no Flutter under environment:")
+        # A bare version: pub then takes that Flutter only.
+        self.assertRegex(pinned.group(1), r"^\d+\.\d+\.\d+$")
+        named = {}
+        for path in sorted((TOOLS.parent / ".github/workflows").glob("*.yml")):
+            for version in re.findall(r"(?m)^  FLUTTER_VERSION: (\S+)$", path.read_text()):
+                named[path.name] = version
+        self.assertIn("ci.yml", named)
+        self.assertIn("release-build.yml", named)
+        self.assertEqual(set(named.values()), {pinned.group(1)}, named)
+
+    def test_the_mac_builds_use_one_xcode(self):
+        named = {}
+        for name in ("ci.yml", "release-build.yml"):
+            text = (TOOLS.parent / ".github/workflows" / name).read_text()
+            found = re.findall(r'(?m)^  XCODE_VERSION: "(\d+(?:\.\d+)*)"$', text)
+            self.assertEqual(len(found), 1, name)
+            named[name] = found[0]
+            self.assertIn("DEVELOPER_DIR=$xcode/Contents/Developer", text)
+            self.assertIn("Use the CocoaPods of Podfile.lock", text)
+        self.assertEqual(len(set(named.values())), 1, named)
+
+    def test_every_build_is_checked_as_release_py_checks_it_and_recorded(self):
+        workflows = TOOLS.parent / ".github/workflows"
+        for name, systems in [("ci.yml", ["macos", "windows"]),
+                              ("release-build.yml", ["linux", "macos", "windows"])]:
+            text = (workflows / name).read_text()
+            for system in systems:
+                with self.subTest(workflow=name, system=system):
+                    job = re.search(rf"(?ms)^  {system}:\n(.*?)(?=^  \S|\Z)", text).group(1)
+                    self.assertRegex(job, rf"ci_builds\.py check-build {system} ")
+                    self.assertIn(f"tools/toolchain.sh {system}", job)
+                    self.assertRegex(job, rf"flutter build {system} --release")
+                    self.assertNotIn("--debug", job)
+        # The Linux job of ci.yml builds and checks through ci.sh.
+        self.assertIn("tools/toolchain.sh linux", (workflows / "ci.yml").read_text())
+        self.assertIn("ci_builds.py check-build linux app/build/linux/x64/release/bundle",
+                      (TOOLS / "ci.sh").read_text())
+        # The release builds keep the record beside each zip, outside it.
+        release = (workflows / "release-build.yml").read_text()
+        for system in ("linux", "windows", "macos"):
+            self.assertRegex(release, rf"\n            toolchain-{system}\.txt\n")
+
+    def test_the_jni_plugin_is_never_built_on_linux_or_windows(self):
+        # The jni package (an Android FFI plugin some dependency brings) builds a library
+        # that needs Java wherever CMake finds a JDK, as on GitHub's computers: release.py
+        # refused beta.8's bundles for it. Only the setting before the plugins' rules keeps
+        # it out.
+        for system in ("linux", "windows"):
+            with self.subTest(system=system):
+                text = (TOOLS.parent / "app" / system / "CMakeLists.txt").read_text()
+                code = [line.split("#", 1)[0].strip() for line in text.splitlines()]
+                disabled = [at for at, line in enumerate(code)
+                            if re.fullmatch(r"set\(\s*CMAKE_DISABLE_FIND_PACKAGE_JNI\s+"
+                                            r"(TRUE|ON|1)\s*\)", line)]
+                plugins = [at for at, line in enumerate(code)
+                           if re.fullmatch(r"include\(\s*flutter/generated_plugins\.cmake\s*\)",
+                                           line)]
+                self.assertEqual(len(plugins), 1)
+                self.assertTrue(disabled and disabled[0] < plugins[0],
+                                "CMAKE_DISABLE_FIND_PACKAGE_JNI must be set before "
+                                "generated_plugins.cmake is included")
+                self.assertFalse(any(re.match(r"(set|unset)\(\s*CMAKE_DISABLE_FIND_PACKAGE_JNI\b",
+                                              line) and at > disabled[0]
+                                     for at, line in enumerate(code[:plugins[0]])),
+                                 "set again before the plugins")
 
 
 class Workflows(unittest.TestCase):
