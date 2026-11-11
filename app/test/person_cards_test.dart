@@ -3,6 +3,7 @@
 // card of the same look that offers a friend request, or says where one stands.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/app_state.dart';
@@ -318,4 +319,99 @@ void main() {
     state.closeFriendCard();
     await _done(tester);
   });
+
+  testWidgets(
+    "a friend's card says who they are and offers both actions in a row",
+    (tester) async {
+      final state = await _show(tester);
+      state.contacts.friends = [
+        UiFriend(
+          person: other(0),
+          fingerprint: '${other(0).short} 1234',
+          presence: UiPresence.online,
+          delivered: true,
+        ),
+        UiFriend(
+          person: other(1),
+          fingerprint: other(1).short,
+          presence: UiPresence.online,
+          delivered: true,
+        ),
+      ];
+      state.contacts.mutualFriends['p0'] = ['p1'];
+      await _tap(tester, _side('p0'));
+      final card = find.byType(FriendCardLayer);
+      Finder inCard(Finder f) => find.descendant(of: card, matching: f);
+      // Their code under the name, and online in words.
+      final code = inCard(find.byKey(const ValueKey('friend-card-code')));
+      expect(tester.widget<Text>(code).data, other(0).short);
+      final presence = inCard(
+        find.byKey(const ValueKey('friend-card-presence')),
+      );
+      expect(tester.widget<Text>(presence).data, l10n.friendsOnline);
+      expect(
+        tester.getTopLeft(presence).dy,
+        greaterThan(tester.getTopLeft(code).dy),
+      );
+      // Call and Message side by side, each half of the card's width.
+      final call = inCard(find.byKey(const ValueKey('friend-card-call')));
+      final message = inCard(find.byKey(const ValueKey('friend-card-message')));
+      expect(tester.getTopLeft(call).dy, tester.getTopLeft(message).dy);
+      expect(
+        tester.getTopLeft(message).dx,
+        greaterThan(tester.getTopRight(call).dx),
+      );
+      expect(
+        tester.getSize(call).width,
+        closeTo(tester.getSize(message).width, .5),
+      );
+      // The friends in common under them.
+      final mutual = inCard(find.text(l10n.friendCardMutualFriends(1)));
+      expect(mutual, findsOneWidget);
+      expect(
+        tester.getTopLeft(mutual).dy,
+        greaterThan(tester.getBottomLeft(call).dy),
+      );
+      await _done(tester);
+    },
+  );
+
+  testWidgets(
+    "a friend's card puts its actions one under the other when their words "
+    'would not fit in a row',
+    (tester) async {
+      await _show(tester);
+      tester.platformDispatcher.textScaleFactorTestValue = 2;
+      addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+      await tester.pump();
+      await _tap(tester, _side('p0'));
+      final card = find.byType(FriendCardLayer);
+      final call = find.descendant(
+        of: card,
+        matching: find.byKey(const ValueKey('friend-card-call')),
+      );
+      final message = find.descendant(
+        of: card,
+        matching: find.byKey(const ValueKey('friend-card-message')),
+      );
+      expect(
+        tester.getTopLeft(message).dy,
+        greaterThanOrEqualTo(tester.getBottomLeft(call).dy),
+      );
+      expect(
+        tester.getSize(call).width,
+        closeTo(tester.getSize(message).width, .5),
+      );
+      // No word of either is cut.
+      for (final button in [call, message]) {
+        for (final text in tester.widgetList<RichText>(
+          find.descendant(of: button, matching: find.byType(RichText)),
+        )) {
+          final box = tester.renderObject<RenderParagraph>(find.byWidget(text));
+          expect(box.didExceedMaxLines, isFalse);
+        }
+      }
+      await _done(tester);
+    },
+  );
 }

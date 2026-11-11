@@ -134,7 +134,8 @@ Fogata/
     fogata-ffi/           The flutter_rust_bridge surface over fogata-core.
   app/                    The Flutter application.
   vendor/                 Crates Fogata keeps a fork of (libp2p-quic, libp2p-mdns,
-                          libp2p-identify, turn, spake2), each with a FOGATA.md of its changes.
+                          libp2p-identify, libp2p-stream, turn, spake2), each with a FOGATA.md
+                          of its changes.
   fuzz/                   The libFuzzer targets, a workspace of their own (docs/fuzzing.md).
   tools/check.sh, ci.sh   The checks before every commit and every push (docs/ci.md).
   tools/netlab/           Simulated home and carrier NATs in Linux network namespaces.
@@ -203,6 +204,7 @@ invite), since the invite names the group and its manager.
 | relay (server) | Circuit Relay v2, restricted to verified members of a shared group. |
 | relay (client) | Reserve a slot at a member who can be reached. |
 | dcutr | Hole punching coordinated through a member's relay slot. |
+| stream | Fogata's own stream protocols (files, updates, typing, the media bridge, direct chats, an account's move). Up to 128 streams of one protocol that come in together wait for the task that takes them, which applies its own limits then; libp2p as published keeps one and drops the rest, so several requests at once from one member failed on a busy computer (vendor/libp2p-stream/FOGATA.md). |
 | request-response | Membership proof, roster exchange, group messages. A message is at most 4 MiB, and one with more CBOR data items than one per 32 bytes of that is refused before it is decoded: anyone can send one, and tiny items would each take far more memory decoded than on the wire. |
 
 Not used: AutoNAT (it asks strangers to probe us) and libp2p's UPnP behaviour (MPL-2.0
@@ -1095,7 +1097,9 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   download from the next. Holders whose download stopped are asked again only after the
   others, and one that sent something that was not the file is not asked again for it.
   Only verified members are served, and only files shared on purpose. Asked for again while
-  it runs, a download goes on as one.
+  it runs, a download goes on as one. A request whose stream ends or is reset before any
+  answer is made again, after 0.1, 0.3 and 1 s: copies before 0.1.0-beta.9 drop all but one
+  of the streams from one member that come in together (see the `stream` behaviour).
 - Pictures up to 10 MB are fetched by themselves into memory for their preview in the chat,
   never written to disk and not shared on; they are dropped when leaving the room. One that
   turns out damaged, or that cannot be fetched after three tries, shows as a file. Saving
@@ -1341,8 +1345,10 @@ computer's firewall letting nothing in (3.3), nothing on the internet answering,
 blocked, or a hard (symmetric) NAT, then with no working IPv6 either. Only with an answer
 from the internet in the last minute, UDP working and a router that can be opened (or none)
 does it say the network looks fine, so what keeps the two apart is probably on the friend's
-side (offline, or their network), or for a room or a call on the others' side. When the
-node has not seen enough for either, it says nothing. No relay or server is involved: this
+side (offline, or their network), or for a room or a call on the others' side; a friend's
+card leaves that sentence out, since it already says the friend is offline and when they
+were last seen, and names only what is in the way here. When the node has not seen enough
+for either, it says nothing. No relay or server is involved: this
 only explains.
 
 ### 3.13 Direct messages
@@ -3603,7 +3609,9 @@ or going to another place) while My profile holds changes not saved asks first: 
 discard them or keep editing. The settings and the other pages that scroll as a whole glide
 with each step of a mouse wheel (200 ms, the steps adding up while the wheel turns), as
 browsers do, rather than jump; a touchpad's small steps move them as they come. A friend's card (Friends, and the right side of a direct chat)
-shows the friend's banner, picture, name, status and bio.
+shows the friend's banner, picture, name, code, status in words and bio, then Call and
+Message side by side (one under the other when their words would not fit so), and the
+friends in common.
 
 The window has six themes, each one set of the same colour tokens (`Fg` in theme.dart): Dark
 (the default), Midnight (true black), Dim (softer greys), Ember (warm greys), Contrast (black

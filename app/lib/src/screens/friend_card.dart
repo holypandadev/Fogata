@@ -184,42 +184,68 @@ class _FriendCard extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
           style: tx(c.fg, size: 19, weight: w600, height: 1.25),
         ),
-        // The dot by the picture says online or not; only where they are, or
-        // when they were last seen, is said in words.
-        if (friend.presence == UiPresence.inRoom ||
-            friend.lastSeenMs != null && !on) ...[
-          const SizedBox(height: 2),
-          Text(
-            presenceText(friend),
-            overflow: TextOverflow.ellipsis,
-            style: tx(
-              friend.presence == UiPresence.inRoom ? c.green : c.fg3,
-              size: 13,
+        // Their code, as the list of friends shows it: two people may share a name.
+        const SizedBox(height: 2),
+        Align(
+          alignment: AlignmentDirectional.centerStart,
+          child: Tooltip(
+            message: friend.fingerprint,
+            child: Text(
+              friend.person.short,
+              key: const ValueKey('friend-card-code'),
+              style: tx(c.fg3, size: 11, monospace: true, spacing: .4),
             ),
           ),
-        ],
+        ),
+        // In words too, beside the dot by the picture: online, away, where they are, or
+        // when they were last seen.
+        const SizedBox(height: 4),
+        Text(
+          presenceText(friend),
+          key: const ValueKey('friend-card-presence'),
+          overflow: TextOverflow.ellipsis,
+          style: tx(
+            !on
+                ? c.fg3
+                : away
+                ? c.fg2
+                : c.green,
+            size: 13,
+          ),
+        ),
         CardBio(friend.bio),
-        if (mutual.isNotEmpty) ...[
-          const SizedBox(height: 10),
-          _Mutual(mutual: mutual),
-        ],
         const SizedBox(height: 14),
-        FgButton(
-          key: const ValueKey('friend-card-call'),
-          text: state.callState.callText(id),
-          icon: Ic.phone,
-          kind: Kind.primary,
-          height: 38,
-          fontSize: 13,
-          expand: true,
-          onTap: on && !inCall && together == null
-              ? () async {
-                  if (!await confirmCalling(context, id)) return;
-                  state.closeFriendCard();
-                  state.notices.missedCalls.remove(id);
-                  await state.callFriend(id);
-                }
-              : null,
+        _Actions(
+          labels: [state.callState.callText(id), l10n.friendCardMessage],
+          call: FgButton(
+            key: const ValueKey('friend-card-call'),
+            text: state.callState.callText(id),
+            icon: Ic.phone,
+            kind: Kind.primary,
+            height: 38,
+            fontSize: _Actions.fontSize,
+            expand: true,
+            onTap: on && !inCall && together == null
+                ? () async {
+                    if (!await confirmCalling(context, id)) return;
+                    state.closeFriendCard();
+                    state.notices.missedCalls.remove(id);
+                    await state.callFriend(id);
+                  }
+                : null,
+          ),
+          message: FgButton(
+            key: const ValueKey('friend-card-message'),
+            text: l10n.friendCardMessage,
+            icon: Ic.chat,
+            height: 38,
+            fontSize: _Actions.fontSize,
+            expand: true,
+            onTap: () {
+              state.closeFriendCard();
+              state.direct.show(id);
+            },
+          ),
         ),
         if (!on || inCall || together != null) ...[
           const SizedBox(height: 8),
@@ -233,34 +259,92 @@ class _FriendCard extends StatelessWidget {
             style: tx(c.fg3, size: 11),
           ),
         ],
-        // Why the friend may not be reached: this side's network, or, with
-        // nothing in the way here, that the friend is probably offline.
+        // Why the friend may not be reached, when something on this side is in the
+        // way (the firewall, no internet, a network that blocks Fogata): what the person
+        // can do something about. With nothing in the way here the card already says
+        // the friend is offline, and when they were last seen.
         if (!on)
           WhyUnreached(
             key: ValueKey('why-unreached:$id'),
             firewall: state.notices.firewallCommand != null,
             load: state.reachability,
             friend: name,
+            fine: false,
             center: true,
             size: 11,
             top: 8,
           ),
-        const SizedBox(height: 8),
-        FgButton(
-          key: const ValueKey('friend-card-message'),
-          text: l10n.friendCardMessage,
-          icon: Ic.chat,
-          height: 38,
-          fontSize: 13,
-          expand: true,
-          onTap: () {
-            state.closeFriendCard();
-            state.direct.show(id);
-          },
-        ),
+        if (mutual.isNotEmpty) ...[
+          const SizedBox(height: 12),
+          _Mutual(mutual: mutual),
+        ],
       ],
     );
   }
+}
+
+/// A friend's card's two actions: side by side, each half the card's width, when both
+/// labels fit so in the language and at the text size chosen; else one under the other,
+/// as wide as the card, so no word is ever cut.
+class _Actions extends StatelessWidget {
+  const _Actions({
+    required this.call,
+    required this.message,
+    required this.labels,
+  });
+  final Widget call;
+  final Widget message;
+
+  /// What the two buttons say, to tell whether they fit side by side.
+  final List<String> labels;
+
+  static const fontSize = 13.0;
+  static const _gap = 8.0;
+
+  /// A button's width around its words: the pill's padding (16 each side), its icon (15)
+  /// and the gap after it (8).
+  static const _around = 32.0 + 15 + 8;
+
+  bool _fit(BuildContext context, double width) {
+    final scaler = MediaQuery.textScalerOf(context);
+    final half = (width - _gap) / 2;
+    for (final label in labels) {
+      final painter = TextPainter(
+        text: TextSpan(
+          text: label,
+          style: tx(context.fg.fg, size: fontSize, weight: w500, height: 1.2),
+        ),
+        textDirection: Directionality.of(context),
+        textScaler: scaler,
+        maxLines: 1,
+      )..layout();
+      final wide = painter.width + _around > half;
+      painter.dispose();
+      if (wide) return false;
+    }
+    return true;
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) => _fit(context, box.maxWidth)
+        ? Row(
+            children: [
+              Expanded(child: call),
+              const SizedBox(width: _gap),
+              Expanded(child: message),
+            ],
+          )
+        : Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              call,
+              const SizedBox(height: _gap),
+              message,
+            ],
+          ),
+  );
 }
 
 /// What a person's card looks like: their banner, a plain one without, their picture with

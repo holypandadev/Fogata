@@ -147,7 +147,8 @@ cargo clippy -p fogata-core --all-targets --features lab -- -D warnings
 cargo test --workspace --quiet
 cargo test -p fogata --features lab --quiet
 # The vendored libp2p-mdns, libp2p-identify, libp2p-quic, turn and spake2 are no workspace
-# members: their own tests run here.
+# members: their own tests run here. The vendored libp2p-stream has none of its own; fogata-net
+# tests its change (tests/bursts.rs).
 cargo test -p libp2p-mdns --lib --quiet
 cargo test -p libp2p-identify --lib --quiet
 cargo test -p libp2p-quic --lib --quiet

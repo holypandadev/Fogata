@@ -31,7 +31,7 @@ use fogata_crypto::{
     at_rest::{DataKey, Durable, SealReader, SealWriter, StreamFile},
 };
 
-use crate::{NetError, NodeHandle};
+use crate::{IncomingStreams, NetError, NodeHandle};
 
 pub const FILE_PROTOCOL: StreamProtocol = StreamProtocol::new("/fogata/file/1");
 const CHUNK: usize = 64 * 1024;
@@ -873,10 +873,22 @@ fn serve_answering(
     served: impl Fn(GroupId, [u8; 32]) + Send + Sync + 'static,
     answering: Answering,
 ) -> Result<(), NetError> {
-    let mut incoming = node
+    let incoming = node
         .streams()
         .accept(FILE_PROTOCOL)
         .map_err(|e| NetError::Setup(e.to_string()))?;
+    serve_from(node, incoming, shared, served, answering);
+    Ok(())
+}
+
+/// Answers the requests `incoming` takes (see [`serve`]).
+fn serve_from(
+    node: NodeHandle,
+    mut incoming: IncomingStreams,
+    shared: SharedFiles,
+    served: impl Fn(GroupId, [u8; 32]) + Send + Sync + 'static,
+    answering: Answering,
+) {
     let served = Arc::new(served);
     // Serving ends with the node, and does not keep it running.
     let node = node.background();
@@ -905,7 +917,6 @@ fn serve_answering(
             });
         }
     });
-    Ok(())
 }
 
 /// How often a transfer waiting for the pace looks again whether the file is still shared
@@ -1072,11 +1083,77 @@ async fn until_gone<T>(
     }
 }
 
-/// Reads the answer to a request for a file, up to its size: found, or why not.
-async fn answered(stream: &mut Stream) -> Result<(), FileError> {
+/// How long an asker waits before it asks again, each time a request's stream was dropped
+/// before any answer: copies of Fogata before 0.1.0-beta.9 keep only one of the streams of
+/// one kind that come in together and drop the others (vendor/libp2p-stream/FOGATA.md), so
+/// several previews asked of one of them at once failed on a busy computer. A request
+/// changes nothing on the other device until it is answered, so asking again is safe.
+const ASKED_AGAIN_AFTER: [Duration; 3] = [
+    Duration::from_millis(100),
+    Duration::from_millis(300),
+    Duration::from_secs(1),
+];
+
+/// Asks `peer` for file `id` of `group` from `offset`, and reads the answer up to the file's
+/// size: the stream the bytes come on once the file is found, or why not. A request whose
+/// stream ends or is reset before the answer is made again (see [`ASKED_AGAIN_AFTER`]).
+async fn ask(
+    node: &NodeHandle,
+    group: GroupId,
+    peer: PeerId,
+    id: [u8; 32],
+    offset: u64,
+) -> Result<Stream, FileError> {
+    let mut again = ASKED_AGAIN_AFTER.iter();
+    loop {
+        let mut stream = node
+            .streams()
+            .open_stream(peer, FILE_PROTOCOL)
+            .await
+            .map_err(|e| FileError::Unreachable(e.to_string()))?;
+        match request(&mut stream, group, id, offset).await {
+            Ok(status) => {
+                answered(&mut stream, status).await?;
+                return Ok(stream);
+            }
+            Err(e) if dropped_unanswered(&e) => {
+                let Some(wait) = again.next() else {
+                    return Err(e.into());
+                };
+                tracing::debug!(%peer, "file request dropped unanswered, asking again: {e}");
+                tokio::time::sleep(*wait).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
+/// Sends a request for file `id` of `group` from `offset` on `stream`, and reads the first
+/// byte of the answer.
+async fn request(stream: &mut Stream, group: GroupId, id: [u8; 32], offset: u64) -> io::Result<u8> {
+    stream.write_all(group.as_bytes()).await?;
+    stream.write_all(&id).await?;
+    stream.write_all(&offset.to_be_bytes()).await?;
+    stream.flush().await?;
     let mut status = [0u8; 1];
     idle(stream.read_exact(&mut status)).await?;
-    match status[0] {
+    Ok(status[0])
+}
+
+/// Whether a request's stream was ended or reset by the other end before it answered, as a
+/// stream the other end dropped unread is. Not a request that went unanswered for
+/// [`IDLE`], nor a connection that closed.
+fn dropped_unanswered(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::BrokenPipe
+    )
+}
+
+/// Reads the rest of the answer to a request for a file after its first byte, `status`, up
+/// to its size: found, or why not.
+async fn answered(stream: &mut Stream, status: u8) -> Result<(), FileError> {
+    match status {
         FOUND => Ok(()),
         LATER => {
             let mut seconds = [0u8; 4];
@@ -1099,16 +1176,7 @@ pub async fn fetch_to_memory(
     id: [u8; 32],
     size: u64,
 ) -> Result<Vec<u8>, FileError> {
-    let mut stream = node
-        .streams()
-        .open_stream(peer, FILE_PROTOCOL)
-        .await
-        .map_err(|e| FileError::Unreachable(e.to_string()))?;
-    stream.write_all(group.as_bytes()).await?;
-    stream.write_all(&id).await?;
-    stream.write_all(&0u64.to_be_bytes()).await?;
-    stream.flush().await?;
-    answered(&mut stream).await?;
+    let mut stream = ask(node, group, peer, id, 0).await?;
     let mut their_size = [0u8; 8];
     idle(stream.read_exact(&mut their_size)).await?;
     if u64::from_be_bytes(their_size) != size {
@@ -1327,16 +1395,7 @@ async fn fetch_part(
         have = 0;
     }
 
-    let mut stream = node
-        .streams()
-        .open_stream(peer, FILE_PROTOCOL)
-        .await
-        .map_err(|e| FileError::Unreachable(e.to_string()))?;
-    stream.write_all(group.as_bytes()).await?;
-    stream.write_all(&id).await?;
-    stream.write_all(&have.to_be_bytes()).await?;
-    stream.flush().await?;
-    answered(&mut stream).await?;
+    let mut stream = ask(node, group, peer, id, have).await?;
     let mut their_size = [0u8; 8];
     idle(stream.read_exact(&mut their_size)).await?;
     if u64::from_be_bytes(their_size) != size {
@@ -2308,6 +2367,95 @@ mod tests {
             "whole, later"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// As above, with Ana's loop taking requests busy elsewhere while they come in, as on a
+    /// loaded computer: every request reaches it and is answered, none is dropped unread.
+    /// Ana's loop starts only after an asker has asked again for the last time, so this
+    /// holds without asking again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn files_asked_at_once_of_a_busy_server_are_all_answered() {
+        let (node_a, node_b, peer_a, log, _ana, _bea) = two_members().await;
+        let group = log.group_id();
+        let dir = folder("day-at-once-busy");
+        let source = dir.join("film.mkv");
+        let bytes: Vec<u8> = (0..1u32 << 20).map(|i| (i % 249) as u8).collect();
+        std::fs::write(&source, &bytes).unwrap();
+        let (id, size) = hash_file(&source).unwrap();
+        let shared = SharedFiles::default();
+        shared.insert(group, id, source);
+        shared.limit_day(1 << 19, Duration::from_secs(600));
+        let incoming = node_a.streams().accept(FILE_PROTOCOL).unwrap();
+        let fetches = (0..MAX_SENDING_PER_PEER)
+            .map(|_| fetch_to_memory(&node_b, group, peer_a, id, size))
+            .collect::<Vec<_>>();
+        let late = ASKED_AGAIN_AFTER.iter().sum::<Duration>() + Duration::from_millis(500);
+        let serving = async {
+            tokio::time::sleep(late).await;
+            serve_from(
+                node_a.clone(),
+                incoming,
+                shared.clone(),
+                |_, _| {},
+                Answering::new(),
+            );
+        };
+        let (outcomes, ()) = tokio::join!(futures::future::join_all(fetches), serving);
+        let whole = outcomes.iter().filter(|o| o.is_ok()).count();
+        let later = outcomes
+            .iter()
+            .filter(|o| matches!(o, Err(FileError::Later(_))))
+            .count();
+        assert_eq!(
+            (whole, later),
+            (1, MAX_SENDING_PER_PEER - 1),
+            "whole, later; failed: {:?}",
+            outcomes
+                .iter()
+                .filter_map(|o| o.as_ref().err())
+                .collect::<Vec<_>>()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A request whose stream the other device drops unread, as copies before 0.1.0-beta.9
+    /// do with all but one of a burst, is made again: the answer that then comes counts.
+    /// One dropped every time is given up after [`ASKED_AGAIN_AFTER`], with the error.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_request_dropped_unanswered_is_made_again() {
+        let (node_a, node_b, peer_a, log, _ana, _bea) = two_members().await;
+        let group = log.group_id();
+        let mut incoming = node_a.streams().accept(FILE_PROTOCOL).unwrap();
+        // Ana drops the first two requests unread and answers the third (not here); every
+        // other is dropped.
+        let seen = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (counted, taker) = (seen.clone(), node_a.background());
+        node_a.spawn(async move {
+            while let Some((_, mut stream)) = taker.next_stream(&mut incoming).await {
+                let n = counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if n == 2 {
+                    let mut request = [0u8; 56];
+                    stream.read_exact(&mut request).await.unwrap();
+                    stream.write_all(&[NOT_HERE]).await.unwrap();
+                    stream.close().await.unwrap();
+                }
+            }
+        });
+        let asked = fetch_to_memory(&node_b, group, peer_a, [7; 32], 10).await;
+        assert!(matches!(asked, Err(FileError::NotThere)), "{asked:?}");
+        assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+        // Counted from 4 on, every request is dropped.
+        seen.store(4, std::sync::atomic::Ordering::SeqCst);
+        let asked = fetch_to_memory(&node_b, group, peer_a, [7; 32], 10).await;
+        assert!(
+            matches!(&asked, Err(FileError::Io(e)) if dropped_unanswered(e)),
+            "{asked:?}"
+        );
+        assert_eq!(
+            seen.load(std::sync::atomic::Ordering::SeqCst),
+            4 + 1 + ASKED_AGAIN_AFTER.len()
+        );
     }
 
     /// A path made a pipe between the check and the open is refused at once, rather than

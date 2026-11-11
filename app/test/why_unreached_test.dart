@@ -70,6 +70,16 @@ void main() {
       'Your network looks fine for Fogata, so what keeps you apart is probably on Sofía’s side (offline, or their network).',
     ]);
     expect(reachTexts(_fine, firewall: false), [l10n.reachFineOthers]);
+    // Left out where the place already says the other one is offline; what is in the
+    // way here is still said there.
+    expect(
+      reachTexts(_fine, firewall: false, friend: 'Sofía', fine: false),
+      isEmpty,
+    );
+    expect(
+      reachTexts(_symmetric, firewall: true, friend: 'Sofía', fine: false),
+      [l10n.reachFirewall, l10n.reachSymmetricNat, l10n.reachNoIpv6],
+    );
     // A firewall in the way is not "fine".
     expect(reachTexts(_fine, firewall: true, friend: 'Sofía'), [
       l10n.reachFirewall,
@@ -181,12 +191,11 @@ void main() {
     state.toggleFriendCard(sofia.id, const Rect.fromLTWH(100, 100, 40, 40));
     await tester.pumpAndSettle();
     tester.takeException();
-    expect(
-      find.text(
-        'Your network looks fine for Fogata, so what keeps you apart is probably on Sofía’s side (offline, or their network).',
-      ),
-      findsOneWidget,
-    );
+    // Nothing in the way here: the card, which already says the friend is offline and
+    // when they were last seen, adds no guess about their side.
+    expect(find.byKey(const ValueKey('why-unreached')), findsNothing);
+    expect(find.textContaining('looks fine'), findsNothing);
+    expect(find.text(l10n.friendCardCallsOnlyOnline), findsOneWidget);
     state.closeFriendCard();
     await tester.pumpAndSettle();
 

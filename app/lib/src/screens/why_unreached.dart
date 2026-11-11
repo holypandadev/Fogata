@@ -12,10 +12,15 @@ import '../theme.dart';
 /// With nothing in the way here right now, that the trouble is likely on the other side:
 /// [friend]'s (offline, or their network), or, for a room or a call, the others'.
 /// Nothing when nothing is known: a guess would send the person after the wrong thing.
+///
+/// Without [fine], only what is in the way on this side is said: where the place already
+/// says that the other one is offline, as a friend's card does, "the trouble is likely on
+/// their side" adds nothing to act on.
 List<String> reachTexts(
   UiReach? reach, {
   required bool firewall,
   String? friend,
+  bool fine = true,
 }) {
   final said = [
     if (firewall) l10n.reachFirewall,
@@ -27,7 +32,7 @@ List<String> reachTexts(
         UiCause.noIpv6 => l10n.reachNoIpv6,
       },
   ];
-  if (said.isEmpty && (reach?.fine ?? false)) {
+  if (fine && said.isEmpty && (reach?.fine ?? false)) {
     said.add(
       friend == null ? l10n.reachFineOthers : l10n.reachFineFriend(friend),
     );
@@ -45,6 +50,7 @@ class WhyUnreached extends StatefulWidget {
     required this.firewall,
     this.friend,
     this.load = api.reachability,
+    this.fine = true,
     this.center = false,
     this.size = 12,
     this.top = 0,
@@ -57,6 +63,10 @@ class WhyUnreached extends StatefulWidget {
   /// The friend that is not reached, when it is one friend.
   final String? friend;
   final Future<UiReach> Function() load;
+
+  /// Whether to say, with nothing in the way here, that the trouble is likely on the
+  /// other side (see [reachTexts]).
+  final bool fine;
   final bool center;
   final double size;
 
@@ -105,6 +115,7 @@ class _WhyUnreachedState extends State<WhyUnreached> {
       _reach,
       firewall: widget.firewall,
       friend: widget.friend,
+      fine: widget.fine,
     );
     if (said.isEmpty) return const SizedBox.shrink();
     return Padding(
