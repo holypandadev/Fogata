@@ -42,6 +42,9 @@ const EPOCH_AHEAD_MS: u64 = 24 * 3600 * 1000;
 /// A manager writes a new key epoch at most this often for a group whose current key it was
 /// not given (see `GroupContext::mend_key`).
 const MEND_EVERY_MS: u64 = 60_000;
+/// Invites written again at once (see [`GroupContext::name_unnamed_invites`]): a person makes
+/// a few, one at a time.
+const MAX_INVITES_NAMED_AGAIN: usize = 16;
 /// How many new epochs one member's reports of a box that does not open make this manager
 /// write in [`MENDS_FOR_MS`]: each is an entry every member keeps, with a box for each.
 const MENDS_PER_MEMBER: u8 = 3;
@@ -1043,6 +1046,77 @@ impl GroupContext {
         }
     }
 
+    /// Manager: its own invites written as level two writes them ([`fogata_state::Body::Invite`],
+    /// naming nobody) that do not apply, because the group went up to level three before
+    /// them in the common order (this device had not seen the raise when it wrote them).
+    /// Level three applies no such invite: nobody would answer under its token, and the
+    /// link given out would never work with nobody told why. Each one still open is written
+    /// again as level three writes invites ([`fogata_state::NamedInvite`], as
+    /// [`GroupLog::invite`] does now), with the same ticket and token, so the link works as
+    /// it was given. Only this device's own: only the issuer signs its ticket's note, and
+    /// what any copy takes of the log is not changed. Returns the new entries.
+    pub(crate) fn name_unnamed_invites(&mut self, now_ms: u64) -> Vec<EntryHash> {
+        if self.joining.is_some()
+            || !self.i_am_manager()
+            || self.log.level() < fogata_state::Level::Three
+        {
+            return Vec::new();
+        }
+        let me = self.identity.public_key();
+        let applied: HashSet<&EntryHash> = self.state.applied.iter().collect();
+        let lost: Vec<(Ticket, fogata_state::InviteToken)> = self
+            .log
+            .entries()
+            .filter(|e| e.author == me)
+            .filter_map(|e| match &e.body {
+                fogata_state::Body::Invite { ticket, token } if !applied.contains(&e.hash()) => {
+                    Some((ticket.clone(), *token))
+                }
+                _ => None,
+            })
+            .filter(|(ticket, _)| {
+                now_ms <= ticket.expires_ms
+                    && !self.state.used_tickets.contains(&ticket.ticket_id)
+                    && !self.ticket_revoked(&ticket.ticket_id)
+                    && !self.log.invited_with(ticket)
+            })
+            .take(MAX_INVITES_NAMED_AGAIN)
+            .collect();
+        if lost.is_empty() {
+            return Vec::new();
+        }
+        // As `GroupLog::invite` names them: the managers above this device.
+        let welcomers: Vec<DevicePublicKey> = self
+            .state
+            .ladder
+            .iter()
+            .take_while(|k| **k != me)
+            .filter(|k| self.state.is_manager(k))
+            .copied()
+            .collect();
+        let mut new = Vec::new();
+        for (ticket, token) in lost {
+            let body = fogata_state::NamedInvite {
+                ticket,
+                token,
+                welcomers: welcomers.clone(),
+            }
+            .body();
+            match self.log.append(&self.identity, body, now_ms) {
+                Ok(entry) => new.push(entry.hash()),
+                Err(e) => tracing::debug!("cannot write an invite again: {e}"),
+            }
+        }
+        if !new.is_empty() {
+            tracing::info!(
+                "{} invites written before the group went up a level written again",
+                new.len()
+            );
+            self.refresh();
+        }
+        new
+    }
+
     /// Manager whose box of the current epoch is missing or does not open: writes a new epoch
     /// for every member at once, at most once every [`MEND_EVERY_MS`]. Any member could
     /// otherwise lock everyone out with a rotation that gives the others nothing usable,
@@ -1744,8 +1818,8 @@ mod tests {
 
     /// A manager removed or demoted keeps the log with the invites open then, and could
     /// let their device into a copy of the group where it still manages: the issuer
-    /// cancels them, once. Invites made after, and a manager that leaves by itself, cancel
-    /// nothing.
+    /// cancels them, once. Invites made after cancel nothing, and nor does a manager that
+    /// leaves by itself where everyone manages.
     #[test]
     fn invites_a_removed_manager_knows_are_cancelled_by_their_issuer() {
         let id = || Arc::new(DeviceIdentity::generate().unwrap());
@@ -1766,6 +1840,44 @@ mod tests {
         assert!(at_ana.log().issuer_revoke(&before).is_some());
         assert!(at_ana.log().issuer_revoke(&after).is_none());
         assert!(at_ana.confirm_revokes(9).is_empty());
+    }
+
+    /// A manager that leaves by itself keeps the log too: it cancels the invites it could
+    /// answer, those that name it from level three, and those of a group where a few
+    /// manage. Not the others, nor those made after it left.
+    #[test]
+    fn invites_a_manager_that_left_could_answer_are_cancelled_by_their_issuer() {
+        let id = || Arc::new(DeviceIdentity::generate().unwrap());
+        let (ana, leo, bea) = (id(), id(), id());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, leo.public_key(), "leo", 2).unwrap();
+        log.add(&ana, bea.public_key(), "bea", 3).unwrap();
+        let mut few = log.clone();
+        log.raise_level(&ana, fogata_state::Level::Three, 4)
+            .unwrap();
+        // Bea's invite names Ana and Leo, above her; Ana's, first, names nobody.
+        let (by_bea, _) = log.invite(&bea, 1_000, 5).unwrap();
+        let (by_ana, _) = log.invite(&ana, 1_000, 5).unwrap();
+        log.append(&leo, fogata_state::Body::Leave, 6).unwrap();
+        let (after, _) = log.invite(&bea, 1_000, 7).unwrap();
+        assert!(ctx(&ana, &log).confirm_revokes(8).is_empty());
+        let mut at_bea = ctx(&bea, &log);
+        assert_eq!(at_bea.confirm_revokes(8).len(), 1);
+        assert!(at_bea.log().issuer_revoke(&by_bea).is_some());
+        assert!(at_bea.log().issuer_revoke(&after).is_none());
+        assert!(at_bea.log().issuer_revoke(&by_ana).is_none());
+
+        // At level two, invites name nobody: where Ana and Leo alone manage, Leo could
+        // answer any.
+        let first_two = fogata_state::Body::SetManagers { first: Some(2) };
+        few.append(&ana, first_two, 4).unwrap();
+        let (by_ana, _) = few.invite(&ana, 1_000, 5).unwrap();
+        few.append(&bea, fogata_state::Body::Leave, 6).unwrap();
+        assert!(ctx(&ana, &few).confirm_revokes(7).is_empty());
+        few.append(&leo, fogata_state::Body::Leave, 7).unwrap();
+        let mut at_ana = ctx(&ana, &few);
+        assert_eq!(at_ana.confirm_revokes(8).len(), 1);
+        assert!(at_ana.log().issuer_revoke(&by_ana).is_some());
     }
 
     /// A member that rotates after someone left may seal the new key to itself alone: the
@@ -1898,6 +2010,69 @@ mod tests {
         assert!(valid.is_some());
     }
 
+    /// An invite a manager wrote naming nobody, before it saw the group go up to level
+    /// three, does not apply there; the manager writes it again as level three writes
+    /// invites, with the same ticket and token, so the link given out works: the device it
+    /// was given to finds the issuer's note of it, and is let in. Written once, and never
+    /// for an invite used, cancelled or run out.
+    #[test]
+    fn an_invite_written_before_the_raise_is_written_again_and_works() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let zed = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut base = GroupLog::create(&ana, "g", 1).unwrap();
+        base.add(&ana, bea.public_key(), "bea", 2).unwrap();
+        // Bea raises the group while Ana, not knowing, invites Zed and cancels another
+        // invite. Ana came in first, so what she did at once goes after the raise.
+        let (mut at_ana, mut at_bea) = (base.clone(), base.clone());
+        at_bea
+            .raise_level(&bea, fogata_state::Level::Three, 3)
+            .unwrap();
+        let (ticket, token) = at_ana.invite(&ana, 50_000, 3).unwrap();
+        let (cancelled, _) = at_ana.invite(&ana, 50_000, 4).unwrap();
+        let revoke = fogata_state::Body::Revoke {
+            ticket_id: cancelled.ticket_id,
+        };
+        at_ana.append(&ana, revoke, 5).unwrap();
+        for e in at_bea.entries() {
+            let _ = at_ana.insert(e.clone());
+        }
+        assert_eq!(at_ana.level(), fogata_state::Level::Three);
+        assert!(!at_ana.invited_with(&ticket), "the link does not work");
+        let mut ana_ctx = ctx(&ana, &at_ana);
+        // Not after it ran out; once while it is open.
+        assert!(ana_ctx.name_unnamed_invites(60_000).is_empty());
+        assert_eq!(ana_ctx.name_unnamed_invites(6).len(), 1);
+        assert!(ana_ctx.name_unnamed_invites(7).is_empty());
+        let log = ana_ctx.log().clone();
+        assert!(log.invited_with(&ticket));
+        assert!(!log.invited_with(&cancelled));
+        assert!(log.state().open_invite_tokens(8).contains(&token));
+        // Every copy takes it as written, and the device invited is let in with it.
+        for e in log.entries() {
+            let _ = at_bea.insert(e.clone());
+        }
+        assert!(at_bea.invited_with(&ticket));
+        let joining = GroupContext::new(
+            zed.clone(),
+            GroupSetup::Joining {
+                group_id: log.group_id(),
+                ticket: ticket.clone(),
+                rendezvous: [0; 32],
+                name: "Zed".into(),
+            },
+        );
+        let join = joining.sign_join(log.heads(), 9).unwrap();
+        let mut at_ana = log;
+        at_ana.insert(join.clone()).unwrap();
+        at_ana.let_in(&ana, &join.hash(), 10).unwrap();
+        assert!(at_ana.state().is_member(&zed.public_key()));
+        assert!(at_ana.admits_as_invited(&ticket, &zed.public_key()));
+        // Another manager writes none for it: only the issuer's note counts.
+        let mut bea_ctx = ctx(&bea, &at_bea);
+        assert!(bea_ctx.name_unnamed_invites(8).is_empty());
+    }
+
     /// A manager raises the group to this version's level of judgment once every other
     /// member was seen at it, never before, and only once; one with a manager above it
     /// connected leaves it to that one.
@@ -1983,6 +2158,12 @@ mod tests {
             .chain([&join, &welcome])
             .map(Entry::encode)
             .collect();
+        let trial = joining.admitted_trial(&shown).unwrap();
+        assert!(trial.judge().is_none());
+        // Or, leaving out his `Join`, adds him and seals him her copy's key: as refused.
+        let mut fork = log.clone();
+        fork.add(&bea, zed.public_key(), "Zed", 6).unwrap();
+        let shown: Vec<Vec<u8>> = fork.entries().map(Entry::encode).collect();
         let trial = joining.admitted_trial(&shown).unwrap();
         assert!(trial.judge().is_none());
         // Ana lets Zed in: taken.

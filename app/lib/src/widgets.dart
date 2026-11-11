@@ -1403,6 +1403,7 @@ class Segmented extends StatefulWidget {
     this.height = 34,
     this.icons,
     this.leading,
+    this.wrap = false,
   });
 
   final List<(String, int?, Color?)> tabs;
@@ -1415,6 +1416,10 @@ class Segmented extends StatefulWidget {
 
   /// Something else before each label, such as a status dot.
   final List<Widget>? leading;
+
+  /// Tabs that do not fit on one line go on to the next, whole, rather than sharing the
+  /// width and cutting their words short.
+  final bool wrap;
 
   @override
   State<Segmented> createState() => _SegmentedState();
@@ -1461,7 +1466,8 @@ class _SegmentedState extends State<Segmented> {
       padding: const EdgeInsets.all(3),
       decoration: BoxDecoration(
         color: c.bg2,
-        borderRadius: BorderRadius.circular(999),
+        // Round at the ends of each line, also when the tabs take more than one.
+        borderRadius: BorderRadius.circular(widget.wrap ? inner / 2 + 3 : 999),
         border: Border.all(color: c.border),
       ),
       child: Stack(
@@ -1492,89 +1498,85 @@ class _SegmentedState extends State<Segmented> {
           // Where the width is limited and the labels are too long for it, the tabs share
           // it, longer labels more, and cut their words short.
           LayoutBuilder(
-            builder: (context, box) => Row(
-              key: _row,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (var i = 0; i < widget.tabs.length; i++) ...[
-                  if (i > 0) const SizedBox(width: 2),
-                  _tab(
-                    box.hasBoundedWidth,
-                    widget.tabs[i].$1.length,
-                    Pressable(
-                      key: _tabs[i],
-                      onTap: () => widget.onSelect(i),
-                      selected: i == widget.selected,
-                      focusRadius: 999,
-                      builder: (context, hovered) {
-                        final on = i == widget.selected;
-                        final color = on || hovered ? c.fg : c.fg2;
-                        final (label, count, countColor) = widget.tabs[i];
-                        return Container(
-                          height: inner,
-                          padding: const EdgeInsets.symmetric(horizontal: 12),
-                          // Until the thumb is measured, the chosen tab draws its own.
-                          decoration: thumb == null && on
-                              ? BoxDecoration(
-                                  color: c.raised,
-                                  borderRadius: BorderRadius.circular(999),
-                                )
-                              : null,
-                          // As wide as its words, not as the room it was given.
-                          child: Align(
-                            widthFactor: 1,
-                            child: Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                if (widget.icons != null) ...[
-                                  FgIcon(
-                                    widget.icons![i],
-                                    size: 14,
-                                    color: color,
-                                  ),
-                                  const SizedBox(width: 6),
-                                ],
-                                if (widget.leading != null) ...[
-                                  widget.leading![i],
-                                  const SizedBox(width: 6),
-                                ],
-                                AnimatedDefaultTextStyle(
-                                  duration: const Duration(milliseconds: 160),
-                                  style: tx(
-                                    color,
-                                    size: 13,
-                                    weight: on ? w500 : FontWeight.w400,
-                                    height: 1.2,
-                                  ),
-                                  child: box.hasBoundedWidth
-                                      ? Flexible(
-                                          child: Text(
-                                            label,
-                                            maxLines: 1,
-                                            softWrap: false,
-                                            overflow: TextOverflow.ellipsis,
-                                          ),
-                                        )
-                                      : Text(label),
+            builder: (context, box) => _line([
+              for (var i = 0; i < widget.tabs.length; i++) ...[
+                if (i > 0 && !widget.wrap) const SizedBox(width: 2),
+                _tab(
+                  box.hasBoundedWidth && !widget.wrap,
+                  widget.tabs[i].$1.length,
+                  Pressable(
+                    key: _tabs[i],
+                    onTap: () => widget.onSelect(i),
+                    selected: i == widget.selected,
+                    focusRadius: 999,
+                    builder: (context, hovered) {
+                      final on = i == widget.selected;
+                      final color = on || hovered ? c.fg : c.fg2;
+                      final (label, count, countColor) = widget.tabs[i];
+                      return Container(
+                        height: inner,
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        // Until the thumb is measured, the chosen tab draws its own.
+                        decoration: thumb == null && on
+                            ? BoxDecoration(
+                                color: c.raised,
+                                borderRadius: BorderRadius.circular(999),
+                              )
+                            : null,
+                        // As wide as its words, not as the room it was given.
+                        child: Align(
+                          widthFactor: 1,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (widget.icons != null) ...[
+                                FgIcon(
+                                  widget.icons![i],
+                                  size: 14,
+                                  color: color,
                                 ),
-                                if (count != null) ...[
-                                  const SizedBox(width: 6),
-                                  CountBadge(
-                                    count,
-                                    color: countColor ?? c.fg,
-                                    background: on ? c.borderStrong : c.hover,
-                                  ),
-                                ],
+                                const SizedBox(width: 6),
                               ],
-                            ),
+                              if (widget.leading != null) ...[
+                                widget.leading![i],
+                                const SizedBox(width: 6),
+                              ],
+                              AnimatedDefaultTextStyle(
+                                duration: const Duration(milliseconds: 160),
+                                style: tx(
+                                  color,
+                                  size: 13,
+                                  weight: on ? w500 : FontWeight.w400,
+                                  height: 1.2,
+                                ),
+                                child: box.hasBoundedWidth && !widget.wrap
+                                    ? Flexible(
+                                        child: Text(
+                                          label,
+                                          maxLines: 1,
+                                          softWrap: false,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      )
+                                    : Text(label),
+                              ),
+                              if (count != null) ...[
+                                const SizedBox(width: 6),
+                                CountBadge(
+                                  count,
+                                  color: countColor ?? c.fg,
+                                  background: on ? c.borderStrong : c.hover,
+                                ),
+                              ],
+                            ],
                           ),
-                        );
-                      },
-                    ),
+                        ),
+                      );
+                    },
                   ),
-                ],
+                ),
               ],
-            ),
+            ]),
           ),
         ],
       ),
@@ -1583,6 +1585,10 @@ class _SegmentedState extends State<Segmented> {
 
   Widget _tab(bool bounded, int length, Widget tab) =>
       bounded ? Flexible(flex: length + 4, child: tab) : tab;
+
+  Widget _line(List<Widget> tabs) => widget.wrap
+      ? Wrap(key: _row, spacing: 2, runSpacing: 2, children: tabs)
+      : Row(key: _row, mainAxisSize: MainAxisSize.min, children: tabs);
 }
 
 /// A bar of pill tabs along the top of a panel, over its bottom border.
@@ -2133,43 +2139,78 @@ class _PageScrollState extends State<PageScroll> {
 }
 
 /// Three bars that bounce while someone talks.
-class SpeakingBars extends StatelessWidget {
-  const SpeakingBars({super.key, this.color, this.height = 10});
+class SpeakingBars extends StatefulWidget {
+  const SpeakingBars({super.key, this.color, this.height = 10, this.lasts});
   final Color? color;
   final double height;
 
+  /// How long the bars move before they hold still, for bars that only show what a voice
+  /// looks like rather than someone talking now; null while they are shown. They hold
+  /// still too while something else (a dialog) covers their page.
+  final Duration? lasts;
+
+  @override
+  State<SpeakingBars> createState() => _SpeakingBarsState();
+}
+
+class _SpeakingBarsState extends State<SpeakingBars> {
+  Timer? _stop;
+  bool _still = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.lasts case final lasts?) {
+      _stop = Timer(lasts, () {
+        if (mounted) setState(() => _still = true);
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _stop?.cancel();
+    super.dispose();
+  }
+
   @override
   Widget build(BuildContext context) {
-    final color = this.color ?? context.fg.green;
+    final color = widget.color ?? context.fg.green;
+    // Bars that would move for as long as the page shows redraw the window 15 times a
+    // second for nothing: several processors' worth without a graphics card.
+    final still =
+        widget.lasts != null &&
+        (_still || !(ModalRoute.of(context)?.isCurrent ?? true));
+    if (still) return _bars(.42, color);
     return SlowPulse(
       period: const Duration(milliseconds: 1100),
-      builder: (context, phase) => Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          for (var i = 0; i < 3; i++) ...[
-            if (i > 0) const SizedBox(width: 2),
-            Container(
-              width: 2,
-              height:
-                  height *
-                  (.3 +
-                      .7 *
-                          (0.5 -
-                              0.5 *
-                                  math.cos(
-                                    2 * math.pi * ((phase - i * .16) % 1),
-                                  ))),
-              decoration: BoxDecoration(
-                color: color,
-                borderRadius: BorderRadius.circular(1),
-              ),
-            ),
-          ],
-        ],
-      ),
+      builder: (context, phase) => _bars(phase, color),
     );
   }
+
+  Widget _bars(double phase, Color color) => Row(
+    mainAxisSize: MainAxisSize.min,
+    crossAxisAlignment: CrossAxisAlignment.end,
+    children: [
+      for (var i = 0; i < 3; i++) ...[
+        if (i > 0) const SizedBox(width: 2),
+        Container(
+          width: 2,
+          height:
+              widget.height *
+              (.3 +
+                  .7 *
+                      (0.5 -
+                          0.5 *
+                              math.cos(2 * math.pi * ((phase - i * .16) % 1)))),
+          decoration: BoxDecoration(
+            color: color,
+            borderRadius: BorderRadius.circular(1),
+          ),
+        ),
+      ],
+    ],
+  );
 }
 
 /// Something secret shown on screen (a link, a code, a QR): blurred until the eye button

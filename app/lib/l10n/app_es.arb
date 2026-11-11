@@ -151,6 +151,7 @@
   "appDownloadFailed": "No se pudo descargar: {why}",
   "appOtherSession": "Esta identidad también está abierta en otro equipo. Cierra Fogata allí: una identidad funciona en un solo equipo a la vez.",
   "appFriendsRestored": "Tu lista de amigos se dañó en este equipo y se restauró desde la copia hecha antes de su último cambio. Puede que tengas que volver a añadir o quitar a un amigo añadido o quitado justo antes.",
+  "appFilesRefused": "Algunos archivos de Fogata en este equipo estaban sin cifrar donde se guardan cifrados, así que no se usaron. No se borró nada: están guardados en {folder}.",
   "appInvitationRanOut": "La invitación a “{group}” caducó antes de que alguien del grupo te dejara entrar. Pide una nueva.",
   "appTakenOut": "{who} te sacó de {room}.",
   "appRoomForSome": "{room} ahora es solo para algunos miembros.",
@@ -995,6 +996,10 @@
   "welcomeKeychainRetry": "Reintentar",
   "welcomeKeychainPlain": "Seguir sin cifrar",
   "welcomeKeychainPlainNote": "Sin cifrar, cualquiera que copie los archivos de este equipo puede leerlos. Ajustes seguirá avisándolo, y Fogata lo cifrará todo la primera vez que se abra con un llavero.",
+  "welcomeProfileKeptTitle": "No se pudo leer tu perfil",
+  "welcomeProfileKeptText": "No se pudieron leer el perfil y los amigos creados en este equipo, así que Fogata se abre como si fuera nuevo. No se borró nada: los archivos están guardados en {folder}.",
+  "welcomeProfileKeptConfirm": "Un perfil nuevo empieza sin amigos. Los archivos del perfil anterior se quedan donde están, y Fogata no los usa.",
+  "welcomeProfileKeptMake": "Crear un perfil nuevo",
   "welcomeWriteName": "Escribe tu nombre.",
   "welcomeCardTitle": "¿Cómo quieres que te vea tu gente?",
   "welcomeCardSub": "Un nombre y una imagen. Cámbialos cuando quieras.",
@@ -1502,5 +1507,9 @@
   "reachFineOthers": "Tu red parece estar bien para Fogata, así que el problema probablemente está del otro lado.",
   "directDropTitle": "Suelta para enviar a {name}",
   "directDropNote": "Esperan en el cuadro de mensaje, donde puedes añadir un mensaje y revisarlos antes de que se envíen.",
-  "directPrivateLeftOut": "{n, plural, =1{Se dejó fuera un archivo oculto o privado: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlo, elígelo con el botón +.} other{Se dejaron fuera {n} archivos ocultos o privados: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlos, elígelos con el botón +.}}"
+  "directPrivateLeftOut": "{n, plural, =1{Se dejó fuera un archivo oculto o privado: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlo, elígelo con el botón +.} other{Se dejaron fuera {n} archivos ocultos o privados: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlos, elígelos con el botón +.}}",
+  "appMustUpdateToJoin": "{name} tiene que actualizar Fogata antes de poder unirse a “{group}”. Cuando lo haga, entrará como siempre.",
+  "appUpdateToJoin": "“{group}” necesita una versión más nueva de Fogata. Actualiza Fogata para unirte.",
+  "errMustUpdateToJoin": "Tu amigo tiene que actualizar Fogata antes de poder unirse a este grupo.",
+  "groupSettingsLevelWaiting": "Este grupo está esperando para activar una protección más fuerte. Se activa sola cuando todos hayan actualizado Fogata. Falta por actualizar: {names}"
 }

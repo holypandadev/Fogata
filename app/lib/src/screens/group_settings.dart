@@ -923,6 +923,25 @@ class _Members extends StatelessWidget {
           ),
           const SizedBox(height: 12),
         ],
+        // Who holds the group back from its stronger protection: they only need to
+        // update. Nothing to do here for the manager but to tell them.
+        if (group.levelBehind case final behind?
+            when group.manager && behind.isNotEmpty) ...[
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: c.blueSoft,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Text(
+              l10n.groupSettingsLevelWaiting(
+                behind.map((p) => p.name).join(', '),
+              ),
+              style: tx(c.blue, size: 13),
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         Text(
           l10n.groupSettingsMembersCount(members.length, group.maxMembers),
           style: tx(c.fg2, size: 13),

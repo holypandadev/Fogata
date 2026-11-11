@@ -3,7 +3,7 @@
 
     python3 -I tools/beta/release.py --build 2 --version 0.1.0-beta.2 --min-build 1 \\
         --notes notes.txt --linux-bundle app/build/linux/x64/release/bundle \\
-        --windows-zip Fogata-windows-x64.zip --macos-zip Fogata-macos-arm64.zip --out <folder>
+        --windows-zip Fogata-windows-x64.zip --macos-zip Fogata-macos-universal.zip --out <folder>
 
 Inputs (each optional, at least one):
   --linux-bundle  the Flutter release bundle built on Linux, or by the release workflow
@@ -16,7 +16,10 @@ Inputs (each optional, at least one):
                   beside it), built on Windows or by the release workflow
   --macos-zip     Fogata.app (built by hand or by the release workflow, with
                   tools/beta/macos-updater.sh), signed on the Mac (tools/sign-macos.sh)
-                  and zipped with `ditto -c -k --keepParent`; give --macos-arch arm64 or x64
+                  and zipped with `ditto -c -k --keepParent`. A universal app (every Mach-O
+                  file in it built for arm64 and x86_64) goes out as macos-universal, the
+                  same package under the platforms macos-arm64 and macos-x64; one built for
+                  a single architecture is refused unless --macos-arch (arm64 or x64) names it
 
 Writes into --out (made new):
   release/   release.json, release.sig and one package per system: publish it with
@@ -89,7 +92,7 @@ FIRST, BEFORE YOU UNZIP OR OPEN ANYTHING: check what you downloaded
   SHA256SUMS. Do not rely on the installer to do it: its script is inside the zip, so
   whoever changed the zip could have changed the script and the checksum it shows.
     Windows, in PowerShell:  Get-FileHash .\\Fogata-{version}-windows-x64.zip
-    macOS, in Terminal:      shasum -a 256 Fogata-{version}-macos-{mac_arch}.zip
+    macOS, in Terminal:      shasum -a 256 Fogata-{version}-macos-{mac_name}.zip
     Linux, in a terminal:    sha256sum Fogata-{version}-linux.flatpak
   If the signature is not good or the checksum differs, do not open the file: write to
   contact@holypanda.dev.
@@ -105,8 +108,8 @@ Windows
      in the download, installs them for you only (no administrator) and opens Fogata; it is
      in the Start menu.
 
-macOS (Apple silicon{mac_note})
-  1. Open Fogata-{version}-macos-{mac_arch}.zip and drag Fogata to Applications.
+macOS ({mac_kind})
+  1. Open Fogata-{version}-macos-{mac_name}.zip and drag Fogata to Applications.
   2. Open Fogata. macOS says it cannot check it for malicious software: Fogata is signed
      but not notarized by Apple, which needs a paid membership. Only if the checksum
      matched, click "Done", then open System Settings, Privacy & Security, scroll down and
@@ -382,6 +385,85 @@ def check_macos_info(app, build):
              "app/pubspec.yaml and build it again")
 
 
+# The Mac architectures Fogata is built for (Mach-O CPU types), named as lipo names them, and
+# the platform under which a copy running on each looks for its package
+# (fogata_update::this_platform: a universal app runs natively on both, so it is the
+# process's architecture that counts).
+MACHO_CPU = {0x0100000C: "arm64", 0x01000007: "x86_64"}
+MACOS_PLATFORM = {"arm64": "macos-arm64", "x86_64": "macos-x64"}
+# What --macos-arch names each architecture.
+MACOS_ARCH = {"arm64": "arm64", "x64": "x86_64"}
+# The Mac's own programs: what must run for Fogata to start and to update.
+MACOS_PROGRAMS = ("Contents/MacOS/Fogata",
+                  "Contents/Library/Helpers/Fogata Updater.app/Contents/MacOS/Fogata Updater")
+
+
+def macho_archs(data):
+    """The architectures of the Mach-O file that starts with `data` (its first bytes are
+    enough), as lipo -archs names them (a CPU type not in MACHO_CPU by its number): every
+    slice of a universal (fat) file, or the one of a thin file. None when it is no Mach-O
+    file. Read here because the release is made on Linux, which has no lipo."""
+    def name(cpu):
+        return MACHO_CPU.get(cpu, f"cpu-{cpu:#x}")
+
+    magic = data[:4]
+    if magic in (b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe"):  # MH_MAGIC_64, MH_MAGIC
+        if len(data) < 8:
+            return None
+        return {name(int.from_bytes(data[4:8], "little"))}
+    if magic not in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):  # FAT_MAGIC, FAT_MAGIC_64
+        return None
+    count = int.from_bytes(data[4:8], "big")
+    entry = 20 if magic == b"\xca\xfe\xba\xbe" else 32
+    # A Java class starts with the same magic, then its version (45 or more) where a fat
+    # file says how many slices it has.
+    if not 0 < count < 45 or len(data) < 8 + count * entry:
+        return None
+    return {name(int.from_bytes(data[at:at + 4], "big"))
+            for at in range(8, 8 + count * entry, entry)}
+
+
+def macos_archs(app):
+    """The architectures the macOS `app` runs on: those every Mach-O file in it was built
+    for, since a library without the slice stops the app on that Mac. Stops unless Fogata's
+    own programs (MACOS_PROGRAMS) are Mach-O files."""
+    found = {}
+    for path in sorted(app.rglob("*")):
+        if path.is_symlink() or not path.is_file():
+            continue
+        with path.open("rb") as file:
+            archs = macho_archs(file.read(8 + 44 * 32))
+        if archs is not None:
+            found[path.relative_to(app).as_posix()] = archs
+    for name in MACOS_PROGRAMS:
+        if name not in found:
+            fail(f"Fogata.app's {name} is not a Mac program")
+    return set.intersection(*found.values())
+
+
+def macos_platforms(archs, given):
+    """The name of the macOS zip and pack (universal, arm64 or x64) and the platforms its
+    package is published under, for an app built for `archs`, as --macos-arch (`given`, or
+    None) says. A universal app goes under the platform of each Mac, the same package for
+    both: a copy on an Intel Mac looks for macos-x64 and would find no update otherwise. One
+    built for a single architecture is refused unless --macos-arch names it, so that a build
+    made for one Mac by mistake is never published as the Mac's only package."""
+    if set(MACOS_PLATFORM) <= archs:
+        if given is not None:
+            fail(f"Fogata.app is universal ({', '.join(sorted(archs))}): leave out "
+                 "--macos-arch, and it is published for Apple silicon and Intel Macs")
+        return "universal", [MACOS_PLATFORM[arch] for arch in sorted(MACOS_PLATFORM)]
+    built = ", ".join(sorted(archs)) or "no architecture common to its files"
+    if given is None:
+        fail(f"Fogata.app is built for {built}, not for both arm64 and x86_64: build it "
+             "universal (flutter build macos --release), or give --macos-arch to publish it "
+             "for one kind of Mac only")
+    if MACOS_ARCH[given] not in archs:
+        fail(f"Fogata.app is built for {built}, not for {MACOS_ARCH[given]} (--macos-arch "
+             f"{given})")
+    return given, [MACOS_PLATFORM[MACOS_ARCH[given]]]
+
+
 def refuse_debug_folder(folder):
     """Stops if the app in `folder` is a debug or profile build, or holds no Flutter engine."""
     public = load_public_release()
@@ -525,6 +607,12 @@ LINUX_DATA_ONLY = {"lib/libapp.so"}
 # built with it, each calls __stack_chk_fail, so its absence means the flag was lost. A
 # plugin of ours with none of those would have to be named apart here.
 LINUX_OURS = re.compile(r"^(fogata|lib/lib\w+_plugin\.so)$")
+# What a library of ours must link where its build only probes for it: the WebRTC plugin
+# builds without PipeWire when its dev package is missing
+# (app/third_party/flutter_webrtc/linux/CMakeLists.txt), and then has no portal screen
+# capture under Wayland, no screen sound and no silent input (the microphone opens while
+# muted). Its build already stops without libpulse; checked here too, as the last word.
+LINUX_NEEDED = {"lib/libflutter_webrtc_plugin.so": ["libpipewire-0.3.so.0", "libpulse.so.0"]}
 
 ELF_MAGIC = b"\x7fELF"
 
@@ -532,9 +620,9 @@ ELF_MAGIC = b"\x7fELF"
 def elf_dynamic(data):
     """What the release checks of the ELF file in `data` (64-bit, little-endian), read as
     the loader reads it, from the program headers: whether it has a RELRO segment, whether
-    it binds every symbol at start, and its RPATH and RUNPATH folders; and from its sections
-    the names its dynamic symbols use (none when they are stripped). None when it is no such
-    file, or one that cannot be read."""
+    it binds every symbol at start, its RPATH and RUNPATH folders and the libraries it needs
+    (DT_NEEDED); and from its sections the names its dynamic symbols use (none when they are
+    stripped). None when it is no such file, or one that cannot be read."""
     try:
         return _elf_dynamic(data)
     except (ValueError, IndexError):
@@ -572,7 +660,7 @@ def _elf_dynamic(data):
                 return address - vaddr + offset
         raise ValueError(f"address {address:#x} outside the file")
 
-    bind_now, paths = False, []
+    bind_now, paths, needed = False, [], []
     for kind, offset, _, size in segments:
         if kind != 2:  # PT_DYNAMIC
             continue
@@ -587,10 +675,14 @@ def _elf_dynamic(data):
             # DT_BIND_NOW, DT_FLAGS with DF_BIND_NOW, DT_FLAGS_1 with DF_1_NOW.
             if tag == 24 or (tag == 30 and value & 0x8) or (tag == 0x6FFFFFFB and value & 0x1):
                 bind_now = True
-            if tag in (15, 29):  # DT_RPATH, DT_RUNPATH
+            if tag in (1, 15, 29):  # DT_NEEDED, DT_RPATH, DT_RUNPATH
                 if table is None:
-                    raise ValueError("RUNPATH without a string table")
-                paths += string(offset_of(table) + value).split(":")
+                    raise ValueError("a dynamic entry names a string without a string table")
+                text = string(offset_of(table) + value)
+                if tag == 1:
+                    needed.append(text)
+                else:
+                    paths += text.split(":")
 
     names = b""
     sections = [shoff + i * shentsize for i in range(shnum)] if shoff else []
@@ -599,7 +691,7 @@ def _elf_dynamic(data):
             linked = sections[u32(section + 0x28)]
             at, size = u64(linked + 0x18), u64(linked + 0x20)
             names = data[at:at + size]
-    return relro, bind_now, paths, set(names.decode(errors="replace").split("\0"))
+    return relro, bind_now, paths, set(names.decode(errors="replace").split("\0")), needed
 
 
 def in_application(folder):
@@ -611,8 +703,12 @@ def in_application(folder):
 
 def check_linux_hardening(bundle):
     """Stops unless every program and library in the Linux `bundle` was built as
-    LINUX_DATA_ONLY and LINUX_OURS say: a variable such as LDFLAGS or CFLAGS in the build's
-    environment, or a plugin built without the flags, drops them silently."""
+    LINUX_DATA_ONLY and LINUX_OURS say, and links what LINUX_NEEDED says: a variable such as
+    LDFLAGS or CFLAGS in the build's environment, a plugin built without the flags, or a dev
+    package missing where it was built, drops them silently."""
+    for name in LINUX_NEEDED:
+        if not (bundle / name).is_file():
+            fail(f"no {name} in the Linux bundle")
     for path in sorted(bundle.rglob("*")):
         if not path.is_file() or path.is_symlink():
             continue
@@ -624,7 +720,7 @@ def check_linux_hardening(bundle):
         found = elf_dynamic(path.read_bytes())
         if found is None:
             fail(f"{name} is not a 64-bit Linux program that can be read")
-        relro, bind_now, paths, names = found
+        relro, bind_now, paths, names, needed = found
         missing = [what for ok, what in [(relro, "RELRO"), (bind_now, "BIND_NOW")] if not ok]
         if LINUX_OURS.match(name) and "__stack_chk_fail" not in names:
             missing.append("the stack protector")
@@ -635,6 +731,10 @@ def check_linux_hardening(bundle):
         if outside:
             fail(f"{name} looks for libraries in {', '.join(outside)}, outside the "
                  "application: only $ORIGIN may be in its RUNPATH")
+        unlinked = [n for n in LINUX_NEEDED.get(name, []) if n not in needed]
+        if unlinked:
+            fail(f"{name} does not link {', '.join(unlinked)}: build it again with the dev "
+                 "packages the release workflow installs (libpipewire-0.3-dev, libpulse-dev)")
 
 
 def find_dir_with(root, name):
@@ -670,7 +770,9 @@ def main():
     parser.add_argument("--extra-libs", type=pathlib.Path)
     parser.add_argument("--windows-zip", type=pathlib.Path)
     parser.add_argument("--macos-zip", type=pathlib.Path)
-    parser.add_argument("--macos-arch", choices=["arm64", "x64"], default="arm64")
+    parser.add_argument("--macos-arch", choices=sorted(MACOS_ARCH),
+                        help="publish a macOS app built for this architecture only (a "
+                             "universal one goes out for both without it)")
     parser.add_argument("--out", type=pathlib.Path, required=True)
     args = parser.parse_args()
 
@@ -700,6 +802,7 @@ def main():
         folder.mkdir(parents=True)
     fogata = args.fogata
     packages = []
+    mac_name = "universal"
     if args.build_linux:
         args.linux_bundle = build_linux(commit, work)
 
@@ -742,15 +845,20 @@ def main():
             fail("Fogata.app has no updater: run tools/beta/macos-updater.sh before signing")
         refuse_debug_folder(app)
         check_macos_info(app, build)
-        pack = work / f"Fogata-{version}-macos-{args.macos_arch}.pack"
+        mac_name, platforms = macos_platforms(macos_archs(app), args.macos_arch)
+        pack = work / f"Fogata-{version}-macos-{mac_name}.pack"
         run(fogata, "release", "pack", *expect, app, "-o", pack)
-        packages.append(f"macos-{args.macos_arch}={pack}")
-        shutil.copy(args.macos_zip, drive / f"Fogata-{version}-macos-{args.macos_arch}.zip")
+        # One file named for each platform it serves: the manifest lists it under each, and
+        # every copy (beta.7 on) fetches and checks the package of its own platform by the
+        # file name and hashes the manifest gives there.
+        packages += [f"{platform}={pack}" for platform in platforms]
+        shutil.copy(args.macos_zip, drive / f"Fogata-{version}-macos-{mac_name}.zip")
 
     (drive / "README.txt").write_text(README.format(
         version=version,
-        mac_arch=args.macos_arch,
-        mac_note="" if args.macos_arch == "arm64" else "; this one is for Intel Macs",
+        mac_name=mac_name,
+        mac_kind={"universal": "Apple silicon and Intel", "arm64": "Apple silicon only",
+                  "x64": "Intel only"}[mac_name],
     ))
     # One passphrase for both: the manifest, and SHA256SUMS of the first installs.
     sign = [fogata, "release", "sign", "--key", args.key, "--build", build, "--version", version,

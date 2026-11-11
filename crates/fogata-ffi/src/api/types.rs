@@ -86,6 +86,9 @@ pub struct UiGroup {
     /// For a manager, or a member with someone below it, the members kept out of a voice
     /// room now; none otherwise.
     pub kept_out: Option<Vec<UiKeptOut>>,
+    /// For a manager, while the group waits to go up to the protection this version gives:
+    /// the members whose Fogata must be updated first. None otherwise.
+    pub level_behind: Option<Vec<UiPerson>>,
 }
 
 /// A voice room of a group: its own people, chat and files.
@@ -750,6 +753,11 @@ pub enum UiEventKind {
     InvitationDeclined,
     /// Where updates stand changed ([`super::update::update_status`]).
     UpdateChanged,
+    /// Someone (`device`, called `name`) asked to be let into `group` with an invite or as
+    /// a friend added to it, but must update Fogata first.
+    MustUpdateToJoin,
+    /// The group this device is joining (`group`, called `name`) needs a newer Fogata.
+    UpdateToJoin,
 }
 
 /// Where a direct call stands here.
@@ -1015,6 +1023,8 @@ pub(crate) fn group(g: GroupView) -> UiGroup {
                 })
                 .collect()
         }),
+        level_behind: (!g.level_behind.is_empty())
+            .then(|| g.level_behind.iter().map(person).collect()),
     }
 }
 
@@ -1487,6 +1497,21 @@ pub(crate) fn event(event: CoreEvent, me: &DevicePublicKey) -> UiEvent {
         }
         CoreEvent::CallsChanged => out.kind = UiEventKind::CallsChanged,
         CoreEvent::UpdateChanged => out.kind = UiEventKind::UpdateChanged,
+        CoreEvent::MustUpdateToJoin {
+            group,
+            device,
+            name,
+        } => {
+            out.kind = UiEventKind::MustUpdateToJoin;
+            out.group = id(group.as_bytes());
+            out.device = id(device.as_bytes());
+            out.name = Some(name);
+        }
+        CoreEvent::UpdateToJoin { group, name } => {
+            out.kind = UiEventKind::UpdateToJoin;
+            out.group = id(group.as_bytes());
+            out.name = Some(name);
+        }
         CoreEvent::DirectChanged { friend } => {
             out.kind = UiEventKind::Direct;
             out.device = id(friend.as_bytes());

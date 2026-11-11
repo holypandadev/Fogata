@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app_state.dart';
+import '../fair_size.dart';
 import '../host.dart';
 import '../icons.dart';
 import '../l10n.dart';
@@ -458,7 +459,8 @@ class VoiceCard extends StatelessWidget {
         final here = file.state == UiFileState.here;
         final failed = !here && file.state != UiFileState.coming && canFetch;
         final playing = voice.playing(file.id);
-        final duration = info.durationMs;
+        // Its sender's word, checked by the core; drawn within what can be shown.
+        final duration = fairLength(info.durationMs);
         // Played to the end, it shows as it did before it played.
         final at = here ? voice.positionOf(file.id) : null;
         final position = at != null && (playing || at < duration - 50)

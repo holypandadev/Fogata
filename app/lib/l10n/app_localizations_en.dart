@@ -693,6 +693,11 @@ class L10nEn extends L10n {
       'Your list of friends was damaged on this computer and was restored from the copy made before its last change. A friend added or removed just before may need adding or removing again.';
 
   @override
+  String appFilesRefused(String folder) {
+    return 'Some of Fogata’s files on this computer were found unencrypted where they are kept encrypted, so they were not used. Nothing was deleted: they are kept in $folder.';
+  }
+
+  @override
   String appInvitationRanOut(String group) {
     return 'The invitation to “$group” ran out before someone in the group let you in. Ask for a new one.';
   }
@@ -4446,6 +4451,21 @@ class L10nEn extends L10n {
       'Unencrypted, anyone who copies this computer’s files can read them. Settings will keep saying so, and Fogata encrypts everything the first time it opens with a keychain.';
 
   @override
+  String get welcomeProfileKeptTitle => 'Your profile could not be read';
+
+  @override
+  String welcomeProfileKeptText(String folder) {
+    return 'The profile and friends made on this computer could not be read, so Fogata opens as if it were new. Nothing was deleted: the files are kept in $folder.';
+  }
+
+  @override
+  String get welcomeProfileKeptConfirm =>
+      'A new profile starts with no friends. The old profile’s files stay where they are, and Fogata does not use them.';
+
+  @override
+  String get welcomeProfileKeptMake => 'Make a new profile';
+
+  @override
   String get welcomeWriteName => 'Write your name.';
 
   @override
@@ -6411,5 +6431,24 @@ class L10nEn extends L10n {
       one: 'A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To send it, pick it with the + button.',
     );
     return '$_temp0';
+  }
+
+  @override
+  String appMustUpdateToJoin(String name, String group) {
+    return '$name has to update Fogata before they can join “$group”. Once they do, they get in as before.';
+  }
+
+  @override
+  String appUpdateToJoin(String group) {
+    return '“$group” needs a newer Fogata. Update Fogata to join it.';
+  }
+
+  @override
+  String get errMustUpdateToJoin =>
+      'Your friend has to update Fogata before they can join this group.';
+
+  @override
+  String groupSettingsLevelWaiting(String names) {
+    return 'This group is waiting to turn on stronger protection. It turns on by itself once everyone has updated Fogata. Still to update: $names';
   }
 }

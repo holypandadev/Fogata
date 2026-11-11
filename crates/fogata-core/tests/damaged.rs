@@ -3,7 +3,7 @@
 
 use std::{fs, path::PathBuf};
 
-use fogata_core::{Core, NetOptions, Store};
+use fogata_core::{Core, CoreEvent, NetOptions, Store};
 use fogata_crypto::DeviceIdentity;
 use fogata_friends::FriendBook;
 use fogata_state::{Body, GroupLog};
@@ -184,16 +184,55 @@ fn a_damaged_friends_file_falls_back_to_its_copy() {
     );
     assert!(FriendBook::decode(&fs::read(&file).unwrap()).is_ok());
 
-    // With the copy damaged too, the device goes on without a profile; nothing is deleted.
+    // With the copy damaged too, the device goes on without a profile; nothing is deleted,
+    // and the folder says where the two were kept, so the start screen does not look
+    // like a new device's.
+    assert_eq!(store.friends_kept(), None);
     fs::write(&file, b"garbage 2").unwrap();
     fs::write(dir.join("friends.bin.bak"), b"garbage 3").unwrap();
     assert!(store.friends().unwrap().is_none());
     assert!(!file.exists());
-    assert_eq!(
-        fs::read(dir.join("friends.bin.damaged.2")).unwrap(),
-        b"garbage 2"
-    );
-    assert_eq!(fs::read(dir.join("friends.bin.bak")).unwrap(), b"garbage 3");
+    assert!(!store.has_profile().unwrap());
+    assert_eq!(store.friends_kept(), Some(dir.clone()));
+    let kept = [
+        ("friends.bin.damaged.2", &b"garbage 2"[..]),
+        ("friends.bin.damaged.3", &b"garbage 3"[..]),
+    ];
+    for (name, bytes) in kept {
+        assert_eq!(fs::read(dir.join(name)).unwrap(), bytes, "{name}");
+    }
+    // A profile made then writes over neither.
+    drop(store);
+    Core::create_profile(&dir, "Ana again", None).unwrap();
+    for (name, bytes) in kept {
+        assert_eq!(fs::read(dir.join(name)).unwrap(), bytes, "{name}");
+    }
+    let store = Store::open(dir.clone()).unwrap();
+    assert_eq!(store.friends().unwrap().unwrap().profile.name, "Ana again");
+    assert_eq!(store.friends_kept(), None);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A copy of the friends file left without the file (put back by hand, say) is set aside by
+/// the first profile made, never written over.
+#[test]
+fn a_first_profile_never_writes_over_a_copy_left_alone() {
+    let _one = ONE_AT_A_TIME.blocking_lock();
+    let dir = folder("copy-alone");
+    let store = Store::open(dir.clone()).unwrap();
+    let (me, _) = store.identity().unwrap();
+    store
+        .save_friends(&FriendBook::new(&me, "Ana", 1).unwrap())
+        .unwrap();
+    let copy = fs::read(dir.join("friends.bin.bak")).unwrap();
+    fs::remove_file(dir.join("friends.bin")).unwrap();
+    assert!(!store.has_profile().unwrap());
+    assert_eq!(store.friends_kept(), Some(dir.clone()));
+    store
+        .save_friends(&FriendBook::new(&me, "Leo", 2).unwrap())
+        .unwrap();
+    assert_eq!(fs::read(dir.join("friends.bin.damaged")).unwrap(), copy);
+    assert_eq!(store.friends().unwrap().unwrap().profile.name, "Leo");
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -295,6 +334,40 @@ async fn the_application_starts_with_its_files_damaged() {
     assert_eq!(groups[0].local_name, "Home");
     assert_eq!(groups[0].icon, 0, "the entry cut short is not there");
     assert!(core.profile().await.unwrap().is_none());
+    core.shutdown().await.unwrap();
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Files refused by sealing are never kept without a word: a start says where they are.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_says_where_refused_files_are_kept() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = folder("refused-notice");
+    Core::create_profile(&dir, "Ana", None).unwrap();
+    let options = NetOptions {
+        use_dht: false,
+        use_mdns: false,
+        ..Default::default()
+    };
+    let told = |events: &mut fogata_core::CoreEvents| {
+        let mut told = Vec::new();
+        while let Ok(e) = events.try_recv() {
+            if let CoreEvent::Notice(text) = e {
+                told.push(text);
+            }
+        }
+        told
+    };
+    let refused = dir.join(fogata_core::store::REFUSED_DIR);
+    fs::create_dir_all(&refused).unwrap();
+    fs::write(refused.join("recovery.bin"), b"plain").unwrap();
+    let (core, mut events) = Core::start(dir.clone(), options).unwrap();
+    let told = told(&mut events);
+    assert!(
+        told.iter().any(|t| t.starts_with("Some of Fogata's files")
+            && t.ends_with(&format!("kept in {}", refused.display()))),
+        "{told:?}"
+    );
     core.shutdown().await.unwrap();
     fs::remove_dir_all(&dir).unwrap();
 }

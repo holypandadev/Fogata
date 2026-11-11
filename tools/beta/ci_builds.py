@@ -235,11 +235,11 @@ def main():
     if "macos" in laid:
         print("On the Mac, at that commit, sign the app and zip it (docs/releasing-beta.md):\n"
               f'  tools/sign-macos.sh "<identity>" {laid["macos"]}\n'
-              f"  ditto -c -k --keepParent {laid['macos']} Fogata-macos-arm64.zip")
+              f"  ditto -c -k --keepParent {laid['macos']} Fogata-macos-universal.zip")
     given = {"linux": "--linux-bundle", "windows": "--windows-zip"}
     paths = " ".join(f"{given[s]} {laid[s]}" for s in ("linux", "windows") if s in laid)
     if "macos" in laid:
-        paths += " --macos-zip Fogata-macos-arm64.zip"
+        paths += " --macos-zip Fogata-macos-universal.zip"
     print(f"Then: python3 -I tools/beta/release.py --build <build> --version <version> "
           f"--min-build <build> --notes notes.txt {paths} --out <folder>")
 

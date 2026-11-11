@@ -151,6 +151,7 @@
   "appDownloadFailed": "Herunterladen fehlgeschlagen: {why}",
   "appOtherSession": "Diese Identität ist auch auf einem anderen Computer geöffnet. Schließe Fogata dort: Eine Identität funktioniert immer nur auf einem Computer.",
   "appFriendsRestored": "Deine Freundesliste war auf diesem Computer beschädigt und wurde aus der Kopie vor ihrer letzten Änderung wiederhergestellt. Einen kurz davor hinzugefügten oder entfernten Freund musst du eventuell erneut hinzufügen oder entfernen.",
+  "appFilesRefused": "Einige Dateien von Fogata auf diesem Computer lagen unverschlüsselt dort, wo sie verschlüsselt gespeichert werden, und wurden deshalb nicht verwendet. Nichts wurde gelöscht: Sie liegen in {folder}.",
   "appInvitationRanOut": "Die Einladung zu „{group}“ ist abgelaufen, bevor dich jemand aus der Gruppe hereingelassen hat. Bitte um eine neue.",
   "appTakenOut": "{who} hat dich aus {room} entfernt.",
   "appRoomForSome": "{room} ist jetzt nur für bestimmte Mitglieder.",
@@ -995,6 +996,10 @@
   "welcomeKeychainRetry": "Erneut versuchen",
   "welcomeKeychainPlain": "Unverschlüsselt fortfahren",
   "welcomeKeychainPlainNote": "Unverschlüsselt kann sie jeder lesen, der die Dateien dieses Computers kopiert. Die Einstellungen weisen weiter darauf hin, und Fogata verschlüsselt alles, sobald es mit einem Schlüsselbund startet.",
+  "welcomeProfileKeptTitle": "Dein Profil konnte nicht gelesen werden",
+  "welcomeProfileKeptText": "Das Profil und die Freunde auf diesem Computer konnten nicht gelesen werden, deshalb startet Fogata wie neu. Nichts wurde gelöscht: Die Dateien liegen in {folder}.",
+  "welcomeProfileKeptConfirm": "Ein neues Profil beginnt ohne Freunde. Die Dateien des alten Profils bleiben, wo sie sind, und Fogata verwendet sie nicht.",
+  "welcomeProfileKeptMake": "Neues Profil erstellen",
   "welcomeWriteName": "Gib deinen Namen ein.",
   "welcomeCardTitle": "Wie sollen deine Leute dich sehen?",
   "welcomeCardSub": "Ein Name und ein Bild. Du kannst sie jederzeit ändern.",
@@ -1502,5 +1507,9 @@
   "reachFineOthers": "Dein Netzwerk scheint für Fogata in Ordnung zu sein, also liegt das, was euch trennt, wahrscheinlich auf der anderen Seite.",
   "directDropTitle": "Zum Senden an {name} ablegen",
   "directDropNote": "Sie warten im Nachrichtenfeld, wo du eine Nachricht hinzufügen und die Dateien vor dem Senden prüfen kannst.",
-  "directPrivateLeftOut": "{n, plural, =1{Eine versteckte oder private Datei wurde weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.} other{{n} versteckte oder private Dateien wurden weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.}}"
+  "directPrivateLeftOut": "{n, plural, =1{Eine versteckte oder private Datei wurde weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.} other{{n} versteckte oder private Dateien wurden weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.}}",
+  "appMustUpdateToJoin": "{name} muss Fogata aktualisieren, bevor sie „{group}“ beitreten können. Danach klappt es wie gewohnt.",
+  "appUpdateToJoin": "„{group}“ braucht eine neuere Fogata-Version. Aktualisiere Fogata, um beizutreten.",
+  "errMustUpdateToJoin": "Deine Freundin oder dein Freund muss Fogata aktualisieren, bevor sie dieser Gruppe beitreten können.",
+  "groupSettingsLevelWaiting": "Diese Gruppe wartet darauf, einen stärkeren Schutz einzuschalten. Er schaltet sich von selbst ein, sobald alle Fogata aktualisiert haben. Noch nicht aktualisiert: {names}"
 }

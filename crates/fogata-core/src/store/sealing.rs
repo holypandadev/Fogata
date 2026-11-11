@@ -80,7 +80,8 @@ struct Noted {
 /// which only a copy of Fogata that holds the key writes (as it makes the key, before the
 /// folder is marked sealed). Once sealing ended, or when it is noted only in the clear
 /// (as earlier versions did), a plain secret was put there by someone else, and is refused:
-/// moved to [`REFUSED_DIR`].
+/// moved to [`REFUSED_DIR`]; except while the folder is as an earlier version left it when
+/// its sealing was cut short ([`PlainSecrets::Resume`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PlainSecrets {
     /// Sealing is under way, as noted with the key: plain secrets are the account's own.
@@ -91,8 +92,45 @@ enum PlainSecrets {
     /// one's place would), and a plain recovery key is refused: copies of what is sealed here
     /// must not go to a key someone put next to it. Its person turns copies on again.
     SealButRecovery,
+    /// Sealing was begun by an earlier version, noted in the clear as begun or failed, and
+    /// cut short after the identity was sealed: the plain copy that sealing made of the
+    /// identity ([`BACKUP_DIR`]) is still there, and is the identity sealed here. Sealing
+    /// goes on ([`Take::UnlessItsCopyDiffers`]): a plain secret that sealing had copied
+    /// aside is sealed only as that copy holds it, one it never reached (it stopped before)
+    /// is copied and sealed now. A plain recovery key is sealed only as its copy holds it.
+    ///
+    /// Someone who can write the folder could leave such a folder too, but only while the
+    /// account's identity lies in it in the clear (until the start after sealing ended),
+    /// where they could read it, and the friends file and the MLS state beside it, anyway.
+    Resume,
     /// Every plain secret is refused.
     Refuse,
+}
+
+impl PlainSecrets {
+    /// What is done with a plain secret found: the recovery key, or another (`recovery`).
+    fn take(self, recovery: bool) -> Take {
+        match self {
+            Self::Seal => Take::Yes,
+            Self::SealButRecovery if recovery => Take::No,
+            Self::SealButRecovery => Take::Yes,
+            Self::Resume if recovery => Take::IfItsCopyIsTheSame,
+            Self::Resume => Take::UnlessItsCopyDiffers,
+            Self::Refuse => Take::No,
+        }
+    }
+}
+
+/// Whether a plain secret found is sealed as the account's own, or refused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Take {
+    Yes,
+    No,
+    /// When the plain copy sealing made of it in [`BACKUP_DIR`] holds the same, or sealing
+    /// made none: it never got to it.
+    UnlessItsCopyDiffers,
+    /// Only when the plain copy sealing made of it holds the same.
+    IfItsCopyIsTheSame,
 }
 
 /// How a data folder's secrets would be kept, once asked ([`Store::sealing`]).
@@ -217,6 +255,7 @@ impl Store {
     /// tied to the program's signature), and without those copies the account would be gone.
     fn seal_rest(&self, key: &DataKey) {
         self.set_aside_marked(key);
+        self.take_back_refused(key);
         let noted = self.read_phase(key);
         let done = noted.as_ref().is_some_and(|n| n.phase == SealPhase::Done);
         let plain = match &noted {
@@ -226,6 +265,9 @@ impl Store {
             }) => PlainSecrets::Refuse,
             Some(Noted { by_key: true, .. }) => PlainSecrets::Seal,
             _ if self.holds_no_sealed_account() => PlainSecrets::SealButRecovery,
+            // An earlier version noted sealing in the clear as begun, and stopped: its plain
+            // secrets are taken as the account's own as far as its copies say so.
+            Some(Noted { by_key: false, .. }) if self.cut_short_here(key) => PlainSecrets::Resume,
             _ => PlainSecrets::Refuse,
         };
         self.done_before.store(done, Ordering::Relaxed);
@@ -378,17 +420,17 @@ impl Store {
     /// not the account's own are refused instead. It runs while the key is first looked for,
     /// which every reader of these files waits for.
     fn seal_plain(&self, key: &DataKey, plain: PlainSecrets) -> Result<()> {
-        let refuse = plain == PlainSecrets::Refuse;
+        let take = plain.take(false);
         self.name_key(key, &self.identity_path(), "identity")?;
         self.name_key(key, &self.friends_path(), "friends")?;
-        self.seal_whole(key, &self.identity_path(), "identity", refuse)?;
-        self.seal_whole(key, &self.friends_path(), "friends", refuse)?;
-        self.seal_whole(key, &self.friends_copy_path(), "friends", refuse)?;
+        self.seal_whole(key, &self.identity_path(), "identity", take)?;
+        self.seal_whole(key, &self.friends_path(), "friends", take)?;
+        self.seal_whole(key, &self.friends_copy_path(), "friends", take)?;
         self.seal_whole(
             key,
             &self.dir.join(crate::recovery::KEY_FILE),
             crate::recovery::KEY_CONTEXT,
-            plain != PlainSecrets::Seal,
+            plain.take(true),
         )?;
         for entry in fs::read_dir(&self.dir)?.flatten() {
             if entry
@@ -396,7 +438,7 @@ impl Store {
                 .to_string_lossy()
                 .starts_with("friends.bin.damaged")
             {
-                self.seal_whole(key, &entry.path(), DAMAGED, refuse)?;
+                self.seal_whole(key, &entry.path(), DAMAGED, take)?;
             }
         }
         for entry in fs::read_dir(self.dir.join(MLS_DIR))
@@ -406,15 +448,15 @@ impl Store {
         {
             let name = entry.file_name().to_string_lossy().into_owned();
             if let Some(group) = name.strip_suffix(".bin") {
-                self.seal_whole(key, &entry.path(), &mls_context(group), refuse)?;
+                self.seal_whole(key, &entry.path(), &mls_context(group), take)?;
             }
         }
         crate::direct::store::seal_plain(&self.dir, key, &|path, bytes| self.back_up(path, bytes))
     }
 
     /// Seals the file at `path`, if it is there and plain, as one box for `context`; or,
-    /// when it is to be `refused`, moves it to [`REFUSED_DIR`] as it is.
-    fn seal_whole(&self, key: &DataKey, path: &Path, context: &str, refused: bool) -> Result<()> {
+    /// when `take` says it is not the account's own, moves it to [`REFUSED_DIR`] as it is.
+    fn seal_whole(&self, key: &DataKey, path: &Path, context: &str, take: Take) -> Result<()> {
         let plain = match fs::read(path) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             read => {
@@ -424,7 +466,7 @@ impl Store {
         if sealed_form(&plain).is_some() {
             return Ok(());
         }
-        if refused {
+        if !self.takes(path, &plain, take) {
             return self.refuse(path);
         }
         self.back_up(path, &plain)?;
@@ -437,6 +479,157 @@ impl Store {
             bail!("{} did not read back once sealed", path.display());
         }
         Ok(())
+    }
+
+    /// Whether the plain secret at `path`, holding `plain`, is sealed as the account's own.
+    fn takes(&self, path: &Path, plain: &[u8], take: Take) -> bool {
+        match take {
+            Take::Yes => true,
+            Take::No => false,
+            Take::UnlessItsCopyDiffers | Take::IfItsCopyIsTheSame => match self.copy_of(path) {
+                Some(copy) => *copy == *plain,
+                None => take == Take::UnlessItsCopyDiffers,
+            },
+        }
+    }
+
+    /// The plain copy sealing made of the file at `path` in [`BACKUP_DIR`], if it is there.
+    fn copy_of(&self, path: &Path) -> Option<Zeroizing<Vec<u8>>> {
+        let relative = path.strip_prefix(&self.dir).ok()?;
+        let copy = self.dir.join(BACKUP_DIR).join(relative);
+        // Only a file of its own: never read through a link someone left there.
+        if !fs::symlink_metadata(&copy).ok()?.is_file() {
+            return None;
+        }
+        fs::read(copy).ok().map(Zeroizing::new)
+    }
+
+    /// Whether the folder is as an earlier version left it when it stopped sealing it after
+    /// the identity: the identity is sealed, opens with `key`, and its plain copy made just
+    /// before is still in [`BACKUP_DIR`]. Only a copy of Fogata that sealed this identity
+    /// leaves that copy (or someone who could read it, who has the account already); the
+    /// start after sealing ended removes it ([`Store::drop_backup`]).
+    fn cut_short_here(&self, key: &DataKey) -> bool {
+        let Ok(sealed) = fs::read(self.identity_path()) else {
+            return false;
+        };
+        if sealed_form(&sealed).is_none() {
+            return false;
+        }
+        let Ok(identity) = key.open_whole("identity", &sealed) else {
+            return false;
+        };
+        self.copy_of(&self.identity_path())
+            .is_some_and(|copy| *copy == *identity)
+    }
+
+    /// Brings back, sealed, the account's own secrets that a start of an earlier version
+    /// (0.1.0-beta.8) refused in a folder whose sealing an older one had cut short: it took
+    /// them for files someone put there, and the account came up without its friends. A
+    /// refused file is taken back by the rule that start should have used
+    /// ([`PlainSecrets::Resume`]): only while the identity's plain copy of that sealing is
+    /// still there ([`Store::cut_short_here`]), only when its copy holds the same (or it has
+    /// none: sealing never reached it), and only where nothing is now (a profile made since
+    /// stays). The friends file and its copy, the MLS state and the recovery key (only as
+    /// its copy holds it) are taken back; anything else stays refused.
+    fn take_back_refused(&self, key: &DataKey) {
+        let refused = self.dir.join(REFUSED_DIR);
+        if !refused.is_dir() || !self.cut_short_here(key) {
+            return;
+        }
+        let mut back = vec![
+            (self.friends_path(), "friends".to_string(), false),
+            (self.friends_copy_path(), "friends".to_string(), false),
+            (
+                self.dir.join(crate::recovery::KEY_FILE),
+                crate::recovery::KEY_CONTEXT.to_string(),
+                true,
+            ),
+        ];
+        for entry in fs::read_dir(refused.join(MLS_DIR))
+            .into_iter()
+            .flatten()
+            .flatten()
+        {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if let Some(group) = name.strip_suffix(".bin") {
+                back.push((
+                    self.dir.join(MLS_DIR).join(&name),
+                    mls_context(group),
+                    false,
+                ));
+            }
+        }
+        let mut friends_kept_since = false;
+        for (path, context, recovery) in back {
+            // The friends file's copy goes with it: beside one made since, it would hold
+            // another profile than the one it is the copy of.
+            if path == self.friends_copy_path() && friends_kept_since {
+                continue;
+            }
+            let take = PlainSecrets::Resume.take(recovery);
+            match self.take_back(key, &path, &context, take) {
+                Ok(true) => {}
+                Ok(false) if path == self.friends_path() => {
+                    friends_kept_since =
+                        fs::symlink_metadata(&path).is_ok() && refused.join("friends.bin").exists();
+                }
+                Ok(false) => {}
+                Err(e) => tracing::warn!("{} was not taken back: {e:#}", path.display()),
+            }
+        }
+        // Nothing left in it: it goes, and nothing says files were refused any more.
+        for dir in [refused.join(MLS_DIR), refused] {
+            let _ = fs::remove_dir(dir);
+        }
+    }
+
+    /// Takes the refused file for `path` back to it, sealed for `context`, when `take` says
+    /// it is the account's own and nothing is at `path`; it is removed from [`REFUSED_DIR`]
+    /// once its sealed form reads back, which a start that stops in between finds and ends.
+    /// Whether it is back.
+    fn take_back(&self, key: &DataKey, path: &Path, context: &str, take: Take) -> Result<bool> {
+        let relative = path
+            .strip_prefix(&self.dir)
+            .with_context(|| format!("{} is not in the data folder", path.display()))?;
+        let from = self.dir.join(REFUSED_DIR).join(relative);
+        if !fs::symlink_metadata(&from).is_ok_and(|m| m.is_file()) {
+            return Ok(false);
+        }
+        let plain = Zeroizing::new(
+            fs::read(&from).with_context(|| format!("cannot read {}", from.display()))?,
+        );
+        if sealed_form(&plain).is_some() || !self.takes(path, &plain, take) {
+            return Ok(false);
+        }
+        let opens_as_plain = |path: &Path| {
+            fs::read(path)
+                .ok()
+                .and_then(|b| key.open_whole(context, &b).ok())
+                .is_some_and(|b| *b == *plain)
+        };
+        match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            // Taken back by a start that stopped before it removed the refused one.
+            Ok(_) if opens_as_plain(path) => return remove_taken_back(&from).map(|()| true),
+            // Something else is there now: it stays, and so does the refused file.
+            _ => return Ok(false),
+        }
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display()))?;
+        }
+        write_private(path, &key.seal_whole(context, &plain)?)?;
+        if !opens_as_plain(path) {
+            let _ = fs::remove_file(path);
+            bail!("{} did not read back once sealed", path.display());
+        }
+        tracing::warn!(
+            "{} was refused by an earlier start, though it was the account's own as sealing \
+             left it: taken back, sealed",
+            path.display()
+        );
+        remove_taken_back(&from).map(|()| true)
     }
 
     /// Moves the plain secret at `path` to [`REFUSED_DIR`], under its path in the folder (with
@@ -746,6 +939,12 @@ impl Store {
     pub fn may_seal(&self) -> bool {
         matches!(self.keychain, Keychain::Seal(_))
     }
+}
+
+/// Removes the refused plain file at `path` once it is back in its place, sealed: written
+/// over first, as an account move does with what it leaves behind.
+fn remove_taken_back(path: &Path) -> Result<()> {
+    crate::transfer::wipe(path)
 }
 
 #[cfg(test)]
@@ -1411,6 +1610,390 @@ mod tests {
         drop(store);
         opens_whole(&dir, &keys, &made).drop_backup();
         assert!(!dir.join(BACKUP_DIR).exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The plain recovery key of the folders below: what it holds does not matter here.
+    const RECOVERY: &[u8] = b"the recovery key of the account";
+
+    /// The folder [`plain_folder_with_mls`] makes, with a recovery key, as 0.1.0-beta.7 or
+    /// earlier left it when sealing it stopped after the identity (a full disk, a computer
+    /// that stopped): the identity sealed, with its plain copy aside, the friends file, its
+    /// copy, the recovery key, the MLS state and a chat's journal still plain, and sealing
+    /// noted as `phase` in the clear, as those versions wrote the note. `copied` names the
+    /// plain files sealing had copied aside before it stopped. Returns the plain files.
+    fn cut_short_by_an_older_version(
+        dir: &Path,
+        keys: &Arc<MemoryKeyStore>,
+        phase: &SealPhase,
+        copied: &[&Path],
+    ) -> (
+        (DevicePublicKey, DevicePublicKey, Chat),
+        BTreeMap<PathBuf, Vec<u8>>,
+    ) {
+        let made = plain_folder_with_mls(dir);
+        fs::write(dir.join(crate::recovery::KEY_FILE), RECOVERY).unwrap();
+        let plain = files_of(dir);
+        drop(
+            Store::open_with(dir.to_path_buf(), Keychain::Seal(keys.clone()))
+                .unwrap()
+                .data_key(),
+        );
+        let backup = dir.join(BACKUP_DIR);
+        fs::remove_dir_all(&backup).unwrap();
+        let identity = dir.join("identity.key");
+        let mut left_plain = secrets(dir, &made.1);
+        left_plain.retain(|p| *p != identity && !p.ends_with("profile"));
+        left_plain.push(dir.join(crate::recovery::KEY_FILE));
+        for path in &left_plain {
+            fs::write(path, &plain[path]).unwrap();
+        }
+        for path in std::iter::once(identity.as_path()).chain(copied.iter().copied()) {
+            let copy = backup.join(path.strip_prefix(dir).unwrap());
+            fs::create_dir_all(copy.parent().unwrap()).unwrap();
+            fs::write(copy, &plain[path]).unwrap();
+        }
+        // Exactly what those versions' `write_phase` wrote.
+        fs::write(
+            dir.join(SEALING_FILE),
+            serde_json::to_vec_pretty(phase).unwrap(),
+        )
+        .unwrap();
+        assert!(is_sealed(&identity));
+        (made, plain)
+    }
+
+    /// The paths of the folder's friends file, its copy and the group's MLS state.
+    fn account_files(dir: &Path) -> [PathBuf; 3] {
+        [
+            dir.join("friends.bin"),
+            dir.join("friends.bin.bak"),
+            dir.join(MLS_DIR)
+                .join(format!("{}.bin", hex::encode([3u8; 16]))),
+        ]
+    }
+
+    /// A folder whose sealing an older version cut short, noted in the clear as begun or
+    /// failed, is sealed whole at its first start by this one: the plain secrets that
+    /// sealing had copied aside are taken as those copies hold them, and those it never
+    /// reached (no copy) are copied and sealed now. The account opens whole, with its
+    /// friends; a recovery key without its copy is refused (copies are turned on again).
+    #[test]
+    fn a_folder_whose_sealing_an_older_version_cut_short_is_sealed_whole() {
+        for (n, (phase, copied_all)) in [
+            (SealPhase::Pending, true),
+            (SealPhase::Pending, false),
+            (
+                SealPhase::Failed {
+                    why: "No space left on device (os error 28)".into(),
+                },
+                false,
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let dir = folder(&format!("older-cut-{n}"));
+            let keys = Arc::new(MemoryKeyStore::default());
+            let files = account_files(&dir);
+            let recovery = dir.join(crate::recovery::KEY_FILE);
+            let mut copied: Vec<&Path> = vec![&files[0]];
+            if copied_all {
+                copied.extend([files[1].as_path(), files[2].as_path(), recovery.as_path()]);
+            }
+            let (made, _) = cut_short_by_an_older_version(&dir, &keys, &phase, &copied);
+            // Asked first, as the application does: the profile is there.
+            let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+            assert!(store.has_profile().unwrap(), "{n}");
+            drop(store);
+            let store = opens_whole(&dir, &keys, &made);
+            assert!(store.sealed(), "{n}: {:?}", store.unfinished());
+            for path in secrets(&dir, &made.1) {
+                assert!(is_sealed(&path), "{n}: {}", path.display());
+            }
+            assert_eq!(store.friends_kept(), None, "{n}");
+            let refused = dir.join(REFUSED_DIR);
+            if copied_all {
+                assert!(is_sealed(&recovery), "{n}");
+                assert!(!refused.exists(), "{n}");
+                assert!(!store.holds_refused());
+            } else {
+                assert!(!recovery.exists(), "{n}");
+                assert_eq!(
+                    fs::read(refused.join(crate::recovery::KEY_FILE)).unwrap(),
+                    RECOVERY
+                );
+                assert!(store.holds_refused());
+            }
+            let key = store.data_key().unwrap().unwrap();
+            assert_eq!(
+                store.read_phase(&key),
+                Some(Noted {
+                    phase: SealPhase::Done,
+                    by_key: true
+                }),
+                "{n}"
+            );
+            drop(store);
+            // The starts after: the same account, and the plain copies go.
+            opens_whole(&dir, &keys, &made).drop_backup();
+            assert!(!dir.join(BACKUP_DIR).exists(), "{n}");
+            opens_whole(&dir, &keys, &made);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// The same folder, with plain files someone put there: one that is not what sealing
+    /// copied aside is refused, and so is every plain secret once the identity's plain copy
+    /// is gone (the start after sealing ended), or is not this identity's. A plain note
+    /// alone never takes a plain secret in.
+    #[test]
+    fn plain_secrets_planted_beside_a_plain_note_are_still_refused() {
+        let theirs = {
+            let other = folder("planted-note-theirs");
+            plain_folder(&other);
+            let mut book =
+                FriendBook::decode(&fs::read(other.join("friends.bin")).unwrap()).unwrap();
+            book.profile.name = "Someone else".into();
+            let bytes = book.encode().to_vec();
+            fs::remove_dir_all(&other).unwrap();
+            bytes
+        };
+        let pending = serde_json::to_vec_pretty(&SealPhase::Pending).unwrap();
+        // Planted where sealing had copied the file aside.
+        let dir = folder("planted-note-copied");
+        let keys = Arc::new(MemoryKeyStore::default());
+        let files = account_files(&dir);
+        let (made, _) =
+            cut_short_by_an_older_version(&dir, &keys, &SealPhase::Pending, &[&files[0]]);
+        fs::write(&files[0], &theirs).unwrap();
+        let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        assert_eq!(store.identity().unwrap().0.public_key(), made.0);
+        assert_eq!(
+            fs::read(dir.join(REFUSED_DIR).join("friends.bin")).unwrap(),
+            theirs
+        );
+        // The rest, which sealing never reached, is sealed; the folder says where the
+        // friends file is kept, rather than look like a new device's.
+        assert!(is_sealed(&files[1]) && is_sealed(&files[2]));
+        assert!(store.friends().unwrap().is_none());
+        assert_eq!(store.friends_kept(), Some(dir.join(REFUSED_DIR)));
+        // A profile made then sets the copy aside rather than write over it.
+        let copy = fs::read(&files[1]).unwrap();
+        let (me, _) = store.identity().unwrap();
+        store
+            .save_friends(&FriendBook::new(&me, "Marta new", 9).unwrap())
+            .unwrap();
+        assert_eq!(fs::read(dir.join("friends.bin.damaged")).unwrap(), copy);
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+
+        // Sealed whole, and started again: the identity's plain copy is gone. A plain note
+        // and plain secrets with copies of their own put back are refused.
+        let dir = folder("planted-note-later");
+        let made = plain_folder_with_mls(&dir);
+        let keys = Arc::new(MemoryKeyStore::default());
+        drop(opens_whole(&dir, &keys, &made));
+        opens_whole(&dir, &keys, &made).drop_backup();
+        assert!(!dir.join(BACKUP_DIR).exists());
+        let files = account_files(&dir);
+        let before: Vec<_> = files.iter().map(|p| fs::read(p).unwrap()).collect();
+        fs::create_dir_all(dir.join(BACKUP_DIR)).unwrap();
+        for path in &files[..2] {
+            fs::write(path, &theirs).unwrap();
+            fs::write(
+                dir.join(BACKUP_DIR).join(path.file_name().unwrap()),
+                &theirs,
+            )
+            .unwrap();
+        }
+        fs::write(dir.join(SEALING_FILE), &pending).unwrap();
+        let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        store.identity().unwrap();
+        assert_eq!(store.friends().unwrap().map(|b| b.encode()), None);
+        for name in ["friends.bin", "friends.bin.bak"] {
+            assert_eq!(fs::read(dir.join(REFUSED_DIR).join(name)).unwrap(), theirs);
+        }
+        assert_eq!(store.friends_kept(), Some(dir.join(REFUSED_DIR)));
+        assert_eq!(fs::read(&files[2]).unwrap(), before[2]);
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+
+        // A plain copy of another identity beside the sealed one proves nothing either.
+        let dir = folder("planted-note-identity");
+        let keys = Arc::new(MemoryKeyStore::default());
+        let files = account_files(&dir);
+        cut_short_by_an_older_version(&dir, &keys, &SealPhase::Pending, &[&files[0]]);
+        fs::write(&files[0], &theirs).unwrap();
+        fs::write(dir.join(BACKUP_DIR).join("friends.bin"), &theirs).unwrap();
+        fs::write(
+            dir.join(BACKUP_DIR).join("identity.key"),
+            hex::encode(DeviceIdentity::generate().unwrap().secret_bytes()),
+        )
+        .unwrap();
+        let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        store.identity().unwrap();
+        assert_eq!(
+            fs::read(dir.join(REFUSED_DIR).join("friends.bin")).unwrap(),
+            theirs
+        );
+        assert!(
+            dir.join(REFUSED_DIR)
+                .join(files[2].strip_prefix(&dir).unwrap())
+                .exists()
+        );
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What 0.1.0-beta.8 did with a folder whose sealing an older version cut short: it
+    /// refused its plain secrets (moved them to `refused/`), noted sealing as done with the
+    /// key, and the account came up without its friends. Done again from those files.
+    fn refused_by_beta8(dir: &Path, key: &DataKey, plain: &[PathBuf]) {
+        for path in plain {
+            if !path.exists() || is_sealed(path) {
+                continue;
+            }
+            let to = dir.join(REFUSED_DIR).join(path.strip_prefix(dir).unwrap());
+            fs::create_dir_all(to.parent().unwrap()).unwrap();
+            fs::rename(path, to).unwrap();
+        }
+        let store = Store::open_with(dir.to_path_buf(), Keychain::Off).unwrap();
+        store.write_phase(&SealPhase::Done, Some(key)).unwrap();
+    }
+
+    /// Someone who started 0.1.0-beta.8 on such a folder has its secrets in `refused/`:
+    /// asking whether there is a profile takes them back, sealed, as sealing had copied them
+    /// aside (or never reached them), and the account opens whole. A start that stopped
+    /// between putting one back and removing it from `refused/` is ended; a friends file
+    /// made since stays as it is, with the refused one kept; one that differs from its copy
+    /// stays refused.
+    #[test]
+    fn secrets_refused_by_the_previous_version_are_taken_back() {
+        let files_of_account = |dir: &Path| {
+            let mut all = account_files(dir).to_vec();
+            all.push(dir.join(crate::recovery::KEY_FILE));
+            all
+        };
+        let key_of = |dir: &Path, keys: &Arc<MemoryKeyStore>| {
+            vault::open(dir, &Keychain::Seal(keys.clone()))
+                .unwrap()
+                .unwrap()
+        };
+        for copied_all in [true, false] {
+            let dir = folder(&format!("taken-back-{copied_all}"));
+            let keys = Arc::new(MemoryKeyStore::default());
+            let files = files_of_account(&dir);
+            let copied: Vec<&Path> = if copied_all {
+                files.iter().map(PathBuf::as_path).collect()
+            } else {
+                vec![&files[0]]
+            };
+            let (made, _) =
+                cut_short_by_an_older_version(&dir, &keys, &SealPhase::Pending, &copied);
+            refused_by_beta8(&dir, &key_of(&dir, &keys), &files);
+            let refused = dir.join(REFUSED_DIR);
+            assert!(refused.join("friends.bin").exists());
+            // As the application starts: asking first.
+            let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+            assert!(store.has_profile().unwrap(), "{copied_all}");
+            drop(store);
+            let store = opens_whole(&dir, &keys, &made);
+            assert!(store.sealed());
+            for path in &files[..3] {
+                assert!(is_sealed(path), "{}", path.display());
+            }
+            if copied_all {
+                assert!(is_sealed(&files[3]));
+                assert!(!refused.exists());
+                assert!(!store.holds_refused());
+            } else {
+                // A recovery key sealing never copied aside stays refused, and is told.
+                assert!(!files[3].exists());
+                assert_eq!(
+                    fs::read(refused.join(crate::recovery::KEY_FILE)).unwrap(),
+                    RECOVERY
+                );
+                assert!(store.holds_refused());
+                assert!(!refused.join("friends.bin").exists());
+                assert!(!refused.join(MLS_DIR).exists());
+            }
+            drop(store);
+            opens_whole(&dir, &keys, &made).drop_backup();
+            assert!(!dir.join(BACKUP_DIR).exists());
+            opens_whole(&dir, &keys, &made);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+
+        // Stopped after the friends file was put back, before it left `refused/`.
+        let dir = folder("taken-back-stopped");
+        let keys = Arc::new(MemoryKeyStore::default());
+        let files = files_of_account(&dir);
+        let copied: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+        let (made, plain) =
+            cut_short_by_an_older_version(&dir, &keys, &SealPhase::Pending, &copied);
+        let key = key_of(&dir, &keys);
+        refused_by_beta8(&dir, &key, &files);
+        fs::write(
+            &files[0],
+            key.seal_whole("friends", &plain[&files[0]]).unwrap(),
+        )
+        .unwrap();
+        let store = opens_whole(&dir, &keys, &made);
+        assert!(!dir.join(REFUSED_DIR).exists());
+        assert!(!store.holds_refused());
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+
+        // A friends file made since stays, and so does the refused one (and its copy,
+        // which goes with it), told.
+        let dir = folder("taken-back-made-since");
+        let keys = Arc::new(MemoryKeyStore::default());
+        let files = files_of_account(&dir);
+        let copied: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+        let (made, _) = cut_short_by_an_older_version(&dir, &keys, &SealPhase::Pending, &copied);
+        let key = key_of(&dir, &keys);
+        refused_by_beta8(&dir, &key, &files);
+        let since = FriendBook::new(&DeviceIdentity::generate().unwrap(), "Marta again", 5)
+            .unwrap()
+            .encode();
+        let since = key.seal_whole("friends", &since).unwrap();
+        fs::write(&files[0], &since).unwrap();
+        let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        assert_eq!(store.identity().unwrap().0.public_key(), made.0);
+        assert_eq!(fs::read(&files[0]).unwrap(), since);
+        assert_eq!(
+            store.friends().unwrap().unwrap().profile.name,
+            "Marta again"
+        );
+        let refused = dir.join(REFUSED_DIR);
+        assert!(refused.join("friends.bin").exists());
+        assert!(refused.join("friends.bin.bak").exists());
+        assert!(!files[1].exists());
+        assert!(is_sealed(&files[2]) && is_sealed(&files[3]));
+        assert!(store.holds_refused());
+        assert_eq!(store.friends_kept(), None);
+        drop(store);
+        fs::remove_dir_all(&dir).unwrap();
+
+        // One that is not what sealing copied aside stays refused, and the folder says
+        // where the profile is kept.
+        let dir = folder("taken-back-differs");
+        let keys = Arc::new(MemoryKeyStore::default());
+        let files = files_of_account(&dir);
+        let copied: Vec<&Path> = files.iter().map(PathBuf::as_path).collect();
+        cut_short_by_an_older_version(&dir, &keys, &SealPhase::Pending, &copied);
+        refused_by_beta8(&dir, &key_of(&dir, &keys), &files);
+        for name in ["friends.bin", "friends.bin.bak"] {
+            fs::write(dir.join(REFUSED_DIR).join(name), b"someone else's").unwrap();
+        }
+        let store = Store::open_with(dir.clone(), Keychain::Seal(keys.clone())).unwrap();
+        assert!(!store.has_profile().unwrap());
+        assert!(!files[0].exists() && !files[1].exists());
+        assert_eq!(store.friends_kept(), Some(dir.join(REFUSED_DIR)));
+        // The MLS state, as its copy holds it, came back.
+        assert!(is_sealed(&files[2]));
+        drop(store);
         fs::remove_dir_all(&dir).unwrap();
     }
 

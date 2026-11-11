@@ -8,6 +8,7 @@ import 'package:flutter/services.dart';
 import 'package:fogata_video/fogata_video.dart';
 
 import '../app_state.dart';
+import '../fair_size.dart';
 import '../icons.dart';
 import '../l10n.dart';
 import '../rust/api/types.dart';
@@ -20,7 +21,7 @@ import '../window.dart';
 
 /// `0:42`, or `1:02:05` past an hour.
 String videoLength(int ms) {
-  final d = Duration(milliseconds: ms);
+  final d = Duration(milliseconds: fairLength(ms));
   final s = (d.inSeconds % 60).toString().padLeft(2, '0');
   if (d.inHours > 0) {
     final m = (d.inMinutes % 60).toString().padLeft(2, '0');
@@ -225,13 +226,11 @@ class _VideoViewerState extends State<VideoViewer> {
   Widget build(BuildContext context) {
     final close = Navigator.of(context).pop;
     final video = widget.video();
-    final ratio = video != null && video.width > 0 && video.height > 0
-        ? video.width / video.height
-        : 16 / 9;
+    final ratio = video?.aspect ?? 16 / 9;
     final player = _player;
     final duration = _at.durationMs > 0
         ? _at.durationMs
-        : (video?.durationMs ?? 0);
+        : (video?.lengthMs ?? 0);
     final position = _dragging != null
         ? (_dragging! * duration).round()
         : _at.positionMs.clamp(0, duration == 0 ? 0 : duration);
@@ -336,89 +335,119 @@ class _VideoViewerState extends State<VideoViewer> {
   }
 
   Widget _controls(int duration, int position) {
-    final player = _player;
     final fraction = duration == 0 ? 0.0 : position / duration;
+    final time = '${videoLength(position)} / ${videoLength(duration)}';
+    final timeStyle = tx(Colors.white70, size: 12, monospace: true);
+    // As wide as the picture, up to the design's width: a tall video is narrower.
     return Container(
-      width: widget.fullScreen ? 560 : 520,
-      height: 48,
+      constraints: BoxConstraints(maxWidth: widget.fullScreen ? 560 : 520),
+      height: heightForText(context, 48, 12),
       padding: const EdgeInsets.symmetric(horizontal: 8),
       decoration: BoxDecoration(
         color: const Color.fromRGBO(17, 17, 17, .82),
         borderRadius: BorderRadius.circular(999),
         border: Border.all(color: Colors.white.withValues(alpha: .08)),
       ),
-      child: Row(
-        children: [
-          Springy(
-            onTap: player == null ? null : _toggle,
-            label: _at.playing ? l10n.roomPause : l10n.roomPlay,
-            builder: (context, hovered) => Container(
-              width: 34,
-              height: 34,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: hovered ? Colors.white : const Color(0xFFEDEDED),
-                shape: BoxShape.circle,
-              ),
-              child: FgIcon(
-                _at.playing ? Ic.pause : Ic.play,
-                size: 15,
-                stroke: 2.6,
-                color: const Color(0xFF0A0A0A),
-              ),
+      child: LayoutBuilder(
+        builder: (context, box) {
+          // The time as wide as its words at the text size chosen, shown only while the
+          // bar beside it keeps room to be moved; never cut.
+          final painter = TextPainter(
+            text: TextSpan(text: time, style: timeStyle),
+            textDirection: Directionality.of(context),
+            textScaler: MediaQuery.textScalerOf(context),
+            maxLines: 1,
+          )..layout();
+          final timeWidth = painter.width.ceilToDouble() + 1;
+          painter.dispose();
+          // The play button, the gaps and the buttons on the right.
+          final rest = 34 + 10 + 32 + (widget.fullScreen ? 32 : 0) + 10;
+          final showTime = box.maxWidth - rest - timeWidth >= 80;
+          return _controlsRow(
+            duration,
+            fraction,
+            showTime ? (time, timeStyle, timeWidth) : null,
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _controlsRow(
+    int duration,
+    double fraction,
+    (String, TextStyle, double)? time,
+  ) {
+    final player = _player;
+    return Row(
+      children: [
+        Springy(
+          onTap: player == null ? null : _toggle,
+          label: _at.playing ? l10n.roomPause : l10n.roomPlay,
+          builder: (context, hovered) => Container(
+            width: 34,
+            height: 34,
+            alignment: Alignment.center,
+            decoration: BoxDecoration(
+              color: hovered ? Colors.white : const Color(0xFFEDEDED),
+              shape: BoxShape.circle,
+            ),
+            child: FgIcon(
+              _at.playing ? Ic.pause : Ic.play,
+              size: 15,
+              stroke: 2.6,
+              color: const Color(0xFF0A0A0A),
             ),
           ),
-          const SizedBox(width: 10),
+        ),
+        const SizedBox(width: 10),
+        if (time case (final words, final style, final width))
           SizedBox(
-            width: 96,
-            child: Text(
-              '${videoLength(position)} / ${videoLength(duration)}',
-              style: tx(Colors.white70, size: 12, monospace: true),
+            width: width,
+            child: Text(words, style: style, maxLines: 1, softWrap: false),
+          ),
+        Expanded(
+          child: SliderTheme(
+            data: SliderTheme.of(context).copyWith(
+              activeTrackColor: Colors.white,
+              inactiveTrackColor: Colors.white24,
+              thumbColor: Colors.white,
+              overlayColor: Colors.white12,
+              trackHeight: 3,
+              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
+            ),
+            child: Slider(
+              value: fraction.clamp(0.0, 1.0),
+              onChanged: player == null || duration == 0
+                  ? null
+                  : (v) => setState(() => _dragging = v),
+              onChangeEnd: (v) async {
+                setState(() => _dragging = null);
+                await player?.seek((v * duration).round());
+              },
             ),
           ),
-          Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                activeTrackColor: Colors.white,
-                inactiveTrackColor: Colors.white24,
-                thumbColor: Colors.white,
-                overlayColor: Colors.white12,
-                trackHeight: 3,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              ),
-              child: Slider(
-                value: fraction.clamp(0.0, 1.0),
-                onChanged: player == null || duration == 0
-                    ? null
-                    : (v) => setState(() => _dragging = v),
-                onChangeEnd: (v) async {
-                  setState(() => _dragging = null);
-                  await player?.seek((v * duration).round());
-                },
-              ),
-            ),
-          ),
+        ),
+        FgButton(
+          icon: _sound.muted ? Ic.volumeOff : Ic.volume,
+          kind: Kind.ghost,
+          height: 32,
+          iconColor: Colors.white70,
+          tooltip: _sound.muted ? l10n.roomSoundOn : l10n.roomMuteVideo,
+          onTap: player == null ? null : _sound.toggle,
+        ),
+        if (widget.fullScreen)
           FgButton(
-            icon: _sound.muted ? Ic.volumeOff : Ic.volume,
+            icon: _fullScreen ? Ic.fullScreenExit : Ic.fullScreen,
             kind: Kind.ghost,
             height: 32,
             iconColor: Colors.white70,
-            tooltip: _sound.muted ? l10n.roomSoundOn : l10n.roomMuteVideo,
-            onTap: player == null ? null : _sound.toggle,
+            tooltip: _fullScreen
+                ? l10n.roomLeaveFullScreen
+                : l10n.roomFullScreen,
+            onTap: _toggleFullScreen,
           ),
-          if (widget.fullScreen)
-            FgButton(
-              icon: _fullScreen ? Ic.fullScreenExit : Ic.fullScreen,
-              kind: Kind.ghost,
-              height: 32,
-              iconColor: Colors.white70,
-              tooltip: _fullScreen
-                  ? l10n.roomLeaveFullScreen
-                  : l10n.roomFullScreen,
-              onTap: _toggleFullScreen,
-            ),
-        ],
-      ),
+      ],
     );
   }
 }

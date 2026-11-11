@@ -13,6 +13,7 @@ import '../app_state.dart';
 import '../devices.dart';
 import '../emoji.dart' show emojiText;
 import '../call.dart';
+import '../fair_size.dart';
 import '../format.dart';
 import '../icons.dart';
 import '../l10n.dart';

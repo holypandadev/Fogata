@@ -1205,6 +1205,49 @@ fn an_invited_device_takes_no_welcome_from_a_manager_its_invite_does_not_name() 
     assert!(shown.admits_as_invited(&ticket, &xavi.key()));
 }
 
+/// The same copy may let the invited device in without its `Welcome`: it learnt the
+/// device's key from the `Join` it was sent, adds it, and seals it the copy's key. The
+/// invited device takes no log where it is a member by an entry of a manager its invite
+/// does not name, however it was let in; an `Add` of the issuer, signed knowing of the
+/// invite, it takes.
+#[test]
+fn an_invited_device_takes_no_add_from_a_manager_its_invite_does_not_name() {
+    let (mut log, ana, bea, _carlos) = at_level_three();
+    let before_invite = log.clone();
+    let (ticket, _) = log.invite(&ana.id, 10_000, 6).unwrap();
+    let invited = log.clone();
+    log.remove(&ana.id, bea.key(), 7).unwrap();
+
+    let xavi = Device::new();
+    // Bea's copy, from the invite on, and one signed on the group as it was before it.
+    for mut fork in [invited.clone(), before_invite] {
+        fork.add(&bea.id, xavi.key(), "xavi", 8).unwrap();
+        let mut shown = GroupLog::empty(log.group_id());
+        shown.insert_all(invited.entries().chain(fork.entries()).cloned());
+        assert!(shown.invited_with(&ticket));
+        assert!(shown.state().is_member(&xavi.key()));
+        assert!(shown.current_keys(&xavi.id).is_some());
+        assert!(!shown.admits_as_invited(&ticket, &xavi.key()));
+    }
+
+    // The issuer adding the device, knowing of the invite, is one way in it allows.
+    let mut by_ana = log.clone();
+    by_ana.add(&ana.id, xavi.key(), "xavi", 8).unwrap();
+    assert!(by_ana.admits_as_invited(&ticket, &xavi.key()));
+
+    // One the issuer added before the invite, and who left since, is no member by it: a
+    // copy that leaves out its `Leave` shows it in still.
+    let (mut log, ana, _bea, _carlos) = at_level_three();
+    log.add(&ana.id, xavi.key(), "xavi", 6).unwrap();
+    let mut left = log.clone();
+    left.append(&xavi.id, Body::Leave, 7).unwrap();
+    let (ticket, _) = log.invite(&ana.id, 10_000, 7).unwrap();
+    assert!(log.state().is_member(&xavi.key()));
+    assert!(!log.admits_as_invited(&ticket, &xavi.key()));
+    sync(&left, &mut log);
+    assert!(log.admits_as_invited(&ticket, &xavi.key()));
+}
+
 /// From level three a `Rotate` gives the new key to every member its author saw: one that
 /// leaves members out is not kept, whoever wrote it (at level two, a member that does not
 /// manage could start an epoch for itself alone once someone gone held the key, and leave

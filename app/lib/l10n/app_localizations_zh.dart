@@ -617,6 +617,11 @@ class L10nZh extends L10n {
       '你在这台电脑上的好友列表已损坏，已从上次更改前的备份中恢复。在那之前刚添加或移除的好友可能需要重新添加或移除。';
 
   @override
+  String appFilesRefused(String folder) {
+    return '这台电脑上的部分Fogata文件在本应加密保存的位置以未加密形式出现，因此没有被使用。没有删除任何内容：它们保存在 $folder。';
+  }
+
+  @override
   String appInvitationRanOut(String group) {
     return '在群组中有人同意你加入之前，“$group”的邀请已过期。请向对方要一个新的。';
   }
@@ -4206,6 +4211,21 @@ class L10nZh extends L10n {
       '不加密时，任何复制这台电脑文件的人都能读取它们。设置中会一直提示这一点；Fogata首次能使用钥匙串打开时，会把所有内容加密。';
 
   @override
+  String get welcomeProfileKeptTitle => '无法读取你的个人资料';
+
+  @override
+  String welcomeProfileKeptText(String folder) {
+    return '无法读取在这台电脑上创建的个人资料和好友，因此Fogata会像全新一样打开。没有删除任何内容：这些文件保存在 $folder。';
+  }
+
+  @override
+  String get welcomeProfileKeptConfirm =>
+      '新的个人资料将从没有好友开始。旧个人资料的文件会保留在原处，Fogata不会使用它们。';
+
+  @override
+  String get welcomeProfileKeptMake => '创建新的个人资料';
+
+  @override
   String get welcomeWriteName => '请输入你的名字。';
 
   @override
@@ -6086,5 +6106,23 @@ class L10nZh extends L10n {
       one: '一个隐藏或私密的文件未被添加：网页也能发起拖动，所以这类文件不能通过拖动添加。要发送它，请用 + 按钮选择。',
     );
     return '$_temp0';
+  }
+
+  @override
+  String appMustUpdateToJoin(String name, String group) {
+    return '$name需要先更新Fogata，才能加入“$group”。更新后即可照常加入。';
+  }
+
+  @override
+  String appUpdateToJoin(String group) {
+    return '“$group”需要更新版本的Fogata。请更新Fogata后加入。';
+  }
+
+  @override
+  String get errMustUpdateToJoin => '你的朋友需要先更新Fogata，才能加入这个群组。';
+
+  @override
+  String groupSettingsLevelWaiting(String names) {
+    return '这个群组正在等待开启更强的保护。所有人都更新Fogata后会自动开启。尚未更新：$names';
   }
 }

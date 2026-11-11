@@ -650,8 +650,10 @@ impl GroupState {
     }
 
     /// The entries that demoted, removed or had leave a member that managed the group just
-    /// before, with that member.
-    pub(crate) fn manager_losses(&self) -> impl Iterator<Item = (&DevicePublicKey, &EntryHash)> {
+    /// before, with that member and who managed the group then.
+    pub(crate) fn manager_losses(
+        &self,
+    ) -> impl Iterator<Item = (&DevicePublicKey, &EntryHash, Managers)> {
         self.losses.iter().flat_map(|(device, losses)| {
             losses
                 .iter()
@@ -661,7 +663,7 @@ impl GroupState {
                         .position(|k| k == device)
                         .is_some_and(|rank| l.managers.include(rank))
                 })
-                .map(move |l| (device, &l.entry))
+                .map(move |l| (device, &l.entry, l.managers))
         })
     }
 

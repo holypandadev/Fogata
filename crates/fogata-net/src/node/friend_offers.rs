@@ -14,7 +14,7 @@ use fogata_state::{Body, Entry, EntryHash, GroupLog};
 use libp2p::PeerId;
 
 use super::{
-    Node,
+    BehindTold, Node,
     friends::{FriendContext, FriendPending},
     judging,
     limits::Sender,
@@ -186,26 +186,51 @@ impl Node {
     /// the group yet. A long log goes in parts of at most `SYNC_BYTES`, each sent once the
     /// one before arrived, so that each arrives within a request's time also over a slow
     /// link.
+    ///
+    /// A friend whose copy is known not to judge at the group's level is not sent it: it
+    /// would refuse the log from the entry that raised the group on (see
+    /// `joins::judges_level`). Its manager is told, once, that it must update; it gets the
+    /// group once it has.
     pub(super) fn share_group(&mut self) {
         let Some(f) = self.friends.as_mut() else {
             return;
         };
         let mut due: Vec<(PeerId, GroupId, Vec<serde_bytes::ByteBuf>)> = Vec::new();
         let mut long: Vec<(PeerId, GroupId)> = Vec::new();
+        let mut behind: Vec<(GroupId, DevicePublicKey, String)> = Vec::new();
+        let advertised = self.advertised.clone();
+        let advertised = crate::locked(&advertised);
         for (group, slot) in &self.groups {
             if !slot.ctx.i_am_member() || slot.call || slot.direct {
                 continue;
             }
-            let peers: Vec<PeerId> = f
-                .online
-                .iter()
-                .filter(|(peer, device)| {
-                    slot.ctx.is_member_device(device)
-                        && !slot.members.contains(peer)
-                        && !f.group_shared.contains(&(**peer, *group))
-                })
-                .map(|(peer, _)| *peer)
-                .collect();
+            let level = slot.ctx.log().level();
+            let mut peers: Vec<PeerId> = Vec::new();
+            for (peer, device) in &f.online {
+                if !slot.ctx.is_member_device(device)
+                    || slot.members.contains(peer)
+                    || f.group_shared.contains(&(*peer, *group))
+                {
+                    continue;
+                }
+                let listed = advertised
+                    .get(peer)
+                    .filter(|protocols| !protocols.is_empty())
+                    .map(crate::caps::level_listed);
+                match super::joins::judges_level(level, listed) {
+                    // Not known: sent as before.
+                    Some(true) | None => peers.push(*peer),
+                    Some(false)
+                        if slot.ctx.i_am_manager()
+                            && !slot.behind_told.contains(&BehindTold::Friend(*device)) =>
+                    {
+                        let state = slot.ctx.log().state();
+                        let name = state.members.get(device).map(|m| m.name.clone());
+                        behind.push((*group, *device, name.unwrap_or_default()));
+                    }
+                    Some(false) => {}
+                }
+            }
             if peers.is_empty() {
                 continue;
             }
@@ -234,6 +259,7 @@ impl Node {
                 }
             }
         }
+        drop(advertised);
         for (peer, _, entries) in due {
             self.friend_request(
                 peer,
@@ -247,6 +273,9 @@ impl Node {
         }
         for (peer, group) in long {
             self.send_offered_part(peer, group);
+        }
+        for (group, device, name) in behind {
+            self.tell_behind(group, BehindTold::Friend(device), device, name);
         }
     }
 
@@ -497,6 +526,73 @@ mod offer_tests {
 
     fn friend() -> DevicePublicKey {
         DeviceIdentity::generate().unwrap().public_key()
+    }
+
+    /// A friend added to a group that went up a level, whose copy does not judge at it, is
+    /// not sent the group (it would refuse it from the raise on); its manager is told once,
+    /// and the friend gets the group once it has updated.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_friend_below_the_group_s_level_is_not_sent_it_and_its_manager_is_told() {
+        use std::{collections::HashSet, sync::Arc};
+
+        use fogata_state::{GroupLog, Level};
+        use libp2p::PeerId;
+
+        use crate::{
+            NodeConfig, NodeEvent, caps,
+            group::GroupSetup,
+            node::{start, tests::inspect},
+        };
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = friend();
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.raise_level(&ana, Level::Three, 2).unwrap();
+        log.add(&ana, bea, "Bea", 3).unwrap();
+        let group = log.group_id();
+        let book = FriendBook::new(&ana, "Ana", 1).unwrap();
+        let (node, mut events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: Some(book),
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let (before, after) = inspect(&node, move |n| {
+            let peer = PeerId::random();
+            n.friends.as_mut().unwrap().online.insert(peer, bea);
+            let shared = |n: &mut super::Node, level: u32| {
+                crate::locked(&n.advertised)
+                    .insert(peer, HashSet::from([caps::caps_protocol(level)]));
+                n.share_group();
+                n.share_group();
+                let f = n.friends.as_ref().unwrap();
+                f.group_shared.contains(&(peer, group))
+            };
+            (shared(n, 2), shared(n, caps::CAPS_LEVEL))
+        })
+        .await;
+        assert!(!before, "not sent to the previous version");
+        assert!(after, "sent once updated");
+        let mut told = 0;
+        while let Ok(event) = events.try_recv() {
+            if let NodeEvent::MustUpdateToJoin {
+                group: g,
+                device,
+                name,
+            } = event
+            {
+                assert_eq!((g, device, name.as_str()), (group, bea, "Bea"));
+                told += 1;
+            }
+        }
+        assert_eq!(told, 1);
     }
 
     /// The first `parts` parts, of 1 MiB each, of a log of 64 parts from `by`; how many

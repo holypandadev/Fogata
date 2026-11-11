@@ -3,7 +3,8 @@
 #
 #   source   the commit to build: the run's own (github.sha), which is the commit GitHub's
 #            attestations name; by hand the commit given must be it, and on a tag the tag
-#            must be v<THIS_VERSION>.
+#            must be v<THIS_VERSION>. And the team pinned into the macOS updater, first, so
+#            that a run without one stops before anything is built.
 #   linux    `flutter build linux --release`, the bundle zipped with its links and modes.
 #   windows  `flutter build windows --release`, the contents of runner\Release zipped.
 #   macos    `flutter build macos --release` (universal) and the updater helper
@@ -52,7 +53,24 @@ jobs:
   source:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      macos_team: ${{ steps.team.outputs.team }}
     steps:
+      # The updater helper is built with the team that must sign every new version pinned
+      # into it (tools/beta/macos-updater.sh --team), and tools/sign-macos.sh refuses to sign
+      # it with another team. The team id is no secret (every signature names it). Checked
+      # first, so that a run without it (a tag push takes it only from the repository
+      # variable) stops in seconds rather than after Linux and Windows have built.
+      - name: Check the team
+        id: team
+        env:
+          TEAM: ${{ inputs.macos_team || vars.FOGATA_MACOS_TEAM }}
+        run: |
+          [[ $TEAM =~ ^[A-Z0-9]{10}$ ]] || {
+            echo "::error::no team id for the macOS updater: give macos_team, or set the repository variable FOGATA_MACOS_TEAM (a tag push can only take it from there)"
+            exit 1
+          }
+          echo "team=$TEAM" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -215,19 +233,6 @@ jobs:
         with:
           persist-credentials: false
 
-      # The updater helper is built with the team that must sign every new version pinned
-      # into it (tools/beta/macos-updater.sh --team), and tools/sign-macos.sh refuses to sign
-      # it with another team. The team id is no secret (every signature names it).
-      - name: Check the team
-        env:
-          TEAM: ${{ inputs.macos_team || vars.FOGATA_MACOS_TEAM }}
-        run: |
-          [[ $TEAM =~ ^[A-Z0-9]{10}$ ]] || {
-            echo "::error::no team id for the macOS updater: give macos_team, or set the repository variable FOGATA_MACOS_TEAM"
-            exit 1
-          }
-          echo "FOGATA_MACOS_TEAM=$TEAM" >> "$GITHUB_ENV"
-
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
@@ -250,6 +255,9 @@ jobs:
       # Signed by Xcode to run here only (ad hoc); tools/sign-macos.sh signs every part again
       # with the release identity on the Mac.
       - name: Build the application and the updater
+        env:
+          # Checked by the source job.
+          FOGATA_MACOS_TEAM: ${{ needs.source.outputs.macos_team }}
         run: |
           (cd app && flutter pub get && flutter build macos --release)
           tools/beta/macos-updater.sh --team "$FOGATA_MACOS_TEAM"

@@ -631,6 +631,11 @@ class L10nJa extends L10n {
       'このパソコンのフレンドリストが破損していたため、最後の変更前に作成されたコピーから復元しました。直前に追加または削除したフレンドは、もう一度追加または削除が必要な場合があります。';
 
   @override
+  String appFilesRefused(String folder) {
+    return 'このパソコンにあるFogataのファイルの一部が、暗号化して保存される場所に暗号化されずに置かれていたため、使用しませんでした。何も削除していません：$folder に保管されています。';
+  }
+
+  @override
   String appInvitationRanOut(String group) {
     return 'グループの誰かが承認する前に、「$group」への招待の有効期限が切れました。新しい招待をもらってください。';
   }
@@ -4270,6 +4275,21 @@ class L10nJa extends L10n {
       '暗号化しないと、このパソコンのファイルをコピーした人は誰でも読めます。設定にはその旨が表示され続け、キーチェーンが使える状態で初めて開いたときに、Fogataがすべて暗号化します。';
 
   @override
+  String get welcomeProfileKeptTitle => 'プロフィールを読み込めませんでした';
+
+  @override
+  String welcomeProfileKeptText(String folder) {
+    return 'このパソコンで作成したプロフィールとフレンドを読み込めなかったため、Fogataは新規のように開きます。何も削除していません：ファイルは $folder に保管されています。';
+  }
+
+  @override
+  String get welcomeProfileKeptConfirm =>
+      '新しいプロフィールはフレンドがいない状態から始まります。以前のプロフィールのファイルはそのまま残り、Fogataでは使用しません。';
+
+  @override
+  String get welcomeProfileKeptMake => '新しいプロフィールを作成';
+
+  @override
   String get welcomeWriteName => '名前を入力してください。';
 
   @override
@@ -6176,5 +6196,23 @@ class L10nJa extends L10n {
       one: '隠しファイルまたは非公開のファイルを追加しませんでした。Webページがドラッグを始めることもあるため、このようなファイルはドラッグでは追加されません。送るには、+ボタンで選んでください。',
     );
     return '$_temp0';
+  }
+
+  @override
+  String appMustUpdateToJoin(String name, String group) {
+    return '$nameさんが「$group」に参加するには、Fogataのアップデートが必要です。アップデート後はいつもどおり参加できます。';
+  }
+
+  @override
+  String appUpdateToJoin(String group) {
+    return '「$group」には新しいバージョンのFogataが必要です。参加するにはFogataをアップデートしてください。';
+  }
+
+  @override
+  String get errMustUpdateToJoin => 'この友だちがこのグループに参加するには、Fogataのアップデートが必要です。';
+
+  @override
+  String groupSettingsLevelWaiting(String names) {
+    return 'このグループは、より強い保護をオンにするのを待っています。全員がFogataをアップデートすると自動でオンになります。まだアップデートしていない人：$names';
   }
 }

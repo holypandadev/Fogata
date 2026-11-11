@@ -97,15 +97,20 @@ endif()
 
 
 # Fogata: screen capture through the xdg-desktop-portal and PipeWire, used under
-# Wayland. Without the PipeWire headers the plugin builds and keeps libwebrtc's own.
+# Wayland; a shared screen's sound and the silent input that keeps the microphone closed
+# while it is off come with it. Without the PipeWire headers a debug build keeps
+# libwebrtc's own capture; a release or profile build stops, as for libpulse above: it
+# would pass every other check and go out without all three.
 if(PkgConfig_FOUND)
   pkg_check_modules(PORTAL_CAPTURE IMPORTED_TARGET libpipewire-0.3 gio-2.0 gio-unix-2.0)
 endif()
 if(TARGET PkgConfig::PORTAL_CAPTURE)
   target_compile_definitions(${PLUGIN_NAME} PRIVATE HAVE_PIPEWIRE)
   target_link_libraries(${PLUGIN_NAME} PRIVATE PkgConfig::PORTAL_CAPTURE)
+elseif(CMAKE_BUILD_TYPE STREQUAL "Debug")
+  message(WARNING "flutter_webrtc: libpipewire-0.3 NOT found -- screen capture under Wayland uses libwebrtc's own, with no screen sound and no silent input (debug build only). Install the PipeWire dev package.")
 else()
-  message(WARNING "flutter_webrtc: libpipewire-0.3 NOT found -- screen capture under Wayland uses libwebrtc's own.")
+  message(FATAL_ERROR "flutter_webrtc: libpipewire-0.3 NOT found. Fogata's release and profile builds need its dev package (libpipewire-0.3-dev): without it the application has no screen capture under Wayland, no screen sound and no silent input.")
 endif()
 
 target_link_libraries(${PLUGIN_NAME} PRIVATE 

@@ -423,7 +423,7 @@ class Call extends ChangeNotifier {
     if (_closed) return;
     await suppressNoise(noiseSuppression);
     if (output != null) await _select(output, Helper.selectAudioOutput);
-    if (input != null) await _select(input, Helper.selectAudioInput);
+    await _chooseInput();
     if (mic && !_closed) await _openMic();
     if (camera && !_closed) await _openCamera();
     if (_closed) return;
@@ -444,6 +444,21 @@ class Call extends ChangeNotifier {
     unawaited(_readDevices());
     notifyListeners();
   });
+
+  /// Chooses the input the call records from. Where a silent input can be made (Linux),
+  /// the system's default is chosen too, by its own id: WebRTC keeps the input it was
+  /// last given from one call to the next, and that may be a silent input left by a call
+  /// that ended as it was being chosen; recording from it, every call after would send
+  /// only silence, and nothing would notice. Elsewhere the voice engine starts with the
+  /// system's default itself.
+  Future<void> _chooseInput() async {
+    final id = input ?? (_silentInputs ? await _first('audioinput') : null);
+    await _select(id, Helper.selectAudioInput);
+  }
+
+  /// Chooses the input as [start] does, for tests.
+  @visibleForTesting
+  Future<void> chooseInputForTests() => _chooseInput();
 
   Future<void> _prepareRenderers() async {
     await localCamera.initialize();
@@ -585,6 +600,10 @@ class Call extends ChangeNotifier {
 
   /// WebRTC records from the silent input, not the microphone.
   bool _silent = false;
+
+  /// The changes of input between the silent one and the microphone, one after the other
+  /// ([_inputTurn]).
+  Future<void> _inputs = Future.value();
 
   bool get _wantSilence =>
       _silentInputs &&
@@ -749,6 +768,11 @@ class Call extends ChangeNotifier {
       if (want && !_ownSound) {
         _soundOf = window;
         _ownSound = await _takeSound(true, window: window);
+        // The call ended while it started: [_stop] found nothing to stop then.
+        if (_ownSound && _closed) {
+          _ownSound = false;
+          await _takeSound(false);
+        }
       } else if (!want && _ownSound) {
         _ownSound = false;
         await _takeSound(false);

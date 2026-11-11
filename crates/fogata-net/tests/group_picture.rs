@@ -225,12 +225,14 @@ async fn a_picture_set_with_an_entry_goes_with_one_entry_without_a_picture() {
         l.picture() == Some(png(500, 5))
     })
     .await;
-    // One entry more in all, with no picture.
+    // One entry more in all, with no picture. A manager may also have raised the group's
+    // level once every copy judged at it (`raise_level_when_all_judge`): that entry is no
+    // picture's, and whether it came depends on when the heartbeat fell.
     let b = node_b.group(group).await.unwrap().unwrap();
-    assert_eq!(b.len(), log.len() + 1);
     let added: Vec<_> = b
         .entries()
         .filter(|e| log.get(&e.hash()).is_none())
+        .filter(|e| !matches!(e.body, Body::Level { .. }))
         .collect();
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].body, Body::SetPicture { picture: None });

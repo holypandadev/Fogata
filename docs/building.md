@@ -13,8 +13,12 @@ The binary is `target/release/fogata`.
 
 ## The desktop application
 
-Requires Flutter 3.47 or newer and, on Linux, the GTK 3 development files, clang, cmake and
-ninja. On macOS a release build is universal (Apple silicon and Intel), so the Rust that
+Requires Flutter 3.47 or newer (releases are built with the exact version the workflows
+name, `FLUTTER_VERSION` in `.github/workflows`) and, on Linux, clang, cmake, ninja and the
+development files of GTK 3, PulseAudio, PipeWire, ALSA and liblzma (on Ubuntu:
+`libgtk-3-dev libpulse-dev libpipewire-0.3-dev libasound2-dev liblzma-dev`). A release or
+profile build stops without PulseAudio's or PipeWire's: it would have no watch on the sound
+server, or no screen capture under Wayland, no screen sound and no silent input. On macOS a release build is universal (Apple silicon and Intel), so the Rust that
 `rust-toolchain.toml` names (1.99.1) needs both Mac targets, added once: its `minimal`
 profile brings only the Mac's own.
 

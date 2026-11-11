@@ -263,7 +263,7 @@ class _Video extends StatelessWidget {
     final here = file.state == UiFileState.here && file.path != null;
     final coming = file.state == UiFileState.coming;
     final dpr = MediaQuery.devicePixelRatioOf(context);
-    final length = videoLength(video.durationMs);
+    final length = videoLength(video.lengthMs);
     return _Hovered(
       builder: (hovered) => Pressable(
         key: ValueKey('direct-video:${file.id}'),

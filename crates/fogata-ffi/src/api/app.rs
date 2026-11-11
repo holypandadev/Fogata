@@ -183,6 +183,13 @@ pub fn has_profile(data_dir: String) -> Result<bool> {
     Core::has_profile(Path::new(&data_dir))
 }
 
+/// While the data folder has no profile: the folder where the profile and friends made in it
+/// were kept when they could not be read or were refused, if they were. The welcome screen
+/// says so, rather than look like a new device's.
+pub fn kept_profile(data_dir: String) -> Result<Option<String>> {
+    Ok(Core::kept_profile(Path::new(&data_dir))?.map(|p| p.to_string_lossy().into_owned()))
+}
+
 /// The data folder's secrets are sealed with a key the system keychain keeps. Copies run
 /// for tests set `FOGATA_SEAL=off`: their folders stay plain, so they put nothing in the
 /// keychain, while a sealed folder still opens. Debug builds only: in a release build

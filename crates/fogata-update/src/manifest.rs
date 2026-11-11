@@ -456,6 +456,23 @@ mod tests {
         }
     }
 
+    /// The universal Mac app: one package, listed under the platform of each kind of Mac
+    /// (tools/beta/release.py), which every copy since the first beta takes.
+    #[test]
+    fn one_package_may_serve_two_platforms() {
+        let key = DeviceIdentity::generate().unwrap();
+        let trusted = [ReleaseKey::release(*key.public_key().as_bytes())];
+        let mut m = manifest(5, b"package");
+        let mac = Artifact::of("Fogata-0.1.5-beta-macos-universal.pack", b"universal app");
+        m.artifacts.insert("macos-arm64".into(), mac.clone());
+        m.artifacts.insert("macos-x64".into(), mac.clone());
+        let signed = Signed::sign(&m, &key).unwrap();
+        let read = signed.verify(&trusted).unwrap();
+        assert_eq!(read.artifacts["macos-arm64"], mac);
+        assert_eq!(read.artifacts["macos-x64"], mac);
+        assert!(crate::PLATFORMS.contains(&"macos-x64"));
+    }
+
     #[test]
     fn a_signed_release_verifies_with_its_key_only() {
         let key = DeviceIdentity::generate().unwrap();

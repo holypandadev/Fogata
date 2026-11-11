@@ -184,6 +184,8 @@ fn weight(event: &CoreEvent) -> usize {
         | CoreEvent::JoinAsked { name, .. }
         | CoreEvent::JoinWaiting { name, .. }
         | CoreEvent::JoinDeclined { name, .. }
+        | CoreEvent::MustUpdateToJoin { name, .. }
+        | CoreEvent::UpdateToJoin { name, .. }
         | CoreEvent::GroupInvited { name, .. } => name.len(),
         CoreEvent::InvitationDeclined { name, who, .. } => name.len() + who.len(),
         _ => 0,

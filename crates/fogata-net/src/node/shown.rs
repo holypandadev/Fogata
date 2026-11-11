@@ -59,6 +59,16 @@ impl Node {
             .map(caps::level_listed)
     }
 
+    /// The capability level `peer` lists, once it shows this device Fogata's protocols at
+    /// all: a device shows them only to the peers it chose to reach and to those that proved
+    /// something, and one that shows none here says nothing of its version.
+    pub(super) fn shown_level(&self, peer: &PeerId) -> Option<u32> {
+        crate::locked(&self.advertised)
+            .get(peer)
+            .filter(|protocols| !protocols.is_empty())
+            .map(caps::level_listed)
+    }
+
     /// Raises the capability level remembered for the device of `peer` to the one it says
     /// now, once both are known: the device from a proof of membership or from a friend's
     /// session, the level from identify. Only ever raised (see caps.rs).

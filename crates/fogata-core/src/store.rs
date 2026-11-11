@@ -674,14 +674,63 @@ impl Store {
     }
 
     /// Whether a profile was made on this device. A sealed friends file is not opened, so the
-    /// keychain is not asked for its key here.
+    /// keychain is not asked for its key here; it is in a folder that has a key and where
+    /// the friends file is plain or refused, as looking for the key decides whether that is
+    /// the account's own (and takes it back from [`REFUSED_DIR`] when it is).
     pub fn has_profile(&self) -> Result<bool> {
+        let keyed = || vault::key_name(&self.dir).is_some();
         match fs::read(self.friends_path()) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                if !(keyed() && self.friends_refused().is_some()) {
+                    return Ok(false);
+                }
+                self.data_key()?;
+                Ok(fs::symlink_metadata(self.friends_path()).is_ok())
+            }
             Ok(bytes) if sealed_form(&bytes).is_some() => Ok(true),
-            Ok(bytes) if FriendBook::decode(&bytes).is_ok() => Ok(true),
+            Ok(bytes) if !keyed() && FriendBook::decode(&bytes).is_ok() => Ok(true),
             _ => Ok(self.friends()?.is_some()),
         }
+    }
+
+    /// A friends file (or its copy) that sealing refused and moved to [`REFUSED_DIR`].
+    fn friends_refused(&self) -> Option<PathBuf> {
+        let mut names: Vec<_> = fs::read_dir(self.dir.join(REFUSED_DIR))
+            .ok()?
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .is_some_and(|n| n.to_string_lossy().starts_with("friends.bin"))
+            })
+            .collect();
+        names.sort();
+        names.into_iter().next()
+    }
+
+    /// Where the profile and friends made on this device were kept when they could not be
+    /// used, while the folder has no friends file: refused by sealing ([`REFUSED_DIR`]), or
+    /// in the folder itself, damaged with their copy (set aside as `friends.bin.damaged`)
+    /// or left as a copy alone. Never deleted: the start screen says where they are, rather
+    /// than look like a new device.
+    pub fn friends_kept(&self) -> Option<PathBuf> {
+        if fs::symlink_metadata(self.friends_path()).is_ok() {
+            return None;
+        }
+        if self.friends_refused().is_some() {
+            return Some(self.dir.join(REFUSED_DIR));
+        }
+        let kept = fs::read_dir(&self.dir).ok()?.flatten().any(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            name.starts_with("friends.bin.") && !is_temp_name(&name)
+        });
+        kept.then(|| self.dir.clone())
+    }
+
+    /// Whether sealing refused plain files in this folder that are still kept in
+    /// [`REFUSED_DIR`].
+    pub fn holds_refused(&self) -> bool {
+        fs::read_dir(self.dir.join(REFUSED_DIR)).is_ok_and(|mut d| d.next().is_some())
     }
 
     /// Profile and friends, if a profile was made on this device.
@@ -725,6 +774,15 @@ impl Store {
             .and_then(|bytes| Some((decode_book(key, &bytes).ok()?, bytes)));
         let Some((book, bytes)) = copy else {
             fs::rename(&path, &aside).with_context(cannot_put_aside)?;
+            // Its copy goes aside too: the first profile made next would write its own copy
+            // over it.
+            let copy = self.friends_copy_path();
+            if fs::symlink_metadata(&copy).is_ok() {
+                let copy_aside = aside_path(&path);
+                if let Err(e) = fs::rename(&copy, &copy_aside) {
+                    tracing::warn!("cannot put {} aside: {e}", copy.display());
+                }
+            }
             tracing::error!(
                 "{} could not be read ({damage:#}) and its copy neither: it is kept as {}, \
                  and this device goes on without a profile",
@@ -776,8 +834,16 @@ impl Store {
                 }
                 _ => {}
             },
-            // The first profile is its own copy.
-            Err(_) => write_private(&self.friends_copy_path(), &new_on_disk)?,
+            // The first profile is its own copy; one left by a profile that could not be
+            // read is set aside rather than written over.
+            Err(_) => {
+                let copy = self.friends_copy_path();
+                if fs::symlink_metadata(&copy).is_ok() {
+                    fs::rename(&copy, aside_path(&path))
+                        .with_context(|| format!("cannot put {} aside", copy.display()))?;
+                }
+                write_private(&copy, &new_on_disk)?
+            }
         }
         write_private(&path, &new_on_disk)
     }

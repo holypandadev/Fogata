@@ -228,7 +228,11 @@ class _Tile extends StatelessWidget {
                     style: tx(const Color(0xFFEDEDED), size: 12, weight: w500),
                   ),
                   const SizedBox(width: 8),
-                  SpeakingBars(color: c.green),
+                  // A few seconds of a voice, then still: the page may show a long time.
+                  SpeakingBars(
+                    color: c.green,
+                    lasts: const Duration(seconds: 4),
+                  ),
                 ],
               ),
             ),
@@ -508,6 +512,97 @@ Future<bool?> _chooseHowDataIsKept(BuildContext context, String dataDir) async {
   return false;
 }
 
+/// Asks before a new profile is made while the one this computer had is kept unread:
+/// whether to make it.
+Future<bool?> _confirmNewProfile(BuildContext context) {
+  final c = context.fg;
+  return showFgDialog<bool>(
+    context,
+    builder: (dialog) => Column(
+      key: const ValueKey('profile-kept-confirm'),
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                l10n.welcomeProfileKeptTitle,
+                style: tx(
+                  c.fg,
+                  size: 20,
+                  weight: w600,
+                  height: 1.3,
+                  spacing: -.4,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                l10n.welcomeProfileKeptConfirm,
+                style: tx(c.fg2, height: 1.45),
+              ),
+            ],
+          ),
+        ),
+        Footer(
+          children: [
+            const Spacer(),
+            FgButton(
+              text: l10n.commonCancel,
+              kind: Kind.secondary,
+              onTap: () => Navigator.of(dialog).pop(false),
+            ),
+            const SizedBox(width: 10),
+            FgButton(
+              key: const ValueKey('profile-kept-make'),
+              text: l10n.welcomeProfileKeptMake,
+              onTap: () => Navigator.of(dialog).pop(true),
+            ),
+          ],
+        ),
+      ],
+    ),
+  );
+}
+
+/// Above the card, while the profile this computer had could not be read: that it was
+/// kept, where, and that nothing was deleted.
+class _KeptNote extends StatelessWidget {
+  const _KeptNote({required this.folder});
+  final String folder;
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.fg;
+    return Container(
+      key: const ValueKey('profile-kept'),
+      width: 420,
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
+      decoration: BoxDecoration(
+        color: c.bg1,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: c.red),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            l10n.welcomeProfileKeptTitle,
+            style: tx(c.fg, size: 14, weight: w600),
+          ),
+          const SizedBox(height: 4),
+          SelectableText(
+            l10n.welcomeProfileKeptText(folder),
+            style: tx(c.fg2, size: 13, height: 1.45),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 enum _Making { empty, ready, busy, done }
 
 /// Making the identity: a name and a picture, previewed as the others will see them, and
@@ -616,6 +711,13 @@ class _IdentityCardState extends State<_IdentityCard> {
       setState(() => _error = l10n.welcomeWriteName);
       return;
     }
+    // The profile this computer had is kept, unread: made only once the person knows.
+    if (state.keptProfile != null) {
+      _busy = true;
+      final make = await _confirmNewProfile(context);
+      _busy = false;
+      if (make != true || !mounted) return;
+    }
     setState(() {
       _busy = true;
       _error = null;
@@ -627,6 +729,7 @@ class _IdentityCardState extends State<_IdentityCard> {
         preset: _preset,
         photo: _photo,
       );
+      state.keptProfile = null;
       if (mounted) {
         setState(() {
           _busy = false;
@@ -664,9 +767,14 @@ class _IdentityCardState extends State<_IdentityCard> {
     // Tighter in a short window, so the link under the card stays in view.
     final short = MediaQuery.sizeOf(context).height < 720;
     final gap = short ? 14.0 : 22.0;
+    final kept = AppScope.of(context).keptProfile;
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
+        if (kept != null) ...[
+          _KeptNote(folder: kept),
+          SizedBox(height: short ? 12 : 16),
+        ],
         Container(
           width: 420,
           padding: EdgeInsets.fromLTRB(

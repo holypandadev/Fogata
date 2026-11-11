@@ -31,7 +31,8 @@ use crate::{
 pub(crate) type VerifiedPeers = Arc<Mutex<HashSet<PeerId>>>;
 
 /// Peers this device lists Fogata's own protocols to in identify, besides those it wants
-/// (see [`Behaviour::new`]): those that proved they are members or friends, while connected.
+/// (see [`Behaviour::new`]): those that proved they are members or friends, and those a
+/// joining device shows its invite to, while connected.
 pub(crate) type ShownPeers = Arc<Mutex<HashSet<PeerId>>>;
 
 /// The beginning of the names of Fogata's own protocols.
@@ -252,6 +253,12 @@ impl relay::RateLimiter for CircuitBudget {
 /// defaults: 2 minutes, 128 KiB). libp2p's relay asks nothing about a circuit's other end
 /// beyond it holding a reservation here, which only verified members get: a circuit between
 /// members of two different groups of this device's is not told apart.
+///
+/// The library asks its limiters in order and stops at the first that says no, and every
+/// limiter but the first is charged for the request: the "verified" check comes first, so
+/// strangers, under as many made-up peer ids as they like, never take a place in the budgets
+/// kept per source (per peer, per address, [`CircuitBudget`]'s bounded table) that members
+/// need.
 fn relay_config(bridge: bool, verified: VerifiedPeers) -> relay::Config {
     let mut config = relay::Config {
         max_reservations: 32,
@@ -269,12 +276,16 @@ fn relay_config(bridge: bool, verified: VerifiedPeers) -> relay::Config {
             .push(Box::new(CircuitBudget::default()));
     }
     let for_reservations = verified.clone();
-    config.reservation_rate_limiters.push(Box::new(
-        move |peer: PeerId, _: &libp2p::Multiaddr, _| is_verified(&for_reservations, &peer),
-    ));
-    config.circuit_src_rate_limiters.push(Box::new(
-        move |peer: PeerId, _: &libp2p::Multiaddr, _| is_verified(&verified, &peer),
-    ));
+    config.reservation_rate_limiters.insert(
+        0,
+        Box::new(move |peer: PeerId, _: &libp2p::Multiaddr, _| {
+            is_verified(&for_reservations, &peer)
+        }),
+    );
+    config.circuit_src_rate_limiters.insert(
+        0,
+        Box::new(move |peer: PeerId, _: &libp2p::Multiaddr, _| is_verified(&verified, &peer)),
+    );
     config
 }
 
@@ -377,6 +388,58 @@ mod tests {
             budget.try_next(PeerId::random(), &at, start);
         }
         assert!(budget.sources.len() <= BRIDGE_SOURCES_KEPT);
+    }
+
+    /// What libp2p's relay does with its limiters for each request: asks them in order and
+    /// stops at the first that says no.
+    fn let_through(
+        limiters: &mut [Box<dyn relay::RateLimiter>],
+        peer: PeerId,
+        at: &Multiaddr,
+        now: Instant,
+    ) -> bool {
+        limiters
+            .iter_mut()
+            .all(|limiter| limiter.try_next(peer, at, now))
+    }
+
+    /// Strangers asking for circuits and slots under made-up peer ids, from the very address
+    /// a member uses, take no place a member needs: the member still gets through.
+    #[test]
+    fn strangers_filling_the_relay_do_not_keep_a_member_out() {
+        let verified: VerifiedPeers = Arc::default();
+        let member = PeerId::random();
+        crate::locked(&verified).insert(member);
+        let mut config = relay_config(true, verified);
+        let at: Multiaddr = "/ip4/192.0.2.1/udp/4001/quic-v1".parse().unwrap();
+        let now = Instant::now();
+        for _ in 0..1000 {
+            let stranger = PeerId::random();
+            assert!(!let_through(
+                &mut config.circuit_src_rate_limiters,
+                stranger,
+                &at,
+                now
+            ));
+            assert!(!let_through(
+                &mut config.reservation_rate_limiters,
+                stranger,
+                &at,
+                now
+            ));
+        }
+        assert!(let_through(
+            &mut config.circuit_src_rate_limiters,
+            member,
+            &at,
+            now
+        ));
+        assert!(let_through(
+            &mut config.reservation_rate_limiters,
+            member,
+            &at,
+            now
+        ));
     }
 
     fn round_trip(request: MemberRequest) -> std::io::Result<MemberRequest> {

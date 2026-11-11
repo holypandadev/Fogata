@@ -442,7 +442,7 @@ fn export_in(
     let key = store.data_key()?;
     let device = hex::encode(store.identity()?.0.public_key().as_bytes());
     let name = store.require_friends()?.profile.name;
-    let items: Vec<Item> = files::list(dir)?
+    let items: Vec<Item> = files::leave_out_unreadable(dir, files::list(dir)?, key.as_ref())
         .into_iter()
         .filter(|i| attachments || !is_attachment(&i.rel))
         .collect();

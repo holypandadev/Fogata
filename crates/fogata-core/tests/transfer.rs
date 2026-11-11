@@ -884,6 +884,68 @@ fn moved_in_days_ago(dir: &Path, days: u64) {
 /// it (which stays "moving"), or after (which stopped for good, and its word that it did is
 /// lost). The new computer keeps the move's secret for a week, to finish the move with an
 /// old computer still waiting, and forgets it at the first start after that.
+/// A friends file set aside as damaged keeps what it was sealed for (`friends`), both ways it
+/// gets there: one that opens but does not read, and a copy left alone that a first profile
+/// sets aside. The account moves whole with them, each sealed on the new computer as a
+/// damaged copy holding what it held; one damaged in its box too stays behind, said in the
+/// log, rather than stop the move.
+#[tokio::test(flavor = "multi_thread")]
+async fn friends_files_set_aside_as_damaged_move_with_the_account() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    keys();
+    let base = base("damaged-friends");
+    let dir_old = alone(&base, "Ana");
+    let (opened, copied) = {
+        let store = Store::open(dir_old.clone()).unwrap();
+        let key = store.data_key().unwrap().unwrap();
+        let (me, _) = store.identity().unwrap();
+        // Sealed for `friends`, and not a friends file inside: put aside, the copy used.
+        let unreadable = b"not a friends file".to_vec();
+        std::fs::write(
+            dir_old.join("friends.bin"),
+            key.seal_whole("friends", &unreadable).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(store.friends().unwrap().unwrap().profile.name, "Ana");
+        // The copy left without the file: a first profile sets it aside.
+        let copy = store.friends().unwrap().unwrap().encode().to_vec();
+        std::fs::remove_file(dir_old.join("friends.bin")).unwrap();
+        let book = fogata_friends::FriendBook::new(&me, "Ana", 2).unwrap();
+        store.save_friends(&book).unwrap();
+        // One whose box does not open.
+        let mut broken = fogata_crypto::at_rest::MAGIC.to_vec();
+        broken.extend_from_slice(&[1; 64]);
+        std::fs::write(dir_old.join("friends.bin.damaged.3"), broken).unwrap();
+        (unreadable, copy)
+    };
+    let dir_new = base.join("new");
+    let port_n = free_port();
+    let mut receiving = transfer::receive(dir_new.clone(), options(port_n, &[], "new")).unwrap();
+    let code = code_of(&mut receiving).await;
+    let sending = transfer::send(dir_old.clone(), &code, options(0, &[port_n], "old")).unwrap();
+    let ((_, got), (_, sent)) =
+        tokio::join!(follow(receiving, Some(true)), follow(sending, Some(true)));
+    assert!(matches!(sent, TransferEvent::Done { .. }), "{sent:?}");
+    assert!(matches!(got, TransferEvent::Done { .. }), "{got:?}");
+    let store = Store::open(dir_new.clone()).unwrap();
+    let key = store.data_key().unwrap().unwrap();
+    for (name, plain) in [
+        ("friends.bin.damaged", &opened),
+        ("friends.bin.damaged.2", &copied),
+    ] {
+        let bytes = std::fs::read(dir_new.join(name)).unwrap();
+        assert_eq!(
+            *key.open_whole("damaged", &bytes).unwrap(),
+            **plain,
+            "{name}"
+        );
+    }
+    assert!(!dir_new.join("friends.bin.damaged.3").exists());
+    assert_eq!(store.friends().unwrap().unwrap().profile.name, "Ana");
+    drop(store);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_secret_of_a_move_whose_last_word_is_lost_goes_a_week_on() {
     let _one = ONE_AT_A_TIME.lock().await;

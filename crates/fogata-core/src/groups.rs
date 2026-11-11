@@ -15,6 +15,16 @@ use crate::{
     store, store::DeclineLeave,
 };
 
+/// Whether a device seen at capability level `seen` (the network's `caps`;
+/// [`fogata_net::caps::FIRST_LEVEL`] when never seen) is known to be too old for a group
+/// judged at `level`. A device never seen saying its level is not known to be: it may be
+/// new.
+fn too_old_to_join(seen: u32, level: fogata_state::Level) -> bool {
+    level > fogata_state::Level::default()
+        && seen > fogata_net::caps::FIRST_LEVEL
+        && !fogata_net::caps::judges_at(seen, level)
+}
+
 impl Core {
     /// Every group, live rooms first, then by name.
     pub async fn groups(&self) -> Result<Vec<GroupView>> {
@@ -84,6 +94,16 @@ impl Core {
                 .find(|(_, r)| r.joined)
                 .or_else(|| live.iter().find(|(_, r)| !r.participants.is_empty()))
                 .map(|(_, room)| summary(room));
+            // Before the lock below: a person's name takes it too.
+            let level_behind =
+                if state.is_manager(&me) && state.level < fogata_state::Level::CURRENT {
+                    self.behind_level(state, fogata_state::Level::CURRENT)
+                        .into_iter()
+                        .map(|device| self.person_with(device, None, book.as_ref(), state))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
             let st = self.inner.lock();
             let online = st
                 .online
@@ -122,6 +142,7 @@ impl Core {
                 open_invites: state.open_invite_tokens(now).len(),
                 outranks: state.below(&me).to_vec(),
                 kept_out,
+                level_behind,
             });
         }
         out.sort_by(|a, b| {
@@ -517,7 +538,11 @@ impl Core {
         Ok(())
     }
 
-    /// Adds a friend to a group (managers).
+    /// Adds a friend to a group (managers). Not a friend whose Fogata is known to be too
+    /// old for the level the group went up to: its copy would refuse the group from there
+    /// on and never get in, while the group would count it in (see the network's `caps`).
+    /// A friend whose level is not known yet is added; the network does not send it the
+    /// group until it lists that level, and tells why.
     pub async fn add_to_group(&self, group: GroupId, friend: DevicePublicKey) -> Result<()> {
         let nick = self
             .inner
@@ -526,11 +551,36 @@ impl Core {
             .await?
             .and_then(|b| b.friends.get(&friend).map(|f| f.profile.name.clone()))
             .context("not a friend")?;
+        let seen = self.inner.node.level_seen(&friend);
         self.change_group(group, |log, id| {
+            let level = log.level();
+            anyhow::ensure!(
+                !too_old_to_join(seen, level),
+                "{nick} must update Fogata before they can join this group"
+            );
             log.add(id, friend, &nick, now_ms())?;
             Ok(())
         })
         .await
+    }
+
+    /// The members other than this device whose copy was never seen judging at `level` (see
+    /// the network's `caps`): those that keep the group from going up to it.
+    fn behind_level(
+        &self,
+        state: &fogata_state::GroupState,
+        level: fogata_state::Level,
+    ) -> Vec<DevicePublicKey> {
+        let me = self.me();
+        state
+            .members
+            .keys()
+            .filter(|device| {
+                **device != me
+                    && !fogata_net::caps::judges_at(self.inner.node.level_seen(device), level)
+            })
+            .copied()
+            .collect()
     }
 
     /// Removes a member below this device on the ladder and makes a new group key without
@@ -580,18 +630,14 @@ impl Core {
         group: GroupId,
         level: fogata_state::Level,
     ) -> Result<()> {
-        let me = self.me();
-        let node = self.inner.node.clone();
         self.change_group(group, |log, id| {
-            let behind: Vec<String> = log
-                .state()
-                .members
+            let state = log.state();
+            let behind: Vec<String> = self
+                .behind_level(&state, level)
                 .iter()
-                .filter(|(device, _)| {
-                    **device != me && !fogata_net::caps::judges_at(node.level_seen(device), level)
-                })
-                .map(|(_, member)| member.name.clone())
+                .filter_map(|device| state.members.get(device).map(|m| m.name.clone()))
                 .collect();
+            drop(state);
             anyhow::ensure!(
                 behind.is_empty(),
                 "not every member's Fogata judges at level {} yet: {}",
@@ -839,5 +885,25 @@ impl Core {
             Ok(())
         });
         shares::leaving(&self.inner, group, leave).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fogata_state::Level;
+
+    use super::too_old_to_join;
+
+    /// Only a friend known to be too old is kept out: one never seen saying its level may
+    /// be new, and a group never raised is judged alike by every copy.
+    #[test]
+    fn only_a_friend_known_to_be_too_old_is_kept_out() {
+        assert!(too_old_to_join(2, Level::Three));
+        assert!(!too_old_to_join(3, Level::Three));
+        assert!(!too_old_to_join(
+            fogata_net::caps::FIRST_LEVEL,
+            Level::Three
+        ));
+        assert!(!too_old_to_join(2, Level::Two));
     }
 }

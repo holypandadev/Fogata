@@ -891,9 +891,8 @@ class _VideoCard extends StatelessWidget {
     if (f == null || video == null) {
       return _FileCard(state: state, seen: seen);
     }
-    final ratio = video.width > 0 && video.height > 0
-        ? video.width / video.height
-        : 16 / 9;
+    // As the sharer's device describes it, within what can be drawn.
+    final ratio = video.aspect;
     final dpr = MediaQuery.devicePixelRatioOf(context);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -957,7 +956,7 @@ class _VideoCard extends StatelessWidget {
                             left: 8,
                             bottom: 8,
                             child: _OverPill(
-                              text: videoLength(video.durationMs),
+                              text: videoLength(video.lengthMs),
                               mono: true,
                             ),
                           ),

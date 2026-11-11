@@ -141,6 +141,16 @@ extension _Events on AppState {
         _onDeclined(e);
       case UiEventKind.joinDeclined:
         say(l10n.appJoinDeclined(e.name ?? ''), error: true);
+      case UiEventKind.mustUpdateToJoin:
+        say(
+          l10n.appMustUpdateToJoin(
+            e.name ?? l10n.appSomeone,
+            contacts.group(e.group)?.name ?? l10n.appAGroup,
+          ),
+          error: true,
+        );
+      case UiEventKind.updateToJoin:
+        say(l10n.appUpdateToJoin(e.name ?? ''), error: true);
       case UiEventKind.download:
         if (e.group == roomState.roomGroup) _later('room', refreshRoom);
       case UiEventKind.downloadDone:

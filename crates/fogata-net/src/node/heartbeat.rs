@@ -68,6 +68,9 @@ impl Node {
             let slot = self.groups.get_mut(&group).expect("listed above");
             let mut new = slot.ctx.welcome_lacking(now_ms());
             new.extend(slot.ctx.mend_key(now_ms(), one_above));
+            // An invite this manager wrote before it saw the group go up a level works only
+            // written again (see `GroupContext::name_unnamed_invites`).
+            new.extend(slot.ctx.name_unnamed_invites(now_ms()));
             // Once every member's copy judges at this version's level, the group goes up.
             new.extend(
                 slot.ctx

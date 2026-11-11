@@ -78,7 +78,7 @@ build() {
   local app=app/build/macos/Build/Products/Release/Fogata.app
   tools/beta/macos-updater.sh --team "$team" "$app"
   tools/sign-macos.sh "$identity" "$app"
-  local zip="$out/Fogata-$version-macos-arm64.zip"
+  local zip="$out/Fogata-$version-macos-universal.zip"
   rm -f "$zip"
   ditto -c -k --keepParent "$app" "$zip"
   (cd "$out" && shasum -a 256 "$(basename "$zip")" > "$(basename "$zip").sha256")

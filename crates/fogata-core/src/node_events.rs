@@ -472,6 +472,21 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             let _ = inner.node.drop_group(group).await;
             inner.emit(CoreEvent::JoinDeclined { group, name });
         }
+        NodeEvent::MustUpdateToJoin {
+            group,
+            device,
+            name,
+        } => inner.emit(CoreEvent::MustUpdateToJoin {
+            group,
+            device,
+            name,
+        }),
+        NodeEvent::UpdateToJoin { group } => {
+            let Some(name) = inner.lock().joining.get(&group).cloned() else {
+                return;
+            };
+            inner.emit(CoreEvent::UpdateToJoin { group, name });
+        }
         NodeEvent::JoinExpired { group } => {
             let Some(name) = inner.lock().joining.remove(&group) else {
                 return;

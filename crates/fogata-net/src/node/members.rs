@@ -609,9 +609,25 @@ impl Node {
                 let fogata_state::Body::Join { ticket, .. } = &entry.body else {
                     return MemberResponse::Refused;
                 };
+                // A copy that does not judge at the group's level could never get in (see
+                // `joins::judges_level`): refused, which leaves its invite good and has it
+                // ask again, and its person's manager told it must update first. One whose
+                // level is not known is answered as before.
+                let level = self.shown_level(&peer);
+                let device = entry.author;
+                let Some(slot) = self.groups.get_mut(&group) else {
+                    return MemberResponse::Refused;
+                };
+                if super::joins::judges_level(slot.ctx.log().level(), level) == Some(false) {
+                    let told = super::BehindTold::Invite(ticket_id);
+                    self.tell_behind(group, told, device, name);
+                    return MemberResponse::Refused;
+                }
+                let Some(slot) = self.groups.get_mut(&group) else {
+                    return MemberResponse::Refused;
+                };
                 // An invite does not let anyone in by itself: a manager says yes first, so a
                 // link passed on to someone else is seen for what it is.
-                let device = entry.author;
                 let ticket = ticket.clone();
                 let Some(asked) = slot.wait_for_answer(
                     device,
@@ -619,6 +635,7 @@ impl Node {
                         peer,
                         entry,
                         ticket,
+                        level,
                     },
                 ) else {
                     return MemberResponse::Refused;

@@ -13,7 +13,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use fogata_crypto::at_rest::{DataKey, SealWriter};
+use fogata_crypto::at_rest::{DataKey, Form, SealWriter, sealed_form};
 use fogata_net::files::kept_context;
 use zeroize::Zeroizing;
 
@@ -52,12 +52,25 @@ pub(crate) enum Kind {
     Chain { file: &'static str, chat: String },
     /// An attachment kept here, a stream for this context in a sealed folder.
     Stream(String),
+    /// A damaged file of the account kept aside, never read again: one box for [`DAMAGED`]
+    /// on the new computer, whatever it was sealed for here (see [`Damaged`]).
+    Damaged(Damaged),
+}
+
+/// Which file a copy of a damaged one was, which says how it may be sealed here. A plain
+/// copy that sealing sealed later is one box for [`DAMAGED`]; one that was sealed already
+/// when it was put aside keeps what it was sealed for: a friends file or its copy one box
+/// for `friends`, a chat's journal or pins (copied as they were) a chain of the chat's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Damaged {
+    Friends,
+    Chain { file: &'static str, chat: String },
 }
 
 impl Kind {
     /// Whether the file is read whole into memory to be opened or sealed.
     pub(crate) fn whole(&self) -> bool {
-        matches!(self, Kind::Whole(_) | Kind::Chain { .. })
+        matches!(self, Kind::Whole(_) | Kind::Chain { .. } | Kind::Damaged(_))
     }
 }
 
@@ -108,7 +121,7 @@ pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
         // A key file set aside as damaged opens nowhere: copies are turned on again instead.
         [name] if name.starts_with(&format!("{}.damaged", crate::recovery::KEY_FILE)) => None,
         ["friends.bin" | "friends.bin.bak"] => Some(Kind::Whole("friends".into())),
-        [name] if name.starts_with("friends.bin.damaged") => Some(Kind::Whole(DAMAGED.into())),
+        [name] if name.starts_with("friends.bin.damaged") => Some(Kind::Damaged(Damaged::Friends)),
         ["mls", file] => file
             .strip_suffix(".bin")
             .map(|group| Kind::Whole(mls_context(group))),
@@ -125,11 +138,14 @@ pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
             } else if *file == CHAT_TAILS {
                 // Made again from the files as written here.
                 None
-            } else if CHAT_CHAINS
+            } else if let Some(chain) = CHAT_CHAINS
                 .iter()
-                .any(|c| file.starts_with(&format!("{c}.damaged")))
+                .find(|c| file.starts_with(&format!("{c}.damaged")))
             {
-                Some(Kind::Whole(DAMAGED.into()))
+                Some(Kind::Damaged(Damaged::Chain {
+                    file: chain,
+                    chat: chat.to_string(),
+                }))
             } else {
                 Some(Kind::Plain)
             }
@@ -332,6 +348,8 @@ pub(crate) fn open(dir: &Path, item: &Item, key: Option<&DataKey>) -> Result<Sou
                 plain_records(key, file, chat, &bytes)
                     .with_context(|| format!("{} does not open", item.rel))?,
             ),
+            Kind::Damaged(of) => open_damaged(key, of, &bytes)
+                .with_context(|| format!("{} does not open", item.rel))?,
             _ => unreachable!("whole kinds only"),
         };
         return Ok(Source::Whole(plain));
@@ -349,6 +367,60 @@ pub(crate) fn open(dir: &Path, item: &Item, key: Option<&DataKey>) -> Result<Sou
     // say) and start like a sealed file, which must not keep the account from moving.
     let file = fs::File::open(&path).with_context(cannot)?;
     Ok(Source::Reader(Box::new(file)))
+}
+
+/// What a copy of a damaged file (`of`) holds, plain, from `bytes` as it is kept here: as it
+/// is when plain, else opened as what its form says it can only be sealed for (one box: for
+/// [`DAMAGED`], or for `friends`; a chain: the chat's, up to where it is damaged). An error
+/// when it opens as none of those.
+fn open_damaged(key: Option<&DataKey>, of: &Damaged, bytes: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let Some(form) = sealed_form(bytes) else {
+        return Ok(Zeroizing::new(bytes.to_vec()));
+    };
+    let Some(key) = key else {
+        bail!("sealed, and this folder has no key");
+    };
+    match (form, of) {
+        (Form::Whole | Form::Named, Damaged::Friends) => key
+            .open_whole(DAMAGED, bytes)
+            .or_else(|_| key.open_whole("friends", bytes))
+            .map_err(|_| anyhow::anyhow!("its box does not open")),
+        (Form::Whole | Form::Named, Damaged::Chain { .. }) => key
+            .open_whole(DAMAGED, bytes)
+            .map_err(|_| anyhow::anyhow!("its box does not open")),
+        (Form::Records | Form::Chain, Damaged::Chain { file, chat }) => {
+            Ok(Zeroizing::new(plain_records(Some(key), file, chat, bytes)?))
+        }
+        _ => bail!("not sealed as such a file is"),
+    }
+}
+
+/// `items` without the copies of damaged files that do not open with `key` (damaged in their
+/// box too): they stay on this computer, said in the log as other files left out are, rather
+/// than stop the whole move or copy. Any other file that does not open still stops it.
+pub(crate) fn leave_out_unreadable(
+    dir: &Path,
+    items: Vec<Item>,
+    key: Option<&DataKey>,
+) -> Vec<Item> {
+    items
+        .into_iter()
+        .filter(|item| {
+            if !matches!(item.kind, Kind::Damaged(_)) {
+                return true;
+            }
+            match open(dir, item, key) {
+                Ok(_) => true,
+                Err(e) => {
+                    tracing::warn!(
+                        "{:?} does not move: a copy of a damaged file that does not open ({e:#})",
+                        item.rel
+                    );
+                    false
+                }
+            }
+        })
+        .collect()
 }
 
 /// A file being written on the new computer, under the folder being filled.
@@ -444,6 +516,11 @@ impl Sink {
                     Kind::Chain { file, chat } => {
                         Zeroizing::new(sealed_records(key, file, chat, &bytes)?)
                     }
+                    // As sealing seals a plain copy of a damaged file: whatever it was
+                    // sealed for on the old computer, nothing reads it but a person.
+                    Kind::Damaged(_) => {
+                        Zeroizing::new(crate::store::to_disk(key, DAMAGED, &bytes)?)
+                    }
                     _ => Zeroizing::new(adjust(&rel, &bytes).unwrap_or_else(|| bytes.to_vec())),
                 };
                 write_private(&path, &out)
@@ -537,6 +614,96 @@ mod tests {
         }
     }
 
+    /// Copies of a damaged journal are opened as what their form says they were sealed for:
+    /// one put aside as it was in a sealed folder (a chain of the chat's, damaged at its
+    /// end), one sealing sealed later (one box for `damaged`), one plain. Each arrives as a
+    /// damaged copy holding what could be read, sealed with the new folder's key; one that
+    /// opens as none of those is left out of the move, not stopping it.
+    #[test]
+    fn copies_of_a_damaged_journal_move_as_they_were_sealed() {
+        use crate::direct::{
+            model::{Body, Chat, Item as ChatItem},
+            store::{DirectStore, Record},
+        };
+        let dir = std::env::temp_dir().join(format!("fogata-damaged-chain-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let key = DataKey::generate().unwrap();
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        let chat = hex::encode(friend.as_bytes());
+        let records: Vec<Record> = (1..=3u8)
+            .map(|id| Record::Item {
+                item: ChatItem {
+                    id: [id; 16],
+                    mine: true,
+                    sent_ms: u64::from(id),
+                    got_ms: u64::from(id),
+                    seq: u64::from(id),
+                    at_ms: u64::from(id),
+                    body: Body::Message {
+                        text: format!("message {id}"),
+                        files: Vec::new(),
+                    },
+                    ttl_ms: 0,
+                    delivered: true,
+                },
+            })
+            .collect();
+        let mut whole = Chat::default();
+        for r in &records {
+            r.apply(&mut whole, &mut None);
+        }
+        DirectStore::open_sealed(&dir, Some(key.clone()))
+            .append(&friend, &records, &whole)
+            .unwrap();
+        let chat_dir = dir.join("direct").join(&chat);
+        let journal = fs::read(chat_dir.join("journal")).unwrap();
+        let plain = plain_records(Some(&key), "journal", &chat, &journal).unwrap();
+        // Put aside as it was, with damage after its records.
+        let mut damaged = journal.clone();
+        damaged.extend_from_slice(&[0xff; 9]);
+        fs::write(chat_dir.join("journal.damaged"), &damaged).unwrap();
+        fs::write(
+            chat_dir.join("journal.damaged.2"),
+            key.seal_whole(DAMAGED, &plain).unwrap(),
+        )
+        .unwrap();
+        fs::write(chat_dir.join("pins.damaged"), b"plain pins").unwrap();
+        let mut broken = fogata_crypto::at_rest::MAGIC.to_vec();
+        broken.extend_from_slice(&[1; 40]);
+        fs::write(chat_dir.join("journal.damaged.3"), &broken).unwrap();
+
+        let items = leave_out_unreadable(&dir, list(&dir).unwrap(), Some(&key));
+        let rel = |name: &str| format!("direct/{chat}/{name}");
+        assert!(!items.iter().any(|i| i.rel == rel("journal.damaged.3")));
+        let new_key = DataKey::generate().unwrap();
+        let stage = dir.join("stage");
+        fs::create_dir_all(&stage).unwrap();
+        for (name, want) in [
+            ("journal.damaged", &plain[..]),
+            ("journal.damaged.2", &plain[..]),
+            ("pins.damaged", &b"plain pins"[..]),
+        ] {
+            let item = items.iter().find(|i| i.rel == rel(name)).unwrap();
+            assert!(matches!(item.kind, Kind::Damaged(_)), "{name}");
+            let Source::Whole(got) = open(&dir, item, Some(&key)).unwrap() else {
+                panic!("{name} is read whole");
+            };
+            assert_eq!(&got[..], want, "{name}");
+            let mut sink = create(&stage, &item.rel, item.kind.clone(), Some(&new_key)).unwrap();
+            sink.write(&got).unwrap();
+            sink.finish(Some(&new_key), |_, _| None).unwrap();
+            let arrived = fs::read(stage.join(&item.rel)).unwrap();
+            assert_eq!(
+                &new_key.open_whole(DAMAGED, &arrived).unwrap()[..],
+                want,
+                "{name}"
+            );
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Any other file goes as it is, whatever it starts with: a group's picture a member
     /// chose cannot keep the account from moving.
     #[test]
@@ -573,7 +740,7 @@ mod tests {
         );
         assert_eq!(
             kind_of("friends.bin.damaged.1"),
-            Some(Kind::Whole(DAMAGED.into()))
+            Some(Kind::Damaged(Damaged::Friends))
         );
         assert_eq!(
             kind_of("mls/abcd.bin"),

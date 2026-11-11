@@ -175,6 +175,8 @@ refuses a folder that holds any key already.
       2d): give it with `-f macos_team=<team>`, or once as the repository variable
       `FOGATA_MACOS_TEAM` (Settings, Secrets and variables, Actions, Variables; a tag push
       can only take it from there). It is no secret: every signature of yours names it.
+      Without it the run fails in its first job, in seconds, before anything is built: until
+      the variable is set, every tag push ends so, and the build is started by hand.
 
       The run builds Linux (`flutter build linux --release` on Ubuntu 24.04, the bundle
       zipped with its links), Windows (`flutter build windows --release`, the contents of
@@ -208,7 +210,7 @@ refuses a folder that holds any key already.
       python3 -I tools/beta/ci_builds.py fetch <run id> --only macos --macos-team <team> \
           --out ~/fogata-ci-builds/0.1.0-beta.2
       tools/sign-macos.sh "<identity>" ~/fogata-ci-builds/0.1.0-beta.2/macos/Fogata.app
-      ditto -c -k --keepParent ~/fogata-ci-builds/0.1.0-beta.2/macos/Fogata.app Fogata-macos-arm64.zip
+      ditto -c -k --keepParent ~/fogata-ci-builds/0.1.0-beta.2/macos/Fogata.app Fogata-macos-universal.zip
       ```
 
       `--macos-team` refuses an updater built for another team, as `sign-macos.sh` does
@@ -244,7 +246,7 @@ refuses a folder that holds any key already.
         new versions signed by that team only), `tools/sign-macos.sh "<identity>"` (online: every
         signature gets Apple's timestamp, so it stays valid after the certificate expires),
         then
-        `ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-arm64.zip`.
+        `ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-universal.zip`.
         Sign every release with the same identity, or macOS forgets the permissions testers
         gave Fogata and the updater refuses the new bundle. An Apple Development certificate
         lasts a year: `security find-certificate -c "<identity>" -p | openssl x509 -noout
@@ -258,7 +260,7 @@ refuses a folder that holds any key already.
    python3 -I tools/beta/release.py --build 2 --version 0.1.0-beta.2 --min-build 1 \
        --notes notes.txt --linux-bundle ~/fogata-ci-builds/0.1.0-beta.2/linux/bundle \
        --windows-zip ~/fogata-ci-builds/0.1.0-beta.2/Fogata-windows-x64.zip \
-       --macos-zip Fogata-macos-arm64.zip --out ~/fogata-releases/0.1.0-beta.2
+       --macos-zip Fogata-macos-universal.zip --out ~/fogata-releases/0.1.0-beta.2
    ```
 
    (`--build-linux` in place of `--linux-bundle` builds the Linux bundle there, from a clean
@@ -278,7 +280,16 @@ refuses a folder that holds any key already.
    what `MITIGATIONS` in the script says a file cannot have), which a variable such as
    `RUSTFLAGS`, `CL` or `LINK` in the build's environment could drop, and that `fogata.exe`
    is not CET shadow stack compatible (off on purpose until Fogata is tried on a processor
-   with shadow stacks; see docs/architecture.md), makes the Flatpak (GnuPG asks for the signing key's passphrase), packs each system's
+   with shadow stacks; see docs/architecture.md), checks that every program and library of
+   the Linux bundle carries RELRO and BIND_NOW (ours the stack protector too) and looks for
+   libraries only beside it (`$ORIGIN`), and that the WebRTC plugin links PipeWire and
+   PulseAudio (without `libpipewire-0.3-dev` where it is built, the plugin still builds, but
+   with no screen capture under Wayland, no screen sound and no silent input), reads which
+   architectures every Mach-O file of the Mac app was built for (from their headers: Linux
+   has no `lipo`) and publishes a universal app, as `Fogata-<version>-macos-universal`, under
+   both `macos-arm64` and `macos-x64`, one package that the manifest lists for each, since
+   a copy looks only for the platform of the Mac it runs on (one built for a single
+   architecture is refused unless `--macos-arch arm64` or `x64` says so), makes the Flatpak (GnuPG asks for the signing key's passphrase), packs each system's
    files, writes and signs the manifest (`release/`), and puts the first installs with a
    README into `drive/`, with `SHA256SUMS`, the SHA-256 of every file there, signed by the
    same key (`SHA256SUMS.sig`). The release key's passphrase is asked once, for both.

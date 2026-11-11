@@ -887,6 +887,15 @@
   "@appFriendsRestored": {
     "description": "Toast at start: the friends list file was damaged and an earlier copy was used."
   },
+  "appFilesRefused": "Some of Fogata’s files on this computer were found unencrypted where they are kept encrypted, so they were not used. Nothing was deleted: they are kept in {folder}.",
+  "@appFilesRefused": {
+    "description": "Toast at start: some secret files (identity, friends, keys) were found unencrypted in a data folder that keeps them encrypted, so Fogata did not use them; they were moved, not deleted. {folder} is the folder where they are kept (a path).",
+    "placeholders": {
+      "folder": {
+        "type": "String"
+      }
+    }
+  },
   "appInvitationRanOut": "The invitation to “{group}” ran out before someone in the group let you in. Ask for a new one.",
   "@appInvitationRanOut": {
     "description": "Toast: an invite link expired while waiting to be let in. {group} is the group.",
@@ -6264,6 +6273,27 @@
   "@welcomeKeychainPlainNote": {
     "description": "Welcome page: note in that dialog about continuing unencrypted."
   },
+  "welcomeProfileKeptTitle": "Your profile could not be read",
+  "@welcomeProfileKeptTitle": {
+    "description": "Welcome page, when this computer had a profile whose files could not be read (damaged, or found unencrypted where they are kept encrypted): title of the note above the card."
+  },
+  "welcomeProfileKeptText": "The profile and friends made on this computer could not be read, so Fogata opens as if it were new. Nothing was deleted: the files are kept in {folder}.",
+  "@welcomeProfileKeptText": {
+    "description": "Welcome page: text of that note. {folder} is the folder where the old files are kept (a path).",
+    "placeholders": {
+      "folder": {
+        "type": "String"
+      }
+    }
+  },
+  "welcomeProfileKeptConfirm": "A new profile starts with no friends. The old profile’s files stay where they are, and Fogata does not use them.",
+  "@welcomeProfileKeptConfirm": {
+    "description": "Welcome page: question asked when Create is pressed while the old profile's files are kept: a new profile starts empty, and the old files are neither used nor deleted."
+  },
+  "welcomeProfileKeptMake": "Make a new profile",
+  "@welcomeProfileKeptMake": {
+    "description": "Welcome page: button of that question that makes the new profile anyway."
+  },
   "welcomeWriteName": "Write your name.",
   "@welcomeWriteName": {
     "description": "Welcome page (first start, before a profile exists): error when Create is pressed with no name."
@@ -8859,6 +8889,40 @@
     "placeholders": {
       "n": {
         "type": "int"
+      }
+    }
+  },
+  "appMustUpdateToJoin": "{name} has to update Fogata before they can join “{group}”. Once they do, they get in as before.",
+  "@appMustUpdateToJoin": {
+    "description": "Toast to a manager: someone asked to join the group {group} (with an invitation, or as a friend added to it), but their Fogata is too old for the group's protection. {name} is the person. Once they update, their invitation still works.",
+    "placeholders": {
+      "name": {
+        "type": "String"
+      },
+      "group": {
+        "type": "String"
+      }
+    }
+  },
+  "appUpdateToJoin": "“{group}” needs a newer Fogata. Update Fogata to join it.",
+  "@appUpdateToJoin": {
+    "description": "Toast to someone joining the group {group} with an invitation: the group needs a newer version of Fogata than the one on this computer.",
+    "placeholders": {
+      "group": {
+        "type": "String"
+      }
+    }
+  },
+  "errMustUpdateToJoin": "Your friend has to update Fogata before they can join this group.",
+  "@errMustUpdateToJoin": {
+    "description": "Error message when a manager adds a friend to a group: the friend's Fogata is too old for the group's protection."
+  },
+  "groupSettingsLevelWaiting": "This group is waiting to turn on stronger protection. It turns on by itself once everyone has updated Fogata. Still to update: {names}",
+  "@groupSettingsLevelWaiting": {
+    "description": "Group settings › Members, shown to those who manage the group: the group switches to stronger protection only once every member has a recent Fogata. {names} lists the members who have not updated yet, separated by commas.",
+    "placeholders": {
+      "names": {
+        "type": "String"
       }
     }
   }

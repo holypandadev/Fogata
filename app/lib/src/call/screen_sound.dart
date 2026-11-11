@@ -5,18 +5,27 @@ part of '../call.dart';
 /// watcher where it cannot go in that channel.
 extension _ScreenSound on Call {
   /// Points WebRTC at the silent input while the microphone is off and the screen's
-  /// sound should go out; before any channel starts sending it.
-  Future<void> _quietInput() async {
+  /// sound should go out; before any channel starts sending it. Its turn comes after any
+  /// change of input still going on, so [_stop] waits for it before going back to the
+  /// microphone; and it keeps the voice engine open while it chooses ([_whileOpening]).
+  Future<void> _quietInput() => _inputTurn(() => _whileOpening(_quietInputNow));
+
+  Future<void> _quietInputNow() async {
     if (!_wantSilence) return;
     if (_silent) {
       // Still there from an earlier share; made again if it went away meanwhile.
       if (await Call._ownSilenceId() != null) return;
       _silent = false;
     }
-    if (!await Call._silentInput(true)) return;
-    // The new input takes a moment to be listed.
-    for (var i = 0; i < 30 && !_silent; i++) {
+    if (!_wantSilence || !await Call._silentInput(true)) {
+      if (!_silent) await Call._silentInput(false);
+      return;
+    }
+    // The new input takes a moment to be listed. The call may end, or the microphone
+    // come on, at every step meanwhile: then it is not chosen.
+    for (var i = 0; i < 30 && !_silent && _wantSilence; i++) {
       final id = await Call._ownSilenceId();
+      if (!_wantSilence) break;
       if (id == null) {
         await Future<void>.delayed(const Duration(milliseconds: 100));
         continue;
@@ -29,6 +38,12 @@ extension _ScreenSound on Call {
         break;
       }
     }
+    // Chosen just as the call ended or the microphone came on: back to the microphone,
+    // or WebRTC would go on recording silence, in this call and the ones after it.
+    if (_silent && !_wantSilence) {
+      await _loudInputNow();
+      return;
+    }
     if (!_silent) await Call._silentInput(false);
   }
 
@@ -37,7 +52,9 @@ extension _ScreenSound on Call {
   /// after the screen's sound stops (until the other side agrees again), and while WebRTC
   /// records, choosing another input opens it at once; a recording whose input goes away
   /// moves to the system's default input by itself.
-  Future<void> _loudInput() async {
+  Future<void> _loudInput() => _inputTurn(_loudInputNow);
+
+  Future<void> _loudInputNow() async {
     if (!_silent || (!mic && !_closed)) return;
     await Call._select(
       input ?? await Call._first('audioinput'),
@@ -45,6 +62,15 @@ extension _ScreenSound on Call {
     );
     _silent = false;
     await Call._silentInput(false);
+  }
+
+  /// Runs [step] once every change of input asked before it is done: one choosing the
+  /// silent input and one going back to the microphone never run at once, and the last
+  /// asked is the one that stays.
+  Future<void> _inputTurn(Future<void> Function() step) {
+    final turn = _inputs.then((_) => step());
+    _inputs = turn.catchError((Object e) => _trace('input: $e'));
+    return turn;
   }
 
   // ----- A screen's sound on a connection of its own -----

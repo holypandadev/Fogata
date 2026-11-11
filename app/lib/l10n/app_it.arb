@@ -151,6 +151,7 @@
   "appDownloadFailed": "Impossibile scaricare: {why}",
   "appOtherSession": "Questa identità è aperta anche su un altro computer. Chiudi Fogata lì: un’identità funziona su un solo computer alla volta.",
   "appFriendsRestored": "Il tuo elenco di amici si era danneggiato su questo computer ed è stato ripristinato dalla copia fatta prima dell’ultima modifica. Un amico aggiunto o rimosso poco prima potrebbe dover essere aggiunto o rimosso di nuovo.",
+  "appFilesRefused": "Alcuni file di Fogata su questo computer erano non cifrati dove vengono conservati cifrati, quindi non sono stati usati. Non è stato eliminato nulla: sono conservati in {folder}.",
   "appInvitationRanOut": "L’invito a “{group}” è scaduto prima che qualcuno del gruppo ti facesse entrare. Chiedine uno nuovo.",
   "appTakenOut": "{who} ti ha fatto uscire da {room}.",
   "appRoomForSome": "{room} ora è solo per alcuni membri.",
@@ -995,6 +996,10 @@
   "welcomeKeychainRetry": "Riprova",
   "welcomeKeychainPlain": "Continua senza cifratura",
   "welcomeKeychainPlainNote": "Senza cifratura, chiunque copi i file di questo computer può leggerli. Le impostazioni continueranno a segnalarlo, e Fogata cifrerà tutto la prima volta che si aprirà con un portachiavi.",
+  "welcomeProfileKeptTitle": "Non è stato possibile leggere il tuo profilo",
+  "welcomeProfileKeptText": "Non è stato possibile leggere il profilo e gli amici creati su questo computer, quindi Fogata si apre come se fosse nuovo. Non è stato eliminato nulla: i file sono conservati in {folder}.",
+  "welcomeProfileKeptConfirm": "Un nuovo profilo inizia senza amici. I file del vecchio profilo restano dove sono, e Fogata non li usa.",
+  "welcomeProfileKeptMake": "Crea un nuovo profilo",
   "welcomeWriteName": "Scrivi il tuo nome.",
   "welcomeCardTitle": "Come vuoi che ti vedano i tuoi amici?",
   "welcomeCardSub": "Un nome e un’immagine. Cambiali quando vuoi.",
@@ -1502,5 +1507,9 @@
   "reachFineOthers": "La tua rete sembra andare bene per Fogata, quindi ciò che vi separa è probabilmente dall’altra parte.",
   "directDropTitle": "Rilascia per inviare a {name}",
   "directDropNote": "Restano in attesa nella casella del messaggio, dove puoi aggiungere un messaggio e controllarli prima che partano.",
-  "directPrivateLeftOut": "{n, plural, =1{Un file nascosto o privato è stato lasciato fuori: file come questo non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarlo, sceglilo con il pulsante +.} other{{n} file nascosti o privati sono stati lasciati fuori: file come questi non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarli, sceglili con il pulsante +.}}"
+  "directPrivateLeftOut": "{n, plural, =1{Un file nascosto o privato è stato lasciato fuori: file come questo non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarlo, sceglilo con il pulsante +.} other{{n} file nascosti o privati sono stati lasciati fuori: file come questi non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarli, sceglili con il pulsante +.}}",
+  "appMustUpdateToJoin": "{name} deve aggiornare Fogata prima di poter entrare in “{group}”. Dopo, entrerà come sempre.",
+  "appUpdateToJoin": "“{group}” richiede una versione più recente di Fogata. Aggiorna Fogata per entrare.",
+  "errMustUpdateToJoin": "Il tuo amico deve aggiornare Fogata prima di poter entrare in questo gruppo.",
+  "groupSettingsLevelWaiting": "Questo gruppo aspetta di attivare una protezione più forte. Si attiva da sola quando tutti hanno aggiornato Fogata. Ancora da aggiornare: {names}"
 }

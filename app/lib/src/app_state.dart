@@ -124,6 +124,21 @@ class AppState extends ChangeNotifier {
   bool started = false;
   String? startError;
 
+  /// Without a profile: the folder where the profile and friends made here were kept when
+  /// they could not be read or were refused. The welcome page says so, and asks before a
+  /// new profile is made.
+  String? keptProfile;
+
+  /// Whether there is a profile, and where an unreadable one was kept when there is not.
+  Future<void> _findProfile() async {
+    hasProfile = await api.hasProfile(dataDir: dataDir);
+    keptProfile = null;
+    if (hasProfile) return;
+    try {
+      keptProfile = await api.keptProfile(dataDir: dataDir);
+    } catch (_) {}
+  }
+
   /// Where the data folder stands with moves of the account to another computer: moved
   /// away (or moving), or an account that came here and waits to be finished.
   moves.UiMoveState? moveState;
@@ -465,7 +480,7 @@ class AppState extends ChangeNotifier {
       return;
     }
     try {
-      hasProfile = await api.hasProfile(dataDir: dataDir);
+      await _findProfile();
     } catch (e) {
       startError = explain(e);
     }
@@ -897,7 +912,7 @@ class AppState extends ChangeNotifier {
     startError = null;
     notifyListeners();
     try {
-      hasProfile = await api.hasProfile(dataDir: dataDir);
+      await _findProfile();
     } catch (e) {
       startError = explain(e);
       notifyListeners();
@@ -1555,6 +1570,10 @@ class AppState extends ChangeNotifier {
     if (text.startsWith('Your list of friends was damaged')) {
       return l10n.appFriendsRestored;
     }
+    final refused = RegExp(
+      r'^Some of Fogata.s files on this computer were found unencrypted.*kept in (.*)$',
+    ).firstMatch(text);
+    if (refused != null) return l10n.appFilesRefused(refused.group(1)!);
     final ranOut = RegExp(r'^The invitation to “(.*)” ran out before')
         .firstMatch(text);
     if (ranOut != null) return l10n.appInvitationRanOut(ranOut.group(1)!);

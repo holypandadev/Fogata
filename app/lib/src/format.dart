@@ -229,6 +229,7 @@ String explain(Object error) {
     'not a Fogata friend link': () => l10n.errNotFriendLink,
     'friend link is damaged': () => l10n.errLinkDamaged,
     'needs a newer version': () => l10n.errLinkNeedsNewer,
+    'must update Fogata before they can join': () => l10n.errMustUpdateToJoin,
     'a friend code looks like': () => l10n.errCodeShape,
     'the code is wrong': () => l10n.errCodeWrong,
     'did not prove who it is': () => l10n.errNotProven,

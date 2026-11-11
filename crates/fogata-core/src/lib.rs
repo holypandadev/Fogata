@@ -180,6 +180,10 @@ pub struct GroupView {
     pub outranks: Vec<DevicePublicKey>,
     /// Members kept out of a voice room now, in the order of the rooms.
     pub kept_out: Vec<KeptOutView>,
+    /// For a manager, while the group waits to go up to the protection this version gives
+    /// (see [`fogata_state::Level`]): the members whose Fogata was not seen to be new
+    /// enough for it, who hold it back until they update. Empty otherwise.
+    pub level_behind: Vec<Person>,
 }
 
 /// A voice room of a group: its own people, chat and files.
@@ -487,6 +491,20 @@ pub enum CoreEvent {
         group: GroupId,
         name: String,
     },
+    /// Someone (`name`) asked this manager to be let into `group`, but their Fogata is too
+    /// old for the group's protection: they must update it before they can get in. Their
+    /// invite still works once they have.
+    MustUpdateToJoin {
+        group: GroupId,
+        device: DevicePublicKey,
+        name: String,
+    },
+    /// The group this device is joining (`name`) needs a newer Fogata than this one: it
+    /// gets in once Fogata is updated.
+    UpdateToJoin {
+        group: GroupId,
+        name: String,
+    },
     /// A member of a group connected, or is now reached by a better path.
     MemberConnected {
         group: GroupId,
@@ -785,11 +803,28 @@ impl State {
     }
 }
 
+/// What a start says while files refused by sealing are kept in `dir` (the screens find it
+/// by its first words, and the folder after "kept in ").
+fn refused_notice(dir: &FsPath) -> String {
+    format!(
+        "Some of Fogata's files on this computer were found unencrypted where they are kept \
+         encrypted, so they were not used. Nothing was deleted: they are kept in {}",
+        dir.display()
+    )
+}
+
 impl Core {
     /// Whether the data folder has a profile yet (the welcome screen makes one).
     pub fn has_profile(data_dir: &FsPath) -> Result<bool> {
         transfer::recover(data_dir);
         Store::open(data_dir.to_path_buf())?.has_profile()
+    }
+
+    /// Where the profile and friends made in the data folder were kept when they could not
+    /// be read or were refused, while it has no profile ([`Store::friends_kept`]): the
+    /// welcome screen says so, rather than look like a new device's.
+    pub fn kept_profile(data_dir: &FsPath) -> Result<Option<PathBuf>> {
+        Ok(Store::open(data_dir.to_path_buf())?.friends_kept())
     }
 
     /// Makes this device's identity, if it has none, and its profile.
@@ -982,6 +1017,12 @@ impl Core {
                  need adding or removing again."
                     .into(),
             ));
+        }
+        // Never kept without a word: they may be the person's own (copied back by hand, say).
+        if store.holds_refused() {
+            let _ = events.send(CoreEvent::Notice(refused_notice(
+                &store.dir().join(store::REFUSED_DIR),
+            )));
         }
         let writer = Arc::new(writer::Writer::start()?);
         let chats = direct::Chats::open(store.dir(), store.data_key()?, writer.clone());

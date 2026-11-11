@@ -68,9 +68,7 @@ class _Spotlight extends StatelessWidget {
       builder: (context, video, _) => LayoutBuilder(
         builder: (context, box) {
           // The picture's own shape once it arrives, 16:9 until then.
-          final aspect = video.width > 0 && video.height > 0
-              ? video.aspectRatio.clamp(.5, 3.0)
-              : 16 / 9;
+          final aspect = fairAspect(video.width, video.height);
           final strip = this.strip.isEmpty ? 0.0 : _stripHeight(box.maxHeight);
           final room = math.max(
             0.0,

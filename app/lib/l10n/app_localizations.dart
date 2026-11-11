@@ -1017,6 +1017,12 @@ abstract class L10n {
   /// **'Your list of friends was damaged on this computer and was restored from the copy made before its last change. A friend added or removed just before may need adding or removing again.'**
   String get appFriendsRestored;
 
+  /// Toast at start: some secret files (identity, friends, keys) were found unencrypted in a data folder that keeps them encrypted, so Fogata did not use them; they were moved, not deleted. {folder} is the folder where they are kept (a path).
+  ///
+  /// In en, this message translates to:
+  /// **'Some of Fogata’s files on this computer were found unencrypted where they are kept encrypted, so they were not used. Nothing was deleted: they are kept in {folder}.'**
+  String appFilesRefused(String folder);
+
   /// Toast: an invite link expired while waiting to be let in. {group} is the group.
   ///
   /// In en, this message translates to:
@@ -6133,6 +6139,30 @@ abstract class L10n {
   /// **'Unencrypted, anyone who copies this computer’s files can read them. Settings will keep saying so, and Fogata encrypts everything the first time it opens with a keychain.'**
   String get welcomeKeychainPlainNote;
 
+  /// Welcome page, when this computer had a profile whose files could not be read (damaged, or found unencrypted where they are kept encrypted): title of the note above the card.
+  ///
+  /// In en, this message translates to:
+  /// **'Your profile could not be read'**
+  String get welcomeProfileKeptTitle;
+
+  /// Welcome page: text of that note. {folder} is the folder where the old files are kept (a path).
+  ///
+  /// In en, this message translates to:
+  /// **'The profile and friends made on this computer could not be read, so Fogata opens as if it were new. Nothing was deleted: the files are kept in {folder}.'**
+  String welcomeProfileKeptText(String folder);
+
+  /// Welcome page: question asked when Create is pressed while the old profile's files are kept: a new profile starts empty, and the old files are neither used nor deleted.
+  ///
+  /// In en, this message translates to:
+  /// **'A new profile starts with no friends. The old profile’s files stay where they are, and Fogata does not use them.'**
+  String get welcomeProfileKeptConfirm;
+
+  /// Welcome page: button of that question that makes the new profile anyway.
+  ///
+  /// In en, this message translates to:
+  /// **'Make a new profile'**
+  String get welcomeProfileKeptMake;
+
   /// Welcome page (first start, before a profile exists): error when Create is pressed with no name.
   ///
   /// In en, this message translates to:
@@ -9180,6 +9210,30 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'{n, plural, =1{A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To send it, pick it with the + button.} other{{n} hidden or private files were left out: files like these are not added by dragging, since a web page can start a drag. To send them, pick them with the + button.}}'**
   String directPrivateLeftOut(int n);
+
+  /// Toast to a manager: someone asked to join the group {group} (with an invitation, or as a friend added to it), but their Fogata is too old for the group's protection. {name} is the person. Once they update, their invitation still works.
+  ///
+  /// In en, this message translates to:
+  /// **'{name} has to update Fogata before they can join “{group}”. Once they do, they get in as before.'**
+  String appMustUpdateToJoin(String name, String group);
+
+  /// Toast to someone joining the group {group} with an invitation: the group needs a newer version of Fogata than the one on this computer.
+  ///
+  /// In en, this message translates to:
+  /// **'“{group}” needs a newer Fogata. Update Fogata to join it.'**
+  String appUpdateToJoin(String group);
+
+  /// Error message when a manager adds a friend to a group: the friend's Fogata is too old for the group's protection.
+  ///
+  /// In en, this message translates to:
+  /// **'Your friend has to update Fogata before they can join this group.'**
+  String get errMustUpdateToJoin;
+
+  /// Group settings › Members, shown to those who manage the group: the group switches to stronger protection only once every member has a recent Fogata. {names} lists the members who have not updated yet, separated by commas.
+  ///
+  /// In en, this message translates to:
+  /// **'This group is waiting to turn on stronger protection. It turns on by itself once everyone has updated Fogata. Still to update: {names}'**
+  String groupSettingsLevelWaiting(String names);
 }
 
 class _L10nDelegate extends LocalizationsDelegate<L10n> {

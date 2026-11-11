@@ -25,6 +25,12 @@ String defaultDataDir() => RustLib.instance.api.crateApiAppDefaultDataDir();
 Future<bool> hasProfile({required String dataDir}) =>
     RustLib.instance.api.crateApiAppHasProfile(dataDir: dataDir);
 
+/// While the data folder has no profile: the folder where the profile and friends made in it
+/// were kept when they could not be read or were refused, if they were. The welcome screen
+/// says so, rather than look like a new device's.
+Future<String?> keptProfile({required String dataDir}) =>
+    RustLib.instance.api.crateApiAppKeptProfile(dataDir: dataDir);
+
 /// Saves the application's settings file (`app.json`) in the data folder, readable by the
 /// owner only, like the files the core keeps there. Off the UI thread: the write waits for
 /// the disk.

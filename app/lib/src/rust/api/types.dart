@@ -655,6 +655,13 @@ enum UiEventKind {
 
   /// Where updates stand changed ([`super::update::update_status`]).
   updateChanged,
+
+  /// Someone (`device`, called `name`) asked to be let into `group` with an invite or as
+  /// a friend added to it, but must update Fogata first.
+  mustUpdateToJoin,
+
+  /// The group this device is joining (`group`, called `name`) needs a newer Fogata.
+  updateToJoin,
 }
 
 class UiFile {
@@ -863,6 +870,10 @@ class UiGroup {
   /// room now; none otherwise.
   final List<UiKeptOut>? keptOut;
 
+  /// For a manager, while the group waits to go up to the protection this version gives:
+  /// the members whose Fogata must be updated first. None otherwise.
+  final List<UiPerson>? levelBehind;
+
   const UiGroup({
     required this.id,
     required this.name,
@@ -883,6 +894,7 @@ class UiGroup {
     required this.openInvites,
     required this.outranks,
     this.keptOut,
+    this.levelBehind,
   });
 
   @override
@@ -905,7 +917,8 @@ class UiGroup {
       lastRoomMs.hashCode ^
       openInvites.hashCode ^
       outranks.hashCode ^
-      keptOut.hashCode;
+      keptOut.hashCode ^
+      levelBehind.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -930,7 +943,8 @@ class UiGroup {
           lastRoomMs == other.lastRoomMs &&
           openInvites == other.openInvites &&
           outranks == other.outranks &&
-          keptOut == other.keptOut;
+          keptOut == other.keptOut &&
+          levelBehind == other.levelBehind;
 }
 
 /// A group a friend added this device to, waiting for the person to join or decline.

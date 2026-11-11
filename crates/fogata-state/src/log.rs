@@ -22,7 +22,10 @@ use crate::{
     },
     picture::{GroupPicture, is_group_picture},
     record::{MAX_RECORD_AHEAD_MS, RecordStamp},
-    state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, ROTATE_LEAVES_OUT, fair_name},
+    state::{
+        GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, Managers, ROTATE_LEAVES_OUT,
+        fair_name,
+    },
 };
 
 /// Why an entry from a device the log never named is refused.
@@ -1791,57 +1794,81 @@ impl GroupLog {
     }
 
     /// The issuer's own note of `ticket` that applies here, and the managers it names when it
-    /// is a [`NamedInvite`] (`None` for a [`Body::Invite`], which names nobody).
-    fn issuer_invite(&self, ticket: &Ticket) -> Option<Option<NamedInvite>> {
+    /// is a [`NamedInvite`] (`None` for a [`Body::Invite`], which names nobody), with the
+    /// entry that notes it.
+    fn issuer_invite(&self, ticket: &Ticket) -> Option<(EntryHash, Option<NamedInvite>)> {
         self.state().applied.iter().find_map(|h| {
             let entry = &self.entries[h];
             if entry.author != ticket.issuer {
                 return None;
             }
             match &entry.body {
-                Body::Invite { ticket: t, .. } => (t == ticket).then_some(None),
+                Body::Invite { ticket: t, .. } => (t == ticket).then_some((*h, None)),
                 body => NamedInvite::of(body)
                     .filter(|i| i.ticket == *ticket)
-                    .map(Some),
+                    .map(|i| (*h, Some(i))),
             }
         })
     }
 
     /// Joining device `me`: whether this log is the group of `ticket` ([`Self::invited_with`]),
-    /// and, when the issuer's invite names who lets its device in ([`NamedInvite`]), whether
-    /// the `Welcome` that let `me` in, if one did, is the issuer's or a named manager's.
+    /// and, when the issuer's invite names who lets its device in ([`NamedInvite`]) and `me`
+    /// is a member here, whether the entry that made it one is the issuer's or a named
+    /// manager's: the `Welcome` signed on its `Join` with this ticket, or an `Add` after the
+    /// invite.
     ///
     /// A manager removed while the invite was open keeps the log up to it, the issuer's note
     /// of the invite included, and manages the group in a copy made of it: only the names
     /// the issuer wrote tell that copy apart. Checked on the invite's own words rather than
-    /// on the group's level where the `Welcome` applies: that copy may sign its `Join` and
-    /// `Welcome` on entries before the group went up to level three, and so be judged at
-    /// level two there.
+    /// on the group's level where the entry applies: that copy may sign it on entries
+    /// before the group went up to level three, and so be judged at level two there. Every
+    /// way in counts, not the `Welcome` alone: that copy may as well add the device it
+    /// learnt from the `Join` it was sent, and seal it the copy's key. Any other way in (an
+    /// older membership, a `Join` with another ticket) is none the invite allows: a manager
+    /// lets in only a device that is no member ([`Body::Join`]), and that copy may leave
+    /// out the device's own `Leave`. Only what this device takes changes; every log is
+    /// judged as before.
     pub fn admits_as_invited(&self, ticket: &Ticket, me: &DevicePublicKey) -> bool {
-        let Some(invite) = self.issuer_invite(ticket) else {
+        let Some((noted, invite)) = self.issuer_invite(ticket) else {
             return false;
         };
         let Some(invite) = invite else {
             return true;
         };
         let state = self.state();
-        // A `Welcome` that let a device in applied just after its `Join`.
-        let joined = state.applied.iter().position(|h| {
-            let entry = &self.entries[h];
-            entry.author == *me
-                && matches!(&entry.body, Body::Join { ticket: t, .. } if t.ticket_id == ticket.ticket_id)
-        });
-        match joined {
-            None => true,
-            Some(at) => state
-                .applied
-                .get(at + 1)
-                .map(|h| &self.entries[h])
-                .is_some_and(|welcome| {
-                    matches!(&welcome.body, Body::Welcome { member, .. } if member == me)
-                        && invite.lets_in(&welcome.author)
-                }),
+        if !state.is_member(me) {
+            // Nothing taken but the log: still joining.
+            return true;
         }
+        // Each entry that let `me` in applied while it was no member, so the last of them
+        // is the one it is a member by. New entries are not always signed on a note of an
+        // invite (see `live_tips`), so an `Add` counts once it applies after it.
+        let mut allowed = false;
+        let mut after_note = false;
+        for (at, h) in state.applied.iter().enumerate() {
+            let entry = &self.entries[h];
+            after_note |= *h == noted;
+            match &entry.body {
+                Body::Create { .. } if entry.author == *me => allowed = false,
+                Body::Add { member, .. } if member == me => {
+                    allowed = after_note && invite.lets_in(&entry.author);
+                }
+                // A `Welcome` that let a device in applied just after its `Join`.
+                Body::Join { ticket: t, .. } if entry.author == *me => {
+                    allowed = t.ticket_id == ticket.ticket_id
+                        && state
+                            .applied
+                            .get(at + 1)
+                            .map(|h| &self.entries[h])
+                            .is_some_and(|welcome| {
+                                matches!(&welcome.body, Body::Welcome { member, .. } if member == me)
+                                    && invite.lets_in(&welcome.author)
+                            });
+                }
+                _ => {}
+            }
+        }
+        allowed
     }
 
     /// The issuing manager's own `Revoke` of `ticket`, when it applies here: the refusal a
@@ -1887,9 +1914,12 @@ impl GroupLog {
     /// it is there: the invited device, which knows the group only by the issuer's note of
     /// the invite, would take that log for the group, and be let in where only that device
     /// answers. Cancelled by the issuer, the invite brings the invited device a refusal it
-    /// believes from any member of the group. A manager that leaves by itself is not
-    /// counted: where everyone manages, as groups start, every leave would cancel every
-    /// invite. It changes nothing of what the log takes.
+    /// believes from any member of the group.
+    ///
+    /// A manager that leaves by itself keeps the log as well, but counts only for the
+    /// invites it could answer: those that name it ([`NamedInvite`]), and, of those that
+    /// name nobody, only where a few manage. Where everyone manages, as groups start, every
+    /// leave would cancel every invite. It changes nothing of what the log takes.
     pub fn invites_a_manager_left_with(
         &self,
         issuer: &DevicePublicKey,
@@ -1906,23 +1936,40 @@ impl GroupLog {
             .applied
             .iter()
             .rposition(|h| matches!(&self.entries[h].body, Body::SetManagers { first: Some(_) }));
-        let Some(last) = state
-            .manager_losses()
-            .filter(|(device, entry)| {
-                *device != issuer && !matches!(self.entries[*entry].body, Body::Leave)
+        let mut last = fewer_managers;
+        let mut leaves = Vec::new();
+        for (device, entry, managers) in state.manager_losses() {
+            let Some(&place) = at.get(entry).filter(|_| device != issuer) else {
+                continue;
+            };
+            if matches!(self.entries[entry].body, Body::Leave) {
+                leaves.push((device, place, managers));
+            } else {
+                last = last.max(Some(place));
+            }
+        }
+        // Whether a manager that left at `place` could let in the device invited at `noted`.
+        let left_with = |noted: usize, invite: &Option<NamedInvite>| {
+            leaves.iter().any(|(device, place, managers)| {
+                noted < *place
+                    && match invite {
+                        Some(named) => named.lets_in(device),
+                        None => matches!(managers, Managers::First(_)),
+                    }
             })
-            .filter_map(|(_, entry)| at.get(entry).copied())
-            .chain(fewer_managers)
-            .max()
-        else {
-            return Vec::new();
         };
-        state.applied[..last]
+        state
+            .applied
             .iter()
-            .map(|h| &self.entries[h])
-            .filter(|e| e.author == *issuer)
-            .filter_map(|e| invite_ticket(&e.body))
-            .map(|ticket| ticket.ticket_id)
+            .enumerate()
+            .map(|(i, h)| (i, &self.entries[h]))
+            .filter(|(_, e)| e.author == *issuer)
+            .filter_map(|(i, e)| {
+                let named = NamedInvite::of(&e.body);
+                let ticket = invite_ticket(&e.body)?;
+                let known = last.is_some_and(|last| i < last) || left_with(i, &named);
+                known.then_some(ticket.ticket_id)
+            })
             .filter(|id| {
                 state
                     .open_invites

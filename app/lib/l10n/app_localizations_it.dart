@@ -693,6 +693,11 @@ class L10nIt extends L10n {
       'Il tuo elenco di amici si era danneggiato su questo computer ed è stato ripristinato dalla copia fatta prima dell’ultima modifica. Un amico aggiunto o rimosso poco prima potrebbe dover essere aggiunto o rimosso di nuovo.';
 
   @override
+  String appFilesRefused(String folder) {
+    return 'Alcuni file di Fogata su questo computer erano non cifrati dove vengono conservati cifrati, quindi non sono stati usati. Non è stato eliminato nulla: sono conservati in $folder.';
+  }
+
+  @override
   String appInvitationRanOut(String group) {
     return 'L’invito a “$group” è scaduto prima che qualcuno del gruppo ti facesse entrare. Chiedine uno nuovo.';
   }
@@ -4563,6 +4568,22 @@ class L10nIt extends L10n {
       'Senza cifratura, chiunque copi i file di questo computer può leggerli. Le impostazioni continueranno a segnalarlo, e Fogata cifrerà tutto la prima volta che si aprirà con un portachiavi.';
 
   @override
+  String get welcomeProfileKeptTitle =>
+      'Non è stato possibile leggere il tuo profilo';
+
+  @override
+  String welcomeProfileKeptText(String folder) {
+    return 'Non è stato possibile leggere il profilo e gli amici creati su questo computer, quindi Fogata si apre come se fosse nuovo. Non è stato eliminato nulla: i file sono conservati in $folder.';
+  }
+
+  @override
+  String get welcomeProfileKeptConfirm =>
+      'Un nuovo profilo inizia senza amici. I file del vecchio profilo restano dove sono, e Fogata non li usa.';
+
+  @override
+  String get welcomeProfileKeptMake => 'Crea un nuovo profilo';
+
+  @override
   String get welcomeWriteName => 'Scrivi il tuo nome.';
 
   @override
@@ -6533,5 +6554,24 @@ class L10nIt extends L10n {
       one: 'Un file nascosto o privato è stato lasciato fuori: file come questo non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarlo, sceglilo con il pulsante +.',
     );
     return '$_temp0';
+  }
+
+  @override
+  String appMustUpdateToJoin(String name, String group) {
+    return '$name deve aggiornare Fogata prima di poter entrare in “$group”. Dopo, entrerà come sempre.';
+  }
+
+  @override
+  String appUpdateToJoin(String group) {
+    return '“$group” richiede una versione più recente di Fogata. Aggiorna Fogata per entrare.';
+  }
+
+  @override
+  String get errMustUpdateToJoin =>
+      'Il tuo amico deve aggiornare Fogata prima di poter entrare in questo gruppo.';
+
+  @override
+  String groupSettingsLevelWaiting(String names) {
+    return 'Questo gruppo aspetta di attivare una protezione più forte. Si attiva da sola quando tutti hanno aggiornato Fogata. Ancora da aggiornare: $names';
   }
 }

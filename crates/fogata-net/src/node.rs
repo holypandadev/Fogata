@@ -466,6 +466,16 @@ struct WaitingJoin {
     peer: PeerId,
     entry: fogata_state::Entry,
     ticket: fogata_state::Ticket,
+    /// The capability level its connection listed when it signed: the group may go up a
+    /// level while it waits (see `joins::answer_join`).
+    level: Option<u32>,
+}
+
+/// Who a manager was told is too old to be let into a group (see `GroupSlot::behind_told`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum BehindTold {
+    Invite([u8; 16]),
+    Friend(DevicePublicKey),
 }
 
 /// What a member request was, to handle its answer.
@@ -713,6 +723,13 @@ struct GroupSlot {
     /// Invitations from this device (the entries that made them) said to be declined, so
     /// each is said once.
     declines_told: HashSet<fogata_state::EntryHash>,
+    /// Invites (their ticket ids) and friends whose device was told to this manager to be
+    /// too old to be let in (see [`NodeEvent::MustUpdateToJoin`]), so each is told once: a
+    /// copy that is refused asks again and again.
+    behind_told: HashSet<BehindTold>,
+    /// This device, joining, was told the group is at a level it does not judge at (see
+    /// [`NodeEvent::UpdateToJoin`]).
+    update_told: bool,
     /// This device's `Leave`, while no member is known to have it: a group this device
     /// left runs on until one has (see `members::leave_taken`), since a member that has not
     /// counted the device in yet refuses it, and one away gets nothing.
@@ -805,6 +822,8 @@ impl GroupSlot {
             leak_heartbeats: 0,
             key_told: HashMap::new(),
             declines_told: HashSet::new(),
+            behind_told: HashSet::new(),
+            update_told: false,
         }
     }
 
@@ -1170,6 +1189,13 @@ impl Node {
             NodeEvent::JoinDeclined { .. } => tracing::info!("a manager said no to joining"),
             NodeEvent::JoinExpired { .. } => {
                 tracing::info!("the invite ran out before a manager let this device in")
+            }
+            NodeEvent::MustUpdateToJoin { device, .. } => tracing::info!(
+                "{} asks to join a group but must update Fogata first",
+                device.fingerprint()
+            ),
+            NodeEvent::UpdateToJoin { .. } => {
+                tracing::info!("the group to join is at a level this version does not judge at")
             }
             NodeEvent::Removed { .. } => tracing::info!("this device left a group"),
             NodeEvent::MemberProfile { profile } => {
@@ -1564,6 +1590,7 @@ mod tests {
                 peer: PeerId::random(),
                 entry,
                 ticket: ticket.clone(),
+                level: Some(crate::caps::CAPS_LEVEL),
             };
             (joiner.public_key(), join)
         };

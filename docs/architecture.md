@@ -1049,7 +1049,10 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   sharing one more is refused with that reason. Every member keeps each share as sent, with a
   video's first picture (64 KiB at most), so the rooms of a group keep at most 24 MiB of
   shares together from all their participants (a picture too big to show counted all the
-  same), whatever modified copies send: each room keeps its part, 24 MiB over the rooms the
+  same), whatever modified copies send. The size and length a video's share says it has
+  are kept as sent too, and only drawn within bounds (`app/lib/src/fair_size.dart`: a
+  shape from 1:2 to 3:1, 16:9 for one that says nothing, a length up to 100 hours), in
+  the rooms and the direct chats alike: each room keeps its part, 24 MiB over the rooms the
   group has, so all of them together keep 24 MiB, and a share past that is not listed on
   that member. The parts come from the group's log (how many rooms it has, how many people
   a room takes), the same on every member, and never from what a member holds of the other
@@ -2102,7 +2105,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   Before each share it checks that its own is still there. The app goes back to the microphone only when it is turned on or the call
   ends: a channel may keep sending until the other side agrees again, choosing another
   input while WebRTC records opens it at once, and a recording whose input goes away
-  moves to the default microphone by itself. The
+  moves to the default microphone by itself. Choosing the silent input and going back
+  to the microphone take turns, so a call that ends (or a microphone turned on) while
+  the silent input is still being chosen goes back to the microphone once it is: WebRTC
+  keeps the input it was last given from one call to the next. For the same reason each
+  call on Linux chooses its input at the start even with "System default" (the first
+  real input listed, never a silent one). The
   voice never reaches the screen's channel: libwebrtc hands what it records only to the
   microphone's track. On Linux a shared window goes without sound, and the sound button
   does not show: the portal does not say which application a window belongs to, and
@@ -2499,8 +2507,25 @@ it judges at; the one place a group's level goes up (`Core::raise_group_level`, 
 member was seen at it. A manager's device raises its group by itself, at a heartbeat, once
 every other member was seen at the level this version judges at (`raise_level_when_all_judge`
 in fogata-net, the manager above it going first when connected): a group with a member on an
-older copy stays where it is, under the old rules, until that member updates. Copies before levels kept a `Level` entry as a kind they do not know,
+older copy stays where it is, under the old rules, until that member updates. The group's
+settings show its managers that the group waits, and which members have not updated
+(`GroupView::level_behind`); nothing raises it past them. Copies before levels kept a `Level` entry as a kind they do not know,
 changing nothing: that one change came without a level, before any copy was handed out.
+
+Nobody is let into a group that went up whose copy does not judge at its level: such a copy
+refuses the log from the `Level` entry on and never gets in, while the group would count it a
+member. These are checks of what a manager does, never of what a copy takes. A manager
+answers a signed `Join` from a connection listing a lower capability level with `Refused`
+(the invite stays good, and the device asks again), checks again when its person says yes,
+does not send a group to a friend listing a lower level, and its core adds no friend last
+seen at a lower level. A connection that shows no Fogata protocol at all says nothing of its
+level, and is answered as before; a joining device shows its protocols to every peer it
+shows its invite to; its person is told, once per invite or friend, that that person must
+update Fogata first (`NodeEvent::MustUpdateToJoin`). A joining device sent a log with a
+signed `Level` entry above every level it knows tells its person to update
+(`NodeEvent::UpdateToJoin`). A manager that wrote an `Invite` before it saw the group go up
+to three, which then does not apply, writes it again as a `NamedInvite` with the same ticket
+and token (`name_unnamed_invites`), so the link given out works.
 
 Level three (capability level 3) changes two rules, and nothing else: invites name who may
 let their device in (`NamedInvite`, 5.3), and a `Rotate` gives the new key to every member
@@ -2887,10 +2912,22 @@ that know it: level two keeps it as a kind it does not know), which names, besid
 issuer, the managers above the issuer on the ladder; an `Invite` that names nobody applies no
 more. Only the issuer and those named announce under its token and take its joins, the group
 applies only their `Welcome` letting its device in, and the joining device takes a log in
-which it was let in only when that `Welcome` is the issuer's or a named manager's. The
-device judges that on the invite's own words, not on the group's level where the `Welcome`
-applies: a copy can sign its `Join` and `Welcome` on the group as it was before it went up to
-level three, and be judged at level two there.
+which it is a member only when the entry that made it one is the issuer's or a named
+manager's: the `Welcome` on its `Join` with that ticket, or an `Add` after the invite. Every
+way in counts, since the copy can as well add the device it learnt from the `Join` it was
+sent and seal it the copy's key; a membership from before (whose `Leave` the copy leaves
+out) is none the invite allows. The device judges that on the invite's own words, not on the
+group's level where the entry applies: a copy can sign its entries on the group as it was
+before it went up to level three, and be judged at level two there. A log judged while
+another was being taken is judged again (the manager is asked again) rather than added
+to it unjudged: together they could let the device in where neither does alone.
+
+The issuer also cancels (`Revoke`) its open invites when a manager is removed or demoted
+after them, or the managers are set to the first few, and when a manager that could answer
+one leaves by itself: one the invite names, or, for an invite that names nobody, any
+manager where a few manage. Where everyone manages a leave cancels nothing, or every leave
+would cancel every invite. That is only what the issuer writes: every version takes a
+`Revoke`.
 
 Why those managers: whoever an invite names can still make such a copy if it loses its
 rights while the invite is open, so naming is trust for the invite's life (a day). The
@@ -3418,9 +3455,31 @@ with the key the keychain gives again. While sealing is not `done`, or an attach
 still plain, the settings and the bell at start say that not all of this computer's data is
 encrypted yet (`at_rest` is `Unfinished`). A keychain that gives the key back once and then loses it (reset,
 or an item tied to the program's signature) leaves the folder refusing to open, and the
-account still in those copies. Has a profile
-(`has_profile`) does not ask the keychain, so the first window opens at once; the keychain
-is asked when the core starts. Keys and decrypted secrets are wiped from memory when dropped
+account still in those copies.
+
+A plain secret (the identity, the friends file or its copy, the recovery key, an MLS state)
+found in a folder that has a key is sealed only while sealing is under way as a note sealed
+with that key says (`sealing.json` is sealed from 0.1.0-beta.8 on): anyone who can write the
+folder could have put it there. Otherwise it is refused: moved, as it is, to `refused/`,
+never read nor sealed. Two cases are the account's own though. A folder of which neither the
+identity nor the friends file is sealed yet is sealed whole (its recovery key refused: copies
+are turned on again). And a folder whose sealing an earlier version (noting it in the clear)
+cut short after the identity, which `before-sealing/identity.key` shows (a plain copy of the
+identity sealed there): sealing goes on, taking a plain secret as its copy in
+`before-sealing/` holds it, or as it is when sealing never got to copy it (a recovery key only
+as its copy holds it), and refusing one that differs. Whoever could write such a folder could
+read the account's identity in it in the clear anyway, until the start after sealing ended
+removes the copies. 0.1.0-beta.8 refused those files; a later start takes them back from
+`refused/` by the same rule, sealed, where nothing was put since, while the identity's copy
+is still there. Refused files are never kept without a word: each start says where they are
+(a notice), a move to another computer writes them over and removes them with the other
+secrets (5e), and a folder whose friends file was refused, or damaged with its copy (both set
+aside as `friends.bin.damaged…`), shows the welcome page with a note of where they are kept
+and that nothing was deleted (`kept_profile`); making a new profile there is asked first, and
+never writes over them. Has a profile
+(`has_profile`) does not ask the keychain, so the first window opens at once, unless the
+folder has a key and its friends file is plain or was refused; the keychain is otherwise
+asked when the core starts. Keys and decrypted secrets are wiped from memory when dropped
 where the types allow (`zeroize`), and so are the password and the random scalars of a run
 of a friend code or a move code: the `spake2` crate (0.4) that runs them is a copy of its own
 for that (`vendor/spake2`, see its FOGATA.md).
@@ -4082,11 +4141,15 @@ direction's key, numbered by its nonce, so a frame changed, dropped, repeated or
 order makes the move stop. The old computer sends a summary (the account's signed profile,
 how many friends, groups, chats and attachments, how many bytes), then, after both yeses, every
 file of the folder in the form a folder without a key keeps it: a sealed file is opened with
-the old folder's key, attachments as they are read. Each file goes as its path, its pieces
+the old folder's key, attachments as they are read. A copy of a damaged friends file, journal
+or pins is opened as its form says it was sealed: for `damaged` (a plain copy sealing sealed
+later), or for what it was when it was put aside already sealed (`friends`; a chain of the
+chat's, read up to its damage); one that opens as none of those (damaged in its box too)
+stays behind, said in the log, rather than stop the move or a copy (5g). Each file goes as its path, its pieces
 (256 KiB) and the BLAKE3 of its contents, checked at the end. The new computer decides from
 the path alone what a file is and how to seal it (the identity, the friends file, the MLS
 states and the friends' profiles whole, a chat's journal and pins as chains, attachments as
-streams, the rest as they are), takes only paths of those kinds (no `..`, no root, at most four
+streams, copies of damaged ones whole for `damaged`, the rest as they are), takes only paths of those kinds (no `..`, no root, at most four
 deep, never twice), and writes everything into `incoming/` of its folder (how far the move
 got is kept beside it in `incoming.json`, where nothing the old computer sends can land), sealed with a new
 data key that its own keychain keeps (plain only where the keychain keeps none, as for a new
@@ -4183,7 +4246,8 @@ of the shell's history and the list of processes.
   can fill the new folder with an account of its choice (only inside `incoming/`, and the
   person sees whose account it is before it starts); it cannot write outside the folder.
 - The old computer keeps chats and attachments, sealed with its own key, until the person
-  deletes them; the identity and friend secrets are gone from it.
+  deletes them; the identity, the friend secrets, the recovery key, the MLS states, the plain
+  copies made while sealing and the files sealing refused are written over and gone from it.
 
 ## 5f. Updates of pre-releases (fogata-update, fogata-net `updates`, fogata-core `updates`)
 
@@ -4197,7 +4261,8 @@ build that still works with it (`min_build`: below it a copy is told it must upd
 change of the network protocol), when it was made and when it expires (180 days by
 default), notes, and one package per platform (`linux-flatpak`, `windows-x64`,
 `macos-arm64`, `macos-x64`) with its file name, size, BLAKE3 and SHA-256, and the BLAKE3 of
-every 1 MiB chunk. The release key (Ed25519) signs `fogata/v1/release-manifest\0` followed by
+every 1 MiB chunk. The universal Mac app is one package listed under both Mac platforms (the
+same file, size and hashes), as a copy takes the platform of the process it runs as. The release key (Ed25519) signs `fogata/v1/release-manifest\0` followed by
 the manifest's exact bytes; the public keys a build trusts are compiled into it
 (`RELEASE_KEYS`, read at run time from the keys marker of the library, which the release
 tooling checks in every package together with its build and the commit it was built from),

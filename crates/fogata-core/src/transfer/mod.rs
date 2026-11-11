@@ -1993,9 +1993,10 @@ async fn sending(
     let (items, summary) = {
         let dir = dir.to_path_buf();
         let keychain = keychain.clone();
+        let key = key.clone();
         blocking(move || {
             let store = Store::open_with(dir.clone(), keychain)?;
-            let items = files::list(&dir)?;
+            let items = files::leave_out_unreadable(&dir, files::list(&dir)?, key.as_ref());
             let summary = summarize(&store, &items)?;
             Ok((items, summary))
         })
@@ -2380,13 +2381,19 @@ fn deactivate(dir: &Path) -> Result<()> {
     }
     for entry in fs::read_dir(dir)?.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        // The identity, the friend secrets, and the tickets of invites still waiting for a
-        // manager (they name this device's identity).
-        if name == "identity.key" || name.starts_with("friends.bin") || name == "joins.json" {
+        // The identity, the friend secrets, the recovery key that proves copies, and the
+        // tickets of invites still waiting for a manager (they name this device's identity).
+        if name == "identity.key"
+            || name.starts_with("friends.bin")
+            || name.starts_with(crate::recovery::KEY_FILE)
+            || name == "joins.json"
+        {
             wipe(&entry.path())?;
         }
     }
-    for sub in ["mls", crate::store::BACKUP_DIR] {
+    // The plain files refused by sealing are secrets of the account too, or were taken
+    // for some, in the clear.
+    for sub in ["mls", crate::store::BACKUP_DIR, crate::store::REFUSED_DIR] {
         let path = dir.join(sub);
         if fs::symlink_metadata(&path).is_ok() {
             wipe(&path)?;
@@ -2400,7 +2407,7 @@ fn deactivate(dir: &Path) -> Result<()> {
 /// not left whole in the disk's free space while the account lives on another computer. Only
 /// as far as the disk lets: one that writes elsewhere (a copy-on-write file system, a flash
 /// drive's own mapping) may still keep the old blocks. A link is removed, never followed.
-fn wipe(path: &Path) -> Result<()> {
+pub(crate) fn wipe(path: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
         for entry in fs::read_dir(path)?.flatten() {
@@ -3118,10 +3125,16 @@ mod tests {
             "friends.bin",
             "friends.bin.bak",
             "joins.json",
+            crate::recovery::KEY_FILE,
         ] {
             fs::write(dir.join(file), b"x").unwrap();
         }
-        for sub in ["mls", crate::store::BACKUP_DIR, "logs"] {
+        for sub in [
+            "mls",
+            crate::store::BACKUP_DIR,
+            crate::store::REFUSED_DIR,
+            "logs",
+        ] {
             fs::create_dir_all(dir.join(sub)).unwrap();
             fs::write(dir.join(sub).join("x"), b"x").unwrap();
         }

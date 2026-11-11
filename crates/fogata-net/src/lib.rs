@@ -201,6 +201,22 @@ pub enum NodeEvent {
     JoinExpired {
         group: GroupId,
     },
+    /// A device asked this manager to be let into `group` (with an invite, or as a friend
+    /// added to it), but its copy of Fogata does not judge at the level the group went up
+    /// to: it would refuse the log from there on and never get in. It is not let in until it
+    /// lists that level; `name` is what it asked to be called, or the friend's name in the
+    /// group. Told once for each invite and each friend.
+    MustUpdateToJoin {
+        group: GroupId,
+        device: DevicePublicKey,
+        name: String,
+    },
+    /// The log a manager let this device into `group` with went up to a level this version
+    /// of Fogata does not judge at: it cannot get in until it is updated. Told once for each
+    /// join.
+    UpdateToJoin {
+        group: GroupId,
+    },
     /// An invite was accepted: this device is now a member of the group called `name`.
     Joined {
         group: GroupId,

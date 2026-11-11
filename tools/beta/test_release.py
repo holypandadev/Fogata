@@ -52,12 +52,12 @@ def make_zip(path, entries):
 
 
 def elf(relro=True, bind_now="flags", runpath="$ORIGIN", rpath=None, protected=True,
-        stripped=False):
+        stripped=False, needed=()):
     """A 64-bit ELF file with what the Linux checks read: a RELRO segment or not, symbols
-    bound at start (by DT_FLAGS, DT_FLAGS_1, DT_BIND_NOW or not at all), its RUNPATH and
-    RPATH in the dynamic segment, and the stack protector's symbol among its dynamic ones
-    or not; with its sections, or stripped of them. Loaded at an address other than its
-    place in the file, as libraries are."""
+    bound at start (by DT_FLAGS, DT_FLAGS_1, DT_BIND_NOW or not at all), its RUNPATH, RPATH
+    and the libraries it needs in the dynamic segment, and the stack protector's symbol
+    among its dynamic ones or not; with its sections, or stripped of them. Loaded at an
+    address other than its place in the file, as libraries are."""
     base = 0x400000
     strings = bytearray(b"\0")
 
@@ -69,7 +69,7 @@ def elf(relro=True, bind_now="flags", runpath="$ORIGIN", rpath=None, protected=T
     if protected:
         string("__stack_chk_fail")
     string("memcpy")
-    dynamic = []
+    dynamic = [(1, string(library)) for library in needed]
     if runpath is not None:
         dynamic.append((29, string(runpath)))
     if rpath is not None:
@@ -117,6 +117,27 @@ def elf(relro=True, bind_now="flags", runpath="$ORIGIN", rpath=None, protected=T
         + section(11, symbols_at, len(symbols), 1)
         + section(6, dynamic_at, len(dynamic_bytes), 1))
     return header + program + bytes(strings) + symbols + dynamic_bytes + sections
+
+
+def macho(*archs, fat64=False):
+    """The header of a Mach-O file built for `archs` (lipo's names, or a CPU type's number):
+    a thin 64-bit file for one, a universal (fat) file for more, with 64-bit slice entries
+    when `fat64`."""
+    cpu = {"arm64": 0x0100000C, "x86_64": 0x01000007}
+    types = [cpu.get(arch, arch) for arch in archs]
+    if len(types) == 1:
+        return b"\xcf\xfa\xed\xfe" + types[0].to_bytes(4, "little") + bytes(24)
+    magic = b"\xca\xfe\xba\xbf" if fat64 else b"\xca\xfe\xba\xbe"
+    entries = b""
+    for at, kind in enumerate(types):
+        offset = 0x4000 * (at + 1)
+        if fat64:
+            entries += (kind.to_bytes(4, "big") + bytes(4) + offset.to_bytes(8, "big")
+                        + (0x1000).to_bytes(8, "big") + (14).to_bytes(4, "big") + bytes(4))
+        else:
+            entries += (kind.to_bytes(4, "big") + bytes(4) + offset.to_bytes(4, "big")
+                        + (0x1000).to_bytes(4, "big") + (14).to_bytes(4, "big"))
+    return magic + len(types).to_bytes(4, "big") + entries
 
 
 class Unzip(unittest.TestCase):
@@ -350,10 +371,13 @@ class Builds(unittest.TestCase):
 
     def test_linux_binaries_must_carry_their_hardening(self):
         self.assertEqual(release.elf_dynamic(elf()),
-                         (True, True, ["$ORIGIN"], {"", "__stack_chk_fail", "memcpy", "$ORIGIN"}))
+                         (True, True, ["$ORIGIN"], {"", "__stack_chk_fail", "memcpy", "$ORIGIN"},
+                          []))
         # Read from the dynamic segment, as the loader does: the sections may be gone.
-        self.assertEqual(release.elf_dynamic(elf(stripped=True, runpath="${ORIGIN}/lib")),
-                         (True, True, ["${ORIGIN}/lib"], {""}))
+        self.assertEqual(release.elf_dynamic(elf(stripped=True, runpath="${ORIGIN}/lib",
+                                                 needed=["libpulse.so.0", "libc.so.6"])),
+                         (True, True, ["${ORIGIN}/lib"], {""}, ["libpulse.so.0", "libc.so.6"]))
+        webrtc = ["libwebrtc.so", "libpipewire-0.3.so.0", "libpulse.so.0", "libc.so.6"]
         for flag in ("flags", "flags_1", "bind_now"):
             self.assertTrue(release.elf_dynamic(elf(bind_now=flag))[1], flag)
         self.assertFalse(release.elf_dynamic(elf(bind_now=None))[1])
@@ -366,6 +390,7 @@ class Builds(unittest.TestCase):
             good = {
                 "fogata": elf(runpath="$ORIGIN/lib"),
                 "lib/libfogata_video_plugin.so": elf(bind_now="flags_1"),
+                "lib/libflutter_webrtc_plugin.so": elf(needed=webrtc),
                 "lib/liburl_launcher_linux_plugin.so": elf(bind_now="bind_now",
                                                            runpath="${ORIGIN}"),
                 # Built elsewhere and stripped of its sections.
@@ -396,6 +421,15 @@ class Builds(unittest.TestCase):
                 ("lib/libfogata_video_plugin.so", elf(protected=False)),
                 ("lib/libflutter_linux_gtk.so", elf(relro=False)),
                 ("lib/fake.so", b"\x7fELF" + bytes([1, 1]) + bytes(100)),
+                # Built where the PipeWire or the PulseAudio dev package was missing: the
+                # plugin builds without screen capture under Wayland, screen sound and the
+                # silent input. A library of the same name elsewhere does not count.
+                ("lib/libflutter_webrtc_plugin.so",
+                 elf(needed=[n for n in webrtc if n != "libpipewire-0.3.so.0"])),
+                ("lib/libflutter_webrtc_plugin.so",
+                 elf(needed=[n for n in webrtc if n != "libpulse.so.0"])),
+                ("lib/libflutter_webrtc_plugin.so",
+                 elf(needed=["libpipewire-0.3.so", "libpulse.so.0"])),
             ]
             for name, data in bad:
                 with self.subTest(name=name):
@@ -408,6 +442,10 @@ class Builds(unittest.TestCase):
                     else:
                         path.unlink()
             release.check_linux_hardening(bundle)
+            # A bundle without the plugin has no screen capture at all.
+            (bundle / "lib/libflutter_webrtc_plugin.so").unlink()
+            with self.assertRaises(SystemExit):
+                release.check_linux_hardening(bundle)
 
     def test_a_file_not_in_the_signed_list_fails_the_public_check(self):
         public = release.load_public_release()
@@ -527,6 +565,71 @@ class Builds(unittest.TestCase):
             plist.write_bytes(b"not a plist")
             with self.assertRaises(SystemExit):
                 release.check_macos_info(app, 7)
+
+    def test_the_architectures_of_a_mac_program_are_read_from_its_header(self):
+        self.assertEqual(release.macho_archs(macho("arm64")), {"arm64"})
+        self.assertEqual(release.macho_archs(macho("x86_64")), {"x86_64"})
+        self.assertEqual(release.macho_archs(macho("arm64", "x86_64")), {"arm64", "x86_64"})
+        self.assertEqual(release.macho_archs(macho("x86_64", "arm64", fat64=True)),
+                         {"arm64", "x86_64"})
+        self.assertEqual(release.macho_archs(macho("arm64", 0x12)), {"arm64", "cpu-0x12"})
+        # The 32-bit thin header too.
+        self.assertEqual(release.macho_archs(b"\xce\xfa\xed\xfe" + (7).to_bytes(4, "little")),
+                         {"cpu-0x7"})
+        for other in [b"", b"\xcf\xfa\xed\xfe", b"\x7fELF" + bytes(60), b"MZ" + bytes(60),
+                      # A Java class: the fat magic, then its version.
+                      b"\xca\xfe\xba\xbe\x00\x00\x00\x41" + bytes(40),
+                      # A fat header cut short.
+                      macho("arm64", "x86_64")[:30],
+                      b"\xca\xfe\xba\xbe" + bytes(4)]:
+            with self.subTest(other=other[:8]):
+                self.assertIsNone(release.macho_archs(other))
+
+    def test_a_universal_mac_app_is_published_for_both_kinds_of_mac(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = pathlib.Path(tmp) / "Fogata.app"
+            main, updater = (app / name for name in release.MACOS_PROGRAMS)
+            library = app / "Contents/Frameworks/fogata_ffi.framework/Versions/A/fogata_ffi"
+            for path in (main, updater, library):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(macho("arm64", "x86_64") + bytes(100))
+            (app / "Contents/Resources").mkdir()
+            (app / "Contents/Resources/AppIcon.icns").write_bytes(b"icns" + bytes(100))
+            (app / "Contents/Frameworks/fogata_ffi.framework/fogata_ffi").symlink_to(
+                "Versions/A/fogata_ffi")
+            self.assertEqual(release.macos_archs(app), {"arm64", "x86_64"})
+            # One package, under the platform each kind of Mac looks for.
+            self.assertEqual(release.macos_platforms(release.macos_archs(app), None),
+                             ("universal", ["macos-arm64", "macos-x64"]))
+            with self.assertRaises(SystemExit):  # it is not for one Mac only
+                release.macos_platforms(release.macos_archs(app), "arm64")
+            # A library with one slice: the app runs on that Mac only.
+            library.write_bytes(macho("arm64") + bytes(100))
+            self.assertEqual(release.macos_archs(app), {"arm64"})
+            with self.assertRaises(SystemExit):
+                release.macos_platforms(release.macos_archs(app), None)
+            self.assertEqual(release.macos_platforms({"arm64"}, "arm64"),
+                             ("arm64", ["macos-arm64"]))
+            with self.assertRaises(SystemExit):
+                release.macos_platforms({"arm64"}, "x64")
+            self.assertEqual(release.macos_platforms({"x86_64"}, "x64"), ("x64", ["macos-x64"]))
+            # The updater, or Fogata itself, missing or not a Mac program.
+            for path in (main, updater):
+                with self.subTest(path=path.name):
+                    kept = path.read_bytes()
+                    path.write_bytes(b"#!/bin/sh\n")
+                    with self.assertRaises(SystemExit):
+                        release.macos_archs(app)
+                    path.unlink()
+                    with self.assertRaises(SystemExit):
+                        release.macos_archs(app)
+                    path.write_bytes(kept)
+
+    def test_the_readme_names_the_macs_the_zip_is_for(self):
+        for name, kind in [("universal", "Apple silicon and Intel"), ("arm64", "Apple silicon only")]:
+            text = release.README.format(version="1", mac_name=name, mac_kind=kind)
+            self.assertIn(f"macOS ({kind})", text)
+            self.assertIn(f"Fogata-1-macos-{name}.zip", text)
 
     def test_the_flatpak_key_is_kept_apart_from_the_release_keys(self):
         with tempfile.TemporaryDirectory() as tmp:

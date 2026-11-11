@@ -9,8 +9,8 @@ use fogata_proto::MemberRequest;
 use fogata_state::{GroupLog, Ticket};
 use libp2p::PeerId;
 
-use super::{Node, Pending, judging::Job, now_ms};
-use crate::{NodeEvent, group::NotLetIn, short_peer};
+use super::{BehindTold, Node, Pending, judging::Job, now_ms};
+use crate::{NodeEvent, caps, group::NotLetIn, short_peer};
 
 /// Times a part of a log that did not arrive is sent again.
 const PART_TRIES: u8 = 3;
@@ -22,7 +22,65 @@ pub(super) const MAX_ADMITTED_BYTES: usize = 16 * 1024 * 1024;
 /// is bounded as a whole too.
 pub(super) const MAX_ADMITTED_BYTES_ALL: usize = 2 * MAX_ADMITTED_BYTES;
 
+/// Whether a device whose connection lists capability level `listed` judges at `level`, a
+/// group's: a copy below it refuses the `Level` entry that raised the group, and waits on
+/// everything signed after it, the `Welcome` that would let it in included. Such a device
+/// never gets in, while the group counts it a member and gives it its keys, so it is not let
+/// in. A group no `Level` entry raised is judged alike by every copy. `None` when its
+/// connection has not shown what it speaks (see `Node::shown_level`): such a device is let in
+/// as before, so that none that would get in is kept out.
+///
+/// Only what this manager does is decided here; what any copy takes of the log is not.
+pub(super) fn judges_level(level: fogata_state::Level, listed: Option<u32>) -> Option<bool> {
+    if level <= fogata_state::Level::default() {
+        return Some(true);
+    }
+    listed.map(|listed| caps::judges_at(listed, level))
+}
+
+/// Whether a log a manager let this device in with carries a `Level` entry, signed, that
+/// raises the group above every level this version judges at: why it could not be taken,
+/// and only an update of Fogata lets this device in. A manager's word only (nothing of the
+/// group is known yet), so it is only told; the join goes on.
+pub(super) fn raised_past_this_version(entries: &[Vec<u8>]) -> bool {
+    entries
+        .iter()
+        .filter_map(|bytes| fogata_state::Entry::decode(bytes).ok())
+        .filter(|entry| {
+            matches!(entry.body, fogata_state::Body::Level { level }
+                if fogata_state::Level::numbered(level).is_none()
+                    && level > fogata_state::Level::CURRENT.number())
+        })
+        .take(1)
+        .any(|entry| entry.signature_valid())
+}
+
 impl Node {
+    /// Manager: tells the application, once for `told`, that `device` (called `name`) must
+    /// update Fogata before it can be let into `group`.
+    pub(super) fn tell_behind(
+        &mut self,
+        group: GroupId,
+        told: BehindTold,
+        device: DevicePublicKey,
+        name: String,
+    ) {
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return;
+        };
+        tracing::debug!(
+            "{} judges below the group's level: not let in",
+            device.fingerprint()
+        );
+        if slot.behind_told.insert(told) {
+            self.emit(NodeEvent::MustUpdateToJoin {
+                group,
+                device,
+                name,
+            });
+        }
+    }
+
     /// Joining device: shows our invite ticket to a peer that may be a member.
     pub(super) fn send_join(&mut self, peer: PeerId, group: GroupId) {
         let Some(slot) = self.groups.get_mut(&group) else {
@@ -32,6 +90,9 @@ impl Node {
             return;
         };
         if slot.join_sent.insert(peer) {
+            // The manager lets in no copy too old for the group's level: it is told this
+            // one's (see `judges_level`), which a device lists only to peers it chose.
+            self.show_protocols(peer);
             self.request(
                 peer,
                 MemberRequest::JoinRequest { ticket },
@@ -168,7 +229,7 @@ impl Node {
     /// The log a manager on `peer` let this device in with, judged (`taken`: it is the
     /// invited group's, or it no longer had to be). `judged` is the group's log with it,
     /// taken whole when nothing came meanwhile; otherwise `entries` are taken as any batch,
-    /// and the rest come with the next sync.
+    /// and the rest come with the next sync, once this device is in.
     pub(super) fn admitted_judged(
         &mut self,
         group: GroupId,
@@ -184,10 +245,23 @@ impl Node {
             tracing::debug!("{peer} sent a log that is not the invited group's");
             slot.join_sent.remove(&peer);
             slot.stop_join_with(&peer);
+            if !slot.update_told && raised_past_this_version(&entries) {
+                slot.update_told = true;
+                self.emit(NodeEvent::UpdateToJoin { group });
+            }
             return;
         }
+        let was_judged = judged.is_some();
         let (new, refused) = match judged.and_then(|log| slot.ctx.take_judged(log)) {
             Some(new) => (new, BTreeMap::new()),
+            None if was_judged && slot.ctx.joining().is_some() => {
+                // Judged on the log as it was: with what was taken meanwhile, the entries
+                // may let this device in as its invite does not allow (an `Add` waiting
+                // here for a parent they bring). Not taken; the manager is asked again,
+                // and its log is judged on this one.
+                slot.join_sent.remove(&peer);
+                return;
+            }
             None => {
                 let taken = slot.ctx.insert_encoded(&entries);
                 (taken.new, taken.refused)
@@ -228,6 +302,17 @@ impl Node {
         };
         if accept {
             let ticket_id = waiting.ticket.ticket_id;
+            // The group may have gone up a level since the device asked.
+            if judges_level(slot.ctx.log().level(), waiting.level) == Some(false) {
+                let name = match &waiting.entry.body {
+                    fogata_state::Body::Join { name, .. } => fogata_crypto::names::tidy(name),
+                    _ => String::new(),
+                };
+                let told = BehindTold::Invite(ticket_id);
+                self.tell_behind(group, told, device, name);
+                self.emit(NodeEvent::JoinAnswered { group, device });
+                return;
+            }
             let new = match slot.ctx.accept_join(waiting.entry, &ticket_id, now_ms()) {
                 Ok(new) => new,
                 Err(why) => {
@@ -602,6 +687,75 @@ mod tests {
         assert_eq!(held, 0);
     }
 
+    /// Two logs sent at once are judged each on the log as it was. A manager the invite
+    /// does not name sends one with an `Add` of the joining device whose parent, the
+    /// `Rotate` that makes the key it seals, comes in the other: each alone lets nobody
+    /// in, and the one taken second is not added to the first unjudged, where the `Add`
+    /// would apply.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_log_judged_on_an_older_one_is_not_added_unjudged_while_joining() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let zed = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+        log.raise_level(&ana, fogata_state::Level::Three, 3)
+            .unwrap();
+        // Ana is first: her invite names nobody else.
+        let (ticket, token) = log.invite(&ana, u64::MAX / 2, 4).unwrap();
+        let mut fork = log.clone();
+        let rotate = fork.rotate(&bea, 5).unwrap();
+        let add = fork.add(&bea, zed.public_key(), "zed", 6).unwrap();
+        let with = |extra: &fogata_state::Entry| -> Vec<Vec<u8>> {
+            log.entries()
+                .chain([extra])
+                .map(fogata_state::Entry::encode)
+                .collect()
+        };
+        let (adds, rotates) = (with(&add), with(&rotate));
+        let group = log.group_id();
+        let (node, _events) = start(NodeConfig {
+            identity: zed.clone(),
+            groups: vec![GroupSetup::Joining {
+                group_id: group,
+                ticket,
+                rendezvous: fogata_state::invite_rendezvous(&token),
+                name: "zed".into(),
+            }],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let zed_key = zed.public_key();
+        let (joining, member) = inspect(&node, move |n| {
+            let slot = &n.groups[&group];
+            let first = slot.ctx.admitted_trial(&adds).unwrap();
+            let second = slot.ctx.admitted_trial(&rotates).unwrap();
+            let judged = first.judge();
+            assert!(judged.is_some());
+            n.admitted_judged(group, PeerId::random(), adds, true, judged);
+            assert!(n.groups[&group].ctx.joining().is_some());
+            let judged = second.judge();
+            assert!(judged.is_some());
+            n.admitted_judged(group, PeerId::random(), rotates, true, judged);
+            let ctx = &n.groups[&group].ctx;
+            (
+                ctx.joining().is_some(),
+                ctx.log().state().is_member(&zed_key),
+            )
+        })
+        .await;
+        assert!(joining);
+        assert!(!member);
+    }
+
     /// A signed join passed on by someone else (any peer the joining device asked, which
     /// stands between it and the managers) does not get that peer the log: the join is
     /// bound to the joining device's own connection, and waits for an answer only there.
@@ -670,5 +824,213 @@ mod tests {
         assert!(matches!(relayed, MemberResponse::Refused));
         assert!(matches!(unbound, MemberResponse::Refused));
         assert!(waiting, "the join waits on Bea's own connection");
+    }
+
+    /// A group gone up to a level lets in no device whose copy does not judge at it: such a
+    /// copy refuses the log from the raise on and would never get in, while the group would
+    /// count it a member. Its join is refused, which leaves the invite good, the manager is
+    /// told once that it must update, and an updated copy is then let in as before. A device
+    /// that shows this one nothing of what it speaks is let in as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_copy_below_the_group_s_level_is_not_let_in_and_its_manager_is_told() {
+        use std::collections::HashSet;
+
+        use fogata_state::{Body, Entry, Level};
+
+        use crate::{NodeEvent, caps};
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let cai = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.raise_level(&ana, Level::Three, 2).unwrap();
+        let (ticket, _) = log.invite(&ana, u64::MAX / 2, 3).unwrap();
+        let (other, _) = log.invite(&ana, u64::MAX / 2, 4).unwrap();
+        let group = log.group_id();
+        let (node, mut events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let bea_key = bea.public_key();
+        let answers = inspect(&node, move |n| {
+            let ana_peer = n.local_peer().to_bytes();
+            let (bea_peer, cai_peer) = (PeerId::random(), PeerId::random());
+            let lists = |n: &mut Node, peer: PeerId, level: Option<u32>| {
+                let shown: HashSet<_> = level.map(caps::caps_protocol).into_iter().collect();
+                crate::locked(&n.advertised).insert(peer, shown);
+            };
+            let join = |n: &mut Node,
+                        who: &DeviceIdentity,
+                        peer: PeerId,
+                        ticket: &fogata_state::Ticket| {
+                let ask = MemberRequest::JoinRequest {
+                    ticket: ticket.encode(),
+                };
+                let heads = match n.on_request(peer, ask) {
+                    MemberResponse::JoinOffer { heads } => heads
+                        .iter()
+                        .map(|h| <[u8; 32]>::try_from(h.as_slice()).unwrap())
+                        .collect::<Vec<_>>(),
+                    _ => panic!("no offer"),
+                };
+                let body = Body::Join {
+                    ticket: ticket.clone(),
+                    name: "Bea".into(),
+                };
+                let entry = Entry::sign(who, group, heads, 4_000, body);
+                let binding = entry.join_binding(who, &peer.to_bytes(), &ana_peer);
+                let commit = MemberRequest::JoinCommit {
+                    entry: entry.encode(),
+                    binding: Some(ByteBuf::from(binding.to_vec())),
+                };
+                let answer = n.on_request(peer, commit);
+                let waits = n.groups[&group]
+                    .join_waiting
+                    .contains_key(&who.public_key());
+                (matches!(answer, MemberResponse::JoinWaiting), waits)
+            };
+            // The previous version: twice, as it keeps asking.
+            lists(n, bea_peer, Some(2));
+            let old = [
+                join(n, &bea, bea_peer, &ticket),
+                join(n, &bea, bea_peer, &ticket),
+            ];
+            // Updated.
+            lists(n, bea_peer, Some(caps::CAPS_LEVEL));
+            let updated = join(n, &bea, bea_peer, &ticket);
+            // Showing nothing of what it speaks.
+            lists(n, cai_peer, None);
+            let unshown = join(n, &cai, cai_peer, &other);
+            (old, updated, unshown)
+        })
+        .await;
+        let (old, updated, unshown) = answers;
+        assert_eq!(old, [(false, false), (false, false)]);
+        assert_eq!(updated, (true, true));
+        assert_eq!(unshown, (true, true));
+        let mut told = 0;
+        while let Ok(event) = events.try_recv() {
+            if let NodeEvent::MustUpdateToJoin {
+                group: g,
+                device,
+                name,
+            } = event
+            {
+                assert_eq!((g, device, name.as_str()), (group, bea_key, "Bea"));
+                told += 1;
+            }
+        }
+        assert_eq!(told, 1, "the manager is told once");
+    }
+
+    /// A device that asked before the group went up a level, and whose copy does not judge
+    /// at the new one, is not let in by its manager's yes either: the manager is told.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_yes_after_the_group_went_up_lets_no_older_copy_in() {
+        use fogata_state::{Body, Entry, Level};
+
+        use crate::NodeEvent;
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = DeviceIdentity::generate().unwrap();
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        let (ticket, _) = log.invite(&ana, u64::MAX / 2, 2).unwrap();
+        let group = log.group_id();
+        let entry = Entry::sign(
+            &bea,
+            group,
+            log.heads(),
+            3,
+            Body::Join {
+                ticket: ticket.clone(),
+                name: "Bea".into(),
+            },
+        );
+        log.raise_level(&ana, Level::Three, 4).unwrap();
+        let (node, mut events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let bea_key = bea.public_key();
+        let member = inspect(&node, move |n| {
+            let slot = n.groups.get_mut(&group).unwrap();
+            let waiting = super::super::WaitingJoin {
+                peer: PeerId::random(),
+                entry,
+                ticket,
+                level: Some(2),
+            };
+            slot.wait_for_answer(bea_key, waiting).unwrap();
+            n.answer_join(group, bea_key, true);
+            n.groups[&group].ctx.is_member_device(&bea_key)
+        })
+        .await;
+        assert!(!member);
+        let mut told = false;
+        while let Ok(event) = events.try_recv() {
+            told |=
+                matches!(event, NodeEvent::MustUpdateToJoin { device, .. } if device == bea_key);
+        }
+        assert!(told);
+    }
+
+    /// A group at the level every copy judges at lets in whatever a device's copy says.
+    #[test]
+    fn a_group_never_raised_is_judged_by_every_copy() {
+        use fogata_state::Level;
+        assert_eq!(super::judges_level(Level::Two, None), Some(true));
+        assert_eq!(super::judges_level(Level::Two, Some(1)), Some(true));
+        assert_eq!(super::judges_level(Level::Three, None), None);
+        assert_eq!(super::judges_level(Level::Three, Some(2)), Some(false));
+        assert_eq!(super::judges_level(Level::Three, Some(3)), Some(true));
+        assert_eq!(super::judges_level(Level::Three, Some(4)), Some(true));
+    }
+
+    /// A joining device tells its person to update when the log it was let in with went up
+    /// to a level this version does not know, signed; not for a level it knows, nor for one
+    /// whose signature does not hold.
+    #[test]
+    fn a_log_raised_past_this_version_is_told() {
+        use fogata_state::{Body, Entry, Level};
+
+        use super::raised_past_this_version;
+        let ana = DeviceIdentity::generate().unwrap();
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        let raise = log.raise_level(&ana, Level::Three, 2).unwrap();
+        let mut entries: Vec<Vec<u8>> = log.entries().map(Entry::encode).collect();
+        assert!(!raised_past_this_version(&entries));
+        let past = Level::CURRENT.number() + 1;
+        let later = Entry::sign(
+            &ana,
+            log.group_id(),
+            vec![raise.hash()],
+            3,
+            Body::Level { level: past },
+        );
+        let mut forged = later.clone();
+        forged.time_ms += 1;
+        entries.push(forged.encode());
+        assert!(!raised_past_this_version(&entries));
+        entries.pop();
+        entries.push(later.encode());
+        assert!(raised_past_this_version(&entries));
     }
 }

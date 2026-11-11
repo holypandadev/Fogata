@@ -8,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 
 import '../app_state.dart';
 import '../icons.dart';
+import '../fair_size.dart';
 import '../l10n.dart';
 import '../rust/api/types.dart';
 import '../theme.dart';
@@ -260,7 +261,7 @@ class PipSpot {
 
 /// The floating picture's size for a picture of [aspect] (width over height).
 Size pipSize(double aspect) {
-  final a = aspect.clamp(.5, 3.0);
+  final a = aspect.isFinite ? aspect.clamp(minAspect, maxAspect) : 16 / 9;
   var width = pipBox.width;
   var height = width / a;
   if (height > pipBox.height) {
@@ -382,9 +383,9 @@ class _PipLayerState extends State<PipLayer>
               valueListenable: pip.renderer,
               builder: (context, video, _) {
                 // The picture's own shape once it arrives, 16:9 until then.
-                final aspect = !_gone && video.width > 0 && video.height > 0
-                    ? video.aspectRatio
-                    : 16 / 9;
+                final aspect = _gone
+                    ? 16 / 9
+                    : fairAspect(video.width, video.height);
                 final size = pipSize(aspect);
                 final drag = _drag;
                 final rect = drag != null

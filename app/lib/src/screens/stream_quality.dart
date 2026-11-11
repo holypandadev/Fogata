@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../app_state.dart';
@@ -58,7 +60,12 @@ class _NextTo extends SingleChildLayoutDelegate {
 
   @override
   BoxConstraints getConstraintsForChild(BoxConstraints constraints) =>
-      constraints.loosen();
+      BoxConstraints.loose(
+        Size(
+          math.max(0, constraints.maxWidth - 2 * _margin),
+          math.max(0, constraints.maxHeight - 2 * _margin),
+        ),
+      );
 
   @override
   Offset getPositionForChild(Size size, Size child) {
@@ -78,6 +85,22 @@ class _NextTo extends SingleChildLayoutDelegate {
 class StreamQualityCard extends StatelessWidget {
   const StreamQualityCard({super.key});
 
+  /// The column of the labels beside the pills.
+  static const _labelWidth = 76.0;
+
+  /// How wide [text] is on one line, at the text size chosen.
+  static double _width(BuildContext context, String text, TextStyle style) {
+    final painter = TextPainter(
+      text: TextSpan(text: text, style: style),
+      textDirection: Directionality.of(context),
+      textScaler: MediaQuery.textScalerOf(context),
+      maxLines: 1,
+    )..layout();
+    final width = painter.width;
+    painter.dispose();
+    return width;
+  }
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
@@ -86,22 +109,43 @@ class StreamQualityCard extends StatelessWidget {
     final call = state.callState.call;
     final sharing = call?.sharing ?? false;
     final source = call?.screenLines;
-    Widget row(String label, Widget choice) => Row(
-      children: [
-        SizedBox(
-          width: 76,
-          child: Text(label, style: tx(c.fg2, size: 13, weight: w500)),
-        ),
-        // A long choice (the source's own height, other languages) shrinks to fit.
-        Flexible(
-          child: FittedBox(
-            fit: BoxFit.scaleDown,
-            alignment: Alignment.centerLeft,
-            child: choice,
-          ),
-        ),
-      ],
-    );
+    final labelStyle = tx(c.fg2, size: 13, weight: w500);
+    // Each label beside its pills while both fit there. Larger text, or a label longer
+    // than its column, puts every label above its pills, which go on to a second line
+    // rather than shrinking: words split across lines, or pills drawn at half their size,
+    // undo the text size chosen.
+    final stacked =
+        largeText(context) ||
+        [
+          l10n.streamQualityResolution,
+          l10n.streamQualityFrameRate,
+        ].any((label) => _width(context, label, labelStyle) > _labelWidth);
+    Widget row(String label, Widget Function(bool wrap) choice) => stacked
+        ? Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(label, style: labelStyle),
+              const SizedBox(height: 6),
+              choice(true),
+            ],
+          )
+        : Row(
+            children: [
+              SizedBox(
+                width: _labelWidth,
+                child: Text(label, style: labelStyle),
+              ),
+              // Only a choice longer than the card (the source's own height, at the
+              // usual text size) shrinks to fit.
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: choice(false),
+                ),
+              ),
+            ],
+          );
     return Container(
       width: 336,
       padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
@@ -110,77 +154,82 @@ class StreamQualityCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: c.border),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(l10n.streamQualityTitle, style: tx(c.fg, weight: w600)),
-          const SizedBox(height: 2),
-          Text(
-            sharing ? l10n.streamQualityNoteSharing : l10n.streamQualityNote,
-            style: tx(c.fg2, size: 12, height: 1.35),
-          ),
-          const SizedBox(height: 14),
-          row(
-            l10n.streamQualityResolution,
-            Segmented(
-              key: const ValueKey('stream-resolution'),
-              height: 32,
-              tabs: [
-                for (final lines in ScreenQuality.resolutions)
-                  (
-                    lines != null
-                        ? '${lines}p'
-                        : source != null
-                        ? l10n.streamQualitySourceLines(source)
-                        : l10n.streamQualitySource,
-                    null,
-                    null,
+      // Taller than the window (large text, a long language, many watching), it scrolls.
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(l10n.streamQualityTitle, style: tx(c.fg, weight: w600)),
+            const SizedBox(height: 2),
+            Text(
+              sharing ? l10n.streamQualityNoteSharing : l10n.streamQualityNote,
+              style: tx(c.fg2, size: 12, height: 1.35),
+            ),
+            const SizedBox(height: 14),
+            row(
+              l10n.streamQualityResolution,
+              (wrap) => Segmented(
+                key: const ValueKey('stream-resolution'),
+                height: 32,
+                wrap: wrap,
+                tabs: [
+                  for (final lines in ScreenQuality.resolutions)
+                    (
+                      lines != null
+                          ? '${lines}p'
+                          : source != null
+                          ? l10n.streamQualitySourceLines(source)
+                          : l10n.streamQualitySource,
+                      null,
+                      null,
+                    ),
+                ],
+                selected: ScreenQuality.resolutions.indexOf(quality.lines),
+                onSelect: (i) => state.setScreenQuality(
+                  ScreenQuality(
+                    lines: ScreenQuality.resolutions[i],
+                    fps: quality.fps,
                   ),
-              ],
-              selected: ScreenQuality.resolutions.indexOf(quality.lines),
-              onSelect: (i) => state.setScreenQuality(
-                ScreenQuality(
-                  lines: ScreenQuality.resolutions[i],
-                  fps: quality.fps,
                 ),
               ),
             ),
-          ),
-          const SizedBox(height: 10),
-          row(
-            l10n.streamQualityFrameRate,
-            Segmented(
-              key: const ValueKey('stream-fps'),
-              height: 32,
-              tabs: [
-                for (final fps in ScreenQuality.rates)
-                  (l10n.streamQualityFps(fps), null, null),
-              ],
-              selected: ScreenQuality.rates.indexOf(quality.fps),
-              onSelect: (i) => state.setScreenQuality(
-                ScreenQuality(
-                  lines: quality.lines,
-                  fps: ScreenQuality.rates[i],
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            l10n.streamQualityHigherNote,
-            style: tx(c.fg3, size: 12, height: 1.35),
-          ),
-          if (call != null && sharing) ...[
-            const SizedBox(height: 12),
-            Container(height: 1, color: c.border),
             const SizedBox(height: 10),
-            ValueListenableBuilder<Map<String, ScreenOut>>(
-              valueListenable: call.screenOut,
-              builder: (context, out, _) => _GoingOut(out: out),
+            row(
+              l10n.streamQualityFrameRate,
+              (wrap) => Segmented(
+                key: const ValueKey('stream-fps'),
+                height: 32,
+                wrap: wrap,
+                tabs: [
+                  for (final fps in ScreenQuality.rates)
+                    (l10n.streamQualityFps(fps), null, null),
+                ],
+                selected: ScreenQuality.rates.indexOf(quality.fps),
+                onSelect: (i) => state.setScreenQuality(
+                  ScreenQuality(
+                    lines: quality.lines,
+                    fps: ScreenQuality.rates[i],
+                  ),
+                ),
+              ),
             ),
+            const SizedBox(height: 12),
+            Text(
+              l10n.streamQualityHigherNote,
+              style: tx(c.fg3, size: 12, height: 1.35),
+            ),
+            if (call != null && sharing) ...[
+              const SizedBox(height: 12),
+              Container(height: 1, color: c.border),
+              const SizedBox(height: 10),
+              ValueListenableBuilder<Map<String, ScreenOut>>(
+                valueListenable: call.screenOut,
+                builder: (context, out, _) => _GoingOut(out: out),
+              ),
+            ],
           ],
-        ],
+        ),
       ),
     );
   }

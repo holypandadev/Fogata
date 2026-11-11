@@ -14,6 +14,8 @@ import 'package:fogata/src/rust/api/update.dart';
 import 'package:fogata/src/rust/api/voice.dart';
 import 'package:fogata/src/screens/report.dart';
 import 'package:fogata/src/screens/shell.dart';
+import 'package:fogata/src/screens/stream_quality.dart';
+import 'package:fogata/src/screens/video_view.dart';
 import 'package:fogata/src/splash.dart';
 import 'package:fogata/src/theme.dart';
 import 'package:fogata/src/window.dart' show splashSize;
@@ -221,6 +223,27 @@ AppState _members() {
     ..nav.page = Screen.members
     ..nav.membersGroup = 'g'
     ..roomState.roomGroup = null;
+  // Waiting for three members to update, as a manager sees it in the settings.
+  final g = state.contacts.groups.single;
+  state.contacts.groups = [
+    UiGroup(
+      id: g.id,
+      name: g.name,
+      localName: g.localName,
+      icon: g.icon,
+      members: g.members,
+      online: g.online,
+      manager: g.manager,
+      rank: g.rank,
+      outranks: g.outranks,
+      maxMembers: g.maxMembers,
+      maxInRoom: g.maxInRoom,
+      voiceRooms: g.voiceRooms,
+      room: g.room,
+      openInvites: g.openInvites,
+      levelBehind: [for (var i = 1; i < 4; i++) other(i)],
+    ),
+  ];
   state.contacts.members['g'] = [
     for (var i = 0; i < 4; i++)
       UiMember(
@@ -246,6 +269,28 @@ class _InSettings extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Center(child: SizedBox(width: 688, height: 600, child: page));
+}
+
+/// A video over the window that cannot play here, as [video] describes it: an hour long,
+/// so the time is as long as it gets.
+class _Viewer extends StatelessWidget {
+  const _Viewer({required this.width, required this.height});
+  final int width, height;
+
+  @override
+  Widget build(BuildContext context) => VideoViewer(
+    state: AppScope.read(context),
+    open: () async => throw VideoProblem(l10n.roomVideoCannotPlay),
+    cannotPlay: l10n.roomVideoCannotPlay,
+    video: () => UiVideo(
+      thumb: Uint8List(0),
+      width: width,
+      height: height,
+      durationMs: 3723000,
+    ),
+    top: (context, path) => const SizedBox(),
+    fullScreen: true,
+  );
 }
 
 /// The splash at its window's size, in the middle of the test's view.
@@ -334,6 +379,19 @@ final _pages = <String, (AppState Function(), Widget)>{
     () => fakeRoom(people: 2),
     const _InSettings(ReportPage(sent: '/home/x/fogata-report-2026-10-30.zip')),
   ),
+  'the video viewer': (
+    () => fakeRoom(people: 2),
+    const _Viewer(width: 1280, height: 720),
+  ),
+  // As thin as a picture is drawn ([minAspect]), whatever the video says.
+  'the video viewer, a tall video': (
+    () => fakeRoom(people: 2),
+    const _Viewer(width: 1, height: 4294967295),
+  ),
+  'the screen quality card': (
+    () => fakeRoom(people: 2, own: true),
+    const Center(child: StreamQualityCard()),
+  ),
   'an update ready': (() => _update(required: false), const Shell()),
   'an update required': (() => _update(required: true), const Shell()),
   for (final step in SplashStep.values)
@@ -419,6 +477,60 @@ void main() {
   }
 
   for (final code in [...languages.keys, 'pseudo']) {
+    testWidgets(
+      'the screen quality card keeps its words whole and its pills at '
+      'their size in $code, text ×2',
+      (tester) async {
+        final state = fakeRoom(people: 2, own: true)
+          ..prefs.language = code == 'pseudo' ? 'en' : code;
+        if (code == 'pseudo') l10n = PseudoL10n();
+        tester.view.physicalSize = const Size(960, 640);
+        tester.view.devicePixelRatio = 1;
+        tester.platformDispatcher.textScaleFactorTestValue = 2;
+        addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+        addTearDown(tester.view.reset);
+        await tester.pumpWidget(
+          AppScope(
+            state: state,
+            child: MaterialApp(
+              theme: Fg.darkTokens.themeData,
+              home: const Material(child: Center(child: StreamQualityCard())),
+            ),
+          ),
+        );
+        await tester.pump();
+        final card = find.byType(StreamQualityCard);
+        // Nothing in it is drawn smaller than the text size chosen.
+        expect(
+          find.descendant(of: card, matching: find.byType(FittedBox)),
+          findsNothing,
+        );
+        for (final label in [
+          l10n.streamQualityResolution,
+          l10n.streamQualityFrameRate,
+        ]) {
+          final paragraph = tester.renderObject<RenderParagraph>(
+            find.text(label),
+          );
+          // No word split across lines: the widest fits the width it was given.
+          expect(
+            paragraph.getMinIntrinsicWidth(double.infinity),
+            lessThanOrEqualTo(paragraph.size.width + .5),
+            reason: label,
+          );
+        }
+        // The pills keep the card's width, on more lines if they need them.
+        for (final key in ['stream-resolution', 'stream-fps']) {
+          expect(
+            tester.getSize(find.byKey(ValueKey(key))).width,
+            lessThanOrEqualTo(tester.getSize(card).width - 32 + .5),
+          );
+        }
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump(const Duration(seconds: 1));
+      },
+    );
+
     for (final scale in const [1.0, 1.5, 2.0]) {
       for (final MapEntry(key: name, value: (make, child)) in _pages.entries) {
         testWidgets('$name fits at 960×640 in $code, text ×$scale', (

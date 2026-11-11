@@ -151,6 +151,7 @@
   "appDownloadFailed": "Não foi possível baixar: {why}",
   "appOtherSession": "Esta identidade também está aberta em outro computador. Feche o Fogata lá: uma identidade funciona em um computador por vez.",
   "appFriendsRestored": "Sua lista de amigos estava danificada neste computador e foi restaurada da cópia feita antes da última mudança. Um amigo adicionado ou removido logo antes talvez precise ser adicionado ou removido de novo.",
+  "appFilesRefused": "Alguns arquivos do Fogata neste computador estavam sem criptografia onde são guardados criptografados, então não foram usados. Nada foi apagado: eles estão guardados em {folder}.",
   "appInvitationRanOut": "O convite para “{group}” expirou antes de alguém do grupo deixar você entrar. Peça um novo.",
   "appTakenOut": "{who} tirou você de {room}.",
   "appRoomForSome": "{room} agora é só para alguns membros.",
@@ -995,6 +996,10 @@
   "welcomeKeychainRetry": "Tentar de novo",
   "welcomeKeychainPlain": "Continuar sem criptografia",
   "welcomeKeychainPlainNote": "Sem criptografia, qualquer pessoa que copie os arquivos deste computador pode lê-los. As configurações continuarão avisando, e o Fogata criptografa tudo na primeira vez que abrir com um chaveiro.",
+  "welcomeProfileKeptTitle": "Não foi possível ler seu perfil",
+  "welcomeProfileKeptText": "Não foi possível ler o perfil e os amigos criados neste computador, então o Fogata abre como se fosse novo. Nada foi apagado: os arquivos estão guardados em {folder}.",
+  "welcomeProfileKeptConfirm": "Um perfil novo começa sem amigos. Os arquivos do perfil antigo continuam onde estão, e o Fogata não os usa.",
+  "welcomeProfileKeptMake": "Criar um perfil novo",
   "welcomeWriteName": "Escreva seu nome.",
   "welcomeCardTitle": "Como você quer aparecer para o seu pessoal?",
   "welcomeCardSub": "Um nome e uma imagem. Mude quando quiser.",
@@ -1502,5 +1507,9 @@
   "reachFineOthers": "Sua rede parece estar boa para o Fogata, então o que separa vocês provavelmente está do outro lado.",
   "directDropTitle": "Solte para enviar para {name}",
   "directDropNote": "Eles esperam na caixa de mensagem, onde você pode adicionar uma mensagem e conferir os arquivos antes de enviá-los.",
-  "directPrivateLeftOut": "{n, plural, =0{{n} arquivos ocultos ou privados ficaram de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-los, escolha-os com o botão +.} =1{Um arquivo oculto ou privado ficou de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-lo, escolha-o com o botão +.} other{{n} arquivos ocultos ou privados ficaram de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-los, escolha-os com o botão +.}}"
+  "directPrivateLeftOut": "{n, plural, =0{{n} arquivos ocultos ou privados ficaram de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-los, escolha-os com o botão +.} =1{Um arquivo oculto ou privado ficou de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-lo, escolha-o com o botão +.} other{{n} arquivos ocultos ou privados ficaram de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-los, escolha-os com o botão +.}}",
+  "appMustUpdateToJoin": "{name} precisa atualizar o Fogata antes de entrar em “{group}”. Depois disso, entra como sempre.",
+  "appUpdateToJoin": "“{group}” precisa de uma versão mais nova do Fogata. Atualize o Fogata para entrar.",
+  "errMustUpdateToJoin": "Seu amigo precisa atualizar o Fogata antes de entrar neste grupo.",
+  "groupSettingsLevelWaiting": "Este grupo está esperando para ativar uma proteção mais forte. Ela se ativa sozinha quando todos tiverem atualizado o Fogata. Ainda falta atualizar: {names}"
 }
