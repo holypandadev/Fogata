@@ -10777,7 +10777,7 @@ Licence text: the same as asn1-rs 0.7.2's, above.
 
 -------------------------------------------------------------------------------
 
-rustix 1.1.5
+rustix 1.1.6
 https://github.com/bytecodealliance/rustix
 Licence: Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT (here: MIT)
 Licence text: the same as adler2 2.0.1's, above.
