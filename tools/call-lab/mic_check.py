@@ -131,7 +131,7 @@ elif check == "unplug":
         notes += said
 elif check == "devices":
     # a's own result says whether its devices stayed listed; its log, what each list held.
-    notes += re.findall(r"(devices [^\n]*|memory over[^\n]*)", log("a"))
+    notes += re.findall(r"(devices [^\n]*|held over[^\n]*|soak [^\n]*|calls [^\n]*)", log("a"))
 elif check in ("late", "alone"):
     if "laba_mic" not in sources_between("a", 0, 1e12):
         problems.append("a never recorded from its microphone")

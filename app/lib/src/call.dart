@@ -1474,7 +1474,7 @@ class Call extends ChangeNotifier {
     peer._madeAt = DateTime.now();
     peer.state = RTCPeerConnectionState.RTCPeerConnectionStateNew;
     final gathered = peer._gathered = Completer<void>();
-    connection.onTrack = (event) => _onTrack(peer, event);
+    connection.onTrack = (event) => _onTrack(peer, connection, event);
     connection.onIceGatheringState = (state) {
       _trace('gathering ${peer.id.substring(0, 8)}: $state');
       if (state == RTCIceGatheringState.RTCIceGatheringStateComplete &&
@@ -1604,7 +1604,11 @@ class Call extends ChangeNotifier {
   @visibleForTesting
   Future<void> rescaleNow() => _rescale();
 
-  Future<void> _onTrack(CallPeer peer, RTCTrackEvent event) async {
+  Future<void> _onTrack(
+    CallPeer peer,
+    RTCPeerConnection connection,
+    RTCTrackEvent event,
+  ) async {
     if (event.track.kind == 'audio') {
       final screen = event.transceiver?.mid == '$_screenSound';
       await _setGain(
@@ -1615,10 +1619,28 @@ class Call extends ChangeNotifier {
     }
     if (event.track.kind != 'video') return;
     final mid = int.tryParse(event.transceiver?.mid ?? '');
-    final stream = event.streams.isNotEmpty
-        ? event.streams.first
-        : await createLocalMediaStream('${peer.id}-$mid');
-    if (event.streams.isEmpty) await stream.addTrack(event.track);
+    final MediaStream stream;
+    if (event.streams.isNotEmpty) {
+      stream = event.streams.first;
+    } else {
+      // A stream of this device's own to show it in, which the video library keeps until
+      // it is let go of: it goes with the connection the track came on ([CallPeer._close]),
+      // or now if that one is closed already. Kept, two were left for every connection
+      // made in a call (camera and screen), each holding its track.
+      stream = await createLocalMediaStream('${peer.id}-$mid');
+      if (peer.connection != connection) {
+        await _letGo('a stream of ${peer.id}', stream.dispose);
+        return;
+      }
+      peer._shown.add(stream);
+      try {
+        await stream.addTrack(event.track);
+      } catch (e) {
+        // Let go of meanwhile, with its connection.
+        _trace('a stream of ${peer.id}: $e');
+        return;
+      }
+    }
     await peer._prepare();
     // Let go of meanwhile (gone from the room, or the call ended): its pictures are freed.
     if (_closed || peers[peer.id] != peer || !peer.rendering) return;

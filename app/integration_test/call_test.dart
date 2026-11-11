@@ -56,6 +56,7 @@
 
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -79,6 +80,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart'
         SourceType,
         StatsReport,
         TransceiverDirection,
+        WebRTC,
         DesktopCapturerSource,
         createPeerConnection,
         desktopCapturer,
@@ -626,7 +628,11 @@ Future<void> _call(WidgetTester tester) async {
   if (micCase != null) {
     await _micCase(tester, state, micCase);
     await _say(state, 'done');
-    await _hear(tester, state, ['done'], seconds: 300);
+    // Measuring many tests or calls (see [_soakTests]) takes a while longer.
+    final soaking =
+        _env['FOGATA_TEST_MIC_SOAK'] != null ||
+        _env['FOGATA_TEST_CALL_SOAK'] != null;
+    await _hear(tester, state, ['done'], seconds: soaking ? 1800 : 300);
     return;
   }
   final watch = int.tryParse(_env['FOGATA_TEST_WATCH'] ?? '');
@@ -4155,46 +4161,190 @@ Future<void> _listedAroundTest(
   await _checkListed(tester, '$when, 5 s after the microphone test');
 }
 
-/// This process's resident memory in kB (Linux), or 0.
-int _residentKb() {
-  final line = File('/proc/self/status')
-      .readAsLinesSync()
-      .firstWhere((l) => l.startsWith('VmRSS:'), orElse: () => '');
-  return int.tryParse(line.replaceAll(RegExp('[^0-9]'), '')) ?? 0;
+/// glibc's `struct mallinfo2`: what malloc holds, across all its arenas.
+final class _MallInfo extends ffi.Struct {
+  @ffi.Size()
+  external int arena;
+  @ffi.Size()
+  external int ordblks;
+  @ffi.Size()
+  external int smblks;
+  @ffi.Size()
+  external int hblks;
+  @ffi.Size()
+  external int hblkhd;
+  @ffi.Size()
+  external int usmblks;
+  @ffi.Size()
+  external int fsmblks;
+  @ffi.Size()
+  external int uordblks;
+  @ffi.Size()
+  external int fordblks;
+  @ffi.Size()
+  external int keepcost;
+}
+
+/// One line of what this process holds (Linux): resident memory, its anonymous part,
+/// malloc's bytes in use, free in its arenas and mapped on their own, threads and open
+/// files. With [trim], malloc gives its free memory back first.
+String _memoryNow({bool trim = false}) {
+  int field(String file, String name) {
+    try {
+      final line = File(file)
+          .readAsLinesSync()
+          .firstWhere((l) => l.startsWith('$name:'), orElse: () => '');
+      return int.tryParse(line.replaceAll(RegExp('[^0-9]'), '')) ?? 0;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  var malloc = '';
+  try {
+    final libc = ffi.DynamicLibrary.process();
+    if (trim) {
+      libc.lookupFunction<ffi.Int Function(ffi.Size), int Function(int)>(
+        'malloc_trim',
+      )(0);
+    }
+    final info = libc
+        .lookupFunction<_MallInfo Function(), _MallInfo Function()>(
+          'mallinfo2',
+        )();
+    malloc =
+        ', malloc in use ${info.uordblks ~/ 1024} kB, free '
+        '${info.fordblks ~/ 1024} kB, mapped ${info.hblkhd ~/ 1024} kB';
+  } catch (_) {}
+  var files = 0;
+  try {
+    files = Directory('/proc/self/fd').listSync().length;
+  } catch (_) {}
+  return 'rss ${field('/proc/self/status', 'VmRSS')} kB, anonymous '
+      '${field('/proc/self/smaps_rollup', 'Anonymous')} kB$malloc, '
+      'threads ${field('/proc/self/status', 'Threads')}, files $files';
+}
+
+/// Connections left on purpose by [_soakTests] (FOGATA_TEST_LEAK), to measure what a leak
+/// costs.
+final _leaked = <RTCPeerConnection>[];
+
+/// [count] more microphone tests, what the process holds logged every 20; with
+/// FOGATA_TEST_LEAK=open each test also leaves an idle connection open, with `closed` one
+/// closed but never freed (the leak the fifth audit fixed), to measure what that costs.
+Future<void> _soakTests(WidgetTester tester, AppState state, int count) async {
+  _log('soak 0 of $count tests: ${_memoryNow()}, held ${await _held()}');
+  for (var i = 1; i <= count; i++) {
+    await _micTestLeaking(tester, state);
+    if (i % 20 == 0) {
+      await _wait(tester, const Duration(seconds: 1));
+      _log('soak $i of $count tests: ${_memoryNow()}, held ${await _held()}');
+    }
+  }
+  _log('soak after malloc_trim: ${_memoryNow(trim: true)}');
+}
+
+/// One microphone test ([_micTestOnce]), with the leak FOGATA_TEST_LEAK asks for.
+Future<void> _micTestLeaking(WidgetTester tester, AppState state) async {
+  await _micTestOnce(tester, state);
+  final leak = _env['FOGATA_TEST_LEAK'];
+  if (leak == 'open' || leak == 'closed') {
+    final c = await createPeerConnection({'iceServers': []});
+    if (leak == 'closed') await c.close();
+    _leaked.add(c);
+  }
+}
+
+/// How many of each thing the video library holds (its `fogataCounts`: connections, their
+/// observers, local streams and tracks, capturers, renderers...); empty where it cannot
+/// tell (macOS).
+Future<Map<String, int>> _held() async {
+  try {
+    final counts = await WebRTC.invokeMethod<Map<Object?, Object?>, dynamic>(
+      'fogataCounts',
+    );
+    return {
+      for (final e in (counts ?? const {}).entries)
+        '${e.key}': (e.value as num).toInt(),
+    };
+  } catch (_) {
+    return const {};
+  }
+}
+
+/// Copy a leaves its call and comes back [count] times while b stays, each time until
+/// connected to b and 3 s more; what the process holds logged every 5.
+Future<void> _soakCalls(WidgetTester tester, AppState state, int count) async {
+  final group = state.callState.call!.group;
+  _log('calls 0 of $count: ${_memoryNow()}, held ${await _held()}');
+  for (var i = 1; i <= count; i++) {
+    await state.endCallForTests();
+    await _wait(tester, const Duration(seconds: 1));
+    await state.startCallForTests(group);
+    await _until(
+      tester,
+      'connected again ($i)',
+      () =>
+          state.callState.call != null &&
+          state.callState.call!.peers.isNotEmpty &&
+          state.callState.call!.peers.values.every((p) => p.connected),
+      seconds: 60,
+    );
+    await _wait(tester, const Duration(seconds: 3));
+    if (i % 5 == 0) {
+      _log('calls $i of $count: ${_memoryNow()}, held ${await _held()}');
+    }
+  }
+  _log('calls after malloc_trim: ${_memoryNow(trim: true)}');
 }
 
 /// Copy a, in a call with b after a microphone test before it ([_listedAroundTest]): its
 /// call ends, and the lists must still hold its devices at once and a few seconds later,
-/// around another microphone test, after 20 more (over which the memory must not keep
-/// growing), with its microphone unplugged and plugged in again (by mic.sh), and around a
+/// around another microphone test, after 20 more (after which the video library must hold
+/// no more connections, streams or tracks than before), with its microphone unplugged and plugged in again (by mic.sh), and around a
 /// last test. The settings list the devices this way while nothing else runs.
 Future<void> _listedAfterCall(WidgetTester tester, AppState state) async {
   await _wait(tester, const Duration(seconds: 3));
   await _checkListed(tester, 'in the call');
+  final calls = int.tryParse(_env['FOGATA_TEST_CALL_SOAK'] ?? '');
+  if (calls != null) await _soakCalls(tester, state, calls);
   await state.endCallForTests();
   await _checkListed(tester, 'right after the call');
   await _wait(tester, const Duration(seconds: 5));
   await _checkListed(tester, '5 s after the call');
+  // Nothing of the call is left (the voice engine's own idle connection is not counted).
+  final afterCall = await _held();
+  _log('held 5 s after the call: $afterCall');
+  for (final e in afterCall.entries) {
+    if (e.value > 0) _unlisted.add('${e.value} ${e.key} held after the call');
+  }
   await _listedAroundTest(tester, state, 'after the call');
   // A few tests first, for what only the first ones make; then 20 counted.
   for (var i = 0; i < 3; i++) {
     await _micTestOnce(tester, state);
   }
   await _wait(tester, const Duration(seconds: 2));
-  final before = _residentKb();
+  final soak = int.tryParse(_env['FOGATA_TEST_MIC_SOAK'] ?? '');
+  if (soak != null) await _soakTests(tester, state, soak);
+  // What is kept is counted, not measured: over 20 tests the resident memory moved by
+  // 0.6 to 37 MB with nothing kept, as malloc's free space came and went (it gave 100 MB
+  // back on malloc_trim), while 20 connections leaked on purpose (open, or closed and never
+  // freed) did not show at all. Each test makes and frees three connections, a stream and
+  // its track: one of them kept a test is 20 more at the end.
+  final heldBefore = await _held();
+  final memoryBefore = _memoryNow();
   for (var i = 0; i < 20; i++) {
-    await _micTestOnce(tester, state);
+    await _micTestLeaking(tester, state);
   }
   await _wait(tester, const Duration(seconds: 2));
-  final after = _residentKb();
+  final heldAfter = await _held();
   _log(
-    'memory over 20 microphone tests: $before kB to $after kB, '
-    '${((after - before) / 20).round()} kB a test',
+    'held over 20 microphone tests: $heldBefore to $heldAfter; memory from '
+    '$memoryBefore to ${_memoryNow()}',
   );
-  // Three connections a test kept until the application quit (their calls, threads and
-  // buffers) would pass this several times over.
-  if (after - before > 20 * 1024) {
-    _unlisted.add('memory grew by ${after - before} kB over 20 tests');
+  for (final e in heldAfter.entries) {
+    final grew = e.value - (heldBefore[e.key] ?? 0);
+    if (grew > 0) _unlisted.add('$grew more ${e.key} held after 20 tests');
   }
   await _checkListed(tester, 'after 20 more microphone tests');
   _mark('unplug-ready');

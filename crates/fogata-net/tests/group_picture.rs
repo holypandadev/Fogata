@@ -76,6 +76,14 @@ fn address(node: &NodeHandle, port: u16) -> Multiaddr {
     .unwrap()
 }
 
+/// Whether an entry is one a manager's device writes by itself once every copy judges at a
+/// higher level: the raise of the group's level (`raise_level_when_all_judge`), and an
+/// open invite of its own written again as one that names who may let its device in
+/// (`name_unnamed_invites`). Whether they came depends on when the heartbeat fell.
+fn upkeep(body: &Body) -> bool {
+    matches!(body, Body::Level { .. }) || fogata_state::NamedInvite::of(body).is_some()
+}
+
 fn has_picture_entries(log: &GroupLog) -> bool {
     log.entries()
         .any(|e| matches!(e.body, Body::SetPicture { .. }))
@@ -169,12 +177,12 @@ async fn a_managers_picture_reaches_the_members_and_only_the_newest_a_newcomer()
     // No picture went into the log.
     for node in [&node_a, &node_b, &node_c] {
         let kept = node.group(group).await.unwrap().unwrap();
-        // A manager may also have raised the group's level once every copy judged at it
-        // (`raise_level_when_all_judge`): that entry is no picture's.
+        // A manager may also have done its own upkeep meanwhile ([`upkeep`]): those entries
+        // are no picture's.
         let kept_hashes: Vec<_> = kept
             .entries_in_order()
             .into_iter()
-            .filter(|e| !matches!(e.body, fogata_state::Body::Level { .. }))
+            .filter(|e| !upkeep(&e.body))
             .map(|e| e.hash())
             .collect();
         assert_eq!(kept_hashes, log.hashes_in_order());
@@ -225,14 +233,12 @@ async fn a_picture_set_with_an_entry_goes_with_one_entry_without_a_picture() {
         l.picture() == Some(png(500, 5))
     })
     .await;
-    // One entry more in all, with no picture. A manager may also have raised the group's
-    // level once every copy judged at it (`raise_level_when_all_judge`): that entry is no
-    // picture's, and whether it came depends on when the heartbeat fell.
+    // One entry more in all, with no picture; a manager's own upkeep ([`upkeep`]) aside.
     let b = node_b.group(group).await.unwrap().unwrap();
     let added: Vec<_> = b
         .entries()
         .filter(|e| log.get(&e.hash()).is_none())
-        .filter(|e| !matches!(e.body, Body::Level { .. }))
+        .filter(|e| !upkeep(&e.body))
         .collect();
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].body, Body::SetPicture { picture: None });

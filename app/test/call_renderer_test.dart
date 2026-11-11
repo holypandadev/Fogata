@@ -38,6 +38,9 @@ class _Track implements MediaStreamTrack {
   String? get kind => 'video';
 
   @override
+  String? get id => 'track';
+
+  @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
@@ -60,12 +63,16 @@ void main() {
       TestWidgetsFlutterBinding.ensureInitialized().defaultBinaryMessenger;
   final calls = <String>[];
   final disposed = <int>[];
+  final streamsDisposed = <String>[];
+  var streamsMade = 0;
   final events = <int, MockStreamHandlerEventSink>{};
   var textures = 0;
 
   setUp(() {
     calls.clear();
     disposed.clear();
+    streamsDisposed.clear();
+    streamsMade = 0;
     events.clear();
     textures = 0;
     onWebRtcEventError = (what, error, stack) {};
@@ -82,6 +89,12 @@ void main() {
             ),
           );
           return <String, dynamic>{'textureId': id};
+        }
+        if (call.method == 'createLocalMediaStream') {
+          return <String, dynamic>{'streamId': 'made-${++streamsMade}'};
+        }
+        if (call.method == 'streamDispose') {
+          streamsDisposed.add((call.arguments as Map)['streamId'] as String);
         }
         if (call.method == 'videoRendererDispose') {
           disposed.add((call.arguments as Map)['textureId'] as int);
@@ -101,7 +114,10 @@ void main() {
   Future<void> settle() =>
       Future<void>.delayed(const Duration(milliseconds: 50));
 
-  Future<(Call, CallPeer, _Connection)> arrive({required int mid}) async {
+  Future<(Call, CallPeer, _Connection)> arrive({
+    required int mid,
+    bool inStream = true,
+  }) async {
     final call = Call(group: 'g', me: me);
     final connection = _Connection();
     final peer = CallPeer(ana)..connection = connection;
@@ -124,7 +140,7 @@ void main() {
     expect(connection.onTrack, isNotNull);
     connection.onTrack!(
       RTCTrackEvent(
-        streams: [_Stream()],
+        streams: [if (inStream) _Stream()],
         track: _Track(),
         transceiver: _Transceiver('$mid'),
       ),
@@ -174,6 +190,35 @@ void main() {
       await call.stop();
     },
   );
+
+  test('a stream made to show a picture that came without one is let go of '
+      'with its connection', () async {
+    final (call, peer, _) = await arrive(mid: 1, inStream: false);
+    expect(streamsMade, 1);
+    expect(peer.camera.srcObject?.id, 'made-1');
+    expect(streamsDisposed, isEmpty);
+    await call.stop();
+    expect(streamsDisposed, ['made-1']);
+  });
+
+  test('a stream made for a connection replaced meanwhile is let go of at '
+      'once', () async {
+    final (call, peer, connection) = await arrive(mid: 1);
+    // Another connection takes its place; a picture of the old one comes late.
+    peer.connection = _Connection();
+    connection.onTrack!(
+      RTCTrackEvent(
+        streams: [],
+        track: _Track(),
+        transceiver: _Transceiver('2'),
+      ),
+    );
+    await settle();
+    expect(streamsMade, 1);
+    expect(streamsDisposed, ['made-1']);
+    expect(peer.screen.srcObject, isNull);
+    await call.stop();
+  });
 
   test(
     'a call that ended meanwhile does not keep the renderer made again',

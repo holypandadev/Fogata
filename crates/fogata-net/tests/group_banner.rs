@@ -101,20 +101,28 @@ async fn a_managers_banner_reaches_the_members() {
     assert!(node_b.set_group_banner(group, second).await.is_err());
 
     // The entries are the same as without banners: what older versions keep. Ana, the
-    // manager, may also have raised the group's level once she saw Bea's copy judge at it
-    // (`raise_level_when_all_judge`), when the heartbeat came in time: that entry is
-    // no banner's.
+    // manager, may also have done a manager's own upkeep meanwhile, when the heartbeat came
+    // in time ([`upkeep`]): those entries are no banner's.
     let a = node_a.group(group).await.unwrap().unwrap();
     let b = node_b.group(group).await.unwrap().unwrap();
-    assert_eq!(without_level_raises(&a), log.hashes_in_order());
-    assert_eq!(without_level_raises(&b), log.hashes_in_order());
+    assert_eq!(without_upkeep(&a), log.hashes_in_order());
+    assert_eq!(without_upkeep(&b), log.hashes_in_order());
 }
 
-/// The hashes of `log` in order, but for the entries that raise the group's level.
-fn without_level_raises(log: &GroupLog) -> Vec<fogata_state::EntryHash> {
+/// Whether an entry is one a manager's device writes by itself once every copy judges at a
+/// higher level: the raise of the group's level (`raise_level_when_all_judge`), and an
+/// open invite of its own written again as one that names who may let its device in
+/// (`name_unnamed_invites`). Whether they came depends on when the heartbeat fell.
+fn upkeep(body: &fogata_state::Body) -> bool {
+    matches!(body, fogata_state::Body::Level { .. })
+        || fogata_state::NamedInvite::of(body).is_some()
+}
+
+/// The hashes of `log` in order, but for a manager's own upkeep ([`upkeep`]).
+fn without_upkeep(log: &GroupLog) -> Vec<fogata_state::EntryHash> {
     log.entries_in_order()
         .into_iter()
-        .filter(|e| !matches!(e.body, fogata_state::Body::Level { .. }))
+        .filter(|e| !upkeep(&e.body))
         .map(|e| e.hash())
         .collect()
 }

@@ -21,8 +21,12 @@
 #   quit     a quits the application as it enters the room with its microphone on, after
 #            QUIT_AFTER ms (default 0); it must end by itself within 15 s, without a crash
 #   devices  a lists its sound devices as the settings do around the settings' microphone
-#            test, before a call and after it ends, 20 tests (memory must not keep growing)
-#            and its microphone unplugged and plugged in again: its own must stay listed
+#            test, before a call and after it ends, 20 tests and its microphone unplugged
+#            and plugged in again: its own must stay listed; and after the 20 tests the
+#            video library must hold no more connections, streams or tracks than before.
+#            FOGATA_TEST_MIC_SOAK=<n> runs n tests first, logging the memory every 20;
+#            FOGATA_TEST_CALL_SOAK=<n> has a leave and rejoin the call n times first;
+#            FOGATA_TEST_LEAK=open|closed leaks a connection a test, to see the check fail
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
 #        300 and 1500). Build first as for measure.sh. Prints PASS or FAIL for each and the
 #        run folders; exits non-zero when one failed.

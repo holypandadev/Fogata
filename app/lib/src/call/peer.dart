@@ -171,9 +171,14 @@ class CallPeer {
     if (_gone) await _freeRenderers();
   }
 
+  /// The streams made to show the pictures of [connection] ([Call._onTrack]).
+  final _shown = <MediaStream>[];
+
   Future<void> _close() async {
     final c = connection;
     connection = null;
+    final shown = [..._shown];
+    _shown.clear();
     _described = false;
     _candidates = 0;
     _offering = false;
@@ -181,6 +186,11 @@ class CallPeer {
     _early.clear();
     connected = false;
     if (c != null) await closeConnection(c);
+    // After the connection: its tracks end with it. A renderer still showing one is
+    // given another stream when pictures come again, and shows nothing meanwhile.
+    for (final stream in shown) {
+      await _letGo('a stream of $id', stream.dispose);
+    }
   }
 
   /// Closes its connections and frees its pictures, once however many ask: a renderer

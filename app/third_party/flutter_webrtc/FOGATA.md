@@ -831,3 +831,14 @@ someone had been made before it.
   fresh `RTCConfiguration` each time. macOS already made a new one for each connection.
 - Checked by `tools/call-lab/mic.sh devices` (Linux): every microphone test after the call
   must hear the tone.
+
+## What the plugin holds, counted for tests (Linux, Windows)
+
+- `common/cpp/src/flutter_webrtc.cc`: the method `fogataCounts` answers how many
+  connections, connection observers, local streams and tracks, capturers, track stoppers,
+  renderers and data channels the plugin holds; only the numbers. `tools/call-lab/mic.sh
+  devices` checks with it that 20 microphone tests leave nothing more behind and that
+  nothing of a call is held once it ended: the process's memory says nothing reliable
+  there (over 20 tests it moved by 0.6 to 37 MB with nothing kept, as malloc's free space
+  came and went, while 20 connections kept on purpose did not show in it at all). macOS
+  answers "not implemented", and the check then counts nothing.

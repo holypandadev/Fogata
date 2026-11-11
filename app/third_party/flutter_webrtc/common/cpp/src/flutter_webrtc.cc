@@ -234,6 +234,20 @@ void FlutterWebRTC::HandleMethodCall(
     // the system's own dialog and libwebrtc is asked for no list.
     result->Success(EncodableValue(WaylandSession()));
 #endif
+  } else if (method_call.method_name().compare("fogataCounts") == 0) {
+    // Fogata: how many of each thing the plugin holds, for tests that check nothing is
+    // kept once let go of (tools/call-lab/mic.sh devices). Only counts.
+    auto count = [](size_t n) { return EncodableValue(static_cast<int64_t>(n)); };
+    EncodableMap counts;
+    counts[EncodableValue("connections")] = count(peerconnections_.size());
+    counts[EncodableValue("observers")] = count(peerconnection_observers_.size());
+    counts[EncodableValue("streams")] = count(local_streams_.size());
+    counts[EncodableValue("tracks")] = count(local_tracks_.size());
+    counts[EncodableValue("capturers")] = count(video_capturers_.size());
+    counts[EncodableValue("stoppers")] = count(track_stoppers_.size());
+    counts[EncodableValue("renderers")] = count(renders_.size());
+    counts[EncodableValue("dataChannels")] = count(data_channel_observers_.size());
+    result->Success(EncodableValue(counts));
   } else if (method_call.method_name().compare("fogataScreenFps") == 0) {
     // Fogata: how many frames a second a screen captured through the portal sends;
     // false for any other track.
