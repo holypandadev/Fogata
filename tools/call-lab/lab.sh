@@ -157,13 +157,16 @@ lab_kill() { # pid word
 # Another application's sound, for a shared screen to take: a tone of its own (880 Hz:
 # neither a copy's voice nor a harmonic of one, all on a 55 Hz grid of odd and even steps
 # that no sum or difference of 880 and 330 reaches) from pw-cat, again and again, into a
-# sink of its own that nothing records.
+# sink of its own that nothing records. Its node names its program itself (LAB_APP_PROPS),
+# whatever PipeWire would add.
+LAB_APP_PROPS='{ application.process.binary = pw-cat }'
+
 lab_apps_tone() {
   pactl load-module module-null-sink sink_name=lab_apps sink_properties=device.description=LabApps > /dev/null
   python3 -I "$LAB_DIR/tone.py" "$RUN/tone-apps.wav" 880 60
   ( trap 'kill "$(cat "$RUN/pwcat-apps.pid")" 2>/dev/null; exit 0' TERM HUP INT
     while true; do
-      pw-cat --playback --target lab_apps "$RUN/tone-apps.wav" 2>/dev/null &
+      pw-cat --playback --target lab_apps -P "$LAB_APP_PROPS" "$RUN/tone-apps.wav" 2>/dev/null &
       echo $! > "$RUN/pwcat-apps.pid"
       wait $!
     done ) > /dev/null 2>&1 &
@@ -175,7 +178,8 @@ lab_apps_tone() {
 # the speakers and plays them on would; a's shared screen then carries it to everyone.
 lab_echo_proof() {
   ( parec --device=laba_quiet.monitor --format=s16le --rate=48000 --channels=1 --raw 2>/dev/null |
-      pw-cat --playback --target lab_apps --raw --format s16 --rate 48000 --channels 1 - 2>/dev/null ) &
+      pw-cat --playback --target lab_apps -P "$LAB_APP_PROPS" --raw --format s16 --rate 48000 \
+        --channels 1 - 2>/dev/null ) &
   echo $! > "$RUN/echo-proof.pid"
 }
 
