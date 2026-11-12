@@ -247,6 +247,7 @@ pub(super) async fn fetch(
         let mut later_rounds = crate::downloads::LaterRounds::default();
         let (fetched, later) = loop {
             let later = std::sync::atomic::AtomicU64::new(0);
+            let cut = std::sync::atomic::AtomicBool::new(false);
             let fetched = match weak.upgrade() {
                 Some(inner) => {
                     let fetching = async {
@@ -282,6 +283,9 @@ pub(super) async fn fetch(
                             later
                                 .store(wait.as_secs().max(1), std::sync::atomic::Ordering::Relaxed);
                         }
+                        if let Err(files::FileError::Cut) = &fetched {
+                            cut.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
                         fetched
                     };
                     within(fetch_limit(asked, total), &coming, fetching).await
@@ -289,6 +293,14 @@ pub(super) async fn fetch(
                 None => return,
             };
             let later = Duration::from_secs(later.load(std::sync::atomic::Ordering::Relaxed));
+            // Stopped after some of it came (the friend gave its turn to another device's
+            // while this one took it slowly): what was asked for goes on from there. Each
+            // such try brings more of it; what comes by itself is tried again later anyway.
+            if asked && cut.load(std::sync::atomic::Ordering::Relaxed) {
+                tokio::time::sleep(CUT_AGAIN_AFTER).await;
+                coming.note();
+                continue;
+            }
             if later.is_zero() || !asked {
                 break (fetched, later);
             }
@@ -356,6 +368,10 @@ fn fetch_deadline(size: u64) -> Duration {
 /// How long an attachment the person asked for may go without any of it coming: on a slow
 /// link it takes as long as it takes, and gives up only when the link stops.
 const ASKED_QUIET: Duration = Duration::from_secs(120);
+
+/// How long an attachment the person asked for, which stopped coming after some of it came,
+/// waits before it is asked for again (see [`files::FileError::Cut`]).
+const CUT_AGAIN_AFTER: Duration = Duration::from_secs(2);
 
 /// When a fetch gives up.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

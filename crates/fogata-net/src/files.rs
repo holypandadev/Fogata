@@ -31,7 +31,10 @@ use fogata_crypto::{
     at_rest::{DataKey, Durable, SealReader, SealWriter, StreamFile},
 };
 
-use crate::{IncomingStreams, NetError, NodeHandle};
+use crate::{
+    IncomingStreams, NetError, NodeHandle,
+    slow::{Reader, Waiting},
+};
 
 pub const FILE_PROTOCOL: StreamProtocol = StreamProtocol::new("/fogata/file/1");
 const CHUNK: usize = 64 * 1024;
@@ -79,6 +82,24 @@ const SEEN_FOR: Duration = Duration::from_secs(24 * 60 * 60);
 /// begins, and asks again then (see [`FileError::Later`]).
 const DAY_BYTES: u64 = 32 << 30;
 const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+/// A device whose files together were taken at less than [`LEAST_RATE`] over
+/// [`SLOW_WINDOW`] of waiting for it loses the turn of each, while another device waits for
+/// a turn (see crate::slow): a reader that takes a block every half minute would otherwise
+/// hold its turns for the whole of a large file, and four such devices every turn of
+/// everyone. The device goes on from what it got when it asks again. 4 KiB/s (32 kbit/s)
+/// together is a third of the slowest honest lines seen, a satellite dish at 0.1 Mbit/s and
+/// mobile data far from a mast: their files go on, also four at once, also through a stall
+/// of most of a minute in a window. Below it, a 100 MiB file would take seven hours.
+const LEAST_RATE: u64 = 4 * 1024;
+const SLOW_WINDOW: Duration = Duration::from_secs(2 * 60);
+/// How long a device that waited for a turn counts as waiting.
+const WAITING_FOR: Duration = Duration::from_secs(2 * 60);
+/// How long a request waits for a turn to send: less than the asker waits for the answer
+/// ([`IDLE`]), so that it hears it should ask later rather than give up first.
+const TURN_WAIT: Duration = Duration::from_secs(20);
+/// What a device asking while every turn stays taken is told to wait before it asks again
+/// (see [`FileError::Later`]): it is busy here, the file is still there.
+const BUSY_LATER: Duration = Duration::from_secs(10);
 
 /// `io`, or a timeout error when it does not finish within [`IDLE`].
 async fn idle<T>(io: impl Future<Output = io::Result<T>>) -> io::Result<T> {
@@ -561,10 +582,16 @@ pub enum FileError {
     Damaged,
     #[error("cannot reach the other device: {0}")]
     Unreachable(String),
-    /// The other device sent this one all it sends a device in a day: ask again after
-    /// this long (at most [`LATER_MOST`]), and the rest comes then.
-    #[error("the other device sent you all it sends in a day; the rest comes later")]
+    /// The other device sent this one all it sends a device in a day, or is busy sending
+    /// others their files: ask again after this long (at most [`LATER_MOST`]), and the rest
+    /// comes then.
+    #[error("the other device is busy or sent you all it sends in a day; the rest comes later")]
     Later(Duration),
+    /// The other device stopped sending after some of the file came (a slow transfer ended
+    /// for another device's, a link that went): what came is kept, and asked again, the
+    /// file goes on from there.
+    #[error("the other device stopped sending; the rest comes when asked again")]
+    Cut,
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -602,6 +629,14 @@ struct Answering {
     paced: Arc<Semaphore>,
     seen: Arc<Seen>,
     pace: Arc<Pace>,
+    /// The devices that waited lately for a turn among everyone's, and among those at the
+    /// pace (see [`LEAST_RATE`]).
+    waiting: Arc<Waiting<Asker>>,
+    waiting_paced: Arc<Waiting<Asker>>,
+    /// The least rate a device's files are taken at together, and the window it is
+    /// counted over ([`LEAST_RATE`], [`SLOW_WINDOW`]; others in tests).
+    least: u64,
+    window: Duration,
 }
 
 /// How far into each file each asker was sent it lately (see [`PACE_BURST`]).
@@ -786,6 +821,10 @@ impl Answering {
             paced: Arc::new(Semaphore::new(MAX_PACED)),
             seen: Arc::default(),
             pace: Arc::default(),
+            waiting: Arc::new(Waiting::new(WAITING_FOR)),
+            waiting_paced: Arc::new(Waiting::new(WAITING_FOR)),
+            least: LEAST_RATE,
+            window: SLOW_WINDOW,
         }
     }
 
@@ -820,27 +859,69 @@ impl Answering {
 type Turn = (OwnedSemaphorePermit, OwnedSemaphorePermit);
 
 impl Request {
-    /// Waits for a turn to send (the peer's and everyone's), at most [`IDLE`].
+    /// Waits for a turn to send (the peer's and everyone's), at most [`TURN_WAIT`].
     async fn turn(&self) -> Option<Turn> {
         let own = self.answering.peers().get(&self.peer)?.1.clone();
-        Self::wait(own, self.answering.sending.clone()).await
+        let all = &self.answering;
+        self.wait(own, all.sending.clone(), &all.waiting).await
     }
 
-    /// Waits for a turn to send at the pace (see [`MAX_PACED`]), at most [`IDLE`].
+    /// Waits for a turn to send at the pace (see [`MAX_PACED`]), at most [`TURN_WAIT`].
     async fn paced_turn(&self) -> Option<Turn> {
         let own = self.answering.peers().get(&self.peer)?.2.clone();
-        Self::wait(own, self.answering.paced.clone()).await
+        let all = &self.answering;
+        self.wait(own, all.paced.clone(), &all.waiting_paced).await
     }
 
-    async fn wait(own: Arc<Semaphore>, all: Arc<Semaphore>) -> Option<Turn> {
-        tokio::time::timeout(IDLE, async {
+    /// Waits for a turn of the asker's own, then for one of everyone's, noted in `waiting`
+    /// when none is free: other devices' slow files then give theirs up (see
+    /// [`LEAST_RATE`]). Waiting for one of its own, the asker waits for itself only.
+    async fn wait(
+        &self,
+        own: Arc<Semaphore>,
+        all: Arc<Semaphore>,
+        waiting: &Waiting<Asker>,
+    ) -> Option<Turn> {
+        tokio::time::timeout(TURN_WAIT, async {
             let own = own.acquire_owned().await.ok()?;
-            let all = all.acquire_owned().await.ok()?;
+            let all = match all.clone().try_acquire_owned() {
+                Ok(all) => all,
+                Err(_) => {
+                    waiting.note(self.peer);
+                    all.acquire_owned().await.ok()?
+                }
+            };
             Some((own, all))
         })
         .await
         .ok()
         .flatten()
+    }
+
+    /// How many of the asker's files are being sent now, at the pace or not.
+    fn sending_now(&self, paced: bool) -> usize {
+        let peers = self.answering.peers();
+        let Some((_, own, own_paced)) = peers.get(&self.peer) else {
+            return 1;
+        };
+        let (turns, most) = if paced {
+            (own_paced, MAX_PACED_PER_PEER)
+        } else {
+            (own, MAX_SENDING_PER_PEER)
+        };
+        most.saturating_sub(turns.available_permits()).max(1)
+    }
+
+    /// Whether a file being sent, whose reader is `reader`, gives up its turn: it is taken
+    /// at less than the asker's share of the least rate, and another device waits for a
+    /// turn of the kind it holds (see [`LEAST_RATE`]).
+    fn gives_way(&self, reader: &Reader, paced: bool) -> bool {
+        let waiting = if paced {
+            &self.answering.waiting_paced
+        } else {
+            &self.answering.waiting
+        };
+        reader.too_slow() && waiting.besides(&self.peer)
     }
 }
 
@@ -955,15 +1036,16 @@ async fn send_file(
         return Ok(None);
     };
     if let Some(wait) = shared.day.used_up(asker, tokio::time::Instant::now()) {
-        let seconds = u32::try_from(wait.as_secs().saturating_add(1)).unwrap_or(u32::MAX);
-        stream.write_all(&[LATER]).await?;
-        stream.write_all(&seconds.to_be_bytes()).await?;
-        stream.close().await?;
-        return Ok(None);
+        return answer_later(stream, wait).await;
     }
     // A turn to send, held until the transfer ends or waits for the pace: the file is open
     // meanwhile.
     let mut turn = until_gone(&mut gone, answering.turn()).await.flatten();
+    // Every turn stayed taken for as long as a request waits: busy here, the file still
+    // there. Asked again later, it comes then (or goes on from what came).
+    if turn.is_none() && !is_gone(&gone) && still_shared() {
+        return answer_later(stream, BUSY_LATER).await;
+    }
     let open = |offset: u64| {
         let source = source.clone();
         async move {
@@ -988,13 +1070,7 @@ async fn send_file(
         .start(asker, size - offset, tokio::time::Instant::now())
     {
         Ok(began) => began,
-        Err(wait) => {
-            let seconds = u32::try_from(wait.as_secs().saturating_add(1)).unwrap_or(u32::MAX);
-            stream.write_all(&[LATER]).await?;
-            stream.write_all(&seconds.to_be_bytes()).await?;
-            stream.close().await?;
-            return Ok(None);
-        }
+        Err(wait) => return answer_later(stream, wait).await,
     };
     let mut counted = Counted {
         day: shared.day.clone(),
@@ -1009,6 +1085,7 @@ async fn send_file(
     stream.write_all(&size.to_be_bytes()).await?;
     let mut buf = vec![0u8; CHUNK];
     let stopped = || io::Error::other("no longer shared with that device");
+    let mut reader = Reader::new(all.window);
     loop {
         let open_file = match file.take() {
             Some(open_file) => open_file,
@@ -1055,14 +1132,38 @@ async fn send_file(
         if is_gone(&gone) || !still_shared() {
             return Err(stopped());
         }
+        // Taken too slowly while another device waits: the turn goes to it, and the asker
+        // goes on from here when it asks again.
+        if answering.gives_way(&reader, paced) {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "taken too slowly while another device waits",
+            ));
+        }
+        let writing = tokio::time::Instant::now();
         until_gone(&mut gone, idle(stream.write_all(&buf[..n])))
             .await
             .ok_or_else(stopped)??;
+        // The asker's share of the least rate: its files are taken over one line.
+        let least = all.least / answering.sending_now(paced) as u64;
+        reader.took(n as u64, writing.elapsed(), least);
         at += n as u64;
         counted.left = counted.left.saturating_sub(n as u64);
     }
     stream.close().await?;
     Ok(Some((group, id)))
+}
+
+/// Answers that the asker asks again in `wait`, and when.
+async fn answer_later(
+    mut stream: Stream,
+    wait: Duration,
+) -> io::Result<Option<(GroupId, [u8; 32])>> {
+    let seconds = u32::try_from(wait.as_secs().saturating_add(1)).unwrap_or(u32::MAX);
+    stream.write_all(&[LATER]).await?;
+    stream.write_all(&seconds.to_be_bytes()).await?;
+    stream.close().await?;
+    Ok(None)
 }
 
 /// Whether the file `gone` tells of stopped being served.
@@ -1422,7 +1523,12 @@ async fn fetch_part(
     let mut got = have;
     let mut buf = vec![0u8; CHUNK];
     while got < size {
-        let n = idle(stream.read(&mut buf)).await?;
+        let n = match idle(stream.read(&mut buf)).await {
+            Ok(n) => n,
+            // Kept, for a later call to go on from (see below).
+            Err(_) if got - have >= CHUNK as u64 => break,
+            Err(e) => return Err(e.into()),
+        };
         if n == 0 {
             break;
         }
@@ -1469,6 +1575,11 @@ async fn fetch_part(
         }
         Out::Sealed(_) => 0,
     };
+    // Stopped after a block or more came (a slow transfer given up for another device's, a
+    // link that went): asked again, it goes on from there.
+    if got < size && got - have >= CHUNK as u64 {
+        return Err(FileError::Cut);
+    }
     if got < size {
         return Err(FileError::Io(io::ErrorKind::UnexpectedEof.into()));
     }
@@ -2001,6 +2112,248 @@ mod tests {
         drop(held);
         assert!(answering.request(greedy).is_some());
         assert_eq!(answering.peers().get(&greedy).map(|p| p.0), None);
+    }
+
+    /// The least rate leaves the slowest honest lines seen their turns: a satellite dish at
+    /// 0.1 Mbit/s taking four files at once, each at a quarter of its line, through a stall
+    /// of 45 seconds in every window, for an hour, never gives way. A device that takes its
+    /// one file a block every 29 seconds (as slowly as the idle timeout allows) does once a
+    /// window has gone by, and only while another device waits for a turn of the kind it
+    /// holds; four such files of one device are taken at twice the least rate together, and
+    /// keep their turns. A turn given up goes to the device that waits.
+    #[tokio::test]
+    async fn only_a_reader_under_the_least_rate_gives_way_and_only_to_another_device() {
+        let second = Duration::from_secs(1);
+        let answering = Answering::new();
+        let (bea, carl, waiter) = (device(), device(), device());
+        let bea_files: Vec<Request> = (0..MAX_SENDING_PER_PEER)
+            .map(|_| answering.request(bea).unwrap())
+            .collect();
+        let carl_file = answering.request(carl).unwrap();
+        let others: Vec<Request> = (0..MAX_SENDING - MAX_SENDING_PER_PEER - 1)
+            .map(|_| answering.request(device()).unwrap())
+            .collect();
+        let mut turns = Vec::new();
+        for request in bea_files.iter().chain([&carl_file]).chain(&others) {
+            turns.push(request.turn().await.unwrap());
+        }
+        assert_eq!(bea_files[0].sending_now(false), MAX_SENDING_PER_PEER);
+        assert_eq!(carl_file.sending_now(false), 1);
+        let share = |request: &Request| answering.least / request.sending_now(false) as u64;
+        let read = |request: &Request, every: Duration, bytes: u64, rounds: u64| {
+            let mut reader = Reader::new(answering.window);
+            for _ in 0..rounds {
+                reader.took(bytes, every, share(request));
+            }
+            reader
+        };
+        let trickle = |request: &Request| {
+            read(
+                request,
+                29 * second,
+                CHUNK as u64,
+                SLOW_WINDOW.as_secs() / 29 + 1,
+            )
+        };
+        // Nobody waits yet: nothing gives way.
+        assert!(!carl_file.gives_way(&trickle(&carl_file), false));
+        let theirs = answering.request(waiter).unwrap();
+        let short = Duration::from_millis(50);
+        assert!(tokio::time::timeout(short, theirs.turn()).await.is_err());
+        // The dish, a quarter of its line for each of four files, with a long stall.
+        let dish = 100_000 / 8 / MAX_SENDING_PER_PEER as u64;
+        let mut honest = Reader::new(answering.window);
+        for _ in 0..30 {
+            for _ in 0..75 {
+                honest.took(dish, second, share(&bea_files[0]));
+            }
+            honest.took(0, 45 * second, share(&bea_files[0]));
+            assert!(!bea_files[0].gives_way(&honest, false));
+        }
+        assert!(!bea_files[0].gives_way(&trickle(&bea_files[0]), false));
+        assert!(carl_file.gives_way(&trickle(&carl_file), false));
+        // Only another device's wait counts, and only for turns of the kind it waits for.
+        assert!(!theirs.gives_way(&trickle(&theirs), false));
+        assert!(!carl_file.gives_way(&trickle(&carl_file), true));
+        // Carl's file given up: the device that waits gets its turn.
+        drop(turns.remove(MAX_SENDING_PER_PEER));
+        assert!(
+            tokio::time::timeout(short, theirs.turn())
+                .await
+                .is_ok_and(|t| t.is_some())
+        );
+    }
+
+    /// Bea takes a large file slowly while every other turn is taken and another device
+    /// waits for one: under the least rate her file gives way, its turn goes to the device
+    /// that waits, and what she got is a part she goes on from; above it, her file comes
+    /// whole however long the other waits.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_taken_too_slowly_gives_its_turn_to_a_device_that_waits() {
+        let (node_a, node_b, peer_a, log, _ana, _bea) = two_members().await;
+        let group = log.group_id();
+        let dir = folder("slow-reader");
+        let source = dir.join("film.mkv");
+        // Past what the transport takes before the reader does.
+        let bytes: Vec<u8> = (0..24u32 << 20).map(|i| (i % 253) as u8).collect();
+        std::fs::write(&source, &bytes).unwrap();
+        let (id, size) = hash_file(&source).unwrap();
+        let shared = SharedFiles::default();
+        shared.insert(group, id, source);
+        let mut answering = Answering::new();
+        answering.least = 512 * 1024;
+        answering.window = Duration::from_secs(1);
+        serve_answering(node_a.clone(), shared, |_, _| {}, answering.clone()).unwrap();
+        // Bea takes a block every `every`, for up to a minute: how much came, counted in
+        // `got` as it comes.
+        let take = |every: Duration, got: Arc<std::sync::atomic::AtomicU64>| {
+            let node_b = node_b.clone();
+            tokio::spawn(async move {
+                let mut stream = node_b
+                    .streams()
+                    .open_stream(peer_a, FILE_PROTOCOL)
+                    .await
+                    .unwrap();
+                let status = request(&mut stream, group, id, 0).await.unwrap();
+                assert_eq!(status, FOUND);
+                let mut size = [0u8; 8];
+                stream.read_exact(&mut size).await.unwrap();
+                let mut buf = vec![0u8; CHUNK];
+                let _ = tokio::time::timeout(Duration::from_secs(60), async {
+                    loop {
+                        match stream.read(&mut buf).await {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => {
+                                got.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+                        tokio::time::sleep(every).await;
+                    }
+                })
+                .await;
+            })
+        };
+        let got = |count: &Arc<std::sync::atomic::AtomicU64>| {
+            count.load(std::sync::atomic::Ordering::Relaxed)
+        };
+        // Every turn of everyone's but one is taken.
+        let others: Vec<Request> = (0..MAX_SENDING - 1)
+            .map(|_| answering.request(device()).unwrap())
+            .collect();
+        let mut held = Vec::new();
+        for other in &others {
+            held.push(other.turn().await.unwrap());
+        }
+        // Taken at a quarter of the least rate, while another device waits.
+        let slow_got: Arc<std::sync::atomic::AtomicU64> = Arc::default();
+        let slow = take(Duration::from_millis(500), Arc::clone(&slow_got));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        assert_eq!(answering.sending.available_permits(), 0);
+        let waiter = answering.request(device()).unwrap();
+        let turn = tokio::time::timeout(Duration::from_secs(25), waiter.turn()).await;
+        assert!(
+            turn.as_ref().is_ok_and(|t| t.is_some()),
+            "the slow file kept its turn"
+        );
+        slow.abort();
+        let slow_got = got(&slow_got);
+        assert!(
+            0 < slow_got && slow_got < size,
+            "{slow_got} of {size} bytes"
+        );
+        drop(turn);
+        // Taken at five times the least rate, while another device waits: it comes whole.
+        let honest_got: Arc<std::sync::atomic::AtomicU64> = Arc::default();
+        let honest = take(Duration::from_millis(25), Arc::clone(&honest_got));
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let waiter = answering.request(device()).unwrap();
+        let waiting = tokio::spawn(async move { waiter.turn().await.is_some() });
+        honest.await.unwrap();
+        assert_eq!(got(&honest_got), size, "an honest reader was cut");
+        assert!(
+            waiting.await.unwrap(),
+            "the device that waited got no turn after"
+        );
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A device that asks while every turn stays taken for as long as a request waits is
+    /// told to ask again later, as one sent all of its day is: the file is there, the
+    /// server busy, and its download waits rather than fails.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_device_asking_while_every_turn_is_taken_is_told_to_ask_later() {
+        let (node_a, node_b, peer_a, log, _ana, _bea) = two_members().await;
+        let group = log.group_id();
+        let dir = folder("busy-later");
+        let source = dir.join("photo.jpg");
+        std::fs::write(&source, vec![7u8; 100_000]).unwrap();
+        let (id, size) = hash_file(&source).unwrap();
+        let shared = SharedFiles::default();
+        shared.insert(group, id, source);
+        let answering = Answering::new();
+        serve_answering(node_a.clone(), shared, |_, _| {}, answering.clone()).unwrap();
+        let others: Vec<Request> = (0..MAX_SENDING)
+            .map(|_| answering.request(device()).unwrap())
+            .collect();
+        let mut held = Vec::new();
+        for other in &others {
+            held.push(other.turn().await.unwrap());
+        }
+        let asked = fetch_to_memory(&node_b, group, peer_a, id, size).await;
+        assert!(
+            matches!(asked, Err(FileError::Later(wait)) if wait > BUSY_LATER && wait < 2 * BUSY_LATER),
+            "{asked:?}"
+        );
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A download that stops after some of the file came (here: the file withdrawn while it
+    /// comes at the pace) says so, and keeps what came: asked again once the file is there
+    /// again, it goes on from there to the whole file.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_download_cut_short_goes_on_from_what_came() {
+        let (node_a, node_b, peer_a, log, _ana, bea) = two_members().await;
+        let group = log.group_id();
+        let (shared, answering, id, dir) =
+            shared_again("cut-short", group, bea.public_key(), Duration::from_secs(1));
+        let source = dir.join("film.mkv");
+        let size = std::fs::metadata(&source).unwrap().len();
+        serve_answering(node_a.clone(), shared.clone(), |_, _| {}, answering).unwrap();
+        let dest = dir.join("film-here.mkv");
+        let fetching = {
+            let (node_b, dest) = (node_b.clone(), dest.clone());
+            tokio::spawn(
+                async move { fetch(&node_b, group, peer_a, id, size, &dest, |_| {}).await },
+            )
+        };
+        // A second at the pace, and half a second of it: about half the file came.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        shared.remove(group, id);
+        let first = fetching.await.unwrap();
+        assert!(matches!(first, Err(FileError::Cut)), "{first:?}");
+        let kept = std::fs::metadata(part_path(&dest, &id)).unwrap().len();
+        assert!(
+            kept >= CHUNK as u64 && kept < size,
+            "{kept} of {size} bytes kept"
+        );
+        shared.insert(group, id, source.clone());
+        let mut from = None;
+        fetch(&node_b, group, peer_a, id, size, &dest, |got| {
+            from.get_or_insert(got);
+        })
+        .await
+        .unwrap();
+        assert!(
+            from.is_some_and(|from| from > kept),
+            "started again from {from:?}"
+        );
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A member that asks again and again for files it already got, past its burst, is sent

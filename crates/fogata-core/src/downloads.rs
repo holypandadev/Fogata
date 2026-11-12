@@ -164,6 +164,10 @@ async fn fetch_from_holders(
     // first of them can send more: the download waits, it does not fail.
     let mut later: Option<std::time::Duration> = None;
     let mut later_rounds = LaterRounds::default();
+    // A round in which a download stopped after some of the file came (a holder that gave
+    // its turn to another device's while this one took it slowly) uses up none of the
+    // retries: each such try goes on from what came, and gets more of it.
+    let mut moved = false;
     let mut round = 0;
     'rounds: while round <= FETCH_RETRIES.len() {
         let wait = match later.take() {
@@ -174,9 +178,11 @@ async fn fetch_from_holders(
                     break;
                 }
             },
+            None if moved => Some(FETCH_RETRIES[0]),
             None if round > 0 => Some(FETCH_RETRIES[round - 1]),
             None => None,
         };
+        moved = false;
         if let Some(wait) = wait {
             tokio::time::sleep(wait).await;
             let rooms = inner.node.rooms(group).await.unwrap_or_default();
@@ -237,11 +243,12 @@ async fn fetch_from_holders(
                     } else if !cut.contains(holder) {
                         cut.push(*holder);
                     }
+                    moved |= matches!(e, files::FileError::Cut);
                     result = Err(e.to_string());
                 }
             }
         }
-        if later.is_none() {
+        if later.is_none() && !moved {
             round += 1;
         }
     }

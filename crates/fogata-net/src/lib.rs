@@ -23,6 +23,7 @@ mod lan;
 mod node;
 mod punches;
 mod rendezvous;
+mod slow;
 mod strangers;
 pub mod updates;
 

@@ -41,7 +41,10 @@ use tokio::{
     sync::{Semaphore, mpsc},
 };
 
-use crate::{NetError, NodeHandle, locked};
+use crate::{
+    NetError, NodeHandle, locked,
+    slow::{Reader, Waiting},
+};
 
 pub const UPDATE_PROTOCOL: StreamProtocol = StreamProtocol::new("/fogata/update/1");
 
@@ -61,11 +64,11 @@ const IDLE: Duration = Duration::from_secs(30);
 /// write; without this, one byte every [`IDLE`] would hold a place among [`REQUESTS`] for
 /// as long as the asker likes.
 const REQUEST_WITHIN: Duration = Duration::from_secs(10);
-/// An upload that went on this long at less than [`MIN_UPLOAD_RATE`] on average ends
-/// while another device was turned away for want of a place (see [`Server::turned_away`]):
-/// a reader that takes a chunk now and then would otherwise hold a place for hours. The
-/// device goes on from its last whole chunk when it asks again; while nobody else waits, a
-/// slow line keeps its place.
+/// An upload whose reader took less than [`MIN_UPLOAD_RATE`] over a minute of waiting for it
+/// ends while another device was turned away for want of a place (see crate::slow, and
+/// [`Server::waiting`]): a reader that takes a chunk now and then would otherwise hold a
+/// place for hours. The device goes on from its last whole chunk when it asks again; while
+/// nobody else waits, a slow line keeps its place.
 const SLOW_AFTER: Duration = Duration::from_secs(60);
 const MIN_UPLOAD_RATE: u64 = 64 * 1024;
 /// How long a device turned away for want of a place counts as waiting.
@@ -173,7 +176,7 @@ pub fn serve(
         answering: Arc::new(Mutex::new(HashMap::new())),
         throttle: Throttle::new(UPLOAD_RATE),
         sent: crate::allowance::Allowance::new(SENT_PER_DAY),
-        turned_away: Mutex::new(None),
+        waiting: Waiting::new(WAITING_FOR),
     });
     let node = server.node.clone();
     node.spawn(async move {
@@ -247,8 +250,8 @@ struct Server {
     answering: Arc<Mutex<HashMap<DevicePublicKey, usize>>>,
     throttle: Throttle,
     sent: crate::allowance::Allowance<DevicePublicKey>,
-    /// When a device was last turned away because every upload's place was taken.
-    turned_away: Mutex<Option<Instant>>,
+    /// The devices turned away lately because every upload's place was taken.
+    waiting: Waiting<DevicePublicKey>,
 }
 
 impl Server {
@@ -334,16 +337,6 @@ impl Server {
         stream.close().await
     }
 
-    /// Notes that a device was turned away for want of a place for its upload.
-    fn turn_away(&self) {
-        *locked(&self.turned_away) = Some(Instant::now());
-    }
-
-    /// Whether a device was turned away for want of a place lately, and may be waiting.
-    fn someone_waits(&self) -> bool {
-        locked(&self.turned_away).is_some_and(|at| at.elapsed() < WAITING_FOR)
-    }
-
     async fn send_package(
         &self,
         peer: PeerId,
@@ -376,7 +369,7 @@ impl Server {
         }
         // One upload per device, a few in all.
         let Ok(_permit) = self.uploads.try_acquire() else {
-            self.turn_away();
+            self.waiting.note(device);
             stream.write_all(&[BUSY]).await?;
             return stream.close().await;
         };
@@ -399,15 +392,14 @@ impl Server {
         file.seek(SeekFrom::Start(first * CHUNK))?;
         idle(stream.write_all(&[DATA])).await?;
         let mut buf = vec![0u8; CHUNK as usize];
-        let started = Instant::now();
-        let mut sent = 0u64;
+        let mut reader = Reader::new(SLOW_AFTER);
         for index in first..artifact.chunk_count() {
             // A newer release replaced this one, or the peer is no friend or member any more:
             // the rest is not sent.
             if self.shelf.build() != Some(build) || self.node.trusted_device(peer).await.is_none() {
                 return Err(io::Error::other("no longer given to that device"));
             }
-            if too_slow(started.elapsed(), sent) && self.someone_waits() {
+            if reader.too_slow() && self.waiting.besides(&device) {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "too slow while another device waits",
@@ -429,18 +421,13 @@ impl Server {
                 ));
             }
             self.throttle.take(len as u64).await;
+            let writing = Instant::now();
             idle(stream.write_all(&(len as u32).to_be_bytes())).await?;
             idle(stream.write_all(&buf[..len])).await?;
-            sent += len as u64;
+            reader.took(len as u64, writing.elapsed(), MIN_UPLOAD_RATE);
         }
         stream.close().await
     }
-}
-
-/// Whether an upload that has gone on for `elapsed` and sent `sent` bytes is too slow to
-/// keep its place from a device that waits (see [`SLOW_AFTER`]).
-fn too_slow(elapsed: Duration, sent: u64) -> bool {
-    elapsed >= SLOW_AFTER && (sent as f64) < MIN_UPLOAD_RATE as f64 * elapsed.as_secs_f64()
 }
 
 /// A request, as read from its stream.
@@ -833,23 +820,30 @@ async fn read_name(stream: &mut Stream) -> io::Result<String> {
 mod tests {
     use super::*;
 
-    /// An upload is too slow to keep its place from a device that waits only once it has
-    /// gone on for a minute at less than the least rate on average: a reader that takes one
-    /// chunk every half minute is, a slow home line well above that rate is not, and nothing
-    /// is in its first minute.
+    /// An upload is too slow to keep its place from a device that waits only once its
+    /// reader took less than the least rate over a minute of waiting for it: a reader that
+    /// takes one chunk every half minute is, a slow home line well above that rate is not,
+    /// and nothing is in its first minute.
     #[test]
     fn an_upload_is_too_slow_only_after_a_minute_under_the_least_rate() {
         let secs = Duration::from_secs;
+        let slow = |took: &[(u64, u64)]| {
+            let mut reader = Reader::new(SLOW_AFTER);
+            for (bytes, waited) in took {
+                reader.took(*bytes, secs(*waited), MIN_UPLOAD_RATE);
+            }
+            reader.too_slow()
+        };
         // A chunk taken every 29 s, as slowly as the idle timeout allows.
-        assert!(too_slow(secs(116), 4 * CHUNK));
-        assert!(too_slow(secs(60), 0));
+        assert!(slow(&[(CHUNK, 29); 4]));
+        assert!(slow(&[(0, 60)]));
         // A line of 1 Mbit/s up, shared by three uploads: about 40 KiB/s each.
-        assert!(too_slow(secs(120), 120 * 40 * 1024));
+        assert!(slow(&[(40 * 1024, 1); 60]));
         // At the least rate, or above it.
-        assert!(!too_slow(secs(120), 120 * MIN_UPLOAD_RATE));
-        assert!(!too_slow(secs(600), 600 * 100 * 1024));
+        assert!(!slow(&[(MIN_UPLOAD_RATE, 1); 120]));
+        assert!(!slow(&[(100 * 1024, 1); 600]));
         // Not in the first minute, however slow.
-        assert!(!too_slow(secs(59), 0));
+        assert!(!slow(&[(0, 59)]));
     }
 
     #[tokio::test]
