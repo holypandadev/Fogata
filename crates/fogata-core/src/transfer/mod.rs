@@ -92,12 +92,29 @@ const START_WAIT: Duration = Duration::from_secs(5);
 /// over the slowest relay are plenty.
 const PROOF_WAIT: Duration = Duration::from_secs(10);
 /// Most runs of the code the new computer answers at once, each of another computer: a
-/// stranger that learnt the nameplate and stalls holds one of them, not the code.
+/// stranger that learnt the nameplate and stalls holds one of them, not the code. The
+/// computer where the code was typed runs it with at most as many at once.
 const MAX_RUNS: usize = 8;
 /// How long a computer found only over the DHT waits for one on the local network.
 const LAN_FIRST: Duration = Duration::from_secs(5);
 /// A computer that took the protocol but did not answer a run is tried again after this.
 const RETRY_PEER: Duration = Duration::from_secs(5);
+/// Most computers the computer where the code was typed proves it to. Each one that answers
+/// a run under the code's nameplate with a SPAKE2 message learns from that proof whether
+/// the one guess of the code it made was right (one in 2^25 for the five characters the
+/// nameplate does not show), and whoever learnt the nameplate can answer, so every proof
+/// is a guess given away: a stranger that answers first no longer spends the move, but the
+/// guesses stay few, and as many as the computer showing the code allows the other way
+/// ([`MAX_FAILED_TRANSFER_RUNS`]).
+const MAX_PROVED_TO: u32 = 3;
+/// How long, at least, the computer where the code was typed looks for the computer showing
+/// it once one answered under the code and did not prove it back (or showed it the old way):
+/// that one may be a stranger, and the one showing the code found a little later (over the
+/// DHT, [`LAN_FIRST`] after it shows). Counted from when it began to look, so a code
+/// mistyped is told a few seconds after it was tried, not minutes.
+const SETTLE: Duration = Duration::from_secs(15);
+/// How often the computer where the code was typed looks at the computers it found.
+const LOOK_EVERY: Duration = Duration::from_millis(300);
 /// What may come past the bytes the old computer said would come (files that grew).
 const SLACK_BYTES: u64 = 64 * 1024 * 1024;
 /// Most files a move takes: far more than a data folder holds.
@@ -187,6 +204,11 @@ pub struct Summary {
 pub enum Failure {
     /// The computer that answered did not accept the code typed (nothing was sent).
     WrongCode,
+    /// More than one computer answered under the code typed and none proved it back
+    /// (nothing was sent): a code mistyped makes only the computer showing it say no, so at
+    /// least one of them is another device, which may be trying to keep the move from
+    /// happening.
+    OthersAnswered,
     /// The code shown ran out before it was used.
     Expired,
     /// Several runs with wrong codes: the code shown stops working.
@@ -295,6 +317,10 @@ impl std::fmt::Display for Failure {
             Failure::WrongCode => {
                 f.write_str("the other computer did not accept the code, so nothing was sent")
             }
+            Failure::OthersAnswered => f.write_str(
+                "several computers answered this code and none of them knew it, so nothing was \
+                 sent; another device may be trying to stop the move",
+            ),
             Failure::Expired => f.write_str("the code expired before it was used"),
             Failure::TooManyTries => {
                 f.write_str("several wrong codes were tried; the code stopped working")
@@ -1097,6 +1123,8 @@ async fn receiving(
         .await?;
     let _ = events.send(TransferEvent::Looking);
     let mut failed = 0;
+    // Starts of the first way that named this code (see `answer_old_run`).
+    let mut old_starts = 0;
     let expiry = tokio::time::sleep(Duration::from_millis(options.code_lifetime_ms));
     tokio::pin!(expiry);
     // Each run goes on its own up to the proof it brings, so that one that stalls keeps
@@ -1120,9 +1148,12 @@ async fn receiving(
                 let code = code.clone();
                 old_runs.start(peer, async move { answer_old_run(&code, stream).await });
             }
-            Some(end) = old_runs.next() => {
-                if let Some(end) = end {
-                    break end;
+            Some(named) = old_runs.next() => {
+                if named {
+                    old_starts += 1;
+                    if old_starts >= MAX_FAILED_TRANSFER_RUNS {
+                        break TransferEvent::Failed(Failure::OldVersion);
+                    }
                 }
             }
             stream = incoming.next() => {
@@ -1346,22 +1377,25 @@ impl<T: Send + 'static> Runs<T> {
     }
 }
 
-/// A start of the first way of running the code (`/fogata/transfer/1`) on `stream`: when
-/// it names this code, a computer of a version up to 0.1.0-beta.7 is moving to this one, and
-/// the move stops so that the person updates both ([`Failure::OldVersion`]). Nothing is
-/// answered: that computer then tries again until it gives up on reaching this one, having
-/// spent nothing. A start for another code is told so, as that way does. Whoever learnt the
-/// nameplate can end the code this way, as it could with wrong proofs; it learns nothing.
-async fn answer_old_run(code: &TransferCode, mut stream: impl Link) -> Option<TransferEvent> {
-    let start = within(START_WAIT, wire::read_start(&mut stream))
-        .await
-        .ok()?;
+/// A start of the first way of running the code (`/fogata/transfer/1`) on `stream`: whether
+/// it names this code. Nothing is answered then: a computer of a version up to 0.1.0-beta.7
+/// typing the code tries again every few seconds until it gives up on reaching this one,
+/// having spent nothing, and the move stops once [`MAX_FAILED_TRANSFER_RUNS`] such starts
+/// came, so that the person updates both ([`Failure::OldVersion`]). One alone does not stop
+/// it: whoever learnt the nameplate can send one, and the computer of this version that
+/// typed the code may be on its way. A stranger can still end the code with that many, as
+/// it can with as many wrong proofs; it learns nothing. A start for another code is told
+/// so, as that way does.
+async fn answer_old_run(code: &TransferCode, mut stream: impl Link) -> bool {
+    let Ok(start) = within(START_WAIT, wire::read_start(&mut stream)).await else {
+        return false;
+    };
     if code.named_by(&start) {
         tracing::info!("a computer with an older Fogata typed this code");
-        return Some(TransferEvent::Failed(Failure::OldVersion));
+        return true;
     }
     let _ = wire::send_reply(&mut stream, None).await;
-    None
+    false
 }
 
 /// Whether `peer`, a computer that takes only the first way of running the code, shows
@@ -1393,22 +1427,44 @@ async fn probe_old_way(code: &TransferCode, mut stream: impl Link) -> Option<boo
 enum Ran<S> {
     /// The two computers proved the code to each other.
     Both(Channel<S>),
-    /// The other computer shows another code, or went before the code was tried on it: not
-    /// a try of the code.
+    /// The other computer shows another code, or went before the code was tried on it, or
+    /// answered when this computer had no proof left to give: not a try of the code.
     Untried { other_code: bool },
-    /// This computer proved the code and the other did not: the code's one try is spent.
+    /// This computer proved the code and the other did not: one of the code's
+    /// [`MAX_PROVED_TO`] tries is spent, on a computer that is not the one showing it, or on
+    /// a code mistyped.
     Wrong,
-    /// This computer proved the code and heard nothing back.
+    /// This computer proved the code and heard nothing back: a try spent too.
     Lost,
 }
 
+/// The proofs of the code typed here that are left to give: one to each computer that
+/// answers a run with a SPAKE2 message, at most [`MAX_PROVED_TO`] in all, shared by the runs
+/// that go side by side.
+#[derive(Clone, Debug, Default)]
+struct Proofs(Arc<std::sync::atomic::AtomicU32>);
+
+impl Proofs {
+    /// Takes one, if any is left.
+    fn take(&self) -> bool {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < MAX_PROVED_TO
+    }
+
+    /// Whether every one was given.
+    fn spent(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) >= MAX_PROVED_TO
+    }
+}
+
 /// Runs the code typed here on `stream`, to the computer at its other end: this computer
-/// proves the code first, and the code's one try is spent only then.
+/// proves the code first, with one of `proofs`, and one of the code's tries is spent only
+/// then.
 async fn run_code<S: Link>(
     code: &TransferCode,
     local: &[u8],
     remote: &[u8],
     mut stream: S,
+    proofs: &Proofs,
 ) -> Ran<S> {
     let (run, start) = run_start(code, local, remote);
     let reply = async {
@@ -1424,6 +1480,10 @@ async fn run_code<S: Link>(
     let Ok((run, proof)) = run.prove(&reply) else {
         return Ran::Untried { other_code: false };
     };
+    // The proof tells whoever answered whether its guess of the code was right.
+    if !proofs.take() {
+        return Ran::Untried { other_code: false };
+    }
     let answer = async {
         wire::send_confirm(&mut stream, &proof).await?;
         wire::read_answer(&mut stream).await
@@ -2123,75 +2183,78 @@ async fn sending(
     node.seek(Some(code.rendezvous()), Some(*code.lan_secret()))
         .await?;
     let _ = events.send(TransferEvent::Looking);
-    let deadline = Instant::now() + Duration::from_millis(options.no_contact_ms);
-    // Peers that show another code, and when each other one was last tried: one that went
-    // away or did not answer in time is tried again a little later.
-    let mut other_code: HashSet<PeerId> = HashSet::new();
-    let mut tried: std::collections::HashMap<PeerId, Instant> = Default::default();
-    let mut first_far: Option<Instant> = None;
+    let began = Instant::now();
+    let deadline = began + Duration::from_millis(options.no_contact_ms);
     let local = node.local_peer();
+    let proofs = Proofs::default();
+    let mut search = Search::default();
+    // The runs under way, each in a task of its own, so that a computer that stalls keeps
+    // neither the others nor the person's Cancel waiting.
+    let mut runs: tokio::task::JoinSet<(PeerId, Tried<fogata_net::Stream>)> =
+        tokio::task::JoinSet::new();
+    let mut look = tokio::time::interval(LOOK_EVERY);
+    look.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let end = loop {
-        if Instant::now() >= deadline {
-            break TransferEvent::Failed(Failure::NoContact);
-        }
-        if let Ok(answer) = control.try_recv()
-            && !answer
-        {
-            break TransferEvent::Failed(Failure::Cancelled);
-        }
-        let candidates = node.move_candidates().await.unwrap_or_default();
-        let taking = node.peers_taking(&PROTOCOL);
-        // Those that take only the first way: told apart below, never run with.
-        let old_only: Vec<PeerId> = node
-            .peers_taking(&OLD_PROTOCOL)
-            .into_iter()
-            .filter(|p| !taking.contains(p))
-            .collect();
-        let listing = taking.iter().chain(&old_only).copied().collect();
-        let ready = to_try(listing, candidates, |p| {
-            *p != local
-                && !other_code.contains(p)
-                && tried.get(p).is_none_or(|t| t.elapsed() >= RETRY_PEER)
-        });
-        // A computer on this local network first (see `choose`).
-        let mut found = Vec::with_capacity(ready.len());
-        for peer in ready {
-            found.push((peer, is_lan(&node, peer).await));
-        }
-        let Some(peer) = choose(&found, &mut first_far) else {
-            tokio::time::sleep(Duration::from_millis(300)).await;
-            continue;
-        };
-        tried.insert(peer, Instant::now());
-        let stream = match old_only.contains(&peer) {
-            true => None,
-            false => node.streams().open_stream(peer, PROTOCOL).await.ok(),
-        };
-        let Some(stream) = stream else {
-            // A computer of the first way (or one that takes neither yet): if it shows this
-            // code, both must run the same version. Nothing is tried on it.
-            match shows_code_the_old_way(&node, peer, code).await {
-                Some(true) => break TransferEvent::Failed(Failure::OldVersion),
-                Some(false) => {
-                    other_code.insert(peer);
-                }
-                None => {}
+        let (peer, channel) = tokio::select! {
+            () = tokio::time::sleep_until(deadline.into()) => {
+                break TransferEvent::Failed(search.verdict().unwrap_or(Failure::NoContact));
             }
-            continue;
-        };
-        // One run per code typed: once this computer's proof went, whatever answered, this
-        // was the code's only try.
-        let channel = match run_code(code, &local.to_bytes(), &peer.to_bytes(), stream).await {
-            Ran::Both(channel) => channel,
-            // Another code, or a computer that went: the code was not tried on it.
-            Ran::Untried { other_code: true } => {
-                other_code.insert(peer);
+            answer = control.recv() => {
+                if answer != Some(true) {
+                    break TransferEvent::Failed(Failure::Cancelled);
+                }
                 continue;
             }
-            Ran::Untried { other_code: false } => continue,
-            Ran::Wrong => break TransferEvent::Failed(Failure::WrongCode),
-            Ran::Lost => break TransferEvent::Failed(Failure::Interrupted(CONNECTION_LOST.into())),
+            Some(ended) = runs.join_next() => {
+                let Ok((peer, tried)) = ended else {
+                    continue;
+                };
+                match search.heard(peer, tried) {
+                    Some(channel) => (peer, channel),
+                    None => {
+                        if let Some(failure) = search.over(proofs.spent(), began.elapsed() >= SETTLE) {
+                            break TransferEvent::Failed(failure);
+                        }
+                        continue;
+                    }
+                }
+            }
+            _ = look.tick() => {
+                let candidates = node.move_candidates().await.unwrap_or_default();
+                let taking = node.peers_taking(&PROTOCOL);
+                // Those that take only the first way: told apart, never run with.
+                let old_only: Vec<PeerId> = node
+                    .peers_taking(&OLD_PROTOCOL)
+                    .into_iter()
+                    .filter(|p| !taking.contains(p))
+                    .collect();
+                let listing = taking.iter().chain(&old_only).copied().collect();
+                let ready = to_try(listing, candidates, |p| *p != local && search.may_try(p));
+                let mut found = Vec::with_capacity(ready.len());
+                for peer in ready {
+                    found.push((peer, is_lan(&node, peer).await));
+                }
+                let chosen = choose(&found, search.near_running(), &mut search.first_far);
+                let room = MAX_RUNS.saturating_sub(runs.len());
+                search.waiting = chosen.len() > room || chosen.len() < found.len();
+                for peer in chosen.into_iter().take(room) {
+                    let lan = found.iter().any(|(p, lan)| *p == peer && *lan);
+                    search.started(peer, lan);
+                    let (node, code, proofs) = (node.clone(), code.clone(), proofs.clone());
+                    let old_only = old_only.contains(&peer);
+                    runs.spawn(async move {
+                        let tried = try_peer(&node, &code, peer, old_only, &proofs).await;
+                        (peer, tried)
+                    });
+                }
+                if let Some(failure) = search.over(proofs.spent(), began.elapsed() >= SETTLE) {
+                    break TransferEvent::Failed(failure);
+                }
+                continue;
+            }
         };
+        // The code checked out with this one: the others stop, whatever they were at.
+        runs.abort_all();
         if let Err(e) = enter(Phase::Running) {
             break TransferEvent::Failed(failure_of(e));
         }
@@ -2212,20 +2275,152 @@ async fn sending(
             Err(e) => TransferEvent::Failed(failure_of(e)),
         };
     };
+    runs.abort_all();
     let _ = node.seek(None, None).await;
     let _ = node.shutdown().await;
     Ok(end)
+}
+
+/// How a try of the code typed here on one computer ended ([`try_peer`]).
+enum Tried<S> {
+    Ran(Ran<S>),
+    /// The computer takes only the first way of running the code: whether it shows this
+    /// code ([`shows_code_the_old_way`]).
+    OldWay(Option<bool>),
+}
+
+/// Tries the code typed here on `peer`: runs it, or, when the computer does not take this
+/// way of running it (`old_only`, or it refuses the stream), tells whether it shows the code
+/// the first way.
+async fn try_peer(
+    node: &NodeHandle,
+    code: &TransferCode,
+    peer: PeerId,
+    old_only: bool,
+    proofs: &Proofs,
+) -> Tried<fogata_net::Stream> {
+    let stream = match old_only {
+        true => None,
+        false => node.streams().open_stream(peer, PROTOCOL).await.ok(),
+    };
+    match stream {
+        Some(stream) => {
+            let (local, remote) = (node.local_peer().to_bytes(), peer.to_bytes());
+            Tried::Ran(run_code(code, &local, &remote, stream, proofs).await)
+        }
+        None => Tried::OldWay(shows_code_the_old_way(node, peer, code).await),
+    }
+}
+
+/// How a computer that answered under the code typed here ended its try without proving it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Answered {
+    Wrong,
+    Lost,
+    /// It shows the code the first way, or said so: it can be a stranger dropping the probe.
+    OldWay,
+}
+
+/// What the computer where the code was typed knows of the computers it tries it on.
+///
+/// Nothing tells the computer showing the code apart from one that learnt its nameplate
+/// (the rendezvous point, the announcement sealed under the nameplate, a connection that
+/// lists the move's protocol: any of them is had for the nameplate), and only the run's
+/// proofs tell whether a computer knows the rest. So every computer found is tried, side by
+/// side; one that answered and did not prove the code back is not tried again, and is no
+/// reason to stop while another may still be the one, until [`MAX_PROVED_TO`] proofs went.
+#[derive(Debug, Default)]
+struct Search {
+    /// Computers that show another code: not tried again.
+    other_code: HashSet<PeerId>,
+    /// When each computer was last tried: one that went, or did not answer in time, is
+    /// tried again a little later.
+    tried: std::collections::HashMap<PeerId, Instant>,
+    /// Computers being tried, and whether each is on this local network.
+    running: std::collections::HashMap<PeerId, bool>,
+    /// Computers that answered under the code and did not prove it back: not tried again.
+    answered: std::collections::HashMap<PeerId, Answered>,
+    /// When a computer found only over the DHT first showed (see [`choose`]).
+    first_far: Option<Instant>,
+    /// Whether computers found at the last look are still to be tried.
+    waiting: bool,
+}
+
+impl Search {
+    /// Whether `peer` may be tried now.
+    fn may_try(&self, peer: &PeerId) -> bool {
+        !self.other_code.contains(peer)
+            && !self.answered.contains_key(peer)
+            && !self.running.contains_key(peer)
+            && self
+                .tried
+                .get(peer)
+                .is_none_or(|t| t.elapsed() >= RETRY_PEER)
+    }
+
+    /// A try of `peer` begins.
+    fn started(&mut self, peer: PeerId, lan: bool) {
+        self.tried.insert(peer, Instant::now());
+        self.running.insert(peer, lan);
+    }
+
+    /// Whether a computer on this local network is being tried.
+    fn near_running(&self) -> bool {
+        self.running.values().any(|lan| *lan)
+    }
+
+    /// The try of `peer` ended: the channel when the code checked out with it.
+    fn heard<S>(&mut self, peer: PeerId, tried: Tried<S>) -> Option<Channel<S>> {
+        self.running.remove(&peer);
+        let answered = match tried {
+            Tried::Ran(Ran::Both(channel)) => return Some(channel),
+            Tried::Ran(Ran::Untried { other_code: true }) | Tried::OldWay(Some(false)) => {
+                self.other_code.insert(peer);
+                return None;
+            }
+            Tried::Ran(Ran::Untried { other_code: false }) | Tried::OldWay(None) => return None,
+            Tried::Ran(Ran::Wrong) => Answered::Wrong,
+            Tried::Ran(Ran::Lost) => Answered::Lost,
+            Tried::OldWay(Some(true)) => Answered::OldWay,
+        };
+        self.answered.insert(peer, answered);
+        None
+    }
+
+    /// How the move stops, if it does now: when a computer answered and did not prove the
+    /// code, nothing is being tried, and either no proof is left (`spent`) or nothing more
+    /// is to be tried once the search `settled` ([`SETTLE`]).
+    fn over(&self, spent: bool, settled: bool) -> Option<Failure> {
+        if !self.running.is_empty() || !(spent || (settled && !self.waiting)) {
+            return None;
+        }
+        self.verdict()
+    }
+
+    /// Why no computer took the move, of those that answered: the person sees whether one
+    /// said no (a code mistyped, or a stranger) or several did (a stranger at least).
+    fn verdict(&self) -> Option<Failure> {
+        if self.answered.len() > 1 {
+            return Some(Failure::OthersAnswered);
+        }
+        Some(match self.answered.values().next()? {
+            Answered::Wrong => Failure::WrongCode,
+            Answered::Lost => Failure::Interrupted(CONNECTION_LOST.into()),
+            Answered::OldWay => Failure::OldVersion,
+        })
+    }
 }
 
 /// The computers the code may be tried on now, of those `keep` takes: those that list the
 /// move's protocol to this computer (found it, or on its local network) first; only when
 /// none does, those this computer found under the code (`candidates`), since the other
 /// computer lists it only to computers it found itself and may not have found this one yet:
-/// finding it is enough. Trying one does not spend the code's only run unless it answers
-/// the move's protocol and runs the exchange: one that does not take the protocol refuses
-/// the stream before anything is said, and one that shows another code is not counted.
-/// The candidates come last so that a stranger that announced itself under the code is
-/// not tried before the computer that showed it takes the move.
+/// finding it is enough. Trying one does not spend one of the code's tries unless it
+/// answers the move's protocol and runs the exchange: one that does not take the protocol
+/// refuses the stream before anything is said, and one that shows another code is not
+/// counted. The candidates come last so that a stranger that announced itself under the
+/// code is not tried before the computer that showed it takes the move; one being tried,
+/// or that answered already, is no longer among those listing, so the candidates come then.
 fn to_try(
     listing: Vec<PeerId>,
     candidates: Vec<PeerId>,
@@ -2241,17 +2436,29 @@ fn to_try(
         .collect()
 }
 
-/// The computer to try the code on, among those found (and whether each is on this local
-/// network): one on the local network first; one found over the DHT only when none is
-/// here, and [`LAN_FIRST`] after such a one first showed, so that one on the local network
-/// found a little later still comes first. `first_far` keeps when that was.
-fn choose(found: &[(PeerId, bool)], first_far: &mut Option<Instant>) -> Option<PeerId> {
-    if let Some((peer, _)) = found.iter().find(|(_, lan)| *lan) {
-        return Some(*peer);
+/// The computers to try the code on now, among those found (and whether each is on this
+/// local network): those on the local network first; those found over the DHT only when
+/// none is here, found or being tried (`near_running`), and [`LAN_FIRST`] after such a one
+/// first showed, so that one on the local network found a little later still comes first.
+/// `first_far` keeps when that was.
+fn choose(
+    found: &[(PeerId, bool)],
+    near_running: bool,
+    first_far: &mut Option<Instant>,
+) -> Vec<PeerId> {
+    let near: Vec<PeerId> = found
+        .iter()
+        .filter(|(_, lan)| *lan)
+        .map(|(peer, _)| *peer)
+        .collect();
+    if !near.is_empty() || near_running || found.is_empty() {
+        return near;
     }
-    let (far, _) = found.first()?;
     let since = *first_far.get_or_insert_with(Instant::now);
-    (since.elapsed() >= LAN_FIRST).then_some(*far)
+    match since.elapsed() >= LAN_FIRST {
+        true => found.iter().map(|(peer, _)| *peer).collect(),
+        false => Vec::new(),
+    }
 }
 
 /// What moves, counted for the person's yes.
@@ -2727,9 +2934,10 @@ mod tests {
     #[tokio::test]
     async fn the_computer_typing_the_code_proves_it_first_and_only_a_wrong_proof_is_a_try() {
         let code = TransferCode::generate().unwrap();
+        let proofs = Proofs::default();
         let (old, new) = ends();
         let (ran, answered) = tokio::join!(
-            run_code(&code, b"old", b"new", old),
+            run_code(&code, b"old", b"new", old, &proofs),
             answer_run(&code, b"new", b"old", new)
         );
         let Ran::Both(mut sender) = ran else {
@@ -2742,7 +2950,7 @@ mod tests {
         let guess = same_place(&code);
         let (old, new) = ends();
         let (ran, answered) = tokio::join!(
-            run_code(&guess, b"old", b"new", old),
+            run_code(&guess, b"old", b"new", old, &proofs),
             answer_run(&code, b"new", b"old", new)
         );
         assert!(matches!(ran, Ran::Wrong));
@@ -2770,7 +2978,7 @@ mod tests {
         };
         let (old, new) = ends();
         let (ran, answered) = tokio::join!(
-            run_code(&other, b"old", b"new", old),
+            run_code(&other, b"old", b"new", old, &proofs),
             answer_run(&code, b"new", b"old", new)
         );
         assert!(matches!(ran, Ran::Untried { other_code: true }));
@@ -2806,7 +3014,10 @@ mod tests {
         let sender = {
             let code = code.clone();
             tokio::spawn(async move {
-                matches!(run_code(&code, b"old", b"new", old).await, Ran::Both(_))
+                matches!(
+                    run_code(&code, b"old", b"new", old, &Proofs::default()).await,
+                    Ran::Both(_)
+                )
             })
         };
         runs.start(PeerId::random(), answering(new));
@@ -2846,6 +3057,194 @@ mod tests {
         assert_eq!(ended, MAX_RUNS);
     }
 
+    /// A stranger that learnt the nameplate and answers the computer typing the code first,
+    /// with a SPAKE2 message of its own guess, gets that computer's proof (one guess, which
+    /// missed) and is not tried again; but the computer showing the code, found after it, is
+    /// still tried and the move goes on with it. One no alone stops the search only once it
+    /// settled with nothing else to try (a code mistyped).
+    #[tokio::test]
+    async fn a_stranger_answering_first_does_not_keep_the_code_from_the_computer_showing_it() {
+        let code = TransferCode::generate().unwrap();
+        let proofs = Proofs::default();
+        let mut search = Search::default();
+        let (stranger, real) = (PeerId::random(), PeerId::random());
+
+        search.started(stranger, true);
+        assert!(!search.may_try(&stranger));
+        let (old, theirs) = ends();
+        let guess = same_place(&code);
+        let (ran, answered) = tokio::join!(
+            run_code(&code, b"old", b"x", old, &proofs),
+            answer_run(&guess, b"x", b"old", theirs)
+        );
+        // Its guess missed, and that is all it learnt.
+        assert_eq!(answered.err(), Some(RunError::WrongCode));
+        assert!(search.heard(stranger, Tried::Ran(ran)).is_none());
+        assert_eq!(search.answered.get(&stranger), Some(&Answered::Wrong));
+        assert!(!search.may_try(&stranger), "a computer gets one guess");
+        // Not the end of the move: the search has not settled, and proofs are left.
+        assert!(!proofs.spent());
+        assert_eq!(search.over(proofs.spent(), false), None);
+
+        // The computer showing the code shows up.
+        assert!(search.may_try(&real));
+        search.started(real, true);
+        let (old, new) = ends();
+        let (ran, answered) = tokio::join!(
+            run_code(&code, b"old", b"new", old, &proofs),
+            answer_run(&code, b"new", b"old", new)
+        );
+        let mut receiver = answered.unwrap().expect("the right code runs");
+        let mut sender = search
+            .heard(real, Tried::Ran(ran))
+            .expect("the move goes on with the computer showing the code");
+        sender.send(&Msg::Go).await.unwrap();
+        assert_eq!(receiver.recv_msg().await.unwrap(), Msg::Go);
+
+        // Had nothing else shown up once the search settled: the code did not match.
+        let mut alone = Search::default();
+        alone.started(stranger, true);
+        assert!(
+            alone
+                .heard::<End>(stranger, Tried::Ran(Ran::Wrong))
+                .is_none()
+        );
+        assert_eq!(alone.over(false, false), None);
+        alone.waiting = true;
+        assert_eq!(
+            alone.over(false, true),
+            None,
+            "one found is still to be tried"
+        );
+        alone.waiting = false;
+        assert_eq!(alone.over(false, true), Some(Failure::WrongCode));
+        // Nor while another is being tried.
+        alone.started(real, false);
+        assert_eq!(alone.over(true, true), None);
+    }
+
+    /// However many computers answer under the code's nameplate, the computer typing it
+    /// proves it to [`MAX_PROVED_TO`] of them, side by side or one after the other: each
+    /// one a guess of the code, and no more. The others' runs stop before the proof, so
+    /// they learn nothing, and the computer showing the code, coming last, is not tried
+    /// either (its count of wrong proofs unspent). Several answered: the person is told so.
+    #[tokio::test]
+    async fn a_stranger_gets_at_most_three_guesses_of_a_code_typed() {
+        let code = TransferCode::generate().unwrap();
+        let guess = same_place(&code);
+        let proofs = Proofs::default();
+        let mut search = Search::default();
+        let strangers: Vec<PeerId> = (0..5).map(|_| PeerId::random()).collect();
+        let mut runs = Vec::new();
+        for peer in &strangers {
+            search.started(*peer, true);
+            let (old, theirs) = ends();
+            let (code, guess, proofs) = (code.clone(), guess.clone(), proofs.clone());
+            runs.push(tokio::spawn(async move {
+                let (ran, answered) = tokio::join!(
+                    run_code(&code, b"old", b"x", old, &proofs),
+                    answer_run(&guess, b"x", b"old", theirs)
+                );
+                (ran, answered.err())
+            }));
+        }
+        let mut guesses = 0;
+        for (peer, run) in strangers.iter().zip(runs) {
+            let (ran, theirs) = run.await.unwrap();
+            match theirs {
+                // It got this computer's proof: a guess (which missed).
+                Some(RunError::WrongCode) => guesses += 1,
+                // Its run stopped before any proof: nothing learnt.
+                Some(RunError::Malformed) => assert!(matches!(ran, Ran::Untried { .. })),
+                other => panic!("{other:?}"),
+            }
+            assert!(search.heard(*peer, Tried::Ran(ran)).is_none());
+        }
+        assert_eq!(guesses, MAX_PROVED_TO);
+        assert!(proofs.spent());
+        assert_eq!(
+            search.over(proofs.spent(), false),
+            Some(Failure::OthersAnswered)
+        );
+
+        // The computer showing the code, last: no proof left, and no try counted there.
+        let (old, new) = ends();
+        let (ran, answered) = tokio::join!(
+            run_code(&code, b"old", b"new", old, &proofs),
+            answer_run(&code, b"new", b"old", new)
+        );
+        assert!(matches!(ran, Ran::Untried { other_code: false }));
+        assert_eq!(answered.err(), Some(RunError::Malformed));
+    }
+
+    /// A start of the first way naming the code shown here does not stop the move: anyone
+    /// who learnt the nameplate can send one, and the computer typing the code may be of
+    /// this version and on its way. A computer of that way sends one every few seconds, and
+    /// after [`MAX_FAILED_TRANSFER_RUNS`] of them the person is told to update both.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn one_start_of_the_first_way_does_not_stop_the_code_shown() {
+        let free_port = || {
+            std::net::UdpSocket::bind("127.0.0.1:0")
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        let net = |port: u16, peers: Vec<fogata_net::Multiaddr>| NetOptions {
+            listen_port: port,
+            use_dht: false,
+            use_mdns: false,
+            peers,
+            ..Default::default()
+        };
+        let code = TransferCode::generate().unwrap();
+        let dir = folder("first-way-start");
+        let port = free_port();
+        let mut options = TransferOptions::new(net(port, Vec::new()), "new");
+        options.keychain = Some(Keychain::Off);
+        options.code = Some(code.to_string());
+        let mut shown = receive(dir.clone(), options).unwrap();
+        let at: fogata_net::Multiaddr = format!("/ip4/127.0.0.1/udp/{port}/quic-v1")
+            .parse()
+            .unwrap();
+        let old = start_node(&TransferOptions::new(net(0, vec![at]), "old"), None).unwrap();
+        let new = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Some(peer) = old.peers_taking(&OLD_PROTOCOL).first() {
+                    return *peer;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .expect("the new computer lists the first way");
+        let (_, start) = run_start(&code, b"old", b"new");
+        for _ in 0..MAX_FAILED_TRANSFER_RUNS {
+            // Each start is taken (the code still shown) and left unanswered.
+            let mut stream = old
+                .streams()
+                .open_stream(new, OLD_PROTOCOL)
+                .await
+                .expect("the code is still shown");
+            wire::send_start(&mut stream, &start).await.unwrap();
+            assert!(wire::read_reply(&mut stream).await.is_err());
+        }
+        let end = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                match shown.events.recv().await {
+                    Some(TransferEvent::Failed(failure)) => return failure,
+                    Some(_) => {}
+                    None => panic!("no end"),
+                }
+            }
+        })
+        .await
+        .expect("the move ended");
+        assert_eq!(end, Failure::OldVersion);
+        let _ = old.shutdown().await;
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// What a new computer of version 0.1.0-beta.7 or before (`/fogata/transfer/1`) does with
     /// a start (its `answer_run`, with what this version still has of its run): another
     /// code is told so; a start it cannot run (no SPAKE2 message) is dropped without an
@@ -2870,8 +3269,8 @@ mod tests {
     /// on a computer of the first way that shows it: its probe is dropped there without a
     /// try being counted, and a computer of that way showing another code says so. A
     /// computer of the first way typing the code on this one: its start (the nameplate and
-    /// a SPAKE2 message) stops the code shown here, unanswered, so that computer goes on
-    /// looking until it gives up; one for another code is told so.
+    /// a SPAKE2 message) is left unanswered, so that computer goes on trying (the code shown
+    /// here stops after a few, see `answer_old_run`); one for another code is told so.
     #[tokio::test]
     async fn a_computer_of_the_first_way_and_this_one_tell_each_other_apart() {
         let code = TransferCode::generate().unwrap();
@@ -2893,10 +3292,7 @@ mod tests {
         let (mut old, new) = ends();
         let (_, start) = run_start(&code, b"old", b"new");
         wire::send_start(&mut old, &start).await.unwrap();
-        assert_eq!(
-            answer_old_run(&code, new).await,
-            Some(TransferEvent::Failed(Failure::OldVersion))
-        );
+        assert!(answer_old_run(&code, new).await);
         // Nothing came back: it hears that the stream ended, and tries again or gives up.
         assert!(wire::read_reply(&mut old).await.is_err());
         let (mut old, new) = ends();
@@ -2905,7 +3301,7 @@ mod tests {
         let (told, reply) =
             tokio::join!(answer_old_run(&code, new), wire::read_old_reply(&mut old));
         if other.rendezvous() != code.rendezvous() {
-            assert_eq!(told, None);
+            assert!(!told);
             assert!(reply.unwrap(), "told it shows another code");
         }
         assert_eq!(
@@ -3378,17 +3774,29 @@ mod tests {
         let (near, far) = (PeerId::random(), PeerId::random());
         let mut first_far = None;
         // Only one found over the DHT: not yet.
-        assert_eq!(choose(&[(far, false)], &mut first_far), None);
+        assert!(choose(&[(far, false)], false, &mut first_far).is_empty());
         assert!(first_far.is_some());
         // One on the local network shows meanwhile: it goes first.
         assert_eq!(
-            choose(&[(far, false), (near, true)], &mut first_far),
-            Some(near)
+            choose(&[(far, false), (near, true)], false, &mut first_far),
+            vec![near]
         );
-        // None here after a while: the one found over the DHT.
+        // None here after a while: the one found over the DHT, unless one here is being
+        // tried still.
         first_far = Some(Instant::now() - LAN_FIRST);
-        assert_eq!(choose(&[(far, false)], &mut first_far), Some(far));
-        assert_eq!(choose(&[], &mut first_far), None);
+        assert!(choose(&[(far, false)], true, &mut first_far).is_empty());
+        assert_eq!(choose(&[(far, false)], false, &mut first_far), vec![far]);
+        assert!(choose(&[], false, &mut first_far).is_empty());
+        // Every one here at once.
+        let other = PeerId::random();
+        assert_eq!(
+            choose(
+                &[(near, true), (far, false), (other, true)],
+                false,
+                &mut first_far
+            ),
+            vec![near, other]
+        );
     }
 
     /// Those that list the move's protocol go first; the computers found under the code that

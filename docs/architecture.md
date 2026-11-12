@@ -4195,11 +4195,24 @@ and the old computer proves the code first (`/fogata/transfer/2`):
 - the old computer sends the nameplate and its SPAKE2 message; the new one answers with its
   own SPAKE2 message alone, which tells nothing of the code to whoever sent the start; the
   old one sends its proof, and only once that checked out does the new one send its own;
-- the old computer makes **one run per code typed**: once its proof went, if the computer
-  that answered with the code's nameplate does not prove it back, the move stops with "the
-  other computer did not accept the code", having sent nothing (it starts with a proof of
-  the nameplate, so a computer on the same network showing another code says so without the
-  try being used);
+- the old computer proves the code typed to **at most three computers**, one proof each:
+  every computer that answers under the code's nameplate with a SPAKE2 message learns from
+  that proof whether its own guess was right, so each proof is a guess given away. Nothing
+  else tells the computer showing the code apart from one that learnt the nameplate (the
+  rendezvous point, the announcement sealed under the nameplate, a connection that lists
+  the protocol: each is had for the nameplate; a key in the announcement too), so the old
+  computer runs the code with every computer it finds, side by side (at most eight at
+  once, those on the local network first), and one that answered and did not prove the code
+  back is never tried again and does not end the move: a stranger that answers first spends
+  one of the three, not the move. The move stops, having sent nothing, once the three proofs
+  went, or once nothing more is being or is to be tried and 15 seconds passed since the old
+  computer began to look (the computer showing the code may be found a little after a
+  stranger): with "the other computer did not accept the code" when one computer answered
+  (a code mistyped, or a stranger alone), with "several computers answered this code and
+  none of them knew it" (`others_answered`) when more did, which a code mistyped never
+  causes, so the person can tell someone trying to stop the move from a typo. A start begins
+  with a proof of the nameplate, so a computer on the same network showing another code
+  says so without a proof being used;
 - the new computer counts only a wrong proof, a guess that missed, and stops answering the
   code after three, showing a new one. A run that stops before its proof (a stranger that
   learnt the nameplate and stalls, or goes once it has the answer) learnt nothing and costs
@@ -4212,29 +4225,41 @@ and the old computer proves the code first (`/fogata/transfer/2`):
   and to keep the real run out it must bring new computers faster than that run ends. The
   proofs are checked one at a time, in the order they come, so runs side by side give no
   more guesses than runs one after the other.
-A guesser therefore gets a handful of tries at 2^25 for the part it cannot see (about one in
-ten million). The application does not try a code that did not match a second time either.
+A guesser therefore gets a handful of tries at 2^25 for the part it cannot see: three on
+the old computer per code typed and three on the new one per code shown, each one in
+33,554,432, so at most six in 33 million, about one in 5.6 million, per code. The
+application does not try a code that did not match, or that several computers answered, a
+second time either. Someone who can bring three computers that answer under the nameplate
+before the one showing the code is reached can still keep a move from happening (the
+budget is there because the code is short); it learns nothing, and the person is told that
+several computers answered.
 
 **Versions.** The first way (`/fogata/transfer/1`, versions up to 0.1.0-beta.7) and this one
 do not run with each other, and each side tells the other apart before anything is tried or
 sent, so neither is left half moved. The new computer also takes streams of the first way:
-a start there that names its code stops the move with "update both computers to the same
-version" (`Failure::OldVersion`, `old_version` to the screens), unanswered, so the older old
-computer goes on looking and gives up after three minutes ("could not reach each other"),
-its code's try unspent; a start for another code is told so. Whoever learnt the nameplate
-can end a code that way, as it could with three wrong proofs; it learns nothing. The old
-computer, finding a computer that takes only the first way, sends it the nameplate and a
-SPAKE2 message that is none (`old_protocol_probe`): a computer of that way showing another
-code says so, and one showing this code drops the stream without counting a try (it cannot
-run the message), and the move stops with the same words; the older new computer keeps
-showing its code until it runs out.
+a start there that names its code is left unanswered, and the older old computer tries
+again every five seconds, its code's try unspent, until it gives up after three minutes
+("could not reach each other"); after three such starts the new computer stops the move
+with "update both computers to the same version" (`Failure::OldVersion`, `old_version` to
+the screens). One start alone does not stop it: anyone who learnt the nameplate can send
+one, and the old computer of this version may be on its way. Whoever learnt the nameplate
+can end a code with three, as it can with three wrong proofs; it learns nothing. A start
+for another code is told so. The old computer, finding a computer that takes only the
+first way, sends it the nameplate and a SPAKE2 message that is none (`old_protocol_probe`):
+a computer of that way showing another code says so, and one showing this code drops the
+stream without counting a try (it cannot run the message), which a stranger can do as
+well; so this does not stop the search at once, but when nothing else took the move by
+the time the search ends (as above) it stops with the same words; the older new computer
+keeps showing its code until it runs out.
 
 The nameplate's 20 bits are a trade-off: the code stays ten characters, and every bit given
 to the rendezvous point is taken from the 25 the guesser must find. 2^20 rendezvous points per
 6-hour window can be watched by someone with the means (about 50 DHT lookups a second): that
 watcher learns the address of computers showing a code at that moment, and can try to answer
-first. It still gets one guess per code typed (one in 33 million), which ends the move with
-"wrong code" when it fails, so it can only spoil moves, not take an account. A computer on the
+first. It still gets one guess per computer that answers, three at most per code typed (each
+one in 33 million); a miss is not tried again, and the move goes on with the computer
+showing the code when that one is found, so it can only spoil moves by bringing several
+computers, not take an account. A computer on the
 local network is tried first, and one found over the DHT only when none is there after five
 seconds, so a move between two computers at the same place does not reach a watcher at all. The run binds both transport identities (authenticated by the transport) and
 both SPAKE2 messages into a transcript, from which HKDF-SHA256 makes one key for each
@@ -4266,7 +4291,10 @@ computer takes streams of `/fogata/transfer/2` (and of `/1`, see Versions above)
 opens one to each connected peer that says it takes it, and, only while none does, to each it found
 under the code itself: the new computer lists the protocol only to computers it found (or on
 its local network), so one finding the other is enough
-(`a_move_needs_only_one_computer_to_find_the_other`). The code's one run is spent only on a
+(`a_move_needs_only_one_computer_to_find_the_other`). A computer that only connected to the
+old one and lists the protocol is tried too: refusing it would gain nothing (a stranger can
+as well announce itself under the rendezvous point, for the nameplate) and would lose a move
+where only the new computer found the other. One of the code's proofs is spent only on a
 computer that takes the protocol and runs the exchange: one that does not refuses the stream
 before anything is said. Two NATs that cannot be punched (one that
 picks a new port per destination) do not meet: after three minutes the old computer says the
@@ -4375,10 +4403,12 @@ of the shell's history and the list of processes.
   transport identities; it can learn the nameplate, and with it open the local addresses
   and port in the two announcements. Nothing it sees allows a test of the rest of the code.
 - Someone who announces under the rendezvous point (a DHT node near it, a device on the same
-  network) can try one guess per code typed on the old computer and three against the new
-  one, each a 2^-25 chance; failing, it makes the move stop with "wrong code" (a nuisance,
-  not a leak). It can also hold some of the new computer's runs (see above), which only
-  delays the move while it keeps bringing new computers.
+  network) can try one guess per computer it answers the old computer with, three at most
+  per code typed, and three against the new one, each a 2^-25 chance. One computer that
+  answers first no longer stops the move; three that answer before the computer showing the
+  code is reached do, with "several computers answered" (a nuisance, not a leak). It can
+  also hold some of the new computer's runs (see above), which only delays the move while it
+  keeps bringing new computers.
 - A frame changed or replayed on the way stops the move; nothing is applied.
 - A malicious new computer that won the code gets the account: that is what the code is for,
   and why the old computer names it and asks first. A malicious old computer that won it

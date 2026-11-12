@@ -89,9 +89,11 @@ class UiMoveEvent {
   final PlatformInt64 done;
   final PlatformInt64 total;
 
-  /// `wrong_code`, `expired`, `too_many_tries`, `no_contact`, `interrupted`,
-  /// `unconfirmed`, `cancelled`, `declined`, `later`, `old_version` (the other computer
-  /// moves accounts the way of an older version: update both) or `other`.
+  /// `wrong_code`, `others_answered` (several computers answered the code typed and none
+  /// knew it: one may be trying to stop the move), `expired`, `too_many_tries`,
+  /// `no_contact`, `interrupted`, `unconfirmed`, `cancelled`, `declined`, `later`,
+  /// `old_version` (the other computer moves accounts the way of an older version: update
+  /// both) or `other`.
   final String? failure;
 
   /// Why, when the screens word it.

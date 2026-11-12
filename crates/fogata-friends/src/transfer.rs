@@ -18,9 +18,9 @@
 //! code nothing. Only a wrong proof is one; the computer showing the code stops answering it
 //! after [`MAX_FAILED_TRANSFER_RUNS`] of those. Its own proof comes only after that, so a
 //! computer pretending to show the code learns from the one typing it whether its own guess
-//! was right, and no more: the computer where the code is typed makes one run per code
-//! typed. A guesser gets a handful of tries at 2^25 possible codes for the part it does not
-//! know.
+//! was right, and no more: the computer where the code is typed proves it to a few computers
+//! at most (fogata-core's `transfer`). A guesser gets a handful of tries at 2^25 possible
+//! codes for the part it does not know.
 //!
 //! That is the second way of running the code (the move's protocol `/fogata/transfer/2`); the
 //! first had the computer showing the code prove first, and counted every run that did not

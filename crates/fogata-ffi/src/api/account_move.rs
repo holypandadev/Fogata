@@ -119,9 +119,11 @@ pub struct UiMoveEvent {
     pub summary: Option<UiMoveSummary>,
     pub done: i64,
     pub total: i64,
-    /// `wrong_code`, `expired`, `too_many_tries`, `no_contact`, `interrupted`,
-    /// `unconfirmed`, `cancelled`, `declined`, `later`, `old_version` (the other computer
-    /// moves accounts the way of an older version: update both) or `other`.
+    /// `wrong_code`, `others_answered` (several computers answered the code typed and none
+    /// knew it: one may be trying to stop the move), `expired`, `too_many_tries`,
+    /// `no_contact`, `interrupted`, `unconfirmed`, `cancelled`, `declined`, `later`,
+    /// `old_version` (the other computer moves accounts the way of an older version: update
+    /// both) or `other`.
     pub failure: Option<String>,
     /// Why, when the screens word it.
     pub reason: Option<UiMoveReason>,
@@ -204,6 +206,7 @@ fn ui_event(event: TransferEvent) -> UiMoveEvent {
             out.failure = Some(
                 match &failure {
                     Failure::WrongCode => "wrong_code",
+                    Failure::OthersAnswered => "others_answered",
                     Failure::Expired => "expired",
                     Failure::TooManyTries => "too_many_tries",
                     Failure::NoContact => "no_contact",

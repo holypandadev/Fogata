@@ -475,8 +475,8 @@ async fn a_third_computer_on_the_rendezvous_gets_nothing() {
     let code = code_of(&mut receiving).await;
 
     // Someone who saw the rendezvous point announces there with a guess of the rest of the
-    // code, and is the only one the old computer reaches: the code's one try goes to it, it
-    // fails, and nothing of the account is sent.
+    // code, and is the only one the old computer reaches: it gets one try of the code, it
+    // fails, and once nothing else answered the move stops, nothing of the account sent.
     let mut intruder_options = options(port_x, &[], "intruder");
     intruder_options.code = Some(same_place(&code));
     let intruder = transfer::receive(dir_x.clone(), intruder_options).unwrap();
@@ -511,6 +511,100 @@ async fn a_third_computer_on_the_rendezvous_gets_nothing() {
             .iter()
             .any(|e| matches!(e, TransferEvent::Matched { .. }))
     );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A stranger that learnt the code's first characters answers the old computer first, with
+/// a guess of the rest: it gets that one guess, which misses, and is not tried again, and
+/// the old computer goes on looking, so the new computer, which reaches it later, still
+/// takes the move.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stranger_answering_first_does_not_keep_the_move_from_the_new_computer() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    keys();
+    let base = base("first");
+    let dir_old = alone(&base, "Ana");
+    let (dir_new, dir_x) = (base.join("new"), base.join("intruder"));
+    let (port_o, port_n, port_x) = (free_port(), free_port(), free_port());
+    let code = TransferCode::generate().unwrap().to_string();
+    let mut intruder_options = options(port_x, &[], "intruder");
+    intruder_options.code = Some(same_place(&code));
+    let mut intruder = transfer::receive(dir_x.clone(), intruder_options).unwrap();
+    // The old computer reaches only the stranger at first, and proves the code to it.
+    let sending =
+        transfer::send(dir_old.clone(), &code, options(port_o, &[port_x], "old")).unwrap();
+    timeout(Duration::from_secs(60), async {
+        while let Some(event) = intruder.events.recv().await {
+            if event == TransferEvent::WrongCodeTried {
+                return;
+            }
+        }
+        panic!("the stranger stopped");
+    })
+    .await
+    .expect("the stranger got the old computer's proof");
+    // Then the new computer, showing the code, reaches the old one.
+    let mut new_options = options(port_n, &[port_o], "new");
+    new_options.code = Some(code.clone());
+    let receiving = transfer::receive(dir_new.clone(), new_options).unwrap();
+    let ((_, got), (_, sent)) =
+        tokio::join!(follow(receiving, Some(true)), follow(sending, Some(true)));
+    assert!(matches!(sent, TransferEvent::Done { .. }), "{sent:?}");
+    assert!(matches!(got, TransferEvent::Done { .. }), "{got:?}");
+    intruder.cancel();
+    let (seen, _) = follow(intruder, None).await;
+    assert!(
+        !seen
+            .iter()
+            .any(|e| matches!(e, TransferEvent::Matched { .. }))
+    );
+    assert!(!dir_x.join("incoming").exists());
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// However many strangers answer under the code's first characters, the old computer proves
+/// the code typed to three of them, one guess each, and then stops, saying that several
+/// computers answered; nothing of the account is sent.
+#[tokio::test(flavor = "multi_thread")]
+async fn strangers_get_three_guesses_of_a_code_typed_and_no_more() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    keys();
+    let base = base("strangers");
+    let dir_old = alone(&base, "Ana");
+    let code = TransferCode::generate().unwrap().to_string();
+    let guess = same_place(&code);
+    let (mut intruders, mut ports) = (Vec::new(), Vec::new());
+    for i in 0..4 {
+        let port = free_port();
+        let mut intruder_options = options(port, &[], "intruder");
+        intruder_options.code = Some(guess.clone());
+        let dir = base.join(format!("intruder-{i}"));
+        intruders.push((
+            transfer::receive(dir.clone(), intruder_options).unwrap(),
+            dir,
+        ));
+        ports.push(port);
+    }
+    let sending = transfer::send(dir_old.clone(), &code, options(0, &ports, "old")).unwrap();
+    let (_, end) = follow(sending, Some(true)).await;
+    assert_eq!(end, TransferEvent::Failed(Failure::OthersAnswered));
+    let mut guesses = 0;
+    for (intruder, dir) in intruders {
+        intruder.cancel();
+        let (seen, _) = follow(intruder, None).await;
+        guesses += seen
+            .iter()
+            .filter(|e| **e == TransferEvent::WrongCodeTried)
+            .count();
+        assert!(
+            !seen
+                .iter()
+                .any(|e| matches!(e, TransferEvent::Matched { .. }))
+        );
+        assert!(!dir.join("incoming").exists());
+    }
+    assert_eq!(guesses, 3);
+    assert!(transfer::moved(&dir_old).is_none());
     let _ = std::fs::remove_dir_all(&base);
 }
 
