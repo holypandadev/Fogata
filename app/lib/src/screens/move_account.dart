@@ -1642,19 +1642,25 @@ class ConfirmMove extends StatelessWidget {
           const SizedBox(height: 14),
           _Note(icon: Ic.warning, child: Text(l10n.moveConfirmNote)),
           const SizedBox(height: 18),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.end,
-            children: [
-              FgButton(text: l10n.commonCancel, onTap: () => onAnswer(false)),
-              const SizedBox(width: 10),
-              FgButton(
-                key: const ValueKey('move-yes'),
-                text: l10n.moveConfirmYes,
-                trailing: Ic.arrowRight,
-                kind: Kind.primary,
-                onTap: () => onAnswer(true),
-              ),
-            ],
+          // On one line at the right, or one under the other when larger text needs it.
+          Align(
+            alignment: AlignmentDirectional.centerEnd,
+            child: Wrap(
+              alignment: WrapAlignment.end,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 10,
+              runSpacing: 8,
+              children: [
+                FgButton(text: l10n.commonCancel, onTap: () => onAnswer(false)),
+                FgButton(
+                  key: const ValueKey('move-yes'),
+                  text: l10n.moveConfirmYes,
+                  trailing: Ic.arrowRight,
+                  kind: Kind.primary,
+                  onTap: () => onAnswer(true),
+                ),
+              ],
+            ),
           ),
         ],
       ),

@@ -2132,10 +2132,15 @@ class Footer extends StatelessWidget {
         color: c.bg2,
         border: Border(top: BorderSide(color: c.border)),
       ),
+      // In the middle, on more lines when larger text or a longer language needs them.
       child: children.firstOrNull is Spacer
-          ? Row(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: children.sublist(1),
+          ? Align(
+              child: Wrap(
+                alignment: WrapAlignment.center,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                runSpacing: 8,
+                children: children.sublist(1),
+              ),
             )
           : Row(children: children),
     );

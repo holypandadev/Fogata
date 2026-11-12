@@ -2,22 +2,38 @@
 // at the window's smallest size, with the system's text at its size, at 1.5 times and at
 // twice it: nothing overflows, and no text is cut by the control it is in.
 
+import 'dart:io';
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fogata/main.dart' show FogataApp;
 import 'package:fogata/src/app_state.dart';
+import 'package:fogata/src/devices.dart';
 import 'package:fogata/src/l10n.dart';
+import 'package:fogata/src/rust/api/account_move.dart';
 import 'package:fogata/src/rust/api/direct.dart';
+import 'package:fogata/src/rust/api/recovery.dart' show UiNewRecoveryKey;
 import 'package:fogata/src/rust/api/types.dart';
 import 'package:fogata/src/rust/api/update.dart';
 import 'package:fogata/src/rust/api/voice.dart';
+import 'package:fogata/src/screens/members.dart';
+import 'package:fogata/src/screens/move_account.dart';
+import 'package:fogata/src/screens/new_group.dart';
+import 'package:fogata/src/screens/recovery.dart';
 import 'package:fogata/src/screens/report.dart';
 import 'package:fogata/src/screens/shell.dart';
 import 'package:fogata/src/screens/stream_quality.dart';
 import 'package:fogata/src/screens/video_view.dart';
+import 'package:fogata/src/screens/switcher.dart';
+import 'package:fogata/src/screens/welcome.dart';
 import 'package:fogata/src/splash.dart';
+import 'package:fogata/src/state/account_move.dart';
 import 'package:fogata/src/theme.dart';
+import 'package:fogata/src/widgets.dart';
 import 'package:fogata/src/window.dart' show splashSize;
 
 import 'cut_text.dart';
@@ -31,18 +47,58 @@ const _sofia = UiPerson(
   avatar: UiAvatar(preset: 2),
 );
 
-/// What overflowed or was cut while [child] showed [state] in a window of [size].
+/// A folder to save a picture of every page tried in, when set:
+///
+/// `FOGATA_SHOTS=<folder> flutter test test/languages_fit_test.dart --name ' in en,'`
+final _shots = Platform.environment['FOGATA_SHOTS'];
+
+/// Saves a picture of the test's window as `<name>.png` in [_shots].
+Future<void> _shot(WidgetTester tester, String name) async {
+  final view = tester.binding.renderViews.first;
+  final layer = view.debugLayer! as OffsetLayer;
+  final file = name.replaceAll(RegExp(r'[^A-Za-z0-9.×-]+'), '-');
+  await tester.runAsync(() async {
+    final image = await layer.toImage(Offset.zero & view.size);
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    image.dispose();
+    await File('$_shots/$file.png').writeAsBytes(data!.buffer.asUint8List());
+  });
+}
+
+/// What overflowed or was cut while [child] showed [state] in a window of [size], after
+/// [act] if given. Saved as a picture named [name] when [_shots] is set.
 Future<List<String>> _overflows(
   WidgetTester tester,
   AppState state, {
   Widget child = const Shell(),
   Size size = const Size(960, 640),
   double scale = 1,
+  Future<void> Function(WidgetTester tester)? act,
+  String? name,
 }) async {
-  tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+  final messenger = tester.binding.defaultBinaryMessenger;
+  messenger.setMockMethodCallHandler(
     const MethodChannel('window_manager'),
     (call) async => false,
   );
+  // The device panels list what the system has.
+  messenger.setMockMethodCallHandler(
+    const MethodChannel('FlutterWebRTC.Method'),
+    (call) async => call.method == 'getSources' ? {'sources': _sources} : null,
+  );
+  messenger.setMockMethodCallHandler(
+    const MethodChannel('FlutterWebRTC.Event'),
+    (call) async => null,
+  );
+  addTearDown(() {
+    for (final name in [
+      'window_manager',
+      'FlutterWebRTC.Method',
+      'FlutterWebRTC.Event',
+    ]) {
+      messenger.setMockMethodCallHandler(MethodChannel(name), null);
+    }
+  });
   tester.view.physicalSize = size;
   tester.view.devicePixelRatio = 1;
   tester.platformDispatcher.textScaleFactorTestValue = scale;
@@ -77,6 +133,13 @@ Future<List<String>> _overflows(
     for (var i = 0; i < 4; i++) {
       await tester.pump(const Duration(milliseconds: 200));
     }
+    if (act != null) {
+      await act(tester);
+      for (var i = 0; i < 4; i++) {
+        await tester.pump(const Duration(milliseconds: 200));
+      }
+    }
+    if (_shots != null && name != null) await _shot(tester, name);
     // Text cut short in its control is as unreadable as text past the window's edge.
     found.addAll(cutText());
   } finally {
@@ -85,6 +148,40 @@ Future<List<String>> _overflows(
   await tester.pumpWidget(const SizedBox());
   await tester.pump(const Duration(seconds: 10));
   return found;
+}
+
+/// A microphone, a speaker and a camera, as the system lists them.
+const _sources = [
+  {
+    'deviceId': 'mic-1',
+    'label': 'Blue Yeti Stereo Microphone',
+    'kind': 'audioinput',
+  },
+  {'deviceId': 'mic-2', 'label': 'Built-in Microphone', 'kind': 'audioinput'},
+  {'deviceId': 'out-1', 'label': 'Speakers', 'kind': 'audiooutput'},
+  {'deviceId': 'cam-1', 'label': 'Webcam', 'kind': 'videoinput'},
+];
+
+/// Shows [child] and, once it is up, what [open] opens over it (a dialog).
+class _Opens extends StatefulWidget {
+  const _Opens(this.open);
+  final void Function(BuildContext context) open;
+
+  @override
+  State<_Opens> createState() => _OpensState();
+}
+
+class _OpensState extends State<_Opens> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) widget.open(context);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => const Shell();
 }
 
 AppState _home() {
@@ -265,14 +362,23 @@ AppState _members() {
   return state;
 }
 
-/// A page of the settings as wide as the settings give it at 960 by 640.
+/// A page of the settings as large as the settings give it in the test's window: 688 by
+/// 600 at 960 by 640, and as much smaller as the window is.
 class _InSettings extends StatelessWidget {
   const _InSettings(this.page);
   final Widget page;
 
   @override
-  Widget build(BuildContext context) =>
-      Center(child: SizedBox(width: 688, height: 600, child: page));
+  Widget build(BuildContext context) {
+    final window = MediaQuery.sizeOf(context);
+    return Center(
+      child: SizedBox(
+        width: math.min(688, window.width - 272),
+        height: math.min(600, window.height - 40),
+        child: page,
+      ),
+    );
+  }
 }
 
 /// A video over the window that cannot play here, as [video] describes it: an hour long,
@@ -363,6 +469,87 @@ AppState _needingUpdate(AppState state) {
   return state;
 }
 
+const _summary = UiMoveSummary(
+  profile: UiProfile(person: me, fingerprint: '7Q4M K2XR 9PLD 3VHC'),
+  friends: 12,
+  groups: 3,
+  chats: 8,
+  files: 40,
+  bytes: 1400000000,
+);
+
+/// An account move at [step], as the screens see it.
+AccountMove _move(MoveStep step, {bool sending = false}) =>
+    AccountMove(sending: sending)
+      ..step = step
+      ..code = 'K7QM2-XR9PD'
+      ..expiresMs = DateTime.now().millisecondsSinceEpoch + 9 * 60 * 1000
+      ..computer = 'Leo’s desktop'
+      ..lan = true
+      ..summary = step == MoveStep.looking ? null : _summary
+      ..done = 880000000
+      ..total = 1400000000;
+
+AppState _movedAway(String kind) => fakeRoom(people: 1)
+  ..moveState = UiMoveState(
+    kind: kind,
+    name: 'Marta',
+    computer: 'Leo’s desktop',
+    atMs: 0,
+  );
+
+/// A room with a friend (`p0`) and a member who is not one (`p1`) in it.
+AppState _withFriend() {
+  final state = fakeRoom(people: 3)
+    ..contacts.friends = [
+      UiFriend(
+        person: other(0),
+        fingerprint: other(0).short,
+        presence: UiPresence.inRoom,
+        delivered: true,
+      ),
+    ];
+  state.contacts.members['g'] = [
+    for (final (i, p) in [me, other(0), other(1)].indexed)
+      UiMember(
+        away: false,
+        person: p,
+        rank: i,
+        manager: i == 0,
+        me: i == 0,
+        waitingForKey: false,
+        fingerprint: '7Q4M K2XR 9PLD 3VHC',
+      ),
+  ];
+  return state;
+}
+
+/// What is opened by a click once a page is up, by the page's name.
+final _acts = <String, Future<void> Function(WidgetTester tester)>{
+  for (final kind in DeviceKind.values)
+    'the ${kind.name} panel': (tester) async {
+      await tester.tap(find.byTooltip(DeviceArrow.tooltip(kind)).last);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    },
+  'room, its chat shown': (tester) async {
+    final show = find.byTooltip(l10n.roomShowChat);
+    if (show.evaluate().isNotEmpty) await tester.tap(show);
+  },
+  'room, an emoji picked in its chat': (tester) async {
+    final show = find.byTooltip(l10n.roomShowChat);
+    if (show.evaluate().isNotEmpty) {
+      await tester.tap(show);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 600));
+    }
+    await tester.tap(find.byTooltip(l10n.emojiPickerButton).last);
+  },
+  'the quick switcher': (tester) async {
+    await tester.tap(find.byType(FindButton));
+  },
+};
+
 final _pages = <String, (AppState Function(), Widget)>{
   'room': (() => fakeRoom(people: 4, cameras: 1), const Shell()),
   'room, many': (() => fakeRoom(people: 8, cameras: 2), const Shell()),
@@ -451,7 +638,147 @@ final _pages = <String, (AppState Function(), Widget)>{
       },
       const Shell(),
     ),
+  'room, alone in it': (() => fakeRoom(people: 1), const Shell()),
+  // Hidden at first in a small window, shown by hand.
+  'room, its chat shown': (() => fakeRoom(people: 4), const Shell()),
+  'room, an emoji picked in its chat': (
+    () => fakeRoom(people: 4),
+    const Shell(),
+  ),
+  'welcome': (() => fakeRoom(people: 1), const Welcome()),
+  'welcome, bringing an account here': (
+    () => fakeRoom(people: 1)
+      ..bringing = true
+      ..accountMove = _move(MoveStep.looking),
+    const Welcome(),
+  ),
+  'welcome, restoring a copy': (
+    () => fakeRoom(people: 1)..restoring = true,
+    const Welcome(),
+  ),
+  'the account moved away': (() => _movedAway('moved'), const MovedScreen()),
+  'the account moving away': (() => _movedAway('moving'), const MovedScreen()),
+  'asked to move the account': (
+    () =>
+        fakeRoom(people: 2)
+          ..accountMove = _move(MoveStep.matched, sending: true),
+    const WithMoveQuestion(child: Shell()),
+  ),
+  'Fogata could not start': (
+    () => fakeRoom(people: 1),
+    FogataApp(
+      state: AppState('/nonexistent/fogata-languages')
+        ..splash.showing = false
+        ..startError =
+            'Fogata could not open its data folder, '
+            '/home/someone/.local/share/fogata/a-rather-long-folder-name: '
+            'permission denied',
+    ),
+  ),
+  "a friend's card": (
+    () =>
+        _withFriend()
+          ..toggleFriendCard('p0', const Rect.fromLTWH(80, 260, 232, 32)),
+    const Shell(),
+  ),
+  "a member's card": (
+    () => _withFriend()
+      ..toggleFriendCard(
+        'p1',
+        const Rect.fromLTWH(80, 300, 232, 32),
+        member: true,
+        group: 'g',
+      ),
+    const Shell(),
+  ),
+  'a call ringing': (
+    () => fakeRoom(people: 1)
+      ..contacts.friends = [
+        UiFriend(
+          person: other(0),
+          fingerprint: other(0).short,
+          presence: UiPresence.online,
+          delivered: true,
+        ),
+      ]
+      ..callState.calls = [
+        UiCall(
+          groupId: 'c',
+          with_: other(0),
+          outgoing: false,
+          phase: UiCallPhase.incoming,
+          sinceMs: DateTime.now().millisecondsSinceEpoch,
+          members: [other(0)],
+          adding: const [],
+          away: const [],
+        ),
+      ],
+    const Shell(),
+  ),
+  for (final kind in DeviceKind.values)
+    'the ${kind.name} panel': (
+      () => fakeRoom(people: 3)..prefs.audioInput = 'mic-1',
+      const Shell(),
+    ),
+  'the quick switcher': (() => fakeRoom(people: 3), const Shell()),
+  'a new group': (() => fakeRoom(people: 2), _Opens(showNewGroup)),
+  'a time-out': (
+    () => _members(),
+    _Opens((context) {
+      final state = AppScope.read(context);
+      showTimeOut(context, state.contacts.groups.single, other(1));
+    }),
+  ),
+  'removing a member': (
+    () => _members(),
+    _Opens(
+      (context) => confirmDialog(
+        context,
+        title: l10n.membersRemoveTitle(other(1).name),
+        text: l10n.membersRemoveText(other(1).name),
+        action: l10n.commonRemove,
+      ),
+    ),
+  ),
+  'a new recovery key': (
+    () => fakeRoom(people: 2),
+    _Opens(
+      (context) => showFgDialog<bool>(
+        context,
+        builder: (dialog) => const NewKeyDialog(
+          newKey: UiNewRecoveryKey(
+            text:
+                'ABCD EFGH JKMN PQRS TVWX YZ01 2345 6789 ABCD EFGH JKMN PQRS '
+                'TVWX Y',
+            id: '7Q4M K2XR',
+          ),
+          dataDir: '/nonexistent/fogata-languages',
+        ),
+      ),
+    ),
+  ),
+  'a recovery copy': (
+    () => fakeRoom(people: 2),
+    _Opens(
+      (context) => showFgDialog<bool>(
+        context,
+        builder: (dialog) =>
+            const MakeCopyDialog(dataDir: '/nonexistent/fogata-languages'),
+      ),
+    ),
+  ),
 };
+
+/// The window's sizes tried, each with the text sizes tried in it: the smallest the window
+/// takes on a screen large enough, the smallest a screen gives it in practice (a Mac's
+/// "Larger Text", 1024 by 571 once its menu bar is off: `mainWindowSizes`), and a
+/// smaller one still, for a margin.
+const _windows = [
+  (Size(960, 640), [1.0, 1.5, 2.0]),
+  (Size(1024, 571), [1.0, 1.5]),
+  (Size(900, 600), [1.0]),
+  (Size(800, 560), [1.0]),
+];
 
 void main() {
   setUpAll(loadFonts);
@@ -577,38 +904,50 @@ void main() {
       },
     );
 
-    for (final scale in const [1.0, 1.5, 2.0]) {
-      for (final MapEntry(key: name, value: (make, child)) in _pages.entries) {
-        testWidgets('$name fits at 960×640 in $code, text ×$scale', (
-          tester,
-        ) async {
-          // Set on the state's settings, which otherwise start in the system's
-          // language when first read and would undo a language picked before.
-          final state = make()..prefs.language = code == 'pseudo' ? 'en' : code;
-          if (code == 'pseudo') l10n = PseudoL10n();
-          final found = await _overflows(
-            tester,
-            state,
-            child: child,
-            scale: scale,
-          );
-          // The language really in use is the one asked for, not the system's.
-          final arbs = readArbs();
-          final word =
-              arbs[code == 'pseudo'
-                  ? 'en'
-                  : localeOf(code).languageCode]!['settingsLanguage'];
-          if (code != 'pseudo') {
-            expect(l10n.settingsLanguage, word);
-            expect(currentLanguage, code);
-            if (code != 'en') {
-              expect(word, isNot(arbs['en']!['settingsLanguage']));
-            }
-          } else {
-            expect(l10n.settingsLanguage, isNot(word));
+    for (final (window, scales) in _windows) {
+      final at = '${window.width.round()}×${window.height.round()}';
+      for (final scale in scales) {
+        for (final MapEntry(key: name, value: (make, child))
+            in _pages.entries) {
+          // The picker's cells keep their size, which emoji twice as large overflow.
+          if (scale == 2 && name == 'room, an emoji picked in its chat') {
+            continue;
           }
-          expect(found, isEmpty);
-        });
+          testWidgets('$name fits at $at in $code, text ×$scale', (
+            tester,
+          ) async {
+            // Set on the state's settings, which otherwise start in the system's
+            // language when first read and would undo a language picked before.
+            final state = make()
+              ..prefs.language = code == 'pseudo' ? 'en' : code;
+            if (code == 'pseudo') l10n = PseudoL10n();
+            final found = await _overflows(
+              tester,
+              state,
+              child: child,
+              size: window,
+              scale: scale,
+              act: _acts[name],
+              name: '$name $at $code x$scale',
+            );
+            // The language really in use is the one asked for, not the system's.
+            final arbs = readArbs();
+            final word =
+                arbs[code == 'pseudo'
+                    ? 'en'
+                    : localeOf(code).languageCode]!['settingsLanguage'];
+            if (code != 'pseudo') {
+              expect(l10n.settingsLanguage, word);
+              expect(currentLanguage, code);
+              if (code != 'en') {
+                expect(word, isNot(arbs['en']!['settingsLanguage']));
+              }
+            } else {
+              expect(l10n.settingsLanguage, isNot(word));
+            }
+            expect(found, isEmpty);
+          });
+        }
       }
     }
   }

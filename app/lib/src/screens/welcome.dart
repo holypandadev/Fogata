@@ -214,7 +214,7 @@ class _Tile extends StatelessWidget {
             left: 12,
             bottom: 12,
             child: Container(
-              height: 28,
+              constraints: const BoxConstraints(minHeight: 28),
               padding: const EdgeInsets.only(left: 11, right: 10),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: .62),
@@ -269,7 +269,8 @@ class _ChipState extends State<_Chip> {
         curve: spring,
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 200),
-          height: 30,
+          // Taller only when larger text needs it.
+          constraints: const BoxConstraints(minHeight: 30),
           padding: const EdgeInsets.only(left: 10, right: 12),
           decoration: BoxDecoration(
             color: _hovered ? c.bg2 : c.bg1,

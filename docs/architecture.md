@@ -3930,6 +3930,14 @@ Text follows the system's text size up to 1.5 times (`maxTextScale` in shell.dar
 settings stop there, the most the window at its smallest (960 by 640) holds. Rows that hold
 text keep their height as a minimum and grow with it rather than cut it.
 
+On a screen whose work area is under 960 by 640 (a scaled laptop screen, a Mac at "Larger
+Text") the window's smallest size is that area (`mainWindowSizes` in window.dart), and the
+pages fit it too: test/languages_fit_test.dart tries every page at 1024 by 571 (text at its
+size and 1.5 times), 900 by 600 and 800 by 560 besides 960 by 640. What does not fit scrolls;
+the tile of a room this device is alone in grows smaller; a card's two buttons go one over
+the other, and a dialog's buttons onto two lines, when their words would not fit; under 860
+points wide only the rail shows beside the page, without the column and the person's pill.
+
 Every button can be reached with Tab (with a blue ring) and used with Enter or Space. Tab
 goes through the title bar, the rail, the column and the page in turn; while the settings, a
 group's settings, the person's panel, a friend's card, the bell, a device panel or a menu

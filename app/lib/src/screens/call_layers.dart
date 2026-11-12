@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -122,31 +124,28 @@ class _IncomingCallLayerState extends State<IncomingCallLayer> {
                           style: tx(c.fg2, size: 13),
                         ),
                         const SizedBox(height: 20),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: _CallButton(
-                                text: l10n.commonDecline,
-                                icon: Ic.hangUp,
-                                color: c.redSolid,
-                                onTap: () => state.declineCall(call),
-                              ),
+                        _Pair(
+                          gap: 12,
+                          labels: [l10n.commonDecline, l10n.commonAccept],
+                          // The icon and the space after it.
+                          beside: 24,
+                          first: _CallButton(
+                            text: l10n.commonDecline,
+                            icon: Ic.hangUp,
+                            color: c.redSolid,
+                            onTap: () => state.declineCall(call),
+                          ),
+                          second: _CallButton(
+                            text: l10n.commonAccept,
+                            icon: Ic.phone,
+                            color: _answer,
+                            onTap: () => _answerChecked(
+                              context,
+                              state,
+                              call,
+                              micOff: _micOff,
                             ),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: _CallButton(
-                                text: l10n.commonAccept,
-                                icon: Ic.phone,
-                                color: _answer,
-                                onTap: () => _answerChecked(
-                                  context,
-                                  state,
-                                  call,
-                                  micOff: _micOff,
-                                ),
-                              ),
-                            ),
-                          ],
+                          ),
                         ),
                         const SizedBox(height: 14),
                         Pressable(
@@ -329,28 +328,26 @@ class _SmallCard extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: FgButton(
-                  text: l10n.commonDecline,
-                  height: 36,
-                  fontSize: 13,
-                  onTap: () => state.declineCall(call),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Expanded(
-                child: _CallButton(
-                  text: room == null
-                      ? l10n.commonAccept
-                      : l10n.callLayersLeaveAndAnswer,
-                  color: _answer,
-                  height: 36,
-                  onTap: () => _answerChecked(context, state, call),
-                ),
-              ),
+          _Pair(
+            gap: 8,
+            labels: [
+              l10n.commonDecline,
+              room == null ? l10n.commonAccept : l10n.callLayersLeaveAndAnswer,
             ],
+            first: FgButton(
+              text: l10n.commonDecline,
+              height: 36,
+              fontSize: 13,
+              onTap: () => state.declineCall(call),
+            ),
+            second: _CallButton(
+              text: room == null
+                  ? l10n.commonAccept
+                  : l10n.callLayersLeaveAndAnswer,
+              color: _answer,
+              height: 36,
+              onTap: () => _answerChecked(context, state, call),
+            ),
           ),
         ],
       ),
@@ -580,6 +577,65 @@ class _InCallCard extends StatelessWidget {
   }
 }
 
+/// A card's two buttons side by side at the same width, or one over the other when a
+/// label would not fit in half the row (larger text, a longer language).
+class _Pair extends StatelessWidget {
+  const _Pair({
+    required this.labels,
+    required this.first,
+    required this.second,
+    required this.gap,
+    this.beside = 0,
+  });
+
+  /// What the buttons say, measured as a call button draws it.
+  final List<String> labels;
+  final Widget first, second;
+  final double gap;
+
+  /// What a button draws beside its label (an icon).
+  final double beside;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      final scaler = MediaQuery.textScalerOf(context);
+      var widest = 0.0;
+      for (final label in labels) {
+        final painter = TextPainter(
+          text: TextSpan(
+            text: label,
+            style: tx(Colors.white, size: 14, weight: w500),
+          ),
+          textDirection: Directionality.of(context),
+          textScaler: scaler,
+          maxLines: 1,
+        )..layout();
+        widest = math.max(widest, painter.width);
+        painter.dispose();
+      }
+      // Side by side as long as nothing would be cut there.
+      if (widest + beside <= (box.maxWidth - gap) / 2) {
+        return Row(
+          children: [
+            Expanded(child: first),
+            SizedBox(width: gap),
+            Expanded(child: second),
+          ],
+        );
+      }
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          first,
+          SizedBox(height: gap),
+          second,
+        ],
+      );
+    },
+  );
+}
+
 /// A pill button of a call: coloured, white text, a spring when pressed.
 class _CallButton extends StatelessWidget {
   const _CallButton({
@@ -604,7 +660,9 @@ class _CallButton extends StatelessWidget {
       hoverScale: 1.03,
       builder: (context, hovered) => AnimatedContainer(
         duration: const Duration(milliseconds: 160),
-        height: height,
+        // Taller, its words on two lines, only when larger text needs it.
+        constraints: BoxConstraints(minHeight: height),
+        padding: const EdgeInsets.symmetric(horizontal: 12),
         alignment: Alignment.center,
         decoration: BoxDecoration(
           color: hovered ? Color.lerp(color, Colors.white, .08) : color,
@@ -617,7 +675,13 @@ class _CallButton extends StatelessWidget {
               FgIcon(icon, size: 16, color: Colors.white),
               const SizedBox(width: 8),
             ],
-            Text(text, style: tx(Colors.white, size: 14, weight: w500)),
+            Flexible(
+              child: Text(
+                text,
+                textAlign: TextAlign.center,
+                style: tx(Colors.white, size: 14, weight: w500),
+              ),
+            ),
           ],
         ),
       ),

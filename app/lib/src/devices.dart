@@ -1106,7 +1106,8 @@ class _DevicePanelState extends State<DevicePanel> {
             },
             label: l10n.devicesVoiceSettings,
             builder: (context, hovered) => Container(
-              height: 36,
+              // Taller only when larger text needs it.
+              constraints: const BoxConstraints(minHeight: 36),
               padding: const EdgeInsets.symmetric(horizontal: 10),
               decoration: BoxDecoration(
                 color: hovered ? c.hover : null,

@@ -758,26 +758,29 @@ class _Alone extends StatelessWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 640),
-            child: AspectRatio(
-              aspectRatio: 16 / 9,
-              child: Talking(
-                call: state.callState.call,
-                builder: (context) => _Tile(
-                  person: profile.person,
-                  label: l10n.roomTileYou(profile.person.name),
-                  avatarSize: 104,
-                  video:
-                      state.callState.call != null &&
-                          state.callState.call!.camera
-                      ? state.callState.call!.localCamera
-                      : null,
-                  mirror: state.prefs.mirrorCamera,
-                  speaking: state.callState.call?.speaking ?? false,
-                  muted:
-                      state.callState.call != null &&
-                      !state.callState.call!.mic,
+          // Smaller in a short window, so the hint and the controls under it still fit.
+          Flexible(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 640),
+              child: AspectRatio(
+                aspectRatio: 16 / 9,
+                child: Talking(
+                  call: state.callState.call,
+                  builder: (context) => _Tile(
+                    person: profile.person,
+                    label: l10n.roomTileYou(profile.person.name),
+                    avatarSize: 104,
+                    video:
+                        state.callState.call != null &&
+                            state.callState.call!.camera
+                        ? state.callState.call!.localCamera
+                        : null,
+                    mirror: state.prefs.mirrorCamera,
+                    speaking: state.callState.call?.speaking ?? false,
+                    muted:
+                        state.callState.call != null &&
+                        !state.callState.call!.mic,
+                  ),
                 ),
               ),
             ),
