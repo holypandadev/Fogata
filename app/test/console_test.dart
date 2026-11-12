@@ -51,10 +51,12 @@ void main() {
         FlutterError.onError = flutter;
         PlatformDispatcher.instance.onError = platform;
         debugPrint = printing;
+        forgetConsoleLog();
         dir.deleteSync(recursive: true);
       });
       final console = <String>[];
-      keepConsoleClean(dir.path, write: console.add, raw: false);
+      // From the start, before the data folder is known: what comes then waits for it.
+      guardConsole(write: console.add, raw: false);
       final stack = StackTrace.fromString(
         '#0 open (package:fogata/src/files.dart:120:7)',
       );
@@ -64,6 +66,8 @@ void main() {
           stack: stack,
         ),
       );
+      expect(console, hasLength(1));
+      logConsoleIn(dir.path);
       expect(
         PlatformDispatcher.instance.onError!(StateError(said), stack),
         isTrue,
@@ -91,6 +95,44 @@ void main() {
       for (final gone in ['marta', 'beach', '203.0.113.7', '4001']) {
         expect(log, isNot(contains(gone)), reason: log);
       }
+    },
+  );
+
+  test(
+    'what the start says before the data folder is known waits, bounded',
+    () async {
+      final dir = Directory.systemTemp.createTempSync('fogata-console-start-');
+      final (flutter, platform, printing) = (
+        FlutterError.onError,
+        PlatformDispatcher.instance.onError,
+        debugPrint,
+      );
+      addTearDown(() {
+        FlutterError.onError = flutter;
+        PlatformDispatcher.instance.onError = platform;
+        debugPrint = printing;
+        forgetConsoleLog();
+        dir.deleteSync(recursive: true);
+      });
+      guardConsole(
+        write: (_) => fail('nothing printed reaches the console'),
+        raw: false,
+      );
+      for (var i = 0; i < 100; i++) {
+        debugPrint('the window opened at ‹$i›');
+      }
+      logConsoleIn(dir.path);
+      await flushAppErrors();
+      final log = Directory('${dir.path}/$logFolder')
+          .listSync()
+          .whereType<File>()
+          .single
+          .readAsStringSync();
+      expect('INFO app: the window opened'.allMatches(log), hasLength(64));
+      expect(
+        log,
+        contains('36 more errors and lines of the start were not kept'),
+      );
     },
   );
 }

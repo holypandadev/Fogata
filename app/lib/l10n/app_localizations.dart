@@ -8743,7 +8743,7 @@ abstract class L10n {
   /// **'That request to join was made on an earlier state of the group. The person has to ask again.'**
   String get errJoinAskAgain;
 
-  /// Error message when downloading a room's file: the disk does not have enough free space for it.
+  /// Error message when a file cannot be written for lack of room on the disk: a room's file downloaded or shared, a direct chat's file or voice message fetched, sent, saved or opened to play.
   ///
   /// In en, this message translates to:
   /// **'There isn’t enough free space for this file. Free some space and try again.'**

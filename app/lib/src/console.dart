@@ -12,7 +12,8 @@ import 'report.dart' show noteAppError, noteAppLine;
 // that reached the root zone, and the window and its libraries print with debugPrint: in a
 // release build each error writes one line saying what kind it was and where, and goes to
 // the day's log, scrubbed ([noteAppError]); what is printed goes to the log alone
-// ([noteAppLine]). A debug build (a developer's run, the tests, which read Flutter's
+// ([noteAppLine]). The guard is set first thing in main, before the window, the bridge or
+// the data folder: what comes before that folder is known waits for it. A debug build (a developer's run, the tests, which read Flutter's
 // reports) prints as Flutter does.
 
 /// Whether the console takes what the window says as it is: a debug build.
@@ -46,18 +47,34 @@ String? placeOf(StackTrace? stack) {
   return null;
 }
 
-/// Notes the window's errors in the day's log of [dataDir], for problem reports, and in a
-/// release build tells the console only [errorLine] of each, and nothing of what is
-/// printed. [write] is where that line goes: standard error.
-void keepConsoleClean(
-  String dataDir, {
-  void Function(String line)? write,
-  bool raw = rawConsole,
-}) {
+/// The data folder whose day's log takes the window's errors and prints, once it is known.
+String? _logDir;
+
+/// What came before the data folder was known, to note in its day's log then: at most
+/// [_waitingMost], and how many more there were.
+final _waiting = <void Function(String dataDir)>[];
+const _waitingMost = 64;
+var _dropped = 0;
+
+void _noteLater(void Function(String dataDir) note) {
+  final dir = _logDir;
+  if (dir != null) return note(dir);
+  if (_waiting.length < _waitingMost) {
+    _waiting.add(note);
+  } else {
+    _dropped++;
+  }
+}
+
+/// Guards the console from the first moment of the start: the window's errors are noted
+/// for problem reports (in the day's log, once [logConsoleIn] names its folder; until then
+/// kept, a bounded number), and in a release build the console is told only [errorLine] of
+/// each, and nothing of what is printed. [write] is where that line goes: standard error.
+void guardConsole({void Function(String line)? write, bool raw = rawConsole}) {
   final say = write ?? stderr.writeln;
   final flutter = FlutterError.onError;
   FlutterError.onError = (details) {
-    noteAppError(dataDir, details.exception, details.stack);
+    _noteLater((dir) => noteAppError(dir, details.exception, details.stack));
     if (raw) {
       flutter?.call(details);
     } else {
@@ -66,7 +83,7 @@ void keepConsoleClean(
   };
   final platform = PlatformDispatcher.instance.onError;
   PlatformDispatcher.instance.onError = (error, stack) {
-    noteAppError(dataDir, error, stack);
+    _noteLater((dir) => noteAppError(dir, error, stack));
     if (raw) return platform?.call(error, stack) ?? false;
     say(errorLine(error, stack));
     // Handled: left to the engine, it is printed as it is.
@@ -74,7 +91,33 @@ void keepConsoleClean(
   };
   if (!raw) {
     debugPrint = (message, {wrapWidth}) {
-      if (message != null) noteAppLine(dataDir, message);
+      if (message != null) _noteLater((dir) => noteAppLine(dir, message));
     };
   }
+}
+
+/// From now on the window's errors and prints go to the day's log of [dataDir], those that
+/// came before it was known first.
+void logConsoleIn(String dataDir) {
+  _logDir = dataDir;
+  final waiting = List.of(_waiting);
+  _waiting.clear();
+  for (final note in waiting) {
+    note(dataDir);
+  }
+  if (_dropped > 0) {
+    noteAppLine(
+      dataDir,
+      '$_dropped more errors and lines of the start were not kept',
+    );
+    _dropped = 0;
+  }
+}
+
+/// Forgets the data folder and what waits for it, for tests.
+@visibleForTesting
+void forgetConsoleLog() {
+  _logDir = null;
+  _waiting.clear();
+  _dropped = 0;
 }

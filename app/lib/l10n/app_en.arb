@@ -8488,7 +8488,7 @@
   },
   "errNoSpaceForFile": "There isn’t enough free space for this file. Free some space and try again.",
   "@errNoSpaceForFile": {
-    "description": "Error message when downloading a room's file: the disk does not have enough free space for it."
+    "description": "Error message when a file cannot be written for lack of room on the disk: a room's file downloaded or shared, a direct chat's file or voice message fetched, sent, saved or opened to play."
   },
   "recoveryTitle": "Recovery copy",
   "@recoveryTitle": {

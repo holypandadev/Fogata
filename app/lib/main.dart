@@ -8,7 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart'
     show WebRTC, onWebRtcEventError;
 
 import 'src/app_state.dart';
-import 'src/console.dart' show keepConsoleClean;
+import 'src/console.dart' show guardConsole, logConsoleIn;
 import 'src/format.dart' show explain;
 import 'src/icons.dart';
 import 'src/l10n.dart';
@@ -26,6 +26,9 @@ import 'src/widgets.dart';
 import 'src/window.dart';
 
 Future<void> main([List<String> args = const []]) async {
+  // Before anything that may print: in a release build nothing of the start reaches the
+  // console as it is (console.dart).
+  guardConsole();
   launchArguments = args;
   WidgetsFlutterBinding.ensureInitialized();
   // macOS's own voice processing plays the others only while a microphone records: with
@@ -108,7 +111,7 @@ Future<void> _cannotStart(String why) async {
 /// Notes the window's errors in the day's log, for problem reports; in a release build the
 /// console is told only their kind and where they happened (console.dart).
 void _noteErrors(String dataDir) {
-  keepConsoleClean(dataDir);
+  logConsoleIn(dataDir);
   // What the video library's event channels fail with: noted here; the connection or
   // renderer that it came from fails by itself (the fork's FOGATA.md).
   onWebRtcEventError = (what, error, stack) => noteAppError(
