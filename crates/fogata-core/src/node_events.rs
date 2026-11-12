@@ -394,17 +394,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             name,
         }),
         NodeEvent::UpdateToJoin { group } => handle_update_to_join(inner, group),
-        NodeEvent::JoinExpired { group } => {
-            let Some(name) = inner.lock().joining.remove(&group) else {
-                return;
-            };
-            inner.forget_join(group);
-            let _ = inner.node.drop_group(group).await;
-            inner.emit(CoreEvent::Notice(format!(
-                "The invitation to “{name}” ran out before someone in the group let you in. \
-                 Ask for a new one."
-            )));
-        }
+        NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
         NodeEvent::Joined { group, name } => {
             if !inner.is_call(group) {
                 // The log the manager sent replaces an invitation kept under the same id:
@@ -908,6 +898,19 @@ fn handle_update_to_join(inner: &Arc<Inner>, group: GroupId) {
         return;
     };
     inner.emit(CoreEvent::UpdateToJoin { group, name });
+}
+
+/// The invite ran out before this device was let in.
+async fn handle_join_expired(inner: &Arc<Inner>, group: GroupId) {
+    let Some(name) = inner.lock().joining.remove(&group) else {
+        return;
+    };
+    inner.forget_join(group);
+    let _ = inner.node.drop_group(group).await;
+    inner.emit(CoreEvent::Notice(format!(
+        "The invitation to “{name}” ran out before someone in the group let you in. \
+         Ask for a new one."
+    )));
 }
 
 #[cfg(test)]
