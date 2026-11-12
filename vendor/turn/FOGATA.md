@@ -2,9 +2,11 @@
 
 This is turn 0.17.2 from crates.io (MIT or Apache-2.0, see LICENSE-MIT and LICENSE-APACHE),
 the TURN server the media bridge (`crates/fogata-media`) runs for the local WebRTC engine,
-without its examples, benchmarks and dev-dependencies, so its own tests run offline from
+without its examples, benchmarks and dev-dependencies (taken out of its Cargo.toml, which
+says so), its README.md a short note pointing here, so its own tests run offline from
 the workspace (`cargo test -p turn --lib`, in tools/check.sh): one test no longer starts
-env_logger, two decode hex with a few lines of their own instead of the hex crate, and the
+env_logger, two decode hex with a few lines of their own instead of the hex crate
+(src/proto/proto_test.rs, src/proto/chandata/chandata_test.rs), and the
 two client tests that ask a public STUN server on the internet
 (`test_client_with_stun_send_binding_request` and its `_to_parallel` twin, in
 src/client/client_test.rs) are ignored. The

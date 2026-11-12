@@ -1,7 +1,7 @@
 # desktop_drop in Fogata
 
 This is desktop_drop 0.8.0 from pub.dev (Apache-2.0, see LICENSE), without its `example`
-and `test` folders. Later versions depend on dbus (MPL-2.0), so this one stays.
+and `test` folders, its README.md a short note pointing here. Later versions depend on dbus (MPL-2.0), so this one stays.
 
 Changed, each place marked `Fogata:` in the code:
 

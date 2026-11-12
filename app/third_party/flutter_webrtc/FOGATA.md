@@ -1,8 +1,10 @@
 # flutter_webrtc in Fogata
 
 This is flutter_webrtc 1.6.2+hotfix.4 from pub.dev (MIT, see LICENSE), without its
-`example` and `test` folders. Fogata keeps its own copy to change how the screen is
-captured on Linux. Every change from the published package is listed here.
+`example` and `test` folders, its README.md a short note pointing here, and with a
+`.gitignore` of its own for the libwebrtc archives its CMake build downloads and unpacks
+into `third_party/` (`downloads/`, `libwebrtc/`). Fogata keeps its own copy to change how
+the screen is captured on Linux. Every change from the published package is listed here.
 
 The Objective-C code comes twice, as published: `common/darwin/Classes` and
 `macos/flutter_webrtc/Sources/flutter_webrtc`. Only the second is built (the macOS podspec
@@ -465,6 +467,24 @@ through ScreenCaptureKit like a display, at the asked frame rate:
   content rectangle and scales each frame carries when the window is resized or moves to
   a screen of another scale.
 - `FlutterRTCDesktopCapturer.m` (both copies, identical): uses it for windows.
+
+## No screen captured larger than the others take (macOS)
+
+Every receiver drops a picture larger than 8K (see "Pictures too large to draw"), and the
+application keeps out of the call whoever sends one. A window captured at its size in
+pixels can be larger than that (a window stretched across two 5K screens), and so can a
+display.
+
+- `macos/flutter_webrtc/Sources/flutter_webrtc/FogataCaptureSize.h` (new):
+  `FogataCaptureSize` gives the size to capture at: the same shape, made smaller only as far
+  as 8K takes it (7680 by 4320 pixels, no side over 8192, the limits of
+  `lib/src/call/fitting.dart` and of the renderers), in even numbers, at least 2 by 2.
+- `macos/flutter_webrtc/Sources/flutter_webrtc/FlutterScreenCaptureKitCapturer.m`: a
+  display's and a window's capture, and a window's new size when it is resized, are set
+  through it; the package set a display's capture to the display's own size.
+- `macos/test/capture_size_test.c` (new): its cases (a laptop's screen as it is, odd sizes
+  made even, 8K as it is, a window wider than any side, two 5K screens, no size at all);
+  `tools/check.sh` builds and runs it on a Mac.
 
 ## Fogata's own windows are not shared (macOS, Windows)
 
@@ -935,8 +955,10 @@ WebRTC's PipeWire path through xdg-desktop-portal's Camera interface
   unless the plugin went meanwhile. `fogataCameraAccess` (new) tells the way and the
   answer ("direct", "notAsked", "asking", "granted", "denied", "unavailable"), and with
   `request` asks first; the app's settings ask when the camera's choice shows.
-- `common/cpp/src/flutter_media_stream.cc`: a camera refused through the portal, or no
-  portal to reach any (and none opened directly), fails `getUserMedia` with
+- `common/cpp/src/flutter_media_stream.cc`, `common/cpp/include/flutter_media_stream.h`
+  (`GetUserVideo` answers false, with the error to tell, where it answered nothing): a
+  camera refused through the portal, or no portal to reach any (and none opened
+  directly), fails `getUserMedia` with
   `NotAllowedError ... (fogataCameraDenied)` or `NotReadableError ...
   (fogataCameraUnavailable)`, which the app tells apart; a camera listed but not opened,
   or one that does not start, fails it too (`NotReadableError`) instead of giving a black
@@ -954,10 +976,12 @@ WebRTC's PipeWire path through xdg-desktop-portal's Camera interface
 The package rethrew the errors of an `EventChannel` from the stream listener, where nothing
 could catch them and the connection or renderer went on as if nothing had happened.
 
-- `lib/src/native/event_errors.dart` (new, exported): `onWebRtcEventError`, set once by the
+- `lib/src/native/event_errors.dart` (new, exported by `lib/flutter_webrtc.dart`):
+  `onWebRtcEventError`, set once by the
   application (`lib/main.dart`, which notes it in the day's log), gets every such error with
   what it was about; without it the error is printed.
-- `RTCPeerConnectionNative.errorListener`: reports the error, and the first one makes the
+- `RTCPeerConnectionNative.errorListener` (`lib/src/native/rtc_peerconnection_impl.dart`):
+  reports the error, and the first one makes the
   connection fail: `onConnectionState` is called with `RTCPeerConnectionStateFailed`, as for a
   network failure (the call's own handlers for that state then run), and it is closed.
   `close()` runs once however many times it is called.
@@ -972,8 +996,10 @@ on. Upstream, the listeners of the shared `FlutterWebRTC.Event` channel (native 
 device changes, the desktop capturer, a capture's end) had none, and the handlers of the
 others (connections, data channels, renderers, frame cryptors, platform views) threw the
 error again; either way it reached the zone as an uncaught error. The shared channel's
-own errors now go on to its listeners, each of which logs them. Tested by
-`app/test/webrtc_events_test.dart`.
+own errors now go on to its listeners, each of which logs them. Among them:
+`lib/src/native/mediadevices_impl.dart` (device changes), `lib/src/native_logs_listener.dart`
+(native logs) and `lib/src/native/rtc_data_channel_impl.dart` (a data channel's
+`errorListener`). Tested by `app/test/webrtc_events_test.dart`.
 
 ## What the Dart side prints (Dart)
 
@@ -1071,7 +1097,10 @@ to the system's default devices.
   the session's `pipewire-pulse` (or `pipewire` and all three), then open the settings
   again and run the test: by the code, the lists should hold "System default" alone and
   the meter stay empty until the application restarts (not yet seen on a computer).
-- Checked by `tools/call-lab/mic.sh devices` (Linux).
+- `common/cpp/test/voice_engine_test.cc` (new; Linux, in `run_tests.sh`): what this counts
+  on, with the real libwebrtc and the computer's sound server: the device lists no input
+  and no output once the last connection is freed, and keeps its lists while an idle
+  connection stays. Checked by `tools/call-lab/mic.sh devices` (Linux).
 
 ## The system's default microphone and speaker (Windows)
 
