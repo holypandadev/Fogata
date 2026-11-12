@@ -2,7 +2,7 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|broken|alsa|hang|quit>
+Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|broken|alsa|hang|quit>
 """
 
 import pathlib
@@ -162,6 +162,30 @@ elif check == "devices":
 elif check == "media":
     # Each copy's own result says whether anything was held; its log, what was.
     notes += re.findall(r"(held [^\n]*|round [^\n]*)", log("a") + log("b"))
+elif check == "rejoin":
+    # Each copy logs every time it measured: who left, the pause, and how soon the other's
+    # voice reached it after the one leaving entered again (call_test.dart, _rejoin).
+    REJOIN_WITHIN_MS = 6000  # call_test.dart's _rejoinWithin
+    times = {}
+    for role in ("a", "b"):
+        for tag, left, pause, direction, ms in re.findall(
+            r"rejoin (\w+): (\w) left, pause (\d+) s, voice (to|from) the one that left after (-?\d+) ms",
+            log(role),
+        ):
+            times.setdefault((left, direction), []).append(int(ms))
+            if int(ms) > REJOIN_WITHIN_MS:
+                problems.append(f"{role}: voice back {ms} ms after {left} entered again ({tag})")
+    if not times:
+        problems.append("no time measured")
+    for (left, direction), ms in sorted(times.items()):
+        ms.sort()
+        notes.append(
+            f"{left} left, voice {direction} the one that left: min {ms[0]} median "
+            f"{ms[len(ms) // 2]} max {ms[-1]} ms ({len(ms)})"
+        )
+    for left in ("a", "b"):
+        if len(times.get((left, "to"), [])) != len(times.get((left, "from"), [])):
+            problems.append(f"{left} left: the copies measured a different number of times")
 elif check in ("late", "alone"):
     if "laba_mic" not in sources_between("a", 0, 1e12):
         problems.append("a never recorded from its microphone")

@@ -53,9 +53,13 @@
 // FOGATA_TEST_MEASURE=<seconds> measures instead the call as it is, with every copy's voice
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
-// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices);
+// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices)
+// or of the call (rejoin);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
+// FOGATA_TEST_MIC_CASE=rejoin (two copies, both with the microphone on, on one computer or
+// on two) has each copy in turn leave the room and enter it again, and both measure how
+// soon the call is back; FOGATA_TEST_REJOIN_TIMES sets how many times; see _rejoin.
 
 import 'dart:async';
 import 'dart:convert';
@@ -3860,6 +3864,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 /// - broken, alsa, hang: see [_noSoundServer].
 /// - quit: see [_quitWhileOpening]; copy b only waits for a to go.
 /// - devices: see [_listedAfterCall]; copy b only stays in the call.
+/// - rejoin: see [_rejoin].
 Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
   final call = state.callState.call!;
   switch (name) {
@@ -3958,6 +3963,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       if (_role == 'a') await _listedAfterCall(tester, state);
     case 'media':
       await _mediaLetGo(tester, state);
+    case 'rejoin':
+      await _rejoin(tester, state);
     default:
       throw StateError('no microphone check called $name');
   }
@@ -4068,6 +4075,215 @@ Future<void> _mediaLetGo(WidgetTester tester, AppState state) async {
   }
   if (problems.isNotEmpty) {
     throw StateError('media not let go of: ${problems.join('; ')}');
+  }
+}
+
+/// A call back within this long after its room is entered again counts as back soon. It
+/// normally takes 1-4 s (the others hear the device is back, its call starts, one offer
+/// and its answer, the first packets); 6 s leaves a margin for a slow start or network,
+/// and still catches a first offer lost on the way, after which the call came back only
+/// at the next try, 5 s or more later.
+const _rejoinWithin = Duration(seconds: 6);
+
+/// Packets of voice that count as voice flowing again: a fifth of a second of it.
+const _flowPackets = 10;
+
+/// The packets of voice received so far on [peer]'s connection (mid 0); 0 without one.
+Future<int> _voicePacketsFrom(CallPeer? peer) async {
+  var packets = 0;
+  for (final r in await peer?.connection?.getStats() ?? const <StatsReport>[]) {
+    if (r.type == 'inbound-rtp' && '${r.values['mid']}' == '0') {
+      packets += (r.values['packetsReceived'] as num? ?? 0).toInt();
+    }
+  }
+  return packets;
+}
+
+/// What [other] said in the room's chat after `test: [prefix] `, once it has.
+Future<String> _heardWith(
+  WidgetTester tester,
+  AppState state,
+  _Other other,
+  String prefix,
+) async {
+  String? said() {
+    for (final UiChatLine line
+        in state.roomState.room?.chat ?? const <UiChatLine>[]) {
+      if (line.sender == other.id && line.text.startsWith('test: $prefix ')) {
+        return line.text.substring('test: $prefix '.length);
+      }
+    }
+    return null;
+  }
+
+  await _until(
+    tester,
+    'heard from ${other.name}: $prefix',
+    () => said() != null,
+    seconds: 180,
+  );
+  return said()!;
+}
+
+/// tools/call-lab/mic.sh rejoin, or two copies on two computers (FOGATA_TEST_MIC_CASE=rejoin,
+/// both with the microphone on): copy b leaves the voice room and enters it again,
+/// FOGATA_TEST_REJOIN_TIMES times (5 when left out) at once, as many after a pause of 1 s and
+/// as many after one of 5 s (the call came back late depending on the moment); then copy a
+/// does the same, so that the device with the smaller id and the one with the larger leave,
+/// whichever each copy got. Each time both measure, from the moment the one leaving entered
+/// again, until voice from the other flows to them again ([_flowPackets] more packets than
+/// before, on the call's connection there is then); the one that stayed counts from the
+/// moment the other says it entered, by the other's clock (on two computers, as close as
+/// their clocks are). Each time is logged, the copies tell each other theirs, and each logs
+/// the least, the median and the most, for each direction and each that left. A time over
+/// [_rejoinWithin] fails the copy that measured it, once all are done.
+Future<void> _rejoin(WidgetTester tester, AppState state) async {
+  if (_copies != 2) throw StateError('the rejoin check takes two copies');
+  final call = state.callState.call!;
+  if (!call.mic) {
+    throw StateError('the rejoin check needs the microphone on in both copies');
+  }
+  final times = int.tryParse(_env['FOGATA_TEST_REJOIN_TIMES'] ?? '') ?? 5;
+  final group = call.group;
+  final _Other other = (
+    id: call.peers.keys.single,
+    name: _names[_role == 'a' ? 'b' : 'a']!,
+  );
+  final measured = <Map<String, Object>>[];
+  Future<void> poll() => _wait(tester, const Duration(milliseconds: 100));
+  for (final leaving in ['b', 'a']) {
+    for (final pause in [0, 1, 5]) {
+      for (var round = 1; round <= times; round++) {
+        final tag = '$leaving${pause}s$round';
+        final int ms;
+        final String direction;
+        if (_role == leaving) {
+          direction = 'to';
+          await _say(state, 'rejoin $tag leave');
+          await _hearFrom(tester, state, other, 'rejoin $tag ready');
+          await state.leaveRoom();
+          await _wait(tester, Duration(seconds: pause));
+          final entered = DateTime.now();
+          await state.openRoom(group);
+          await _say(
+            state,
+            'rejoin $tag entered ${entered.millisecondsSinceEpoch}',
+          );
+          final end = entered.add(const Duration(seconds: 30));
+          while (await _voicePacketsFrom(
+                state.callState.call?.peers[other.id],
+              ) <
+              _flowPackets) {
+            if (DateTime.now().isAfter(end)) {
+              await _say(state, 'rejoin $tag took never');
+              throw StateError(
+                'rejoin $tag: no voice from ${other.name} in 30 s',
+              );
+            }
+            await poll();
+          }
+          ms = DateTime.now().difference(entered).inMilliseconds;
+        } else {
+          direction = 'from';
+          await _hearFrom(tester, state, other, 'rejoin $tag leave');
+          await _say(state, 'rejoin $tag ready');
+          // Its voice stops as it leaves: the connection goes, or nothing more comes on it.
+          var peer = state.callState.call?.peers[other.id];
+          var count = await _voicePacketsFrom(peer);
+          var still = DateTime.now();
+          final end = DateTime.now().add(const Duration(seconds: 60));
+          while (true) {
+            await poll();
+            final now = state.callState.call?.peers[other.id];
+            if (now != peer) {
+              peer = now;
+              count = now == null ? 0 : await _voicePacketsFrom(now);
+              break;
+            }
+            final n = await _voicePacketsFrom(now);
+            if (n != count) {
+              count = n;
+              still = DateTime.now();
+            } else if (DateTime.now().difference(still) >
+                const Duration(milliseconds: 600)) {
+              break;
+            }
+            if (DateTime.now().isAfter(end)) {
+              throw StateError('rejoin $tag: ${other.name} never left');
+            }
+          }
+          // And comes again: on a new connection, or more on the one it stopped on.
+          final base = (peer: peer, packets: count);
+          while (true) {
+            final now = state.callState.call?.peers[other.id];
+            final n = await _voicePacketsFrom(now);
+            if (n - (now == base.peer ? base.packets : 0) >= _flowPackets) {
+              break;
+            }
+            if (DateTime.now().isAfter(end)) {
+              await _say(state, 'rejoin $tag took never');
+              throw StateError(
+                'rejoin $tag: no voice from ${other.name} again',
+              );
+            }
+            await poll();
+          }
+          final flowing = DateTime.now().millisecondsSinceEpoch;
+          final entered = int.parse(
+            await _heardWith(tester, state, other, 'rejoin $tag entered'),
+          );
+          ms = flowing - entered;
+        }
+        _log(
+          'rejoin $tag: $leaving left, pause $pause s, voice $direction the one '
+          'that left after $ms ms',
+        );
+        measured.add({'l': leaving, 'p': pause, 'd': direction, 'ms': ms});
+        await _say(state, 'rejoin $tag took $ms');
+        final theirs = await _heardWith(
+          tester,
+          state,
+          other,
+          'rejoin $tag took',
+        );
+        if (theirs == 'never') {
+          throw StateError('rejoin $tag: ${other.name} measured none');
+        }
+        // A moment in the call before the next round.
+        await _wait(tester, const Duration(seconds: 1));
+      }
+    }
+  }
+  await _say(state, 'rejoin times ${jsonEncode(measured)}');
+  final theirs = (jsonDecode(
+    await _heardWith(tester, state, other, 'rejoin times'),
+  ) as List).cast<Map<String, dynamic>>();
+  final all = [...measured, ...theirs];
+  for (final leaving in ['b', 'a']) {
+    final parts = <String>[];
+    for (final direction in ['to', 'from']) {
+      final ms = [
+        for (final m in all)
+          if (m['l'] == leaving && m['d'] == direction) m['ms'] as int,
+      ]..sort();
+      if (ms.isEmpty) continue;
+      parts.add(
+        'voice $direction the one that left: min ${ms.first} median '
+        '${ms[ms.length ~/ 2]} max ${ms.last} ms (${ms.length})',
+      );
+    }
+    _log('rejoin summary: $leaving left, ${parts.join('; ')}');
+  }
+  final late = [
+    for (final m in measured)
+      if ((m['ms'] as int) > _rejoinWithin.inMilliseconds)
+        '${m['l']} left, pause ${m['p']} s: ${m['ms']} ms',
+  ];
+  if (late.isNotEmpty) {
+    throw StateError(
+      'voice back later than ${_rejoinWithin.inSeconds} s after entering again: '
+      '${late.join(', ')}',
+    );
   }
 }
 

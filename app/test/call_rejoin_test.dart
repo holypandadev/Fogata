@@ -11,6 +11,7 @@ import 'package:fogata/src/app_state.dart';
 import 'package:fogata/src/call.dart';
 import 'package:fogata/src/rust/api/types.dart';
 
+import 'call_net.dart';
 import 'fake_room.dart';
 import 'wait.dart';
 
@@ -201,4 +202,80 @@ void main() {
       await events.close();
     },
   );
+
+  group('leaving the room and entering it again', () {
+    // As the lab's check (call_test.dart's rejoin step): the call is back within 6 s, the
+    // normal 1-4 s with a margin.
+    const within = Duration(seconds: 6);
+    // The device that comes back takes this long to start its call (its media bridge and
+    // microphone), about what a Mac takes; the one that stayed hears it is back, and its
+    // room's refresh names the other, this long after it entered.
+    const starting = Duration(seconds: 2);
+    const heard = Duration(milliseconds: 300);
+    late FakeNet net;
+    setUp(() => net = FakeNet()..install());
+    tearDown(() => net.uninstall());
+
+    /// [leaves] leaves the room [stays] stays in and enters it again: how long until the
+    /// two are connected again, from the moment it entered.
+    Future<Duration> rejoin(String stays, String leaves) async {
+      final stayer = net.add(
+        Call(group: 'g', me: stays)..bridgeForTests = _bridge,
+      );
+      final before = net.add(
+        Call(group: 'g', me: leaves)..bridgeForTests = _bridge,
+      );
+      await Future.wait([
+        stayer.setParticipants([stays, leaves]),
+        before.setParticipants([stays, leaves]),
+      ]);
+      await until(
+        () =>
+            stayer.peers[leaves]?.connected == true &&
+            before.peers[stays]?.connected == true,
+        what: 'connected at first',
+      );
+      // It leaves: nothing reaches it until it is in the room again.
+      net.calls.remove(leaves);
+      await stayer.setParticipants([stays]);
+      final entered = DateTime.now();
+      final back = net.add(Call(group: 'g', me: leaves));
+      unawaited(
+        Future<void>.delayed(heard, () async {
+          await stayer.setParticipants([stays, leaves]);
+        }),
+      );
+      // Its own room's refresh names the other while its call still starts.
+      unawaited(
+        Future<void>.delayed(heard, () async {
+          await back.setParticipants([stays, leaves]);
+        }),
+      );
+      unawaited(
+        Future<void>.delayed(starting, () async {
+          back.bridgeForTests = _bridge;
+          await back.setParticipants([stays, leaves]);
+        }),
+      );
+      await until(
+        () =>
+            stayer.peers[leaves]?.connected == true &&
+            back.peers[stays]?.connected == true,
+        what: 'connected again',
+      );
+      return DateTime.now().difference(entered);
+    }
+
+    test('the call is back soon when the one that stays offers', () async {
+      // The smaller id offers: the one that stayed offers as it hears the other is back,
+      // while the other's call is still starting.
+      final took = await rejoin('1000000000000000', 'e000000000000000');
+      expect(took, lessThan(within));
+    });
+
+    test('the call is back soon when the one that comes back offers', () async {
+      final took = await rejoin('e100000000000000', '1100000000000000');
+      expect(took, lessThan(within));
+    });
+  });
 }
