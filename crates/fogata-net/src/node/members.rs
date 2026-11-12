@@ -250,39 +250,7 @@ impl Node {
             MemberRequest::Push { group_id, entries } => {
                 self.on_push_request(peer, group_id, entries)
             }
-            MemberRequest::JoinRequest { ticket } => {
-                let Ok(ticket) = Ticket::decode(&ticket) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&ticket.group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if slot.ctx.joining().is_some() || !slot.ctx.i_am_manager() {
-                    return MemberResponse::Refused;
-                }
-                if !slot.ctx.ticket_genuine(&ticket) {
-                    return MemberResponse::Refused;
-                }
-                if slot.ctx.ticket_revoked(&ticket.ticket_id) {
-                    // The answer itself proves nothing; the signed `Revoke` goes along.
-                    let revoke = slot.ctx.refusal_of(&ticket);
-                    self.send_refusal(peer, ticket.group_id, revoke);
-                    return MemberResponse::JoinDeclined;
-                }
-                // A ticket already used is offered again only to show its joiner, now a
-                // member, the log it missed (checked against its signed `Join` next).
-                if !slot.ctx.ticket_acceptable(&ticket, now_ms())
-                    && !slot.ctx.ticket_used(&ticket.ticket_id)
-                {
-                    return MemberResponse::Refused;
-                }
-                let heads = slot.ctx.heads();
-                slot.join_offers
-                    .insert(peer, (ticket.ticket_id, heads.clone()));
-                MemberResponse::JoinOffer {
-                    heads: bytes(heads),
-                }
-            }
+            MemberRequest::JoinRequest { ticket } => self.on_join_request(peer, ticket),
             MemberRequest::JoinCommit { entry, binding } => {
                 let Ok(entry) = Entry::decode(&entry) else {
                     return MemberResponse::Refused;
@@ -940,6 +908,41 @@ impl Node {
         }
         self.take_pushed(peer, group, &entries);
         MemberResponse::Ack
+    }
+
+    /// Answers an invite shown by a device that would join, as a manager.
+    fn on_join_request(&mut self, peer: PeerId, ticket: Vec<u8>) -> MemberResponse {
+        let Ok(ticket) = Ticket::decode(&ticket) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&ticket.group_id) else {
+            return MemberResponse::Refused;
+        };
+        if slot.ctx.joining().is_some() || !slot.ctx.i_am_manager() {
+            return MemberResponse::Refused;
+        }
+        if !slot.ctx.ticket_genuine(&ticket) {
+            return MemberResponse::Refused;
+        }
+        if slot.ctx.ticket_revoked(&ticket.ticket_id) {
+            // The answer itself proves nothing; the signed `Revoke` goes along.
+            let revoke = slot.ctx.refusal_of(&ticket);
+            self.send_refusal(peer, ticket.group_id, revoke);
+            return MemberResponse::JoinDeclined;
+        }
+        // A ticket already used is offered again only to show its joiner, now a
+        // member, the log it missed (checked against its signed `Join` next).
+        if !slot.ctx.ticket_acceptable(&ticket, now_ms())
+            && !slot.ctx.ticket_used(&ticket.ticket_id)
+        {
+            return MemberResponse::Refused;
+        }
+        let heads = slot.ctx.heads();
+        slot.join_offers
+            .insert(peer, (ticket.ticket_id, heads.clone()));
+        MemberResponse::JoinOffer {
+            heads: bytes(heads),
+        }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
