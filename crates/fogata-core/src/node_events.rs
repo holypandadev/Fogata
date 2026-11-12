@@ -396,27 +396,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::UpdateToJoin { group } => handle_update_to_join(inner, group),
         NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
         NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
-        NodeEvent::Removed { group, log } => {
-            if direct::on_removed(inner, group).await {
-                return;
-            }
-            inner.shared.clear_group(group);
-            let name = log.shared_state().name.clone();
-            // The log stays, to tell this group if this device is added again; its pictures
-            // and its members' go.
-            let store = inner.store.clone();
-            let saved = name.clone();
-            inner.writer.after(move || {
-                if let Err(e) = store.save_group_log(&log, &saved) {
-                    tracing::warn!("cannot save group {group:?}: {e:#}");
-                }
-                store.forget_group_pictures(&group);
-            });
-            forget_gone_soon(inner);
-            inner.lock().online.remove(&group);
-            inner.emit(CoreEvent::Removed { group, name });
-            inner.emit(CoreEvent::GroupsChanged);
-        }
+        NodeEvent::Removed { group, log } => handle_removed(inner, group, log).await,
         NodeEvent::MemberProfile { profile } => {
             let newer = {
                 let mut state = inner.lock();
@@ -913,6 +893,29 @@ async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
     inner.lock().joining.remove(&group);
     inner.forget_join(group);
     inner.emit(CoreEvent::Joined { group, name });
+    inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// This device was taken out of a group.
+async fn handle_removed(inner: &Arc<Inner>, group: GroupId, log: fogata_state::GroupLog) {
+    if direct::on_removed(inner, group).await {
+        return;
+    }
+    inner.shared.clear_group(group);
+    let name = log.shared_state().name.clone();
+    // The log stays, to tell this group if this device is added again; its pictures
+    // and its members' go.
+    let store = inner.store.clone();
+    let saved = name.clone();
+    inner.writer.after(move || {
+        if let Err(e) = store.save_group_log(&log, &saved) {
+            tracing::warn!("cannot save group {group:?}: {e:#}");
+        }
+        store.forget_group_pictures(&group);
+    });
+    forget_gone_soon(inner);
+    inner.lock().online.remove(&group);
+    inner.emit(CoreEvent::Removed { group, name });
     inner.emit(CoreEvent::GroupsChanged);
 }
 
