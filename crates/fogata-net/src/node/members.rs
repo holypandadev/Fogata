@@ -1160,15 +1160,7 @@ impl Node {
             // An earlier version takes smaller banners: it keeps the one it has, and is not
             // sent this one again at every roster.
             (Pending::Banner(group, digest), response) => {
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.banner_answered(peer, digest);
-                    if matches!(response, MemberResponse::Refused) {
-                        tracing::debug!("{} refused the group's banner", short_peer(&peer));
-                        slot.banner_refused.insert(peer, digest);
-                    } else {
-                        slot.banner_refused.remove(&peer);
-                    }
-                }
+                self.on_banner_answer(peer, group, digest, response)
             }
             (Pending::Picture(group, digest), response) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
@@ -1336,6 +1328,25 @@ impl Node {
             .is_some_and(|s| s.ctx.joining().is_some())
         {
             self.emit(NodeEvent::JoinWaiting { group });
+        }
+    }
+
+    /// Takes a member's answer to the group's banner record sent to it.
+    fn on_banner_answer(
+        &mut self,
+        peer: PeerId,
+        group: GroupId,
+        digest: [u8; 32],
+        response: MemberResponse,
+    ) {
+        if let Some(slot) = self.groups.get_mut(&group) {
+            slot.banner_answered(peer, digest);
+            if matches!(response, MemberResponse::Refused) {
+                tracing::debug!("{} refused the group's banner", short_peer(&peer));
+                slot.banner_refused.insert(peer, digest);
+            } else {
+                slot.banner_refused.remove(&peer);
+            }
         }
     }
 }
