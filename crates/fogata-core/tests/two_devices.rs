@@ -739,6 +739,129 @@ async fn a_partial_download_from_another_holder_is_not_gone_on_from() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Ana and Bea in the room of Ana's group, with a file of `size` bytes Ana shares there and
+/// Bea sees: the two, Bea's events, the group, the file's id and its bytes.
+async fn sharing_a_file(
+    base: &std::path::Path,
+    size: u32,
+) -> (Core, Core, CoreEvents, GroupId, [u8; 32], Vec<u8>) {
+    let _ = std::fs::remove_dir_all(base);
+    let (dir_a, dir_b) = (base.join("ana"), base.join("bea"));
+    Core::create_profile(&dir_a, "Ana", None).unwrap();
+    Core::create_profile(&dir_b, "Bea", None).unwrap();
+    let port_a = free_port();
+    let (ana, mut events_a) = Core::start(dir_a, options(port_a, Vec::new())).unwrap();
+    let group = ana.create_group("crew", 0, &[]).await.unwrap();
+    let invite = ana.invite(group, 1).await.unwrap();
+    let to_ana: Multiaddr = format!("/ip4/127.0.0.1/udp/{port_a}/quic-v1")
+        .parse()
+        .unwrap();
+    let (bea, mut events_b) = Core::start(dir_b, options(0, vec![to_ana])).unwrap();
+    let_in(&ana, &mut events_a, &bea, &mut events_b, &invite, group).await;
+    tokio::spawn(async move { while events_a.recv().await.is_some() {} });
+    ana.join_room(group).await.unwrap();
+    bea.join_room(group).await.unwrap();
+    let path = base.join("party.mp4");
+    let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&path, &bytes).unwrap();
+    let info = ana.share_file(group, path, None).await.unwrap();
+    eventually("Bea to see the file", || async {
+        let room = bea.room(group, FIRST_ROOM).await.unwrap();
+        room.is_some_and(|r| r.files.iter().any(|f| f.info.id == info.id))
+    })
+    .await;
+    (ana, bea, events_b, group, info.id, bytes)
+}
+
+/// Ana gives up every transfer of her file after 400 KiB of it, as she does one that Bea
+/// takes too slowly while another device waits: Bea's download goes on each time from the
+/// part it kept, past the three tries a download has (a cut that brought bytes is progress,
+/// and uses up none), and comes whole. Meanwhile Bea's row shows no failure, and its
+/// progress never goes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_room_download_cut_again_and_again_goes_on_from_what_came() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-core-cut-{}", std::process::id()));
+    let (ana, bea, mut events_b, group, id, bytes) = sharing_a_file(&base, 2 << 20).await;
+    let cut = 400 << 10;
+    ana.cut_transfers_after(Some(cut));
+    let downloads = base.join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    bea.download(group, id, &downloads).await.unwrap();
+    let mut shown: Vec<u64> = Vec::new();
+    let mut failed = None;
+    let done = timeout(Duration::from_secs(90), async {
+        while let Some(event) = events_b.recv().await {
+            match event {
+                CoreEvent::Download { file, received, .. } if file == id => shown.push(received),
+                CoreEvent::DownloadDone { file, .. } if file == id => return true,
+                CoreEvent::DownloadFailed { file, reason, .. } if file == id => {
+                    failed = Some(reason);
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
+    })
+    .await;
+    assert_eq!(failed, None, "a cut download failed");
+    assert_eq!(done, Ok(true), "the download never ended");
+    assert!(
+        shown.windows(2).all(|w| w[0] <= w[1]),
+        "the progress went back: {shown:?}"
+    );
+    assert_eq!(shown.last(), Some(&(2 << 20)), "{shown:?}");
+    // It took more transfers than a download has tries.
+    assert!((bytes.len() as u64).div_ceil(cut) > 3);
+    assert_eq!(std::fs::read(downloads.join("party.mp4")).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Ana gives up every transfer before any of it goes: each try brings nothing, which is no
+/// progress, so Bea's download fails after its three tries, and says so, rather than going
+/// round for ever; once Ana sends again, asked again, it comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_room_download_cut_with_nothing_come_fails_after_its_tries() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-core-cut0-{}", std::process::id()));
+    let (ana, bea, mut events_b, group, id, bytes) = sharing_a_file(&base, 1 << 20).await;
+    ana.cut_transfers_after(Some(0));
+    let downloads = base.join("downloads");
+    std::fs::create_dir_all(&downloads).unwrap();
+    let started = std::time::Instant::now();
+    bea.download(group, id, &downloads).await.unwrap();
+    let mut came = false;
+    wait_for(&mut events_b, "the download to fail", |e| match e {
+        CoreEvent::Download { file, .. } if *file == id => {
+            came = true;
+            false
+        }
+        CoreEvent::DownloadFailed { file, .. } => *file == id,
+        CoreEvent::DownloadDone { file, .. } => {
+            assert_ne!(*file, id, "it came although nothing was sent");
+            false
+        }
+        _ => false,
+    })
+    .await;
+    assert!(!came, "progress shown although nothing came");
+    // Three tries, with 2 and 5 s between them.
+    assert!(started.elapsed() >= Duration::from_secs(7));
+    ana.cut_transfers_after(None);
+    bea.download(group, id, &downloads).await.unwrap();
+    wait_for(&mut events_b, "the download", |e| match e {
+        CoreEvent::DownloadDone { file, .. } => *file == id,
+        CoreEvent::DownloadFailed { file, reason, .. } if *file == id => {
+            panic!("failed again: {reason}")
+        }
+        _ => false,
+    })
+    .await;
+    assert_eq!(std::fs::read(downloads.join("party.mp4")).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_file_past_the_most_a_room_lists_is_refused_with_a_reason() {
     let _one = ONE_AT_A_TIME.lock().await;

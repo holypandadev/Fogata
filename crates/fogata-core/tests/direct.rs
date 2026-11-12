@@ -800,6 +800,97 @@ async fn a_pin_of_a_message_gone_on_the_other_side_is_undone() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Ana gives up every transfer of a file after 200 KiB of it, as she does one that Bea takes
+/// too slowly while another device waits: the file Bea asked for goes on each time from what
+/// came, with no failure shown and progress that never goes back, and comes whole. Given up
+/// before any of it goes, a try brings nothing, which is no progress: Bea is told it did not
+/// come, once, and asked for again once Ana sends again, it comes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_file_asked_for_and_cut_again_and_again_comes_whole() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-direct-cut-{}", std::process::id()));
+    let (dir_a, dir_b) = friends(&base);
+    let size: usize = 1 << 20;
+    let document = base.join("report.pdf");
+    let bytes: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+    std::fs::write(&document, &bytes).unwrap();
+    let (options_a, options_b) = dialling();
+    let (ana, mut events_a) = Core::start(dir_a, options_a.clone()).unwrap();
+    let (bea, mut events_b) = Core::start(dir_b, options_b.clone()).unwrap();
+    let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
+    wait_for(&mut events_a, "Bea online", online).await;
+    wait_for(&mut events_b, "Ana online", online).await;
+    tokio::spawn(async move { while events_a.recv().await.is_some() {} });
+    let files = vec![Outgoing {
+        path: document.clone(),
+        video: None,
+    }];
+    ana.send_direct(bea.me(), "the report", files)
+        .await
+        .unwrap();
+    let chat = chat_until(&bea, ana.me(), "the message", |c| {
+        c.items.last().is_some_and(|i| i.files.len() == 1)
+    })
+    .await;
+    let item = chat.items.last().unwrap();
+    assert_eq!(item.files[0].file.local, Local::Missing);
+    let id = item.files[0].file.id;
+    let here = |c: &ChatView| c.items.last().unwrap().files[0].file.local == Local::Here;
+
+    // Given up before any of it goes: told once.
+    ana.cut_transfers_after(Some(0));
+    bea.fetch_direct_file(ana.me(), id).await.unwrap();
+    let mut came = false;
+    wait_for(&mut events_b, "the file not to come", |e| match e {
+        CoreEvent::DirectDownload { file, .. } if *file == id => {
+            came = true;
+            false
+        }
+        CoreEvent::DirectDownloadFailed { file, .. } => *file == id,
+        _ => false,
+    })
+    .await;
+    assert!(!came, "progress shown although nothing came");
+    assert!(!here(&bea.direct_chat(ana.me(), 100).await.unwrap()));
+
+    // Given up after 200 KiB, again and again.
+    let cut = 200 << 10;
+    ana.cut_transfers_after(Some(cut));
+    bea.fetch_direct_file(ana.me(), id).await.unwrap();
+    let mut shown: Vec<u64> = Vec::new();
+    let mut failed = None;
+    let done = timeout(Duration::from_secs(90), async {
+        loop {
+            match timeout(Duration::from_millis(500), events_b.recv()).await {
+                Ok(Some(CoreEvent::DirectDownload { file, received, .. })) if file == id => {
+                    shown.push(received);
+                }
+                Ok(Some(CoreEvent::DirectDownloadFailed { file, reason, .. })) if file == id => {
+                    failed = Some(reason);
+                    return false;
+                }
+                Ok(None) => return false,
+                _ => {}
+            }
+            if here(&bea.direct_chat(ana.me(), 100).await.unwrap()) {
+                return true;
+            }
+        }
+    })
+    .await;
+    assert_eq!(failed, None, "a cut file was shown as failed");
+    assert_eq!(done, Ok(true), "the file never came");
+    assert!(
+        shown.windows(2).all(|w| w[0] <= w[1]),
+        "the progress went back: {shown:?}"
+    );
+    assert!((size as u64).div_ceil(cut) > 3);
+    let kept = bea.direct_chat(ana.me(), 100).await.unwrap();
+    let path = kept.items.last().unwrap().files[0].path.clone().unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), bytes);
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn pictures_come_by_themselves_and_files_when_asked() {
     let _one = ONE_AT_A_TIME.lock().await;

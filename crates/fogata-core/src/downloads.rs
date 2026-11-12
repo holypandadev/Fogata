@@ -628,6 +628,14 @@ impl Core {
         self.inner.lock().free_space = Some(free_space);
     }
 
+    /// Stops every transfer of a file this device sends once it has sent `bytes` of it
+    /// (`None`: never), as one given up for a device that takes it too slowly is: for tests
+    /// of what the other device does then.
+    #[doc(hidden)]
+    pub fn cut_transfers_after(&self, bytes: Option<u64>) {
+        self.inner.shared.cut_after(bytes);
+    }
+
     /// Fetches a file of the room into memory for a preview, if it is at most `max_bytes`:
     /// nothing is kept on disk, this device does not start sharing it, and no download
     /// events are sent.

@@ -123,6 +123,8 @@ pub struct SharedFiles {
     registry: Arc<Mutex<Registry>>,
     /// What each device was sent in its day.
     day: Arc<Day>,
+    /// Bytes after which every transfer stops, for tests (see [`SharedFiles::cut_after`]).
+    cut: Arc<Mutex<Option<u64>>>,
 }
 
 /// A shared file: its group and id.
@@ -197,6 +199,14 @@ impl SharedFiles {
             .limits
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = (most, length);
+    }
+
+    /// Stops every transfer once it has sent `bytes` of its file (`None`: never), as one
+    /// given up for a reader that took it too slowly is (see [`LEAST_RATE`]): for tests of
+    /// what the other device does then, which cannot be that slow.
+    #[doc(hidden)]
+    pub fn cut_after(&self, bytes: Option<u64>) {
+        *crate::locked(&self.cut) = bytes;
     }
 
     /// Takes note of what stopped `id` of `group` being served so far, before its share
@@ -1134,7 +1144,8 @@ async fn send_file(
         }
         // Taken too slowly while another device waits: the turn goes to it, and the asker
         // goes on from here when it asks again.
-        if answering.gives_way(&reader, paced) {
+        let cut = crate::locked(&shared.cut).is_some_and(|cut| at - offset >= cut);
+        if cut || answering.gives_way(&reader, paced) {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "taken too slowly while another device waits",
