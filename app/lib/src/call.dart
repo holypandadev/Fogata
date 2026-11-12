@@ -1051,14 +1051,20 @@ class Call extends ChangeNotifier {
     await _resend(_camera);
   }
 
-  /// The voice engine lists the system's default device first.
+  /// The voice engine lists the system's default device first (on Windows, where
+  /// libwebrtc's own list has no default first, our copy of flutter_webrtc puts it there:
+  /// its FOGATA.md, "The system's default microphone and speaker").
   static Future<String?> _first(String kind) async {
     try {
       final devices = await navigator.mediaDevices.enumerateDevices();
-      return devices
+      final listed = devices
           .where((d) => d.kind == kind && !d.label.contains(silenceLabel))
-          .firstOrNull
-          ?.deviceId;
+          .toList();
+      // Which device the system's default was taken for, in the call's log.
+      _trace(
+        '$kind, the first taken: ${listed.map((d) => d.label).join(' | ')}',
+      );
+      return listed.firstOrNull?.deviceId;
     } catch (_) {
       return null;
     }

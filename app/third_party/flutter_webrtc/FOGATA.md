@@ -957,6 +957,32 @@ to the system's default devices.
   the meter stay empty until the application restarts (not yet seen on a computer).
 - Checked by `tools/call-lab/mic.sh devices` (Linux).
 
+## The system's default microphone and speaker (Windows)
+
+The application takes the first device listed for the system's default (`_first` in
+`app/lib/src/call.dart`, `_choose` in `app/lib/src/mic_test.dart`), and the package's
+`getUserMedia` without a device records from the first input. On Linux libwebrtc's
+PulseAudio device lists the default first. On Windows its CoreAudio device lists the active
+endpoints in the order Windows enumerates them, with no default among them: the first may
+be any device (a virtual cable's 16-channel input, a phone's virtual microphone), so a call
+or a microphone test with "System default" played to, and recorded from, whichever came
+first. Only the voice engine's own start (`adm_helpers::Init`) takes Windows' default for
+calls (the communications role), and since it stays (above) and calls choose the default
+by its id, nothing else did.
+
+- `common/cpp/include/fogata_default_device.h` (new): `DefaultAudioEndpoint` asks Windows
+  for the endpoint id of its default input or output for calls
+  (`IMMDeviceEnumerator::GetDefaultAudioEndpoint`, `eCommunications`, as libwebrtc's own
+  start), on the platform thread, where the runner has started COM; elsewhere, or when
+  Windows cannot tell, it is "", and nothing changes. `DefaultDevicePlace` finds that id
+  among the devices' guids (libwebrtc gives the same endpoint id), `ListingOrder` puts it
+  first. Tested by `common/cpp/test/default_device_test.cc` (in `run_tests.sh`).
+- `common/cpp/src/flutter_media_stream.cc`: `getSources` lists the default input and output
+  first (a device is still selected by its id, at its own place in libwebrtc's list), and
+  `getUserMedia` without a device records from the default input.
+- With `FOGATA_CALL_LOG` set, the call's log names the devices of each kind in the order
+  listed whenever the system's default is taken (the first).
+
 ## Each connection from its own configuration (Linux, Windows)
 
 `createPeerConnection` parsed each connection's configuration over one kept in the plugin

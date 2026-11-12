@@ -1,6 +1,7 @@
 #include "flutter_media_stream.h"
 
 #include "flutter_utf8_sanitize.h"
+#include "fogata_default_device.h"
 #include "fogata_track_owner.h"
 #ifdef __linux__
 #include "output_keeper.h"
@@ -31,6 +32,27 @@ std::string SanitizeDeviceIdFromVideoBuffers(const char* name, const char* guid)
                               ? std::string(guid)
                               : std::string(name != nullptr ? name : "");
   return SanitizeUtf8ForFlutter(raw);
+}
+
+// Fogata: the place of the system's default input (`capture`) or output in libwebrtc's
+// list of `count` devices; 0, its first, where that is the default or it cannot be told
+// (fogata_default_device.h: on Windows the list has no default first).
+uint16_t DefaultAudioPlace(RTCAudioDevice* audio, bool capture, int count) {
+  const std::string wanted = DefaultAudioEndpoint(capture);
+  if (wanted.empty() || count <= 0)
+    return 0;
+  std::vector<std::string> guids;
+  char name[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
+  char guid[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
+  for (int i = 0; i < count; i++) {
+    name[0] = guid[0] = 0;
+    if (capture)
+      audio->RecordingDeviceName(static_cast<uint16_t>(i), name, guid);
+    else
+      audio->PlayoutDeviceName(static_cast<uint16_t>(i), name, guid);
+    guids.push_back(std::string(guid));
+  }
+  return DefaultDevicePlace(guids, wanted);
 }
 
 }  // namespace
@@ -238,11 +260,14 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
     }
 
     if (sourceId == "") {
-      base_->audio_device_->RecordingDeviceName(0, strRecordingName,
+      // Fogata: the system's default, which on Windows need not be the first listed.
+      const uint16_t place = DefaultAudioPlace(base_->audio_device_.get(),
+                                               true, recording_devices);
+      base_->audio_device_->RecordingDeviceName(place, strRecordingName,
                                                 strRecordingGuid);
       sourceId = SanitizeDeviceIdFromAudioBuffers(strRecordingName,
                                                   strRecordingGuid);
-      base_->SelectRecordingDevice(0, sourceId);
+      base_->SelectRecordingDevice(place, sourceId);
     }
 
     char strPlayoutName[256];
@@ -492,11 +517,16 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
 void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   EncodableList sources;
 
+  // Fogata: the system's default input and output listed first, as the application
+  // takes the first listed for the default (fogata_default_device.h). A device is still
+  // selected by its id, at its own place in libwebrtc's list.
   int nb_audio_devices = base_->audio_device_->RecordingDevices();
   char strNameUTF8[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
   char strGuidUTF8[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
 
-  for (uint16_t i = 0; i < nb_audio_devices; i++) {
+  for (uint16_t i : ListingOrder(
+           nb_audio_devices, DefaultAudioPlace(base_->audio_device_.get(),
+                                               true, nb_audio_devices))) {
     base_->audio_device_->RecordingDeviceName(i, strNameUTF8, strGuidUTF8);
     std::string device_id =
         SanitizeDeviceIdFromAudioBuffers(strNameUTF8, strGuidUTF8);
@@ -509,7 +539,9 @@ void FlutterMediaStream::GetSources(std::unique_ptr<MethodResultProxy> result) {
   }
 
   nb_audio_devices = base_->audio_device_->PlayoutDevices();
-  for (uint16_t i = 0; i < nb_audio_devices; i++) {
+  for (uint16_t i : ListingOrder(
+           nb_audio_devices, DefaultAudioPlace(base_->audio_device_.get(),
+                                               false, nb_audio_devices))) {
     base_->audio_device_->PlayoutDeviceName(i, strNameUTF8, strGuidUTF8);
     std::string device_id =
         SanitizeDeviceIdFromAudioBuffers(strNameUTF8, strGuidUTF8);

@@ -17,7 +17,10 @@
 // only: an input called FogataMic that carries a tone, a silent one called FogataQuiet and
 // an output called FogataTest. FOGATA_TEST_MIC=off enters with the microphone off, with
 // the same virtual devices. FOGATA_TEST_MIC=system uses the computer's own microphone and
-// speakers instead, where that is allowed. With a tone on copy a, the others also see it
+// speakers instead, where that is allowed: the system's defaults, or with FOGATA_TEST_INPUT
+// and FOGATA_TEST_OUTPUT the input and the output whose names contain them, chosen as the
+// settings choose a device (a computer whose default microphone is silent, as a phone's
+// virtual one with no phone). With a tone on copy a, the others also see it
 // mute and change microphone. FOGATA_TEST_CAMERA=1 turns the camera on.
 // FOGATA_TEST_SCREEN=1 shares the first screen, best on a virtual display since the others
 // receive what it shows; FOGATA_TEST_SCREEN=window shares the app's own window. With
@@ -487,6 +490,21 @@ Future<void> _call(WidgetTester tester) async {
     }
     // Were the microphone opened anyway, it would hear only silence.
     if (_mic == 'off') state.prefs.audioInput = _quiet;
+  }
+  if (_mic == 'system') {
+    // This computer's own devices, by a part of their names.
+    String? named(String kind, String? name) => name == null || name.isEmpty
+        ? null
+        : devices
+              .firstWhere(
+                (d) => d.kind == kind && d.label.contains(name),
+                orElse: () => throw StateError('no $kind called $name'),
+              )
+              .deviceId;
+    final input = named('audioinput', _env['FOGATA_TEST_INPUT']);
+    final output = named('audiooutput', _env['FOGATA_TEST_OUTPUT']);
+    if (input != null) state.prefs.audioInput = input;
+    if (output != null) state.prefs.audioOutput = output;
   }
   // A microphone that cannot be opened: only where the copy reaches no sound server at all
   // (tools/call-lab/mic.sh broken), never where it could open the computer's own.

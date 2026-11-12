@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
 # renderer's, a connection's received tracks' and the retired textures' with
-# ThreadSanitizer, the check of the noise suppression table, which outputs a shared
+# ThreadSanitizer, the check of the noise suppression table, the order the system's
+# default microphone and speaker are listed in, which outputs a shared
 # screen's sound takes, the portal's frame conversion, and libwebrtc
 # taking a local offer with a section rejected as call.dart rejects one, its voice engine
 # stopping with the last connection unless one is kept (voice_engine_test.cc), screen
@@ -46,6 +47,11 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/retired_textures_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/common/cpp/include" \
   "$here/track_owner_test.cc" -o "$out/track_owner_test"
 "$out/track_owner_test"
+# The system's default microphone and speaker listed first (fogata_default_device.h): plain
+# C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/common/cpp/include" \
+  "$here/default_device_test.cc" -o "$out/default_device_test"
+"$out/default_device_test"
 # Which outputs a shared screen's sound takes (linux/screen_sound_node.h): plain C++.
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/linux" \
   "$here/screen_sound_node_test.cc" -o "$out/screen_sound_node_test"
