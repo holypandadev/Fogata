@@ -1328,12 +1328,13 @@ mod tests {
         }
         assert_eq!(found, expected);
         // What the events kept.
-        let state = inner.lock();
-        assert!(state.join_asks.is_empty());
-        assert!(state.profiles.contains_key(&device));
-        assert!(!state.friends_online.contains_key(&device));
-        assert!(!state.away.contains(&device));
-        drop(state);
+        {
+            let state = inner.lock();
+            assert!(state.join_asks.is_empty());
+            assert!(state.profiles.contains_key(&device));
+            assert!(!state.friends_online.contains_key(&device));
+            assert!(!state.away.contains(&device));
+        }
         core.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
