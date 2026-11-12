@@ -259,55 +259,7 @@ impl Node {
             }
             MemberRequest::Addresses { addresses } => self.on_addresses_request(peer, addresses),
             MemberRequest::Signal { group_id, payload } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if !self.is_member_of(&group, &peer) {
-                    return MemberResponse::Refused;
-                }
-                let Some(from) = self.members.get(&peer).map(|m| m.device) else {
-                    return MemberResponse::Refused;
-                };
-                // Calls are set up in a voice room, by its participants, with a few small
-                // signals: none goes to a device in none of the group's rooms, and a member
-                // that sends large or many is not heard. Nothing of a call with someone kept
-                // out of the voice room it is for. A member not in this device's room is
-                // heard only a few times now and then: its join may still be on its way, and
-                // the application keeps those few until it comes.
-                let Some(in_my_room) = self
-                    .groups
-                    .get(&group)
-                    .and_then(|s| s.joined())
-                    .map(|(_, room)| room.is_participant(&from))
-                else {
-                    return MemberResponse::Refused;
-                };
-                let now = Instant::now();
-                if payload.len() > limits::MAX_SIGNAL_BYTES
-                    || self.kept_out_of_my_room(&group, &from)
-                {
-                    tracing::debug!(%peer, bytes = payload.len(), "call signal dropped");
-                    return MemberResponse::Refused;
-                }
-                // A call is set up after its sender entered the room, so its join is late or
-                // was lost on the way: the room is asked of the sender now, rather than heard
-                // at its next presence, up to 20 s on, with the call waiting for it. Once
-                // every 15 s at most (see `ask_room`), however many it sends.
-                if !in_my_room {
-                    self.ask_room(group, peer);
-                }
-                if !self.limits.take_signal(peer, now)
-                    || (!in_my_room && !self.limits.take_early_signal(peer, now))
-                {
-                    tracing::debug!(%peer, bytes = payload.len(), "call signal dropped");
-                    return MemberResponse::Refused;
-                }
-                self.emit(NodeEvent::Signal {
-                    group,
-                    from,
-                    payload,
-                });
-                MemberResponse::Ack
+                self.on_signal_request(peer, group_id, payload)
             }
             MemberRequest::Admitted {
                 group_id,
@@ -966,6 +918,62 @@ impl Node {
             self.quic_tried.remove(&peer);
         }
         self.want_datagrams(peer);
+        MemberResponse::Ack
+    }
+
+    /// Takes a call signal a member sends in a group's voice room.
+    fn on_signal_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        payload: Vec<u8>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        if !self.is_member_of(&group, &peer) {
+            return MemberResponse::Refused;
+        }
+        let Some(from) = self.members.get(&peer).map(|m| m.device) else {
+            return MemberResponse::Refused;
+        };
+        // Calls are set up in a voice room, by its participants, with a few small
+        // signals: none goes to a device in none of the group's rooms, and a member
+        // that sends large or many is not heard. Nothing of a call with someone kept
+        // out of the voice room it is for. A member not in this device's room is
+        // heard only a few times now and then: its join may still be on its way, and
+        // the application keeps those few until it comes.
+        let Some(in_my_room) = self
+            .groups
+            .get(&group)
+            .and_then(|s| s.joined())
+            .map(|(_, room)| room.is_participant(&from))
+        else {
+            return MemberResponse::Refused;
+        };
+        let now = Instant::now();
+        if payload.len() > limits::MAX_SIGNAL_BYTES || self.kept_out_of_my_room(&group, &from) {
+            tracing::debug!(%peer, bytes = payload.len(), "call signal dropped");
+            return MemberResponse::Refused;
+        }
+        // A call is set up after its sender entered the room, so its join is late or
+        // was lost on the way: the room is asked of the sender now, rather than heard
+        // at its next presence, up to 20 s on, with the call waiting for it. Once
+        // every 15 s at most (see `ask_room`), however many it sends.
+        if !in_my_room {
+            self.ask_room(group, peer);
+        }
+        if !self.limits.take_signal(peer, now)
+            || (!in_my_room && !self.limits.take_early_signal(peer, now))
+        {
+            tracing::debug!(%peer, bytes = payload.len(), "call signal dropped");
+            return MemberResponse::Refused;
+        }
+        self.emit(NodeEvent::Signal {
+            group,
+            from,
+            payload,
+        });
         MemberResponse::Ack
     }
 
