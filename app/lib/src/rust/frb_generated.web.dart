@@ -431,6 +431,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   UiDirectCall dco_decode_ui_direct_call(dynamic raw);
 
   @protected
+  UiDirectChanges dco_decode_ui_direct_changes(dynamic raw);
+
+  @protected
   UiDirectChat dco_decode_ui_direct_chat(dynamic raw);
 
   @protected
@@ -441,6 +444,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   UiDirectItem dco_decode_ui_direct_item(dynamic raw);
+
+  @protected
+  UiDirectOlder dco_decode_ui_direct_older(dynamic raw);
 
   @protected
   UiDirectOutgoing dco_decode_ui_direct_outgoing(dynamic raw);
@@ -1120,6 +1126,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   UiDirectCall sse_decode_ui_direct_call(SseDeserializer deserializer);
 
   @protected
+  UiDirectChanges sse_decode_ui_direct_changes(SseDeserializer deserializer);
+
+  @protected
   UiDirectChat sse_decode_ui_direct_chat(SseDeserializer deserializer);
 
   @protected
@@ -1132,6 +1141,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   UiDirectItem sse_decode_ui_direct_item(SseDeserializer deserializer);
+
+  @protected
+  UiDirectOlder sse_decode_ui_direct_older(SseDeserializer deserializer);
 
   @protected
   UiDirectOutgoing sse_decode_ui_direct_outgoing(SseDeserializer deserializer);
@@ -1956,6 +1968,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_ui_direct_call(UiDirectCall self, SseSerializer serializer);
 
   @protected
+  void sse_encode_ui_direct_changes(
+    UiDirectChanges self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_ui_direct_chat(UiDirectChat self, SseSerializer serializer);
 
   @protected
@@ -1969,6 +1987,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   void sse_encode_ui_direct_item(UiDirectItem self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_ui_direct_older(UiDirectOlder self, SseSerializer serializer);
 
   @protected
   void sse_encode_ui_direct_outgoing(

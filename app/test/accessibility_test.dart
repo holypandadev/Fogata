@@ -55,6 +55,7 @@ const _sofia = UiPerson(
 
 UiDirectItem _item(String id, String text, {bool mine = false}) => UiDirectItem(
   id: id,
+  seq: 0,
   mine: mine,
   atMs: DateTime.now().millisecondsSinceEpoch,
   text: text,
@@ -68,6 +69,7 @@ UiDirectPage _page(List<UiDirectItem> items, {UiPerson friend = _sofia}) =>
     UiDirectPage(
       away: false,
       friend: friend,
+      version: 0,
       online: true,
       connected: true,
       items: items,

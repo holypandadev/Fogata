@@ -158,6 +158,7 @@ void _stage(AppState state, String file, UiFileState fileState) {
   final page = state.direct.page!;
   UiDirectItem item(UiDirectItem i) => UiDirectItem(
     id: i.id,
+    seq: i.seq,
     mine: i.mine,
     atMs: i.atMs,
     text: i.text,
@@ -184,6 +185,7 @@ void _stage(AppState state, String file, UiFileState fileState) {
   );
   state.direct.page = UiDirectPage(
     friend: page.friend,
+    version: 0,
     online: page.online,
     away: false,
     lastSeenMs: page.lastSeenMs,

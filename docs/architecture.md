@@ -3666,8 +3666,22 @@ What the screens read (all computed on demand from the node and these files):
 - `members(group)` (each with its full fingerprint, shown on hovering the short one),
   `network_report()` with `diagnose::diagnose` for plain words.
 - `direct_chats()` (each chat with its last line, unread count and timer) and
-  `direct_chat(friend)` (its items with each attachment's state, the messages pinned,
-  whether the chat is connected, what it takes here), `direct_storage()`.
+  `direct_chat(friend)` (its newest items with each attachment's state, the messages
+  pinned, whether the chat is connected, what it takes here, and a `version`),
+  `direct_storage()`. A chat on screen is then read only in parts: `direct_chat_older`
+  gives the items before one the screen holds, by that item's place in the chat (its
+  `seq` and id, which never change, so the page before it is the same however many came,
+  changed or went after it), down to a given place when asked (a pinned message brought
+  into view, in one read); `direct_chat_changes` gives what changed since a `version`
+  among the items from the oldest held on: those that came or changed (delivered, a file
+  coming, fetched or removed, played, pinned or unpinned), the ids of those that went or
+  no longer show, and the pinned messages only when they may have changed. Each item
+  carries, in memory only, the stamp of its last change, from one count for every chat,
+  and a chat remembers its last 1024 removals: a view older than the chat (read again at
+  a start) or than the removals it remembers gets the items from the oldest it held on
+  whole instead. The screen merges what comes into what it holds, reads the page one
+  read at a time in the order asked, and holds only the chat shown; the others are the
+  list's summaries.
 
 What they do: make a profile, change it; friend links and codes, add, answer, remove; make a
 group with friends, invite, join, add or remove members, move them up or down, choose who

@@ -243,12 +243,14 @@ AppState _direct() {
     ..page = UiDirectPage(
       away: true,
       friend: _sofia,
+      version: 0,
       online: true,
       connected: true,
       items: [
         for (var i = 0; i < 6; i++)
           UiDirectItem(
             id: '$i',
+            seq: 0,
             mine: i.isEven,
             atMs: now - (6 - i) * 26 * 3600 * 1000,
             text: 'Message number $i, a little longer than one word',
@@ -275,6 +277,7 @@ AppState _voiceChat({bool problem = false}) {
   final now = DateTime.now().millisecondsSinceEpoch;
   state.direct.page = UiDirectPage(
     friend: page.friend,
+    version: 0,
     online: true,
     away: false,
     connected: true,
@@ -282,6 +285,7 @@ AppState _voiceChat({bool problem = false}) {
       for (final (i, s) in UiFileState.values.indexed)
         UiDirectItem(
           id: 'v$i',
+          seq: 0,
           mine: i.isOdd,
           atMs: now - 1000 + i,
           text: '',

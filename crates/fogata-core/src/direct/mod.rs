@@ -178,6 +178,54 @@ pub struct ChatView {
     /// The chat's history on this device's disk was changed, or part of it lost, since
     /// this device last wrote it: found when it was read at this start.
     pub altered: bool,
+    /// When it was read: what changed since is asked for with it
+    /// ([`Core::direct_chat_changes`]).
+    pub version: u64,
+}
+
+/// Older items of a chat, before one a screen holds ([`Core::direct_chat_older`]).
+#[derive(Clone, Debug)]
+pub struct OlderItems {
+    /// Oldest first.
+    pub items: Vec<ItemView>,
+    /// Older items are there too.
+    pub more: bool,
+}
+
+/// What changed in a chat since a view of it was read ([`Core::direct_chat_changes`]).
+#[derive(Clone, Debug)]
+pub struct ChatChanges {
+    /// The chat now. Its items are those that came or changed since the view was read,
+    /// oldest first, unless `whole`; its pinned messages are there only when
+    /// `pinned_changed`; `more` says whether items are there before the oldest the view
+    /// holds.
+    pub view: ChatView,
+    /// Items the view may hold that no longer show: gone, or a pin whose message went.
+    pub removed: Vec<ItemId>,
+    /// What changed is not known: the items are the chat's from the oldest the view held
+    /// on, or its newest, to take in place of the view's.
+    pub whole: bool,
+    /// The messages pinned are given, and may have changed.
+    pub pinned_changed: bool,
+}
+
+/// Which items of a chat a view of it reads.
+enum Pick {
+    /// The newest, at most this many.
+    Newest(usize),
+    /// What changed since stamp `since` from item `from` on, or among the newest `count`
+    /// when the view holds none.
+    Changes {
+        since: u64,
+        from: Option<(u64, ItemId)>,
+        count: usize,
+    },
+}
+
+/// Whether `item` shows in its chat: not a pin whose message is gone (an unpin on its way
+/// to the friend), nor a deletion for both, which waits for the friend unseen.
+fn shows(chat: &Chat, item: &Item) -> bool {
+    item.pin_target().is_none_or(|t| chat.contains(t)) && item.unsend_target().is_none()
 }
 
 /// What direct messages take on this device.
@@ -235,6 +283,20 @@ struct ChatsState {
     /// Attachments being sent: a copy in the chat's folder is not removed while a send uses
     /// it (see `Copies` in sending.rs).
     copying: InUse,
+}
+
+impl ChatsState {
+    /// Notes how much of `file` came from `friend` so far, or that its download ended
+    /// (`None`): the messages with it show it changed.
+    fn set_download(&mut self, friend: DevicePublicKey, file: FileId, got: Option<u64>) {
+        match got {
+            Some(got) => self.downloads.insert((friend, file), got),
+            None => self.downloads.remove(&(friend, file)),
+        };
+        if let Some(entry) = self.chats.get_mut(&friend) {
+            entry.chat.touch_file(&file);
+        }
+    }
 }
 
 /// Attachments being sent, by how many sends use them, with the copies a removal left for
@@ -881,6 +943,61 @@ impl Core {
     /// A chat's newest `limit` items, and what goes with the chat. A friend never written
     /// with gives an empty chat.
     pub async fn direct_chat(&self, friend: DevicePublicKey, limit: usize) -> Result<ChatView> {
+        Ok(self.chat_view(friend, Pick::Newest(limit)).await?.view)
+    }
+
+    /// The items of a chat just before the item at `before` (its `seq` and id) in the chat's
+    /// order, whether that one is still there or not: `count` of them, and more to reach
+    /// `seq` `down_to` when given, oldest first. The place of an item never changes, so the
+    /// items before it are the same however many came, changed or went after it.
+    pub fn direct_chat_older(
+        &self,
+        friend: DevicePublicKey,
+        before: (u64, ItemId),
+        count: usize,
+        down_to: Option<u64>,
+    ) -> Result<OlderItems> {
+        let chats = self.inner.direct.lock();
+        let Some(entry) = chats.chats.get(&friend) else {
+            return Ok(OlderItems {
+                items: Vec::new(),
+                more: false,
+            });
+        };
+        let chat = &entry.chat;
+        let end = chat.place(before);
+        let mut start = end.saturating_sub(count);
+        if let Some(seq) = down_to {
+            start = start.min(chat.place((seq, [0; 16])));
+        }
+        let view = self.item_view(&chats, &friend, chat);
+        Ok(OlderItems {
+            items: chat.items()[start..end]
+                .iter()
+                .filter(|i| shows(chat, i))
+                .map(view)
+                .collect(),
+            more: start > 0,
+        })
+    }
+
+    /// What changed in a chat since a view of it read at `since` (its `version`) that holds
+    /// the items from `from` (the oldest it holds) on, or none: what came or changed among
+    /// them, what went, and what goes with the chat. Only when the chat no longer knows what
+    /// changed since then (it was read again, or many went) does it give the items from
+    /// `from` on whole; a view that holds none gets at most the newest `count`.
+    pub async fn direct_chat_changes(
+        &self,
+        friend: DevicePublicKey,
+        since: u64,
+        from: Option<(u64, ItemId)>,
+        count: usize,
+    ) -> Result<ChatChanges> {
+        self.chat_view(friend, Pick::Changes { since, from, count })
+            .await
+    }
+
+    async fn chat_view(&self, friend: DevicePublicKey, pick: Pick) -> Result<ChatChanges> {
         let book = self.inner.node.friends().await?;
         let in_book = book
             .as_ref()
@@ -901,57 +1018,112 @@ impl Core {
             None if in_book => &empty,
             None => bail!("no chat with that device"),
         };
-        let pinned = entry.chat.pinned();
-        let view = |item: &Item| ItemView {
+        let chat = &entry.chat;
+        // With the chats held: whatever changes after this has a later stamp.
+        let version = model::version();
+        let view = self.item_view(&chats, &friend, chat);
+        let items = chat.items();
+        let newest = |count: usize| items.len().saturating_sub(count);
+        let (start, items, removed, whole, pinned_changed) = match pick {
+            Pick::Newest(limit) => {
+                let start = newest(limit);
+                let items = items[start..]
+                    .iter()
+                    .filter(|i| shows(chat, i))
+                    .map(&view)
+                    .collect();
+                (start, items, Vec::new(), true, true)
+            }
+            Pick::Changes { since, from, count } => {
+                let start = from.map_or_else(|| newest(count), |from| chat.place(from));
+                if chat.knows_since(since) {
+                    let mut removed: Vec<ItemId> = chat.removed_since(since).copied().collect();
+                    let mut changed = Vec::new();
+                    for item in chat.changed_since(since, start) {
+                        if shows(chat, item) {
+                            changed.push(view(item));
+                        } else {
+                            // Shown no longer, as a pin whose message went.
+                            removed.push(item.id);
+                        }
+                    }
+                    (
+                        start,
+                        changed,
+                        removed,
+                        false,
+                        chat.pins_changed_since(since),
+                    )
+                } else {
+                    let items = items[start..]
+                        .iter()
+                        .filter(|i| shows(chat, i))
+                        .map(&view)
+                        .collect();
+                    (start, items, Vec::new(), true, true)
+                }
+            }
+        };
+        let pinned = if pinned_changed {
+            chat.pinned()
+                .iter()
+                .filter_map(|id| chat.get(id))
+                .map(&view)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut usage = chat.usage();
+        usage.messages = self.inner.direct.store.journal_bytes(&friend);
+        Ok(ChatChanges {
+            view: ChatView {
+                friend: chat_person(&friend, entry, book.as_ref()),
+                online,
+                away,
+                last_seen_ms,
+                // A friend appearing offline is not shown as connected either.
+                connected: online && chats.connected.contains(&friend),
+                items,
+                more: start > 0,
+                pinned,
+                timer_ms: chat.timer().max(if chat.is_empty() {
+                    chats.settings.timer_ms
+                } else {
+                    0
+                }),
+                ended_ms: entry.ended_ms,
+                usage,
+                altered: entry.altered,
+                version,
+            },
+            removed,
+            whole,
+            pinned_changed,
+        })
+    }
+
+    /// How an item of the chat with `friend` shows, with its files as they stand here.
+    fn item_view<'a>(
+        &'a self,
+        chats: &'a ChatsState,
+        friend: &'a DevicePublicKey,
+        chat: &Chat,
+    ) -> impl Fn(&Item) -> ItemView + 'a {
+        let pinned = chat.pinned();
+        move |item: &Item| ItemView {
             item: item.clone(),
             files: item
                 .files()
                 .iter()
                 .map(|f| FileView {
                     file: f.clone(),
-                    received: chats.downloads.get(&(friend, f.id)).copied(),
+                    received: chats.downloads.get(&(*friend, f.id)).copied(),
                     path: (f.local == Local::Here)
-                        .then(|| self.inner.direct.store.file_path(&friend, f)),
+                        .then(|| self.inner.direct.store.file_path(friend, f)),
                 })
                 .collect(),
             pinned: pinned.contains(&item.id),
-        };
-        let items = entry.chat.items();
-        let start = items.len().saturating_sub(limit);
-        // A pin whose message is gone (an unpin on its way to the friend) says nothing.
-        let items = items[start..]
-            .iter()
-            .filter(|i| i.pin_target().is_none_or(|t| entry.chat.contains(t)))
-            // A deletion for both waits for the friend unseen.
-            .filter(|i| i.unsend_target().is_none())
-            .map(view)
-            .collect();
-        let pinned = pinned
-            .iter()
-            .filter_map(|id| entry.chat.get(id))
-            .map(view)
-            .collect();
-        let mut usage = entry.chat.usage();
-        usage.messages = self.inner.direct.store.journal_bytes(&friend);
-        Ok(ChatView {
-            friend: chat_person(&friend, entry, book.as_ref()),
-            online,
-            away,
-            last_seen_ms,
-            // A friend appearing offline is not shown as connected either.
-            connected: online && chats.connected.contains(&friend),
-            items,
-            more: start > 0,
-            pinned,
-            timer_ms: entry.chat.timer().max(if entry.chat.is_empty() {
-                chats.settings.timer_ms
-            } else {
-                0
-            }),
-            ended_ms: entry.ended_ms,
-            usage,
-            altered: entry.altered,
-        })
+        }
     }
 
     /// Marks everything in a chat as read.

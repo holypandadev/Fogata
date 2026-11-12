@@ -51,8 +51,11 @@ UiDirectItem message(
   bool delivered = true,
   bool pinned = false,
   List<UiDirectFile> files = const [],
+  int? seq,
 }) => UiDirectItem(
   id: id,
+  // Its place in the chat: the number its id is, when it is one.
+  seq: seq ?? int.tryParse(id) ?? 0,
   mine: mine,
   atMs: at ?? now,
   text: text,
@@ -69,9 +72,11 @@ UiDirectPage page(
   int timer = 0,
   bool more = false,
   bool altered = false,
+  int version = 0,
 }) => UiDirectPage(
   away: false,
   friend: sofia,
+  version: version,
   online: online,
   lastSeenMs: online ? null : now - 2 * dayMs,
   connected: online,
@@ -191,6 +196,7 @@ void main() {
   test('a change of the timer says who made it', () {
     UiDirectItem timer(int ms, {bool mine = false}) => UiDirectItem(
       id: 't',
+      seq: 0,
       mine: mine,
       atMs: 1,
       text: '',
@@ -463,29 +469,105 @@ void main() {
   );
 
   test(
-    'a page read earlier that answers later does not replace a newer one',
+    'a read that answers after the page changed asks again from what it is now',
     () async {
       final state = AppState('/nonexistent/fogata-direct-test');
-      final answers = <Completer<UiDirectPage>>[];
+      final asked = <int>[];
+      final answers = <Completer<UiDirectChanges>>[];
       state.direct
         ..open = sofia.id
-        ..loadChat = ({required deviceId, required limit}) {
-          final answer = Completer<UiDirectPage>();
-          answers.add(answer);
-          return answer.future;
-        };
-      final older = state.direct.refresh();
-      final newer = state.direct.refresh();
+        ..page = page([message('1', 'Before')], version: 10)
+        ..loadChanges =
+            ({
+              required deviceId,
+              required since,
+              fromSeq,
+              fromId,
+              required count,
+            }) {
+              asked.add(since);
+              final answer = Completer<UiDirectChanges>();
+              answers.add(answer);
+              return answer.future;
+            };
+      UiDirectChanges changed(List<UiDirectItem> items, int version) =>
+          UiDirectChanges(
+            page: page(items, version: version),
+            removed: const [],
+            whole: false,
+            pinnedChanged: false,
+          );
+      // A send and an event at once: both ask from the page held.
+      final first = state.direct.refresh();
+      final second = state.direct.refresh();
       await pumpEventQueue();
-      expect(answers, hasLength(2));
-      final sent = page([message('1', 'Before'), message('2', 'Just sent')]);
-      answers[1].complete(sent);
-      await newer;
-      answers[0].complete(page([message('1', 'Before')]));
-      await older;
-      expect(state.direct.page, same(sent));
+      expect(asked, [10, 10]);
+      // The one asked later answers first.
+      answers[1].complete(changed([message('2', 'Just sent')], 12));
+      await second;
+      // The other, older news, is not taken: it asks again from where the page is now.
+      answers[0].complete(changed(const [], 11));
+      await pumpEventQueue();
+      expect(asked, [10, 10, 12]);
+      answers[2].complete(changed(const [], 13));
+      await first;
+      expect(state.direct.page!.items.map((i) => i.text), [
+        'Before',
+        'Just sent',
+      ]);
+      expect(state.direct.page!.version, 13);
+      state.dispose();
     },
   );
+
+  test('what changed in a chat is merged into the page held', () {
+    final held = page(
+      [
+        message('3', 'three'),
+        message('4', 'four', mine: true, delivered: false),
+        message('5', 'five', pinned: true),
+      ],
+      more: true,
+      version: 20,
+    );
+    UiDirectChanges changes(
+      List<UiDirectItem> items, {
+      List<String> removed = const [],
+      bool whole = false,
+      bool pinned = false,
+      bool more = true,
+    }) => UiDirectChanges(
+      page: page(items, version: 30, more: more),
+      removed: removed,
+      whole: whole,
+      pinnedChanged: pinned,
+    );
+    // Delivered, one deleted, one new; the pinned ones stay as held when not given.
+    final now = merged(
+      held,
+      changes(
+        [message('4', 'four', mine: true), message('6', 'six')],
+        removed: ['3', 'not held'],
+      ),
+    );
+    expect(now.items.map((i) => (i.id, i.delivered)), [
+      ('4', true),
+      ('5', true),
+      ('6', true),
+    ]);
+    expect(now.pinned.map((i) => i.id), ['5']);
+    expect((now.version, now.more), (30, true));
+    // The pinned messages given replace those held, even none.
+    expect(merged(held, changes(const [], pinned: true)).pinned, isEmpty);
+    // Whole: the items given take the place of those held.
+    expect(
+      merged(
+        held,
+        changes([message('5', 'five')], whole: true, more: false),
+      ).items.map((i) => i.id),
+      ['5'],
+    );
+  });
 
   test('pictures read for a chat go when another is shown', () async {
     final state = AppState('/nonexistent/fogata-direct-test');
@@ -516,6 +598,7 @@ void main() {
   ) async {
     UiDirectItem lasting(String id, String text, int expires) => UiDirectItem(
       id: id,
+      seq: 0,
       mine: false,
       atMs: now,
       text: text,
@@ -597,6 +680,7 @@ void main() {
   UiDirectItem pinOf(String target, {bool mine = false, bool pinned = true}) =>
       UiDirectItem(
         id: 'pin-$target-$pinned',
+        seq: 0,
         mine: mine,
         atMs: now,
         text: '',
@@ -1176,18 +1260,81 @@ void main() {
 
   test('older messages are asked for one page at a time', () async {
     final state = AppState('/nonexistent/fogata-direct-more');
+    final asked = <(int, String, int?)>[];
+    final answer = Completer<UiDirectOlder>();
     state.direct
       ..open = sofia.id
-      ..page = page([message('1', 'Hello')], more: true);
+      ..page = page([message('5', 'Hello')], more: true)
+      ..loadOlder =
+          ({
+            required deviceId,
+            required beforeSeq,
+            required beforeId,
+            required count,
+            downToSeq,
+          }) {
+            asked.add((beforeSeq, beforeId, downToSeq));
+            return answer.future;
+          };
     final first = state.direct.more();
     for (var i = 0; i < 5; i++) {
       expect(identical(state.direct.more(), first), isTrue);
     }
-    expect(state.direct.limit, 400);
+    await pumpEventQueue();
+    // Before the oldest held, by its place.
+    expect(asked, [(5, '5', null)]);
+    answer.complete(
+      UiDirectOlder(
+        items: [message('3', 'Older'), message('4', 'Old')],
+        more: false,
+      ),
+    );
     await first;
-    // The page did not change here (no core): the next scroll asks for the next page.
+    expect(state.direct.page!.items.map((i) => i.id), ['3', '4', '5']);
+    expect(state.direct.page!.more, isFalse);
+    // Nothing older: nothing more is asked for.
     await state.direct.more();
-    expect(state.direct.limit, 600);
+    expect(asked, hasLength(1));
+    state.dispose();
+  });
+
+  test('a pinned message is brought into view in one read', () async {
+    final state = AppState('/nonexistent/fogata-direct-jump');
+    final asked = <int?>[];
+    final page0 = page([message('90', 'New')], more: true);
+    state.direct
+      ..open = sofia.id
+      ..page = UiDirectPage(
+        friend: page0.friend,
+        version: 0,
+        online: page0.online,
+        away: false,
+        connected: page0.connected,
+        lastSeenMs: page0.lastSeenMs,
+        items: page0.items,
+        more: true,
+        pinned: [message('7', 'Pinned long ago', pinned: true)],
+        timerMs: 0,
+        usage: usage,
+        altered: false,
+      )
+      ..loadOlder =
+          ({
+            required deviceId,
+            required beforeSeq,
+            required beforeId,
+            required count,
+            downToSeq,
+          }) async {
+            asked.add(downToSeq);
+            return UiDirectOlder(
+              items: [message('7', 'Pinned long ago', pinned: true)],
+              more: true,
+            );
+          };
+    await state.direct.showMessage('7');
+    expect(asked, [7]);
+    expect(state.direct.jump.value?.$1, '7');
     state.dispose();
   });
 
@@ -1201,7 +1348,23 @@ void main() {
         ..loadChat = ({required deviceId, required limit}) async {
           reads++;
           return page([message('1', 'Hello')]);
-        };
+        }
+        ..loadChanges =
+            ({
+              required deviceId,
+              required since,
+              fromSeq,
+              fromId,
+              required count,
+            }) async {
+              reads++;
+              return UiDirectChanges(
+                page: page([]),
+                removed: const [],
+                whole: false,
+                pinnedChanged: false,
+              );
+            };
       UiEvent changed(UiEventKind kind, String? device) =>
           UiEvent(kind: kind, device: device, received: 0, total: 0);
       Future<void> settle() =>
@@ -1334,6 +1497,7 @@ void main() {
       ..page = UiDirectPage(
         away: false,
         friend: leo,
+        version: 0,
         online: true,
         connected: true,
         items: const [],
@@ -1410,6 +1574,7 @@ void main() {
   ) async {
     UiDirectItem call(String id) => UiDirectItem(
       id: id,
+      seq: 0,
       mine: false,
       atMs: now,
       text: '',

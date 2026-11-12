@@ -120,6 +120,22 @@ class FakeCore implements RustLibApi {
     required int limit,
   }) async => chat!;
 
+  /// What changed since the page was read: [chat], whole, as the core gives it when it no
+  /// longer knows what changed.
+  @override
+  Future<UiDirectChanges> crateApiDirectDirectChatChanges({
+    required String deviceId,
+    required int since,
+    int? fromSeq,
+    String? fromId,
+    required int count,
+  }) async => UiDirectChanges(
+    page: chat!,
+    removed: const [],
+    whole: true,
+    pinnedChanged: true,
+  );
+
   /// The attachments kept here, for one not in the page read; and how often asked.
   Set<String> keptFiles = {};
   int keptAsked = 0;
@@ -145,6 +161,7 @@ final now = DateTime.now().millisecondsSinceEpoch;
 UiDirectPage chatPage(List<UiDirectItem> items, {bool more = false}) =>
     UiDirectPage(
       friend: sofia,
+      version: 0,
       online: true,
       away: false,
       connected: true,
@@ -158,6 +175,7 @@ UiDirectPage chatPage(List<UiDirectItem> items, {bool more = false}) =>
 
 UiDirectItem voiceItem(String id, String file, {int ago = 0}) => UiDirectItem(
   id: id,
+  seq: 0,
   mine: false,
   atMs: now - ago,
   text: '',

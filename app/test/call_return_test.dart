@@ -34,6 +34,7 @@ UiDirectItem item(
   UiDirectCall? call,
 }) => UiDirectItem(
   id: id,
+  seq: 0,
   mine: mine,
   atMs: now,
   text: text,
@@ -47,6 +48,7 @@ UiDirectItem item(
 UiDirectPage page(List<UiDirectItem> items) => UiDirectPage(
   away: false,
   friend: sofia,
+  version: 0,
   online: true,
   connected: true,
   items: items,

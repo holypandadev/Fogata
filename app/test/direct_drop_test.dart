@@ -28,6 +28,7 @@ const _sofia = UiPerson(
 UiDirectPage _page({bool online = true, int? ended}) => UiDirectPage(
   away: false,
   friend: _sofia,
+  version: 0,
   online: online,
   lastSeenMs: null,
   connected: online,

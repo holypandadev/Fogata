@@ -294,9 +294,15 @@ impl Usage {
 /// reply above what it answers, maybe far up the chat. So an item from the friend goes after
 /// everything that was here when it arrived; what waited while the two were apart comes in
 /// the order the friend wrote it, which is the order the friend sends it in.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+///
+/// Each item carries, beside it, when it last changed as the screens show it ([`stamp`]),
+/// and the chat remembers what was taken out of it lately, so a screen that holds part of
+/// the chat asks only for what changed since it read it ([`Chat::changed_since`]).
+#[derive(Clone, Debug)]
 pub struct Chat {
     items: Vec<Item>,
+    /// When each item of `items`, at the same place, last changed.
+    stamps: Vec<u64>,
     ids: HashSet<ItemId>,
     /// The last item read here, by its `seq`.
     pub read_seq: u64,
@@ -313,6 +319,70 @@ pub struct Chat {
     /// again is confirmed, not kept again.
     forgotten: VecDeque<ItemId>,
     forgotten_ids: HashSet<ItemId>,
+    /// Items taken out lately, with when, oldest first, at most [`MAX_REMOVED`].
+    removed: VecDeque<(u64, ItemId)>,
+    /// What changed is known from this stamp on: a view of the chat from before it (the
+    /// chat was made or read again since, or removals it needs were let go) is read again
+    /// whole.
+    known_from: u64,
+    /// When a pin or unpin, or any item, last came or went: the messages pinned may have
+    /// changed then.
+    pins_stamp: u64,
+}
+
+impl Default for Chat {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            stamps: Vec::new(),
+            ids: HashSet::new(),
+            read_seq: 0,
+            next_seq: 0,
+            voice_charges: Vec::new(),
+            file_charges: Vec::new(),
+            theirs: 0,
+            forgotten: VecDeque::new(),
+            forgotten_ids: HashSet::new(),
+            removed: VecDeque::new(),
+            known_from: stamp(),
+            pins_stamp: 0,
+        }
+    }
+}
+
+/// Two chats are the same when they hold the same, whenever it changed.
+impl PartialEq for Chat {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+            && self.read_seq == other.read_seq
+            && self.next_seq == other.next_seq
+            && self.voice_charges == other.voice_charges
+            && self.file_charges == other.file_charges
+            && self.theirs == other.theirs
+            && self.forgotten == other.forgotten
+    }
+}
+
+impl Eq for Chat {}
+
+/// How many removals a chat remembers for the screens: a view older than the oldest of
+/// them is read again whole. Far more than go between two reads of a chat on screen.
+const MAX_REMOVED: usize = 1024;
+
+/// The last stamp given (see [`stamp`]).
+static STAMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A new stamp for a change to a chat, later than every stamp and [`version`] before it.
+/// One count for every chat, so a chat made or read again has only stamps later than any
+/// view of the chat it replaced.
+fn stamp() -> u64 {
+    STAMPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+}
+
+/// The last stamp given: what changes after a view read now gets a later one. Read with the
+/// chats held, as they are changed.
+pub fn version() -> u64 {
+    STAMPS.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// An attachment of the friend's that started to come by itself: when, what it counts
@@ -352,11 +422,69 @@ impl Chat {
             .flatten()
     }
 
+    /// An item to change: it counts as changed.
     pub fn get_mut(&mut self, id: &ItemId) -> Option<&mut Item> {
         if !self.ids.contains(id) {
             return None;
         }
-        self.items.iter_mut().find(|i| i.id == *id)
+        let at = self.items.iter().rposition(|i| i.id == *id)?;
+        self.stamps[at] = stamp();
+        Some(&mut self.items[at])
+    }
+
+    /// Counts the items with an attachment of file id `file` as changed: how it comes
+    /// shows with them.
+    pub fn touch_file(&mut self, file: &FileId) {
+        let now = stamp();
+        for (item, at) in self.items.iter().zip(&mut self.stamps) {
+            if item.files().iter().any(|f| f.id == *file) {
+                *at = now;
+            }
+        }
+    }
+
+    /// Where the items from `from` (an item's `seq` and id) on start in the chat's order:
+    /// the first item at or after it, whether that one is still here or not.
+    pub fn place(&self, from: (u64, ItemId)) -> usize {
+        self.items.partition_point(|i| i.order() < from)
+    }
+
+    /// The items from place `at` on ([`Self::place`]) that changed after stamp `since`, or
+    /// came, in the chat's order.
+    pub fn changed_since(&self, since: u64, at: usize) -> impl Iterator<Item = &Item> {
+        self.items
+            .iter()
+            .zip(&self.stamps)
+            .skip(at)
+            .filter(move |(_, s)| **s > since)
+            .map(|(item, _)| item)
+    }
+
+    /// The items taken out after stamp `since`.
+    pub fn removed_since(&self, since: u64) -> impl Iterator<Item = &ItemId> {
+        self.removed
+            .iter()
+            .rev()
+            .take_while(move |(s, _)| *s > since)
+            .map(|(_, id)| id)
+    }
+
+    /// Whether what changed after stamp `since` is all known here: not when the chat was
+    /// made (or read again) after it, nor when removals since were let go.
+    pub fn knows_since(&self, since: u64) -> bool {
+        since >= self.known_from && since <= version()
+    }
+
+    /// Whether the messages pinned, or any of them, may have changed after stamp `since`.
+    pub fn pins_changed_since(&self, since: u64) -> bool {
+        if self.pins_stamp > since {
+            return true;
+        }
+        let pinned: HashSet<ItemId> = self.pinned().into_iter().collect();
+        self.items
+            .iter()
+            .zip(&self.stamps)
+            .any(|(item, s)| *s > since && pinned.contains(&item.id))
     }
 
     /// The `seq` the next item that reaches this device gets.
@@ -411,7 +539,16 @@ impl Chat {
             .iter()
             .rposition(|i| i.order() <= order)
             .map_or(0, |p| p + 1);
+        let now = stamp();
+        // The message a pin is about shows pinned, or no longer.
+        if let Some(target) = item.pin_target() {
+            self.pins_stamp = now;
+            if let Some(t) = self.items.iter().position(|i| i.id == *target) {
+                self.stamps[t] = now;
+            }
+        }
         self.items.insert(at, item);
+        self.stamps.insert(at, now);
         true
     }
 
@@ -433,14 +570,41 @@ impl Chat {
         if gone.is_empty() {
             return Vec::new();
         }
-        let (out, keep): (Vec<Item>, Vec<Item>) = std::mem::take(&mut self.items)
+        let now = stamp();
+        let mut out = Vec::new();
+        let (mut keep, mut stamps) = (Vec::new(), Vec::new());
+        for (item, at) in std::mem::take(&mut self.items)
             .into_iter()
-            .partition(|i| gone.contains(&i.id));
+            .zip(std::mem::take(&mut self.stamps))
+        {
+            if gone.contains(&item.id) {
+                out.push(item);
+            } else {
+                keep.push(item);
+                stamps.push(at);
+            }
+        }
         self.items = keep;
+        self.stamps = stamps;
         for item in &out {
             self.ids.remove(&item.id);
             if !item.mine {
                 self.theirs = self.theirs.saturating_sub(item.weight());
+            }
+            self.removed.push_back((now, item.id));
+        }
+        while self.removed.len() > MAX_REMOVED {
+            if let Some((at, _)) = self.removed.pop_front() {
+                self.known_from = self.known_from.max(at);
+            }
+        }
+        // What showed with them changes too: a pin of one says nothing now, and a message
+        // a pin taken out was about may no longer show pinned.
+        self.pins_stamp = now;
+        let targets: HashSet<&ItemId> = out.iter().filter_map(Item::pin_target).collect();
+        for (item, at) in self.items.iter().zip(&mut self.stamps) {
+            if item.pin_target().is_some_and(|t| gone.contains(t)) || targets.contains(&item.id) {
+                *at = now;
             }
         }
         out
@@ -625,7 +789,8 @@ impl Chat {
     /// Sets where every attachment with file id `file` stands; returns the items changed.
     pub fn set_local(&mut self, file: &FileId, local: Local) -> Vec<ItemId> {
         let mut changed = Vec::new();
-        for item in &mut self.items {
+        let now = stamp();
+        for (item, at) in self.items.iter_mut().zip(&mut self.stamps) {
             let mut touched = false;
             for f in item.files_mut() {
                 if f.id == *file && f.local != local {
@@ -634,6 +799,7 @@ impl Chat {
                 }
             }
             if touched {
+                *at = now;
                 changed.push(item.id);
             }
         }
@@ -723,13 +889,15 @@ impl Chat {
     /// Marks the voice messages with this file id as played; whether one was not yet.
     pub fn set_played(&mut self, file: &FileId) -> bool {
         let mut changed = false;
-        for item in &mut self.items {
+        let now = stamp();
+        for (item, at) in self.items.iter_mut().zip(&mut self.stamps) {
             for f in item.files_mut() {
                 if f.id == *file
                     && let Some(voice) = f.voice.as_mut()
                     && !voice.played
                 {
                     voice.played = true;
+                    *at = now;
                     changed = true;
                 }
             }
@@ -741,9 +909,11 @@ impl Chat {
     /// was not one. They show as the files they are. Whether one was.
     pub fn drop_voice(&mut self, file: &FileId) -> bool {
         let mut changed = false;
-        for item in &mut self.items {
+        let now = stamp();
+        for (item, at) in self.items.iter_mut().zip(&mut self.stamps) {
             for f in item.files_mut() {
                 if f.id == *file && f.voice.take().is_some() {
+                    *at = now;
                     changed = true;
                 }
             }
@@ -755,10 +925,12 @@ impl Chat {
     /// not one. Whether one was.
     pub fn drop_picture(&mut self, file: &FileId) -> bool {
         let mut changed = false;
-        for item in &mut self.items {
+        let now = stamp();
+        for (item, at) in self.items.iter_mut().zip(&mut self.stamps) {
             for f in item.files_mut() {
                 if f.id == *file && f.kind == FileKind::Picture {
                     f.kind = FileKind::File;
+                    *at = now;
                     changed = true;
                 }
             }
@@ -1142,6 +1314,64 @@ mod tests {
         assert!(!mine.gone_from_its_author(200_000));
         theirs.ttl_ms = 0;
         assert!(!theirs.gone_from_its_author(u64::MAX));
+    }
+
+    /// A screen holding part of a chat learns from the chat what changed in it since it
+    /// read it, from the place of the oldest item it holds on: what came, what changed and
+    /// what went; and that it must read it whole when the chat no longer knows.
+    #[test]
+    fn a_chat_says_what_changed_since_a_view_of_it() {
+        let ids = |items: Vec<&Item>| items.into_iter().map(|i| i.id[0]).collect::<Vec<_>>();
+        let mut chat = Chat::default();
+        for id in 1..=5 {
+            chat.insert(message(
+                id,
+                true,
+                u64::from(id),
+                vec![file(id, 10, FileKind::Picture, Local::Missing)],
+            ));
+        }
+        let read = version();
+        assert!(chat.knows_since(read));
+        let held = chat.place((3, [3; 16]));
+        assert_eq!(held, 2);
+        assert!(chat.changed_since(read, held).next().is_none());
+        // Something new, one held delivered, one before what is held changed (not said),
+        // a file coming and one item going.
+        chat.insert(message(6, false, 6, Vec::new()));
+        chat.get_mut(&[4; 16]).unwrap().delivered = true;
+        chat.get_mut(&[1; 16]).unwrap().delivered = true;
+        chat.touch_file(&[5; 32]);
+        chat.remove(&[[3; 16]]);
+        let held = chat.place((3, [3; 16]));
+        assert_eq!(ids(chat.changed_since(read, held).collect()), [4, 5, 6]);
+        assert_eq!(chat.removed_since(read).collect::<Vec<_>>(), [&[3; 16]]);
+        assert!(!chat.pins_changed_since(version()));
+        // A pin shows on its message, and its going too.
+        let again = version();
+        chat.insert(pin(7, true, 7, 5, true));
+        assert!(chat.pins_changed_since(again));
+        assert_eq!(ids(chat.changed_since(again, held).collect()), [5, 7]);
+        let again = version();
+        chat.remove(&[[5; 16]]);
+        assert_eq!(ids(chat.changed_since(again, held).collect()), [7]);
+        // Past the removals remembered, an older view is read again whole.
+        let old = version();
+        assert!(chat.knows_since(old));
+        let many: Vec<ItemId> = (0..=MAX_REMOVED as u64)
+            .map(|n| {
+                let mut item = message(0, true, 100 + n, Vec::new());
+                item.id = (u128::from(n) + 1000).to_be_bytes();
+                item.seq = 100 + n;
+                chat.insert(item.clone());
+                item.id
+            })
+            .collect();
+        chat.remove(&many);
+        assert!(!chat.knows_since(old));
+        assert!(chat.knows_since(version()));
+        // So is a view of a chat made (or read) again after it.
+        assert!(!Chat::default().knows_since(old));
     }
 
     fn file(id: u8, size: u64, kind: FileKind, local: Local) -> Attachment {

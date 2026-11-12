@@ -98,12 +98,14 @@ AppState _direct() {
     ..page = UiDirectPage(
       away: false,
       friend: _sofia,
+      version: 0,
       online: true,
       connected: true,
       items: [
         for (var i = 0; i < 6; i++)
           UiDirectItem(
             id: '$i',
+            seq: 0,
             mine: i.isEven,
             atMs: now,
             text: 'Message number $i, a little longer than one word',

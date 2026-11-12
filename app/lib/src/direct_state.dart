@@ -84,15 +84,15 @@ class DirectChats extends Piece {
   /// The chats with something in them, newest first.
   List<dm.UiDirectChat> chats = [];
 
-  /// The friend whose chat is shown, and its page.
+  /// The friend whose chat is shown, and its page: the newest items, and older ones as far
+  /// as they were scrolled to. It is read whole when the chat is shown; then only what
+  /// changed in it comes, and older items a page at a time, before the oldest held.
   String? open;
   dm.UiDirectPage? page;
 
-  /// How many of the newest items the page holds; more are read when scrolled to.
-  int _limit = 200;
-
-  @visibleForTesting
-  int get limit => _limit;
+  /// How many items a read of the page brings: the newest, as the chat is shown, and each
+  /// page of older ones.
+  static const pageSize = 200;
 
   /// Files picked for the chat shown, by friend, until Send.
   final Map<String, List<OutgoingFile>> outgoing = {};
@@ -220,30 +220,50 @@ class DirectChats extends Piece {
     if (!same) banners[friend] = banner;
   }
 
-  /// Reads the chat shown again; what came into it since is told to a screen reader
-  /// unless [older] (older items read for scrolling up or for a message to show).
-  Future<void> _loadPage({bool older = false}) async {
-    final friend = open;
-    if (friend == null) return;
-    // Numbered, as the room's refreshes are: one asked earlier that answers later (a send
-    // and an event at once, or a page read before more was asked for) is older news.
-    final asked = ++_pageAsked;
-    try {
-      final loaded = await loadChat(deviceId: friend, limit: _limit);
+  /// Brings the chat shown up to date: read whole when none of it is held, otherwise only
+  /// what changed since it was read, merged into what is held. What came into it is told
+  /// to a screen reader.
+  Future<void> _loadPage() async {
+    // A read answers for the page it started from: one that finds the page changed by
+    // another meanwhile (two at once, or older items read) asks again from it, so none
+    // brings older news over newer.
+    for (var tries = 0; tries < 3; tries++) {
+      final friend = open;
+      if (friend == null) return;
+      final held = page;
+      final dm.UiDirectPage loaded;
+      try {
+        if (held == null || held.friend.id != friend) {
+          loaded = await loadChat(deviceId: friend, limit: pageSize);
+        } else {
+          final oldest = held.items.firstOrNull;
+          loaded = merged(
+            held,
+            await loadChanges(
+              deviceId: friend,
+              since: held.version,
+              fromSeq: oldest?.seq,
+              fromId: oldest?.id,
+              count: pageSize,
+            ),
+          );
+        }
+      } catch (_) {
+        return;
+      }
+      // Another chat shown meanwhile.
       if (open != friend) return;
-      if (asked < _pageShown) return;
-      _pageShown = asked;
-      if (!older) _announceNew(page, loaded);
+      if (!identical(page, held)) continue;
+      _announceNew(held, loaded);
       page = loaded;
       _keepPicturesOf(loaded);
       unawaited(voice.chatRead(friend, loaded));
-    } catch (_) {
+      if (reading(friend) && (chat(friend)?.unread ?? 0) > 0) {
+        try {
+          await dm.markDirectRead(deviceId: friend);
+        } catch (_) {}
+      }
       return;
-    }
-    if (reading(friend) && (chat(friend)?.unread ?? 0) > 0) {
-      try {
-        await dm.markDirectRead(deviceId: friend);
-      } catch (_) {}
     }
   }
 
@@ -258,8 +278,6 @@ class DirectChats extends Piece {
     pictures.removeWhere((path, _) => !paths.contains(path));
   }
 
-  int _pageAsked = 0, _pageShown = 0;
-
   /// Reads a chat's newest items; the tests put their own in its place.
   @visibleForTesting
   Future<dm.UiDirectPage> Function({
@@ -267,6 +285,29 @@ class DirectChats extends Piece {
     required int limit,
   })
   loadChat = dm.directChat;
+
+  /// Reads what changed in a chat since its page was read; the tests put their own in its
+  /// place.
+  @visibleForTesting
+  Future<dm.UiDirectChanges> Function({
+    required String deviceId,
+    required int since,
+    int? fromSeq,
+    String? fromId,
+    required int count,
+  })
+  loadChanges = dm.directChatChanges;
+
+  /// Reads a chat's items before one held; the tests put their own in its place.
+  @visibleForTesting
+  Future<dm.UiDirectOlder> Function({
+    required String deviceId,
+    required int beforeSeq,
+    required String beforeId,
+    required int count,
+    int? downToSeq,
+  })
+  loadOlder = dm.directChatOlder;
 
   /// Tells a screen reader the friend's messages that came into the chat on screen
   /// since [before].
@@ -279,7 +320,6 @@ class DirectChats extends Piece {
   Future<void> show(String friend) async {
     if (open != friend) {
       page = null;
-      _limit = 200;
       pictures.clear();
     }
     _bannersRead.remove(friend);
@@ -300,28 +340,57 @@ class DirectChats extends Piece {
     await refresh(page: false);
   }
 
-  /// Reads older items of the chat shown; asked again while that is under way, the same
-  /// reading answers, so scrolling asks for one page at a time.
-  Future<void> more() {
+  /// Reads the page of items before the oldest of the chat shown, and more down to the
+  /// item at [downTo] (its `seq`) when given; asked again while that is under way, the
+  /// same reading answers, so scrolling asks for one page at a time.
+  Future<void> more({int? downTo}) {
     if (_more case final going?) return going;
     if (!(page?.more ?? false)) return Future.value();
-    _limit += 200;
-    return _more = () async {
-      try {
-        await _loadPage(older: true);
-      } finally {
-        _more = null;
-      }
-      _changed();
-    }();
+    return _more =
+        () async {
+          try {
+            // As [_loadPage]: items read before a page that changed meanwhile are read again.
+            for (var tries = 0; tries < 3; tries++) {
+              final friend = open;
+              final held = page;
+              if (friend == null || held == null || !held.more) return;
+              final oldest = held.items.firstOrNull;
+              // Nothing held shows (only lines that say nothing came): all before the end.
+              final older = await loadOlder(
+                deviceId: friend,
+                beforeSeq: oldest?.seq ?? _end,
+                beforeId: oldest?.id ?? 'ff' * 16,
+                count: pageSize,
+                downToSeq: oldest == null ? 0 : downTo,
+              );
+              if (open != friend) return;
+              if (!identical(page, held)) continue;
+              page = _withItems(held, [
+                ...older.items,
+                ...held.items,
+              ], more: older.more);
+              return;
+            }
+          } catch (_) {
+            // Read again at the next scroll.
+          }
+        }().whenComplete(() {
+          _more = null;
+          _changed();
+        });
   }
 
   Future<void>? _more;
 
+  /// Past every item's place.
+  static const _end = 0x7fffffffffffffff;
+
   /// Brings message `id` of the chat shown into view, reading older items until it is
-  /// among them.
+  /// among them: down to it at once when its place is known, as a pinned message's is.
   Future<void> showMessage(String id) async {
     bool held() => page?.items.any((i) => i.id == id) ?? false;
+    final place = page?.pinned.where((i) => i.id == id).firstOrNull?.seq;
+    if (!held() && place != null) await more(downTo: place);
     while (!held() && (page?.more ?? false)) {
       final before = page;
       await more();
@@ -649,3 +718,53 @@ List<(String, String)> newMessages(
         ),
   ];
 }
+
+/// [held], a chat's page, brought up to date with [changes]: what went is taken out, what
+/// came or changed takes its place by its place in the chat; or the items given whole.
+dm.UiDirectPage merged(dm.UiDirectPage held, dm.UiDirectChanges changes) {
+  final now = changes.page;
+  final List<dm.UiDirectItem> items;
+  if (changes.whole) {
+    items = now.items;
+  } else {
+    final replaced = {...changes.removed, for (final i in now.items) i.id};
+    items = [
+      for (final i in held.items)
+        if (!replaced.contains(i.id)) i,
+      ...now.items,
+    ]..sort(_byPlace);
+  }
+  return _withItems(
+    now,
+    items,
+    more: now.more,
+    pinned: changes.pinnedChanged ? now.pinned : held.pinned,
+  );
+}
+
+int _byPlace(dm.UiDirectItem a, dm.UiDirectItem b) {
+  final bySeq = a.seq.compareTo(b.seq);
+  return bySeq != 0 ? bySeq : a.id.compareTo(b.id);
+}
+
+/// [page] holding [items] instead, with [more] and, when given, [pinned].
+dm.UiDirectPage _withItems(
+  dm.UiDirectPage page,
+  List<dm.UiDirectItem> items, {
+  required bool more,
+  List<dm.UiDirectItem>? pinned,
+}) => dm.UiDirectPage(
+  friend: page.friend,
+  online: page.online,
+  away: page.away,
+  lastSeenMs: page.lastSeenMs,
+  connected: page.connected,
+  items: items,
+  more: more,
+  pinned: pinned ?? page.pinned,
+  timerMs: page.timerMs,
+  endedMs: page.endedMs,
+  usage: page.usage,
+  altered: page.altered,
+  version: page.version,
+);

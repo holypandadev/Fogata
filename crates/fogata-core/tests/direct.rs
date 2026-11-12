@@ -630,6 +630,138 @@ async fn a_message_deleted_here_goes_from_here_only_and_for_good() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// A screen reads a chat by pages, each before the oldest item it holds, and then only
+/// what changed since it read it: what came, what was delivered, pinned or deleted, never
+/// the items it holds again.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_is_read_by_pages_and_by_what_changed() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-direct-pages-{}", std::process::id()));
+    let (dir_a, dir_b) = friends(&base);
+    let (options_a, options_b) = dialling();
+    let (ana, mut events_a) = Core::start(dir_a, options_a).unwrap();
+    let (bea, mut events_b) = Core::start(dir_b, options_b).unwrap();
+    let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
+    wait_for(&mut events_a, "Bea online", online).await;
+    wait_for(&mut events_b, "Ana online", online).await;
+
+    for n in 1..=5 {
+        bea.send_direct(ana.me(), &format!("m{n}"), Vec::new())
+            .await
+            .unwrap();
+    }
+    chat_until(&ana, bea.me(), "Bea's messages", |c| texts(c).len() == 5).await;
+    // The newest two, then the page before them, then the rest.
+    let view = ana.direct_chat(bea.me(), 2).await.unwrap();
+    assert_eq!(texts(&view), ["m4", "m5"]);
+    assert!(view.more);
+    let cursor = |v: &fogata_core::direct::ItemView| (v.item.seq, v.item.id);
+    let older = ana
+        .direct_chat_older(bea.me(), cursor(&view.items[0]), 2, None)
+        .unwrap();
+    let words = |items: &[fogata_core::direct::ItemView]| {
+        items
+            .iter()
+            .filter_map(|i| match &i.item.body {
+                Body::Message { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(words(&older.items), ["m2", "m3"]);
+    assert!(older.more);
+    let first = ana
+        .direct_chat_older(bea.me(), cursor(&older.items[0]), 2, None)
+        .unwrap();
+    assert_eq!(words(&first.items), ["m1"]);
+    assert!(!first.more);
+    // Down to a message asked for, in one page however far it is.
+    let down = ana
+        .direct_chat_older(
+            bea.me(),
+            cursor(&view.items[0]),
+            1,
+            Some(first.items[0].item.seq),
+        )
+        .unwrap();
+    assert_eq!(words(&down.items), ["m1", "m2", "m3"]);
+
+    // Nothing changed: nothing comes again.
+    let from = Some(cursor(&older.items[0]));
+    let none = ana
+        .direct_chat_changes(bea.me(), view.version, from, 2)
+        .await
+        .unwrap();
+    assert!(!none.whole);
+    assert!(none.view.items.is_empty() && none.removed.is_empty());
+    assert!(none.view.more);
+
+    // One comes, one held is deleted, one is pinned, and Ana writes one Bea then gets.
+    bea.send_direct(ana.me(), "m6", Vec::new()).await.unwrap();
+    chat_until(&ana, bea.me(), "m6", |c| texts(c).len() == 6).await;
+    let deleted = older.items[1].item.id;
+    ana.delete_direct_message(bea.me(), deleted).unwrap();
+    ana.pin_direct(bea.me(), view.items[0].item.id, true)
+        .await
+        .unwrap();
+    let changes = ana
+        .direct_chat_changes(bea.me(), view.version, from, 2)
+        .await
+        .unwrap();
+    assert!(!changes.whole);
+    assert_eq!(changes.removed, [deleted]);
+    assert!(changes.pinned_changed);
+    assert_eq!(words(&changes.view.pinned), ["m4"]);
+    // m4 shows pinned now, m6 came, with the line of the pin; m2 and m5 did not change.
+    assert_eq!(words(&changes.view.items), ["m4", "m6"]);
+    assert!(
+        changes
+            .view
+            .items
+            .iter()
+            .any(|i| i.item.pin_target().is_some())
+    );
+    assert!(changes.view.items[0].pinned);
+
+    // This device's own message, then its delivery, as a change of it alone.
+    let before = ana
+        .direct_chat_changes(bea.me(), changes.view.version, from, 2)
+        .await
+        .unwrap();
+    // (The pin's delivery may come meanwhile: a change of the pin's line alone.)
+    assert!(words(&before.view.items).is_empty() && !before.pinned_changed);
+    ana.send_direct(bea.me(), "mine", Vec::new()).await.unwrap();
+    chat_until(&ana, bea.me(), "Ana's message delivered", |c| {
+        c.items.last().is_some_and(|i| i.item.delivered)
+    })
+    .await;
+    let delivered = ana
+        .direct_chat_changes(bea.me(), before.view.version, from, 2)
+        .await
+        .unwrap();
+    assert_eq!(words(&delivered.view.items), ["mine"]);
+    assert!(delivered.view.items[0].item.delivered);
+    assert!(delivered.removed.is_empty());
+
+    // A view from before the chat was read at this start is read again whole.
+    ana.shutdown().await.unwrap();
+    drop(ana);
+    let (ana, _events) = start_again(&base.join("ana"), alone(free_port(), None)).await;
+    let whole = ana
+        .direct_chat_changes(bea.me(), delivered.view.version, from, 2)
+        .await
+        .unwrap();
+    assert!(whole.whole);
+    assert_eq!(words(&whole.view.items), ["m2", "m4", "m5", "m6", "mine"]);
+    // A view holding nothing gets the newest.
+    let newest = ana.direct_chat_changes(bea.me(), 0, None, 1).await.unwrap();
+    assert!(newest.whole && newest.view.more);
+    assert_eq!(words(&newest.view.items), ["mine"]);
+    ana.shutdown().await.unwrap();
+    bea.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pinned_message_stays_on_both_until_it_is_unpinned() {
     let _one = ONE_AT_A_TIME.lock().await;

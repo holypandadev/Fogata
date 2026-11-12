@@ -7,8 +7,8 @@ use anyhow::{Result, anyhow};
 use fogata_core::{
     VideoPreview,
     direct::{
-        ChatSummary, ChatView, FileView, ItemView, Outgoing, StorageView,
-        model::{Body, FileKind, Local, Usage},
+        ChatChanges, ChatSummary, ChatView, FileView, ItemView, OlderItems, Outgoing, StorageView,
+        model::{Body, FileKind, ItemId, Local, Usage},
         store::Settings,
     },
 };
@@ -87,6 +87,9 @@ pub struct UiVoice {
 #[derive(Clone, Debug)]
 pub struct UiDirectItem {
     pub id: String,
+    /// Its place in the chat, which never changes: with the id, where older items are read
+    /// from ([`direct_chat_older`]).
+    pub seq: i64,
     /// Written on this device.
     pub mine: bool,
     /// When it shows in the chat: when written, but never before the item above it nor
@@ -158,6 +161,31 @@ pub struct UiDirectPage {
     /// The chat's history on this computer was changed, or part of it lost, since Fogata
     /// last wrote it (found when it started).
     pub altered: bool,
+    /// When it was read, to ask what changed since ([`direct_chat_changes`]).
+    pub version: i64,
+}
+
+/// Older items of a chat, before the oldest a screen holds.
+#[derive(Clone, Debug)]
+pub struct UiDirectOlder {
+    /// Oldest first.
+    pub items: Vec<UiDirectItem>,
+    /// Older items are there too.
+    pub more: bool,
+}
+
+/// What changed in a chat since a page of it was read.
+#[derive(Clone, Debug)]
+pub struct UiDirectChanges {
+    /// The chat now: its items are those that came or changed since, oldest first (all of
+    /// them from the oldest held on, when `whole`); its pinned messages only when
+    /// `pinned_changed`; `more` says whether older items are there than the oldest held.
+    pub page: UiDirectPage,
+    /// Ids of items the page may hold that no longer show.
+    pub removed: Vec<String>,
+    /// The items are to take in place of those held.
+    pub whole: bool,
+    pub pinned_changed: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -286,6 +314,7 @@ fn item(view: &ItemView) -> UiDirectItem {
     };
     UiDirectItem {
         id: hex_id(&item.id),
+        seq: ms(item.seq),
         mine: item.mine,
         at_ms: ms(item.at_ms),
         text,
@@ -313,7 +342,32 @@ fn page(view: ChatView) -> UiDirectPage {
         ended_ms: view.ended_ms.map(ms),
         usage: usage(&view.usage),
         altered: view.altered,
+        version: ms(view.version),
     }
+}
+
+fn older(older: OlderItems) -> UiDirectOlder {
+    UiDirectOlder {
+        items: older.items.iter().map(item).collect(),
+        more: older.more,
+    }
+}
+
+fn changes(changes: ChatChanges) -> UiDirectChanges {
+    UiDirectChanges {
+        removed: changes.removed.iter().map(|id| hex_id(id)).collect(),
+        whole: changes.whole,
+        pinned_changed: changes.pinned_changed,
+        page: page(changes.view),
+    }
+}
+
+/// An item's place in a chat, from its `seq` and id.
+fn place(seq: i64, id: &str) -> Result<(u64, ItemId)> {
+    let id: ItemId = hex::decode(id)?
+        .try_into()
+        .map_err(|_| anyhow!("not an item id"))?;
+    Ok((non_negative(seq), id))
 }
 
 fn storage(view: StorageView) -> UiDirectStorage {
@@ -352,6 +406,52 @@ pub async fn direct_chats() -> Result<Vec<UiDirectChat>> {
 pub async fn direct_chat(device_id: String, limit: u32) -> Result<UiDirectPage> {
     let friend = device(&device_id)?;
     run(|core| async move { Ok(page(core.direct_chat(friend, limit as usize).await?)) }).await
+}
+
+/// The `count` items of a chat before the item at `before_seq` with id `before_id` (the
+/// oldest the screen holds), and more to reach `seq` `down_to_seq` when given.
+pub async fn direct_chat_older(
+    device_id: String,
+    before_seq: i64,
+    before_id: String,
+    count: u32,
+    down_to_seq: Option<i64>,
+) -> Result<UiDirectOlder> {
+    let friend = device(&device_id)?;
+    let before = place(before_seq, &before_id)?;
+    run(|core| async move {
+        Ok(older(core.direct_chat_older(
+            friend,
+            before,
+            count as usize,
+            down_to_seq.map(non_negative),
+        )?))
+    })
+    .await
+}
+
+/// What changed in a chat since its page was read at `since` (the page's `version`), among
+/// the items from the one at `from_seq` with id `from_id` (the oldest held) on; with none
+/// held, among the newest `count`.
+pub async fn direct_chat_changes(
+    device_id: String,
+    since: i64,
+    from_seq: Option<i64>,
+    from_id: Option<String>,
+    count: u32,
+) -> Result<UiDirectChanges> {
+    let friend = device(&device_id)?;
+    let from = match (from_seq, from_id) {
+        (Some(seq), Some(id)) => Some(place(seq, &id)?),
+        _ => None,
+    };
+    run(|core| async move {
+        Ok(changes(
+            core.direct_chat_changes(friend, non_negative(since), from, count as usize)
+                .await?,
+        ))
+    })
+    .await
 }
 
 /// Writes to a friend: text, files, or both. It goes when both are online.

@@ -9,8 +9,8 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `file`, `item`, `non_negative`, `page`, `settings`, `storage`, `summary`, `usage`
-// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
+// These functions are ignored because they are not marked as `pub`: `changes`, `file`, `item`, `non_negative`, `older`, `page`, `place`, `settings`, `storage`, `summary`, `usage`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `assert_fields_are_eq`, `assert_fields_are_eq`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `clone`, `eq`, `eq`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`, `fmt`
 
 /// The chats with something in them, the newest first.
 Future<List<UiDirectChat>> directChats() =>
@@ -23,6 +23,39 @@ Future<UiDirectPage> directChat({
 }) => RustLib.instance.api.crateApiDirectDirectChat(
   deviceId: deviceId,
   limit: limit,
+);
+
+/// The `count` items of a chat before the item at `before_seq` with id `before_id` (the
+/// oldest the screen holds), and more to reach `seq` `down_to_seq` when given.
+Future<UiDirectOlder> directChatOlder({
+  required String deviceId,
+  required PlatformInt64 beforeSeq,
+  required String beforeId,
+  required int count,
+  PlatformInt64? downToSeq,
+}) => RustLib.instance.api.crateApiDirectDirectChatOlder(
+  deviceId: deviceId,
+  beforeSeq: beforeSeq,
+  beforeId: beforeId,
+  count: count,
+  downToSeq: downToSeq,
+);
+
+/// What changed in a chat since its page was read at `since` (the page's `version`), among
+/// the items from the one at `from_seq` with id `from_id` (the oldest held) on; with none
+/// held, among the newest `count`.
+Future<UiDirectChanges> directChatChanges({
+  required String deviceId,
+  required PlatformInt64 since,
+  PlatformInt64? fromSeq,
+  String? fromId,
+  required int count,
+}) => RustLib.instance.api.crateApiDirectDirectChatChanges(
+  deviceId: deviceId,
+  since: since,
+  fromSeq: fromSeq,
+  fromId: fromId,
+  count: count,
 );
 
 /// Writes to a friend: text, files, or both. It goes when both are online.
@@ -191,6 +224,45 @@ class UiDirectCall {
           starter == other.starter;
 }
 
+/// What changed in a chat since a page of it was read.
+class UiDirectChanges {
+  /// The chat now: its items are those that came or changed since, oldest first (all of
+  /// them from the oldest held on, when `whole`); its pinned messages only when
+  /// `pinned_changed`; `more` says whether older items are there than the oldest held.
+  final UiDirectPage page;
+
+  /// Ids of items the page may hold that no longer show.
+  final List<String> removed;
+
+  /// The items are to take in place of those held.
+  final bool whole;
+  final bool pinnedChanged;
+
+  const UiDirectChanges({
+    required this.page,
+    required this.removed,
+    required this.whole,
+    required this.pinnedChanged,
+  });
+
+  @override
+  int get hashCode =>
+      page.hashCode ^
+      removed.hashCode ^
+      whole.hashCode ^
+      pinnedChanged.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UiDirectChanges &&
+          runtimeType == other.runtimeType &&
+          page == other.page &&
+          removed == other.removed &&
+          whole == other.whole &&
+          pinnedChanged == other.pinnedChanged;
+}
+
 /// A chat in the list of chats.
 class UiDirectChat {
   final UiPerson friend;
@@ -337,6 +409,10 @@ class UiDirectFile {
 class UiDirectItem {
   final String id;
 
+  /// Its place in the chat, which never changes: with the id, where older items are read
+  /// from ([`direct_chat_older`]).
+  final PlatformInt64 seq;
+
   /// Written on this device.
   final bool mine;
 
@@ -368,6 +444,7 @@ class UiDirectItem {
 
   const UiDirectItem({
     required this.id,
+    required this.seq,
     required this.mine,
     required this.atMs,
     required this.text,
@@ -383,6 +460,7 @@ class UiDirectItem {
   @override
   int get hashCode =>
       id.hashCode ^
+      seq.hashCode ^
       mine.hashCode ^
       atMs.hashCode ^
       text.hashCode ^
@@ -400,6 +478,7 @@ class UiDirectItem {
       other is UiDirectItem &&
           runtimeType == other.runtimeType &&
           id == other.id &&
+          seq == other.seq &&
           mine == other.mine &&
           atMs == other.atMs &&
           text == other.text &&
@@ -410,6 +489,28 @@ class UiDirectItem {
           pinned == other.pinned &&
           pin == other.pin &&
           call == other.call;
+}
+
+/// Older items of a chat, before the oldest a screen holds.
+class UiDirectOlder {
+  /// Oldest first.
+  final List<UiDirectItem> items;
+
+  /// Older items are there too.
+  final bool more;
+
+  const UiDirectOlder({required this.items, required this.more});
+
+  @override
+  int get hashCode => items.hashCode ^ more.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is UiDirectOlder &&
+          runtimeType == other.runtimeType &&
+          items == other.items &&
+          more == other.more;
 }
 
 /// A file to send, with a video's first picture and length as this device read them.
@@ -459,6 +560,9 @@ class UiDirectPage {
   /// last wrote it (found when it started).
   final bool altered;
 
+  /// When it was read, to ask what changed since ([`direct_chat_changes`]).
+  final PlatformInt64 version;
+
   const UiDirectPage({
     required this.friend,
     required this.online,
@@ -472,6 +576,7 @@ class UiDirectPage {
     this.endedMs,
     required this.usage,
     required this.altered,
+    required this.version,
   });
 
   @override
@@ -487,7 +592,8 @@ class UiDirectPage {
       timerMs.hashCode ^
       endedMs.hashCode ^
       usage.hashCode ^
-      altered.hashCode;
+      altered.hashCode ^
+      version.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -505,7 +611,8 @@ class UiDirectPage {
           timerMs == other.timerMs &&
           endedMs == other.endedMs &&
           usage == other.usage &&
-          altered == other.altered;
+          altered == other.altered &&
+          version == other.version;
 }
 
 /// A message pinned or unpinned, as a line of the chat.

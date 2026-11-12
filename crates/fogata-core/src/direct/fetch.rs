@@ -151,7 +151,7 @@ pub(super) async fn fetch(
             }
         }
         let dest = inner.direct.store.file_path(&friend, &attachment);
-        chats.downloads.insert((friend, file), 0);
+        chats.set_download(friend, file, Some(0));
         // What comes by itself waits for a turn of the friend's and one of all; what was
         // asked for goes at once.
         let turns = (!asked).then(|| {
@@ -166,7 +166,7 @@ pub(super) async fn fetch(
     };
     let peer = inner.node.member_peer(friend).await.ok().flatten();
     let Some(peer) = peer else {
-        inner.direct.lock().downloads.remove(&(friend, file));
+        inner.direct.lock().set_download(friend, file, None);
         settle(inner, friend, file, charged, false);
         bail!("files come while you are both online; try again then");
     };
@@ -177,7 +177,7 @@ pub(super) async fn fetch(
         match room_on_disk(inner, &attachment, &dest) {
             Ok(room) => Some(room),
             Err(e) => {
-                inner.direct.lock().downloads.remove(&(friend, file));
+                inner.direct.lock().set_download(friend, file, None);
                 settle(inner, friend, file, charged, false);
                 return Err(e);
             }
@@ -209,7 +209,7 @@ pub(super) async fn fetch(
                     Ok(room) => room,
                     Err(_) => {
                         tracing::info!("an attachment waits to be asked for: the disk is full");
-                        inner.direct.lock().downloads.remove(&(friend, file));
+                        inner.direct.lock().set_download(friend, file, None);
                         settle(&inner, friend, file, charged, false);
                         tried(&inner, friend, file, false);
                         inner.emit(CoreEvent::DirectChanged { friend });
@@ -228,10 +228,15 @@ pub(super) async fn fetch(
             let Some(inner) = weak.upgrade() else {
                 return;
             };
-            inner.direct.lock().downloads.insert((friend, file), got);
             let step = got * 20 / total.max(1);
-            if step > last_step {
+            let mut chats = inner.direct.lock();
+            if step <= last_step {
+                // Read with the chat; said changed only at each step, as it is shown.
+                chats.downloads.insert((friend, file), got);
+            } else {
                 last_step = step;
+                chats.set_download(friend, file, Some(got));
+                drop(chats);
                 inner.emit(CoreEvent::DirectDownload {
                     friend,
                     file,
@@ -346,7 +351,7 @@ pub(super) async fn fetch(
         }
         // Still downloading until it is kept or not: a voice message being checked would
         // otherwise be fetched again, and charged again, by the next message to arrive.
-        inner.direct.lock().downloads.remove(&(friend, file));
+        inner.direct.lock().set_download(friend, file, None);
         inner.emit(CoreEvent::DirectChanged { friend });
     });
     Ok(())

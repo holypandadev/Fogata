@@ -40,6 +40,7 @@ UiDirectFile voiceFile(
 UiDirectItem item(String id, UiDirectFile file, {bool mine = false}) =>
     UiDirectItem(
       id: id,
+      seq: 0,
       mine: mine,
       atMs: now,
       text: '',
@@ -64,6 +65,7 @@ Future<AppState> show(
     ..open = sofia.id
     ..page = UiDirectPage(
       friend: sofia,
+      version: 0,
       online: online,
       away: false,
       lastSeenMs: online ? null : now - 60000,

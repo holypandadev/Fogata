@@ -122,6 +122,7 @@ void main() {
     final now = DateTime.now().millisecondsSinceEpoch;
     UiDirectItem message(String id, String text) => UiDirectItem(
       id: id,
+      seq: 0,
       mine: false,
       atMs: now,
       text: text,
@@ -141,6 +142,7 @@ void main() {
       ..page = UiDirectPage(
         away: false,
         friend: sofia,
+        version: 0,
         online: false,
         lastSeenMs: now - 2 * dayMs,
         connected: false,

@@ -67,6 +67,7 @@ final _now = DateTime.now().millisecondsSinceEpoch;
 UiDirectItem _line(String id, String text, {bool mine = false, int ago = 0}) =>
     UiDirectItem(
       id: id,
+      seq: 0,
       mine: mine,
       atMs: _now - ago * 60000,
       text: text,
@@ -146,6 +147,7 @@ AppState _state(Screen page) {
       ..page = UiDirectPage(
         away: false,
         friend: _sofia,
+        version: 0,
         online: true,
         connected: true,
         items: [
