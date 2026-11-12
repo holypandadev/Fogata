@@ -256,6 +256,20 @@ Dependabot alerts name the crates and packages with a known vulnerability, and t
 private vulnerability reporting are on too. These are settings of the repository, not files
 in it.
 
+## A call's memory over hours
+
+`.github/workflows/call-memory.yml`, started by hand (`gh workflow run call-memory.yml --repo
+holypandadev/Fogata -f seconds=12600 -f mode=voice`), runs a call of the call lab for hours
+on one of GitHub's computers, where a job may last six: copies of the call test built
+optimised (`--profile`), every copy's memory by kind of mapping each minute
+(`tools/call-lab/smaps.py`, in the run's `smaps.log`), and one copy under heaptrack
+(`MEASURE_HEAP` of `tools/call-lab/measure.sh`), from whose notes
+`tools/call-lab/heap-report.sh` says what was allocated after the call settled and never
+freed, by call stack. The run's summary shows the start of that; the whole run folder is
+the run's artifact, kept 30 days. It checks nothing and blocks nothing: it is how a slow
+growth is looked for, before and after a change. The same runs on any Linux computer with
+`heaptrack` and `zstd` installed.
+
 ## The smoke test
 
 The smoke test is the main things a person does, done by two copies of the application the

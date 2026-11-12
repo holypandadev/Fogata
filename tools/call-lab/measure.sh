@@ -22,6 +22,14 @@
 # Environment: BUNDLE (another build), CALL_LAB_RUNS (where run folders go, default
 # ~/call-lab), MEASURE_ENV (more VAR=value for every copy), LAB_DISPLAY (default 171), LOAD_MAX (the computer's load to wait under before
 # starting, default 6: other work on it shows in every figure). Prints the run folder at the end.
+#
+# For a call's memory over hours: every minute smaps.log gets what each copy's memory is
+# made of (smaps.py), and with MEASURE_HEAP=<role> that copy runs under heaptrack's library
+# (HEAPTRACK_LIB and HEAPTRACK_INTERPRET, default those under /usr/lib), which notes every
+# allocation with its call stack: heaptrack-<role>.zst (the whole run) and
+# heaptrack-<role>-early.zst (up to MEASURE_EARLY seconds, default 1800);
+# heap-report.sh makes reports of them. That copy runs slower: its other figures are not
+# those of a call.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" = --inside ]; then
@@ -33,8 +41,31 @@ if [ "${1:-}" = --inside ]; then
   roles=("${ROLES[@]}")
   mic=1
   [ "$MODE" = idle ] && mic=off
+  heap=""
   for r in "${roles[@]:0:N}"; do
     extra=(FOGATA_TEST_MEASURE="$SECS")
+    if [ "${MEASURE_HEAP:-}" = "$r" ]; then
+      lib=${HEAPTRACK_LIB:-$(ls /usr/lib/heaptrack/libheaptrack_preload.so /usr/lib/*/heaptrack/libheaptrack_preload.so 2> /dev/null | head -n 1)}
+      interpret=${HEAPTRACK_INTERPRET:-$(ls /usr/lib/heaptrack/libexec/heaptrack_interpret /usr/lib/*/heaptrack/libexec/heaptrack_interpret 2> /dev/null | head -n 1)}
+      [ -n "$lib" ] && [ -e "$lib" ] && [ -n "$interpret" ] && [ -x "$interpret" ] ||
+        { echo "no heaptrack library or interpreter (HEAPTRACK_LIB, HEAPTRACK_INTERPRET)" | tee -a "$RUN/lab.log" >&2; lab_stop; exit 1; }
+      # The library writes as the copy allocates. heaptrack's interpreter gives the call
+      # stacks their names on the way to the disk, as heaptrack itself does (done after
+      # hours of a call, it took longer than the call), twice: the whole run, and the run
+      # up to MEASURE_EARLY seconds (default 1800), once the call has settled, which
+      # heap-report.sh takes from the whole to say what grew. Both end when the copy does.
+      mkfifo "$RUN/heap-$r.fifo"
+      tee >(python3 -I "$HERE/heap_until.py" "${MEASURE_EARLY:-1800}" | "$interpret" 2> /dev/null |
+        zstd -q -3 > "$RUN/heaptrack-$r-early.zst") < "$RUN/heap-$r.fifo" |
+        "$interpret" 2> "$RUN/heap-$r-interpret.log" | zstd -q -3 > "$RUN/heaptrack-$r.zst" &
+      heap=$!
+      # The sound libraries the call opens by name when it starts come in with it: opened
+      # then, on one thread while others allocate, the library's lock and the loader's
+      # were taken in both orders now and then, and the copy stopped for good.
+      extra+=(LD_PRELOAD="$lib libpulse.so.0 libasound.so.2 libpipewire-0.3.so.0"
+        DUMP_HEAPTRACK_OUTPUT="$RUN/heap-$r.fifo"
+        LD_LIBRARY_PATH="$(dirname "$BUNDLE")/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+    fi
     [ "$MODE" = camera ] && extra+=(FOGATA_TEST_CAMERA=1)
     [ "$MODE" = screen ] && [ "$r" = a ] && extra+=(FOGATA_TEST_SCREEN=1)
     # MEASURE_ENV: more settings for every copy, such as FOGATA_TEST_CAMERA_PEOPLE=6.
@@ -60,9 +91,29 @@ if [ "${1:-}" = --inside ]; then
     done
   ) &
   sampler=$!
+  # What each copy's memory is made of, every minute.
+  (
+    while true; do
+      for r in "${roles[@]:0:N}"; do
+        echo "$(date +%s) $r $(python3 -I "$HERE/smaps.py" "$(cat "$RUN/$r.pid")")" >> "$RUN/smaps.log"
+      done
+      sleep 60
+    done
+  ) &
+  kinds=$!
   lab_wait "${roles[*]:0:N}" $((SECS + 1200))
-  kill "$sampler"
+  kill "$sampler" "$kinds"
   lab_stop
+  # The last of the allocations, written once the copy is gone; the early part's own
+  # pipe ends by itself a moment after.
+  if [ -n "$heap" ]; then
+    wait "$heap"
+    for _ in $(seq 60); do
+      size=$(stat -c %s "$RUN"/heaptrack-?-early.zst 2> /dev/null | head -n 1)
+      sleep 1
+      [ "$size" = "$(stat -c %s "$RUN"/heaptrack-?-early.zst 2> /dev/null | head -n 1)" ] && [ -n "$size" ] && [ "$size" != 0 ] && break
+    done
+  fi
   exit 0
 fi
 
