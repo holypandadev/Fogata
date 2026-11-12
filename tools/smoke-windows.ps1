@@ -8,7 +8,8 @@
 #
 # Builds the test (`flutter build windows --debug -t integration_test/smoke_test.dart`)
 # unless -NoBuild, then starts copy a and copy b with folders of their own under -Out
-# (default: a new folder in %TEMP%), waits for both results (up to -Minutes, default 15),
+# (default: a new folder in %TEMP%; emptied of what an earlier run left in them), waits for
+# both results (up to -Minutes, default 15),
 # and stops them. Meant for a computer with no real microphone or speakers in use (a test
 # machine with virtual devices only, such as VB-Cable): no microphone is opened, the camera
 # stays off, and the app's sounds play to the default output.
@@ -51,6 +52,13 @@ if (-not (Test-Path $exe)) {
 $copies = @{}
 foreach ($role in 'a', 'b') {
   $data = Join-Path $Out $role
+  # A profile left there by an earlier run with the same -Out would open in place of the
+  # welcome page, which the test waits for in vain.
+  Remove-Item -Recurse -Force $data -ErrorAction SilentlyContinue
+  if (Test-Path $data) {
+    Write-Output "smoke: cannot empty $data (a copy of an earlier run still open?)"
+    exit 1
+  }
   New-Item -ItemType Directory -Force $data | Out-Null
   $env:FOGATA_ROLE = $role
   $env:FOGATA_SMOKE = $meet

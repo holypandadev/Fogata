@@ -56,6 +56,9 @@ run() {
   [ -x "$exe" ] || { echo "smoke: no app at $smoke_app (run: $0 build)" >&2; exit 3; }
   local out=${FOGATA_SMOKE_OUT:-$HOME/fogata-smoke-runs/$(date +%Y%m%d-%H%M%S)}
   local limit=${FOGATA_SMOKE_TIMEOUT:-900}
+  # What an earlier run with the same FOGATA_SMOKE_OUT left: a profile there would open in
+  # place of the welcome page, which the test waits for in vain.
+  rm -rf "${out:?}/meet" "${out:?}/a" "${out:?}/b"
   mkdir -p "$out/meet"
   # The macOS bash has no maps: copy a is 0, copy b is 1.
   local roles=(a b) pid=() status=('' '') i
