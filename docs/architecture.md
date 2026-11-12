@@ -1136,8 +1136,18 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   the sender with the most kept loses its oldest lines first, so a member that floods its
   rooms (in any number of groups) loses its own lines and nobody else's while it keeps more
   than they do. A line let go is not taken again when a copy comes back. That is this
-  device's memory only: each member answers with what it keeps. The shares stay bounded
-  by group.
+  device's memory only: each member answers with what it keeps, and two members that keep
+  different amounts still list the same people and files, alike for a member that asks
+  either, and lose nothing for asking each other (`node::room` test
+  `devices_keeping_less_chat_still_agree_on_the_room`); only how far back the chat goes
+  differs. The shares stay bounded by group, the same on every member: a device cannot
+  let go of shares the others list, or it would answer a member that asks with another
+  room. Measured (`measure_device_room_memory_*`, ten groups each with eight devices of a
+  flooding member in all ten rooms, macOS release build): 633 MiB of chat and 200 MiB of
+  shares as counted, 1.2 GB resident, with each group's bounds alone; 127 MiB of chat and
+  the same shares, 0.74 GB resident, within the bound of all the chat. What is left grows
+  with the groups by their shares: each kept as the message sent and again as the picture
+  it shows.
 - Another member fetches it over a stream (`/fogata/file/1`) from any participant that has
   it: the request names the id and an offset, so an interrupted download resumes from its
   `.part` file (named after the file's id too, so two files of one name never mix). The connection's own encryption covers the transfer end to end, also when a
