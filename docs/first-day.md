@@ -6,9 +6,10 @@ break without noticing. Everything here is said at length elsewhere; this page o
 ## Read
 
 1. `docs/architecture.md`, sections 1 (the concepts: groups, devices, friends, rooms) and 2
-   (the folders and the layers of the crates). The rest is long (some 4,800 lines) and is
-   read by section, when a change touches it: it is the specification of what Fogata does,
-   kept true as the code changes.
+   (the folders and the layers of the crates), and 7 (the threat model). The rest is long
+   (some 5,000 lines, a file per section in `docs/architecture/`, listed in its contents) and
+   is read by section, when a change touches it: it is the specification of what Fogata
+   does, kept true as the code changes.
 2. The comments of the code you change: they say why, and many state a rule the rest of
    the code relies on.
 3. For a forked package, its `FOGATA.md`: `vendor/<crate>/FOGATA.md`,
@@ -17,6 +18,14 @@ break without noticing. Everything here is said at length elsewhere; this page o
 
 ## Build and run
 
+| What | Version | Pinned in |
+|---|---|---|
+| Rust | 1.99.1 | `rust-toolchain.toml` |
+| Flutter | 3.47.8 | `app/pubspec.yaml`, `FLUTTER_VERSION` in `.github/workflows` |
+| flutter_rust_bridge, and its codegen | 2.13.0 | `crates/fogata-ffi/Cargo.toml`, `app/pubspec.yaml` |
+| Xcode (macOS) | 16.4 | `XCODE_VERSION` in `.github/workflows/ci.yml` |
+| The systems GitHub checks on | `ubuntu-24.04`, `macos-15`, `windows-2025` | `.github/workflows/ci.yml` |
+
 `docs/building.md`: the Rust of `rust-toolchain.toml` (rustup takes it), the exact Flutter of
 `app/pubspec.yaml`, and on Linux the development packages it names. The WebRTC library
 comes as archives built by `tools/webrtc` and published in holypandadev/fogata-libwebrtc,
@@ -24,13 +33,27 @@ which the build downloads and checks by SHA-256 (`docs/native-components.md`); y
 build it. `docs/cli.md` is the command-line program, which runs the same core as the app and
 is the quickest way to try the network.
 
+```
+cargo build --release -p fogata
+cd app && flutter build linux --release
+```
+
+The first builds the command-line program (`target/release/fogata`), on any system; the
+second the application on Linux (`app/build/linux/x64/release/bundle/fogata`). On macOS,
+add the Mac targets once (`rustup target add aarch64-apple-darwin x86_64-apple-darwin
+--toolchain 1.99.1`), then run `flutter build macos --release` in `app/`; on Windows,
+`flutter build windows --release`. `FOGATA_DATA_DIR` gives a run a data folder of its own.
+
 ## Before a commit, before a push
 
 - `tools/check.sh`: formatting, clippy, every Rust test, `cargo deny`, the tools' own tests,
   the generated bridge code and notices. Run it before every commit.
 - `tools/install-hooks.sh` once, then `tools/ci.sh --full` before a push: the whole run of
   `docs/ci.md` (the release build, the native, integration, pair and smoke tests) in a
-  clean worktree. GitHub runs the same on Linux, macOS and Windows at every push.
+  clean worktree. GitHub runs the same on Linux, macOS and Windows at every push; the
+  macOS and Windows parts are `tools/ci-leg.sh macos` and `tools/ci-leg.ps1`, and each
+  system's smoke test is `tools/smoke-linux.sh`, `tools/smoke-windows.ps1` or
+  `tools/smoke-macos.sh build`, then `run` (`docs/ci.md`, "The smoke test").
 
 ## Rules that are easy to break
 
@@ -50,9 +73,12 @@ is the quickest way to try the network.
 ## Where other devices' input comes in
 
 The code that reads what other devices send, and so decides what a stranger, a friend or a
-member may do. Each is a large `match` over message kinds: a new kind needs its own check of
-who may ask, at the top of its arm, and a fuzz target if it decodes something new
-(`docs/fuzzing.md`).
+member may do. Each is a `match` over every message kind, with no wildcard, that hands each
+kind to a function of its own (`on_<kind>_request`, `on_<kind>_answer`, `handle_<kind>`): a
+new kind gets its own function, with its check of who may ask at its top, a line in the
+test that asks with every kind (`every_member_request_is_answered_by_who_asks`,
+`every_friend_request_is_answered_by_who_asks`), and a fuzz target if it decodes something
+new (`docs/fuzzing.md`).
 
 | Where | What |
 |---|---|
