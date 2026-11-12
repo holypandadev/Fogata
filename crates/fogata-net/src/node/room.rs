@@ -1268,6 +1268,13 @@ mod tests {
     use super::*;
     use crate::behaviour::{MAX_MESSAGE_BYTES, message_codec};
 
+    /// Requests made of a peer so far: those on their way and those waiting their turn
+    /// (only so many go to one peer at once: asked for again and again, as these tests
+    /// do of peers that never answer, one more waits and is no less asked for).
+    fn sent(outbox: &super::super::Outbox) -> usize {
+        outbox.in_flight + outbox.waiting.len()
+    }
+
     fn record(id: u8, ciphertext: usize) -> WireMessage {
         WireMessage {
             version: 1,
@@ -1519,11 +1526,11 @@ mod tests {
         // Room asks of a heartbeat: by group, the members asked.
         fn beat(n: &mut Node) -> HashMap<GroupId, Vec<PeerId>> {
             let before: HashMap<PeerId, usize> =
-                n.outbox.iter().map(|(p, o)| (*p, o.in_flight)).collect();
+                n.outbox.iter().map(|(p, o)| (*p, sent(o))).collect();
             n.room_heartbeat();
             let mut asked: HashMap<GroupId, Vec<PeerId>> = HashMap::new();
             for (peer, outbox) in &n.outbox {
-                if outbox.in_flight > before.get(peer).copied().unwrap_or(0) {
+                if sent(outbox) > before.get(peer).copied().unwrap_or(0) {
                     let group = n
                         .groups
                         .iter()
@@ -1920,11 +1927,11 @@ mod tests {
         use fogata_proto::MemberResponse;
         fn asked(n: &mut Node) -> Vec<PeerId> {
             let before: HashMap<PeerId, usize> =
-                n.outbox.iter().map(|(p, o)| (*p, o.in_flight)).collect();
+                n.outbox.iter().map(|(p, o)| (*p, sent(o))).collect();
             n.room_heartbeat();
             n.outbox
                 .iter()
-                .filter(|(p, o)| o.in_flight > before.get(*p).copied().unwrap_or(0))
+                .filter(|(p, o)| sent(o) > before.get(*p).copied().unwrap_or(0))
                 .map(|(p, _)| *p)
                 .collect()
         }
