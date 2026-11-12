@@ -2662,16 +2662,72 @@ three. The corpus of level two is judged in its test as a copy of level two (one
 no later level: the corpus holds `Level` entries naming three, which such a copy refuses),
 and still matches `level-two.txt`.
 
-The rotation rule binds only a `Rotate` whose author saw the group at level three: what is
-kept is judged on its author's view, at that view's level, and what applies falls back to
-level two for a `Rotate`. A member that signs one on entries from before the raise (when it
-saw someone gone hold the key) still starts an epoch for itself and a few, as at level two;
-and a `Remove`, which a member above another may write, carries a rotation no level checks
-for every member. The managers' devices repair either, as at level two: one left without
-the key starts a new epoch for everyone (`mend_key`, at most once a minute), one that has it
-sends it to the members that lack it (`welcome_lacking`). Holding a rotation to the rule
-where it applies changes what a log applies, so it waits for a later level (with the
-`Remove` rotations), raised once every member's copy judges at it.
+The rotation rule of level three binds only a `Rotate` whose author saw the group at level
+three: what is kept is judged on its author's view, at that view's level, and what applies
+falls back to level two for a `Rotate`. A member that signs one on entries from before the
+raise (when it saw someone gone hold the key) still starts an epoch for itself and a few, as
+at level two; and a `Remove`, which a member above another may write, carries a rotation no
+level checks for every member. The managers' devices repair either, as at level two: one
+left without the key starts a new epoch for everyone (`mend_key`, at most once a minute), one
+that has it sends it to the members that lack it (`welcome_lacking`). Level four closes both.
+
+**Level four** (capability level 4) changes two rules, and nothing else:
+
+- a `Rotate` that applies at level four, whoever wrote it and whatever its author saw, gives
+  the new key to every member of the group as its author saw it (but keys nothing can be
+  sealed to); one that leaves some out does not apply;
+- a `Remove` that applies at level four gives its new epoch to every member its author saw
+  but the one removed (the same keys aside); one that leaves some out does not apply: the
+  member is not removed by it, and its epoch does not start.
+
+*What is judged, and on which view.* The rule is judged once per entry, on the group its
+author saw: the state of the log made of the entry's ancestors (its parents, theirs and so
+on), which its hash fixes (`GroupLog::state_before`). That is the view a `Rotate` of a
+member that does not manage is already judged on for its reason to rotate (level two), and
+the answer is kept with that one, by the entry's hash (`Seen`: whether its author had a
+reason to rotate, whether its rotation reaches every member it saw). Where it is checked:
+
+- *kept*: an entry is judged, as every entry, on its author's view at that view's level; at
+  level four a `Remove` that leaves out a member it saw is refused (a `Rotate` already is
+  from level three), so neither is kept nor passed on, and what is signed on it waits;
+- *applied*: an entry placed in the common order where the group is at level four is held
+  to the rule on its author's view, whatever that view's level. This is what level three
+  lacks: a `Rotate` or `Remove` signed on entries from before the raise was judged at the
+  level its author saw, and kept, and now does not apply where the group is at four.
+
+*Why every copy agrees.* What applies at level four depends on two things only: where the
+entry is in the common order (after the `Level` entry that raised the group to four, which
+applied), which every copy with the same entries works out alike; and the entry's view,
+which depends on nothing but its ancestors. Neither depends on the order the entries came in,
+nor on what else a copy has: two copies given the same entries in any order keep and apply
+the same (a property test checks it, with members writing rotations and removals for a few
+on parents from before and after the raise, sent in different orders). Where the view is
+the group as the log has it (an entry signed on every head) it is not worked out again; else
+it is worked out once per entry and kept, and what was judged is kept with the log
+(`Verdicts`), so a log read back at a start does not work views out again.
+
+*What an older copy sees.* A copy of level three refuses the `Level` entry naming four, and
+waits on everything signed after it, as for any level it does not judge at: the group stays
+there as it was. Copies up to 0.1.0-beta.9 say nothing of it; this version and later ones
+tell their person that the group needs a newer Fogata (`GroupLog::level_ahead`, above). A
+release that brings level four therefore sets its `min_build` (5f) to its own build, so that
+every older copy is told it must update, from its updates, whatever group it is in.
+
+*How a group gets there.* As level three did: a manager's device raises its group by itself
+once every other member was seen at capability level four (`raise_level_when_all_judge`), or,
+once the group has waited a week, its manager raises it anyway, naming who will have to
+update (above). A group created by this version starts at the level the creator raises it to
+by itself, as before.
+
+*The managers' repair.* A member can still lack the current key at level four: one let in
+(added or joined) while a rotation that did not see it was written, one whose box opens to
+nothing (a box is checked for being there and of the right length, not for what it opens
+to), a key nothing can be sealed to. `welcome_lacking` and `mend_key` stay for those, and are
+needed less: a rotation that leaves out a member its author saw no longer applies, so it
+leaves nobody without a key, and the epoch before it stays current until a rotation that
+applies. The device whose rotation did not apply (an honest one only does that with stale
+parents, signing on a view that left a member out) is told nothing; at its next heartbeat it
+sees the epoch it wrote did not start, and rotates again if it still has a reason to.
 
 The order of the entries, the shortcut that judges an entry signed on every head on the
 group as the log has it, and the limits judging reads (members, rooms, names, picture,
