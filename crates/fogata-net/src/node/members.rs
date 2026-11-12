@@ -1163,15 +1163,7 @@ impl Node {
                 self.on_banner_answer(peer, group, digest, response)
             }
             (Pending::Picture(group, digest), response) => {
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.picture_answered(peer, digest);
-                    if matches!(response, MemberResponse::Refused) {
-                        tracing::debug!("{} refused the group's picture", short_peer(&peer));
-                        slot.picture_refused.insert(peer, digest);
-                    } else {
-                        slot.picture_refused.remove(&peer);
-                    }
-                }
+                self.on_picture_answer(peer, group, digest, response)
             }
             (Pending::FriendAsk(device, fresh), response) => {
                 self.member_ask_answered(device, fresh, matches!(response, MemberResponse::Ack))
@@ -1346,6 +1338,25 @@ impl Node {
                 slot.banner_refused.insert(peer, digest);
             } else {
                 slot.banner_refused.remove(&peer);
+            }
+        }
+    }
+
+    /// Takes a member's answer to the group's picture record sent to it.
+    fn on_picture_answer(
+        &mut self,
+        peer: PeerId,
+        group: GroupId,
+        digest: [u8; 32],
+        response: MemberResponse,
+    ) {
+        if let Some(slot) = self.groups.get_mut(&group) {
+            slot.picture_answered(peer, digest);
+            if matches!(response, MemberResponse::Refused) {
+                tracing::debug!("{} refused the group's picture", short_peer(&peer));
+                slot.picture_refused.insert(peer, digest);
+            } else {
+                slot.picture_refused.remove(&peer);
             }
         }
     }
