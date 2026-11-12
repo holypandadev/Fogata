@@ -1094,28 +1094,7 @@ impl Node {
                 self.on_friend_code_start_request(peer, local, remote, now, gate, spake)
             }
             FriendRequest::CodeFinish { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some((inviter, _)) = f.inviting.remove(&peer) else {
-                    return FriendResponse::Refused;
-                };
-                match inviter.finish(&sealed) {
-                    Ok(intro) => {
-                        f.code = None;
-                        f.inviting.clear();
-                        self.received_request(peer, intro);
-                        FriendResponse::Pending
-                    }
-                    Err(e) => {
-                        tracing::debug!("a code run from {peer} failed: {e}");
-                        if let Some(code) = f.code.as_mut() {
-                            code.failed += 1;
-                        }
-                        FriendResponse::Refused
-                    }
-                }
+                self.on_friend_code_finish_request(peer, sealed)
             }
             FriendRequest::Accept { mac, sealed } => {
                 // Kept, as checked above.
@@ -1655,6 +1634,32 @@ impl Node {
                 }
             }
             Err(_) => FriendResponse::Refused,
+        }
+    }
+
+    /// Takes the end of a run of the friend code, and its friend request.
+    fn on_friend_code_finish_request(&mut self, peer: PeerId, sealed: Vec<u8>) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some((inviter, _)) = f.inviting.remove(&peer) else {
+            return FriendResponse::Refused;
+        };
+        match inviter.finish(&sealed) {
+            Ok(intro) => {
+                f.code = None;
+                f.inviting.clear();
+                self.received_request(peer, intro);
+                FriendResponse::Pending
+            }
+            Err(e) => {
+                tracing::debug!("a code run from {peer} failed: {e}");
+                if let Some(code) = f.code.as_mut() {
+                    code.failed += 1;
+                }
+                FriendResponse::Refused
+            }
         }
     }
 
