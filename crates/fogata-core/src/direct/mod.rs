@@ -332,6 +332,15 @@ impl Held {
         held
     }
 
+    /// A chat not read, of which only its summary is known.
+    fn away(store: Arc<DirectStore>, friend: DevicePublicKey, summary: Summary) -> Self {
+        Self {
+            source: Some((store, friend)),
+            summary,
+            ..Self::default()
+        }
+    }
+
     /// The chat, read now if it is not held.
     fn read(&self) -> &(Chat, bool) {
         self.used.set(USES.fetch_add(1, Ordering::Relaxed));
@@ -539,35 +548,52 @@ impl Chats {
         key: Option<fogata_crypto::at_rest::DataKey>,
         writer: Arc<Writer>,
     ) -> Self {
-        let store = DirectStore::open_sealed(data_dir, key);
+        let store = Arc::new(DirectStore::open_sealed(data_dir, key));
         // Copies made to play attachments last until the core stops.
         store.forget_copies();
         let mut state = ChatsState {
             settings: store.settings(),
             ..Default::default()
         };
-        for (friend, loaded) in store.chats() {
-            // Kept for what was read, unless the one kept says the same.
-            let summary = Summary::of(&loaded.chat, loaded.ended_ms);
-            if store.summary(&friend).as_ref() != Some(&summary) {
-                keep_summary(&store, &friend, &summary);
-            }
+        for friend in store.friends() {
+            // A chat whose summary is as its journal stands is not read: its items are read
+            // when something needs them. Any other is read whole, and its summary kept.
+            let (chat, ended_ms, group, profile) = match store.resume(&friend) {
+                Some(summary) => {
+                    let (group, profile) = store.group_and_profile(&friend);
+                    let ended_ms = summary.ended_ms;
+                    let chat = Held::away(store.clone(), friend, summary);
+                    (chat, ended_ms, group, profile)
+                }
+                None => match store.load(&friend) {
+                    Ok(loaded) => {
+                        keep_summary(&store, &friend, &Summary::of(&loaded.chat, loaded.ended_ms));
+                        let chat = Held::here(loaded.chat, loaded.altered);
+                        (chat, loaded.ended_ms, loaded.group, loaded.profile)
+                    }
+                    Err(e) => {
+                        tracing::warn!("a chat not read: {e:#}");
+                        continue;
+                    }
+                },
+            };
             let entry = Entry {
-                chat: Held::here(loaded.chat, loaded.altered),
-                ended_ms: loaded.ended_ms,
-                profile: loaded
-                    .profile
+                chat,
+                ended_ms,
+                profile: profile
                     .and_then(|bytes| Profile::decode(&bytes).ok())
                     .filter(|p| p.device == friend),
-                group: loaded.group,
+                group,
             };
             if let Some(group) = entry.group_id() {
                 state.by_group.insert(group, friend);
             }
             state.chats.insert(friend, entry);
         }
+        // What was read whole to make its summary is let go of past the few kept.
+        state.trim(&store);
         Self {
-            store: Arc::new(store),
+            store,
             state: Arc::new(Mutex::new(state)),
             writer,
             asked: Default::default(),
@@ -2760,14 +2786,39 @@ mod tests {
         chats.settle();
         chats.trim();
         assert_eq!(held(), CHATS_HELD);
-        // Read again at a start, each chat is as it was written.
+        // A start reads no chat: each is taken from its summary, and read when needed, as
+        // it was written.
         let again = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        assert_eq!(again.store.loads.load(Relaxed), 0);
         let state = again.lock();
         for (n, friend) in (1u8..).zip(&friends) {
+            assert_eq!(
+                state.chats[friend].usage().pictures,
+                if n == 1 { 0 } else { 400 }
+            );
             let local = state.chats[friend].chat.items()[0].files()[0].local;
             assert_eq!(local, if n == 1 { Local::Removed } else { Local::Here });
         }
         drop(state);
+        drop(again);
+        // A folder from before summaries reads every chat once, and keeps their summaries.
+        for friend in &friends {
+            std::fs::remove_file(chats.store.chat_dir(friend).join("summary")).unwrap();
+        }
+        let first = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        assert_eq!(first.store.loads.load(Relaxed), friends.len());
+        assert!(
+            first
+                .lock()
+                .chats
+                .values()
+                .filter(|e| e.held().is_some())
+                .count()
+                <= CHATS_HELD
+        );
+        let then = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        assert_eq!(then.store.loads.load(Relaxed), 0);
+        assert_eq!(then.lock().chats.len(), friends.len());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

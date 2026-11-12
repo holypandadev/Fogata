@@ -635,6 +635,18 @@ impl DirectStore {
 
     /// The chats kept here, each with its friend.
     pub fn chats(&self) -> Vec<(DevicePublicKey, Loaded)> {
+        let mut out = Vec::new();
+        for friend in self.friends() {
+            match self.load(&friend) {
+                Ok(loaded) => out.push((friend, loaded)),
+                Err(e) => tracing::warn!("chat {} not loaded: {e:#}", chat_name(&friend)),
+            }
+        }
+        out
+    }
+
+    /// The friends of the chats kept here, by their folders.
+    pub fn friends(&self) -> Vec<DevicePublicKey> {
         let Ok(entries) = fs::read_dir(&self.dir) else {
             return Vec::new();
         };
@@ -647,12 +659,8 @@ impl DirectStore {
             else {
                 continue;
             };
-            if !entry.path().is_dir() {
-                continue;
-            }
-            match self.load(&friend) {
-                Ok(loaded) => out.push((friend, loaded)),
-                Err(e) => tracing::warn!("chat {name} not loaded: {e:#}"),
+            if entry.path().is_dir() {
+                out.push(friend);
             }
         }
         out
@@ -782,26 +790,30 @@ impl DirectStore {
         }
         self.drop_damaged(friend, Some(DAMAGED_KEPT));
         self.measure(friend);
-        let group_path = self.group_path(friend);
-        if let Ok(bytes) = fs::read(&group_path) {
+        (loaded.group, loaded.profile) = self.group_and_profile(friend);
+        Ok(loaded)
+    }
+
+    /// The chat's group, if it has one, and the friend's profile as last known, encoded.
+    pub fn group_and_profile(
+        &self,
+        friend: &DevicePublicKey,
+    ) -> (Option<GroupLog>, Option<Vec<u8>>) {
+        let mut group = None;
+        if let Ok(bytes) = fs::read(self.group_path(friend)) {
             let (entries, _) = decode_entries(&bytes);
             if let Some(first) = entries.first() {
-                let (path, context) = (self.judged_path(friend), judged_context(&chat));
-                let group = first.group_id;
-                loaded.group = Some(read_judged(
-                    self.key.as_ref(),
-                    &path,
-                    &context,
-                    group,
-                    entries,
-                ));
+                let path = self.judged_path(friend);
+                let context = judged_context(&chat_name(friend));
+                let id = first.group_id;
+                group = Some(read_judged(self.key.as_ref(), &path, &context, id, entries));
             }
         }
-        loaded.profile = fs::read(self.profile_path(friend))
+        let profile = fs::read(self.profile_path(friend))
             .ok()
             .and_then(|bytes| from_disk(self.key.as_ref(), PROFILE, &bytes).ok())
             .map(|plain| plain.to_vec());
-        Ok(loaded)
+        (group, profile)
     }
 
     fn count(&self, friend: &DevicePublicKey, records: usize) {
@@ -3596,9 +3608,10 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// What reading every chat at a start costs, sealed: 20 chats of 10,000 messages each,
-    /// as the core reads them as it starts (the time, and what this process holds more
-    /// once they are read, by `ps`).
+    /// What a start costs with 20 sealed chats of 10,000 messages each: every chat read
+    /// whole (as before summaries were kept, and as a folder's first start without them
+    /// still does), and a start from the summaries, with one chat read when it is opened;
+    /// the time, and what this process holds more once done, by `ps`.
     /// `cargo test --release -p fogata-core --lib cost_of_many_chats -- --ignored --nocapture`.
     #[test]
     #[ignore]
@@ -3647,17 +3660,49 @@ mod tests {
                 .parse::<u64>()
                 .unwrap()
         };
+        let ms = |start: Instant| start.elapsed().as_secs_f64() * 1000.0;
+        let open = || {
+            super::super::Chats::open(
+                &dir,
+                Some(key.clone()),
+                std::sync::Arc::new(crate::writer::Writer::start().unwrap()),
+            )
+        };
+        // Every chat read whole, as before summaries were kept (and as the first start of a
+        // folder without them still does).
         let before = rss_kb();
         let start = Instant::now();
-        let chats = DirectStore::open_sealed(&dir, Some(key)).chats();
-        let took = start.elapsed();
-        let after = rss_kb();
+        let chats = DirectStore::open_sealed(&dir, Some(key.clone())).chats();
+        let read_all = ms(start);
+        let held_all = rss_kb().saturating_sub(before) / 1024;
         assert_eq!(chats.len(), 20);
         assert!(chats.iter().all(|(_, l)| l.chat.items().len() == 10_000));
+        drop(chats);
+        // The first start of such a folder reads each chat and keeps its summary.
+        let start = Instant::now();
+        let first = open();
+        let first_ms = ms(start);
+        first.settle();
+        drop(first);
+        // Then a start reads the summaries only, and a chat when it is opened.
+        let before = rss_kb();
+        let start = Instant::now();
+        let chats = open();
+        let start_ms = ms(start);
+        let held_start = rss_kb().saturating_sub(before) / 1024;
+        assert_eq!(
+            chats.store.loads.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+        let friend = *chats.lock().chats.keys().next().unwrap();
+        let start = Instant::now();
+        assert_eq!(chats.lock().chats[&friend].chat.items().len(), 10_000);
+        let opened_ms = ms(start);
         eprintln!(
-            "20 sealed chats of 10,000 messages read in {:.0} ms; the process holds {} MB more",
-            took.as_secs_f64() * 1000.0,
-            after.saturating_sub(before) / 1024
+            "20 sealed chats of 10,000 messages: all read whole in {read_all:.0} ms, holding \
+             {held_all} MB more; a first start that keeps their summaries {first_ms:.0} ms; a \
+             start from the summaries {start_ms:.1} ms, holding {held_start} MB more; one chat \
+             read when opened {opened_ms:.1} ms"
         );
         drop(chats);
         fs::remove_dir_all(&dir).unwrap();
