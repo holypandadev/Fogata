@@ -229,14 +229,7 @@ impl Node {
             }
             MemberRequest::Deliver(wire) => self.on_deliver_request(peer, wire),
             MemberRequest::Spread { message, reached } => {
-                let Some(group) = group_of(&message.group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if !self.is_member_of(&group, &peer) || !self.take_group_message(peer, &message) {
-                    return MemberResponse::Refused;
-                }
-                self.receive(peer, message, Forward::Spread(reached));
-                MemberResponse::Ack
+                self.on_spread_request(peer, message, reached)
             }
             MemberRequest::RoomEvents { group_id, ids } => {
                 let Some(group) = group_of(&group_id) else {
@@ -873,6 +866,23 @@ impl Node {
             return MemberResponse::Refused;
         }
         self.receive(peer, wire, Forward::Flooded);
+        MemberResponse::Ack
+    }
+
+    /// Takes a group message a member spreads.
+    fn on_spread_request(
+        &mut self,
+        peer: PeerId,
+        message: fogata_proto::WireMessage,
+        reached: Vec<u8>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&message.group_id) else {
+            return MemberResponse::Refused;
+        };
+        if !self.is_member_of(&group, &peer) || !self.take_group_message(peer, &message) {
+            return MemberResponse::Refused;
+        }
+        self.receive(peer, message, Forward::Spread(reached));
         MemberResponse::Ack
     }
 
