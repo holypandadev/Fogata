@@ -179,15 +179,15 @@ refuses a folder that holds any key already.
       gh run watch --repo holypandadev/Fogata <run id>
       ```
 
-      Pushing the tag `v0.1.0-beta.2` starts it too (the tag must be `v` and
-      `THIS_VERSION`). The attestations name the commit the run is on, so the run refuses
-      to build when `commit` is not the head of `--ref` as it starts: start it again on a
-      ref at that commit. The macOS updater is built with your team id pinned into it (see
-      2d): give it with `-f macos_team=<team>`, or once as the repository variable
-      `FOGATA_MACOS_TEAM` (Settings, Secrets and variables, Actions, Variables; a tag push
-      can only take it from there). It is no secret: every signature of yours names it.
-      Without it the run fails in its first job, in seconds, before anything is built: until
-      the variable is set, every tag push ends so, and the build is started by hand.
+      It is started by hand only: the release's tag is made when the release is published
+      (step 6), after these builds, so a tag does not start it. The attestations name the
+      commit the run is on, so the run refuses to build when `commit` is not the head of
+      `--ref` as it starts: start it again on a ref at that commit (a tag given as `--ref`
+      must be `v` and `THIS_VERSION`). The macOS updater is built with your team id pinned
+      into it (see 2d): give it with `-f macos_team=<team>`, or once as the repository
+      variable `FOGATA_MACOS_TEAM` (Settings, Secrets and variables, Actions, Variables). It
+      is no secret: every signature of yours names it. Without it the run fails in its first
+      job, in seconds, before anything is built.
 
       The run builds Linux (`flutter build linux --release` on Ubuntu 24.04, the bundle
       zipped with its links), Windows (`flutter build windows --release`, the contents of

@@ -2,7 +2,7 @@
 # where they came from (docs/releasing-beta.md, "A release"):
 #
 #   source   the commit to build: the run's own (github.sha), which is the commit GitHub's
-#            attestations name; by hand the commit given must be it, and on a tag the tag
+#            attestations name; the commit given must be it, and started on a tag the tag
 #            must be v<THIS_VERSION>. And the team pinned into the macOS updater, first, so
 #            that a run without one stops before anything is built.
 #   linux    `flutter build linux --release`, the bundle zipped with its links and modes.
@@ -28,9 +28,11 @@
 # where they stay for as long as it does (docs/releasing-beta.md).
 name: Release build
 
+# Started by hand only. A release's tag is made when the release is published, after its
+# builds were made here, fetched, signed and checked: a run started by that tag would build
+# everything again for nothing (and, with no team given, fail in its first job and send a
+# notice of a failed release build for a release that is fine).
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       commit:
@@ -67,15 +69,15 @@ jobs:
       # The updater helper is built with the team that must sign every new version pinned
       # into it (tools/beta/macos-updater.sh --team), and tools/sign-macos.sh refuses to sign
       # it with another team. The team id is no secret (every signature names it). Checked
-      # first, so that a run without it (a tag push takes it only from the repository
-      # variable) stops in seconds rather than after Linux and Windows have built.
+      # first, so that a run without it stops in seconds rather than after Linux and Windows
+      # have built.
       - name: Check the team
         id: team
         env:
           TEAM: ${{ inputs.macos_team || vars.FOGATA_MACOS_TEAM }}
         run: |
           [[ $TEAM =~ ^[A-Z0-9]{10}$ ]] || {
-            echo "::error::no team id for the macOS updater: give macos_team, or set the repository variable FOGATA_MACOS_TEAM (a tag push can only take it from there)"
+            echo "::error::no team id for the macOS updater: give macos_team, or set the repository variable FOGATA_MACOS_TEAM"
             exit 1
           }
           echo "team=$TEAM" >> "$GITHUB_OUTPUT"
