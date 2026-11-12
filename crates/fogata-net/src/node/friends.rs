@@ -1106,36 +1106,7 @@ impl Node {
                 entries,
                 declined,
                 part,
-            } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(by) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                if !self.limits.take_friend_offer(by, Instant::now()) {
-                    return FriendResponse::Refused;
-                }
-                let entries: Vec<Vec<u8>> = entries.into_iter().map(|e| e.into_vec()).collect();
-                let Some((index, count)) = part else {
-                    return self.on_group_offer(peer, by, entries, declined);
-                };
-                // A long log, in parts: kept until they are all here, up to the bounds of
-                // one offer.
-                let Some(group) = entries
-                    .first()
-                    .and_then(|e| Entry::decode(e).ok())
-                    .map(|e| e.group_id)
-                else {
-                    return FriendResponse::Refused;
-                };
-                match f.take_offered_part(by, group, index, count, entries, Instant::now()) {
-                    OfferPart::Kept => FriendResponse::Ack,
-                    OfferPart::Refused => FriendResponse::Refused,
-                    OfferPart::Whole(entries) => self.on_group_offer(peer, by, entries, declined),
-                }
-            }
+            } => self.on_friend_group_request(peer, entries, declined, part),
             FriendRequest::Call { sealed } => {
                 // Kept, as checked above.
                 let Some(f) = self.friends.as_mut() else {
@@ -1672,6 +1643,44 @@ impl Node {
                 FriendResponse::Ack
             }
             Err(_) => FriendResponse::Refused,
+        }
+    }
+
+    /// Takes a group's log a friend offers, or a part of it.
+    fn on_friend_group_request(
+        &mut self,
+        peer: PeerId,
+        entries: Vec<serde_bytes::ByteBuf>,
+        declined: Option<serde_bytes::ByteBuf>,
+        part: Option<(u32, u32)>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(by) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        if !self.limits.take_friend_offer(by, Instant::now()) {
+            return FriendResponse::Refused;
+        }
+        let entries: Vec<Vec<u8>> = entries.into_iter().map(|e| e.into_vec()).collect();
+        let Some((index, count)) = part else {
+            return self.on_group_offer(peer, by, entries, declined);
+        };
+        // A long log, in parts: kept until they are all here, up to the bounds of
+        // one offer.
+        let Some(group) = entries
+            .first()
+            .and_then(|e| Entry::decode(e).ok())
+            .map(|e| e.group_id)
+        else {
+            return FriendResponse::Refused;
+        };
+        match f.take_offered_part(by, group, index, count, entries, Instant::now()) {
+            OfferPart::Kept => FriendResponse::Ack,
+            OfferPart::Refused => FriendResponse::Refused,
+            OfferPart::Whole(entries) => self.on_group_offer(peer, by, entries, declined),
         }
     }
 
