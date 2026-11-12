@@ -216,7 +216,7 @@ fn what_honest_devices_write_is_judged_alike_at_the_level_before() {
             for (k, log) in world.logs.iter().enumerate() {
                 let was = taken[k];
                 taken[k] = take_at_the_level_before(&mut olds[k], log, was);
-                for (hash, (n, _)) in &log.arrived {
+                for (hash, (n, _)) in log.arrived.iter() {
                     if *n < was {
                         continue;
                     }

@@ -478,7 +478,7 @@ fn every_copy_keeps_only_what_authors_could_make_whatever_came_first() {
 fn bytes_of(log: &GroupLog, author: &DevicePublicKey) -> (usize, usize) {
     let spare: BTreeSet<EntryHash> = log.spare().into_iter().collect();
     let mut out = (0, 0);
-    for (hash, entry) in &log.entries {
+    for (hash, entry) in log.entries.iter() {
         if entry.author != *author {
             continue;
         }

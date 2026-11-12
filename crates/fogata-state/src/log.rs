@@ -231,11 +231,67 @@ pub struct KeyProblem {
     pub bad_box: bool,
 }
 
+/// A log's entries by hash, each kept once for every copy of the log that has it: a copy
+/// that changes takes a map of its own, which only points at the entries.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Entries(BTreeMap<EntryHash, Arc<Entry>>);
+
+impl Entries {
+    pub(crate) fn get(&self, hash: &EntryHash) -> Option<&Entry> {
+        self.0.get(hash).map(|e| &**e)
+    }
+
+    pub(crate) fn contains_key(&self, hash: &EntryHash) -> bool {
+        self.0.contains_key(hash)
+    }
+
+    pub(crate) fn keys(&self) -> std::collections::btree_map::Keys<'_, EntryHash, Arc<Entry>> {
+        self.0.keys()
+    }
+
+    pub(crate) fn values(&self) -> impl Iterator<Item = &Entry> {
+        self.0.values().map(|e| &**e)
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&EntryHash, &Entry)> {
+        self.0.iter().map(|(h, e)| (h, &**e))
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    fn insert(&mut self, hash: EntryHash, entry: Arc<Entry>) {
+        self.0.insert(hash, entry);
+    }
+
+    fn remove(&mut self, hash: &EntryHash) -> Option<Arc<Entry>> {
+        self.0.remove(hash)
+    }
+}
+
+impl std::ops::Index<&EntryHash> for Entries {
+    type Output = Entry;
+
+    fn index(&self, hash: &EntryHash) -> &Entry {
+        &self.0[hash]
+    }
+}
+
 /// Every entry this device knows for one group.
+///
+/// A copy costs little whatever the log's length: copies share the entries, each kept once,
+/// and what was worked out of them, until one of them changes. The node hands one to the
+/// core at every change of a group, to save and to show.
 #[derive(Clone, Debug)]
 pub struct GroupLog {
     group_id: GroupId,
-    pub(crate) entries: BTreeMap<EntryHash, Entry>,
+    /// Shared with copies of the log until one changes (see [`Entries`]).
+    pub(crate) entries: Arc<Entries>,
     /// The group's `Create`: the first one this log took. Another is never kept, so nobody
     /// can start the group over under the same id and take it.
     root: Option<EntryHash>,
@@ -256,7 +312,7 @@ pub struct GroupLog {
     /// When each entry arrived on this device, counted in entries, and its length: the
     /// waiting room lets go of the last to arrive, which the sender cannot choose as it can
     /// an entry's time.
-    arrived: BTreeMap<EntryHash, Arrival>,
+    arrived: Arc<BTreeMap<EntryHash, Arrival>>,
     arrivals: u64,
     /// Room for spare entries ([`SPARE_ROOM`]; smaller in tests).
     spare_room: Room,
@@ -310,13 +366,13 @@ impl GroupLog {
     pub fn empty(group_id: GroupId) -> Self {
         Self {
             group_id,
-            entries: BTreeMap::new(),
+            entries: Arc::default(),
             root: None,
             named: BTreeSet::new(),
             banner: None,
             picture: None,
             commit_views: Arc::default(),
-            arrived: BTreeMap::new(),
+            arrived: Arc::default(),
             arrivals: 0,
             spare_room: SPARE_ROOM,
             run_room: RUN_ROOM,
@@ -762,12 +818,12 @@ impl GroupLog {
             }
             _ => {}
         }
-        self.arrived.insert(hash, (self.arrivals, encoded.len()));
+        Arc::make_mut(&mut self.arrived).insert(hash, (self.arrivals, encoded.len()));
         self.arrivals += 1;
         if !ready {
             self.unjudged.insert(hash);
         }
-        self.entries.insert(hash, entry);
+        Arc::make_mut(&mut self.entries).insert(hash, Arc::new(entry));
         self.note_new(hash);
         Ok(Some(hash))
     }
@@ -781,10 +837,9 @@ impl GroupLog {
         if let Body::Add { member, .. } = &entry.body {
             self.named.insert(*member);
         }
-        self.arrived
-            .insert(hash, (self.arrivals, entry.encode().len()));
+        Arc::make_mut(&mut self.arrived).insert(hash, (self.arrivals, entry.encode().len()));
         self.arrivals += 1;
-        self.entries.insert(hash, entry);
+        Arc::make_mut(&mut self.entries).insert(hash, Arc::new(entry));
         self.note_new(hash);
     }
 
@@ -1166,9 +1221,13 @@ impl GroupLog {
             return false;
         }
         let before = self.state_cache().clone();
-        let taken: Vec<(EntryHash, Entry, Option<Arrival>)> = drop
+        let (entries, arrived) = (
+            Arc::make_mut(&mut self.entries),
+            Arc::make_mut(&mut self.arrived),
+        );
+        let taken: Vec<(EntryHash, Arc<Entry>, Option<Arrival>)> = drop
             .iter()
-            .filter_map(|h| Some((*h, self.entries.remove(h)?, self.arrived.remove(h))))
+            .filter_map(|h| Some((*h, entries.remove(h)?, arrived.remove(h))))
             .collect();
         self.work_out_again();
         let after = self.state_cache();
@@ -1177,10 +1236,14 @@ impl GroupLog {
             self.forget_old_waiting();
             return true;
         }
+        let (entries, arrived) = (
+            Arc::make_mut(&mut self.entries),
+            Arc::make_mut(&mut self.arrived),
+        );
         for (hash, entry, at) in taken {
-            self.entries.insert(hash, entry);
+            entries.insert(hash, entry);
             if let Some(at) = at {
-                self.arrived.insert(hash, at);
+                arrived.insert(hash, at);
             }
         }
         self.work_out_again();
@@ -1244,8 +1307,8 @@ impl GroupLog {
 
     /// Takes an entry out of the log.
     fn forget(&mut self, hash: &EntryHash) {
-        self.entries.remove(hash);
-        self.arrived.remove(hash);
+        Arc::make_mut(&mut self.entries).remove(hash);
+        Arc::make_mut(&mut self.arrived).remove(hash);
         self.unjudged.remove(hash);
         self.forgot(hash);
     }
@@ -1541,7 +1604,7 @@ impl GroupLog {
     /// Every entry after entry `hash`: those signed on it, on those, and so on.
     pub(crate) fn descendants(&self, hash: &EntryHash) -> BTreeSet<EntryHash> {
         let mut children: BTreeMap<EntryHash, Vec<EntryHash>> = BTreeMap::new();
-        for (h, entry) in &self.entries {
+        for (h, entry) in self.entries.iter() {
             for parent in &entry.parents {
                 children.entry(*parent).or_default().push(*h);
             }
@@ -2440,6 +2503,40 @@ mod tests {
         assert_eq!(log.state_and_keys(&bea.id).1.len(), 3);
         assert_eq!(log.state_and_keys(&leo.id).1.len(), 2);
         assert!(log.state_and_keys(&leo.id).2.is_none());
+    }
+
+    /// A copy of a log, as the node hands one over at every change, shares its entries and
+    /// what was worked out of them: the log that changes after takes a map of its own that
+    /// points at the same entries, and the copy stays as it was.
+    #[test]
+    fn a_copy_shares_the_entries_until_one_changes() {
+        let ana = Device::new();
+        let bea = Device::new();
+        let mut log = GroupLog::create(&ana.id, "friends", 1).unwrap();
+        log.add(&ana.id, bea.key(), "Bea", 2).unwrap();
+        for i in 0..20 {
+            let body = Body::Rename {
+                name: format!("n{i}"),
+            };
+            log.append(&ana.id, body, 3 + i).unwrap();
+        }
+        let state = log.shared_state();
+        let copy = log.clone();
+        assert!(Arc::ptr_eq(&log.entries, &copy.entries));
+        assert!(Arc::ptr_eq(&log.arrived, &copy.arrived));
+        assert!(Arc::ptr_eq(&state, &copy.shared_state()));
+        let before = copy.hashes_in_order();
+        let new = log
+            .append(&ana.id, Body::Rename { name: "h".into() }, 99)
+            .unwrap();
+        assert!(!Arc::ptr_eq(&log.entries, &copy.entries));
+        for hash in &before {
+            assert!(Arc::ptr_eq(&log.entries.0[hash], &copy.entries.0[hash]));
+        }
+        assert_eq!(copy.hashes_in_order(), before);
+        assert!(copy.get(&new.hash()).is_none());
+        assert_eq!(copy.state().name, "n19");
+        assert_eq!(log.state().name, "h");
     }
 
     #[test]
