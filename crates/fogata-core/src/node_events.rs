@@ -964,6 +964,267 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// What the core shows for each of the node's events it takes without asking the network
+    /// anything: written down before `handle` was split, to be shown the same after. The
+    /// events about a group are of one this device is not in, as a group's can be on their
+    /// way while it goes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn each_node_event_is_shown_as_before() {
+        use fogata_crypto::DeviceIdentity;
+        use fogata_friends::{Animated, Avatar};
+        use fogata_net::PeerId;
+        let dir = std::env::temp_dir().join(format!("fogata-events-shown-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        };
+        let (core, mut events) = Core::start(dir.clone(), options).unwrap();
+        let inner = core.inner.clone();
+        // The kinds of what waits, past what the node says of its addresses meanwhile.
+        let shown = |events: &mut crate::CoreEvents| {
+            let mut kinds = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                let kind = format!("{event:?}");
+                let kind = kind
+                    .split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .unwrap_or_default();
+                if !matches!(kind, "Address" | "Info") {
+                    kinds.push(kind.to_string());
+                }
+            }
+            kinds
+        };
+        // What the start shows goes first.
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            if shown(&mut events).is_empty() {
+                break;
+            }
+        }
+        let ana = DeviceIdentity::generate().unwrap();
+        let device = ana.public_key();
+        let group = fogata_state::GroupLog::create(&ana, "g", 1)
+            .unwrap()
+            .group_id();
+        let profile = Profile::sign(&ana, "Ana", Avatar::Preset(0), 5).unwrap();
+        fn animation(identity: &DeviceIdentity) -> Animation {
+            Animation::sign(identity, Animated::Photo, &[], Vec::new(), 5).unwrap()
+        }
+        let peer = PeerId::random();
+        let address: fogata_net::Multiaddr = "/ip4/198.51.100.7/udp/4001/quic-v1".parse().unwrap();
+        let cases = vec![
+            (NodeEvent::PortChangesPerDestination, vec!["HardNat"]),
+            (NodeEvent::OtherSession, vec!["OtherSession"]),
+            (
+                NodeEvent::SignalsLost {
+                    group,
+                    from: device,
+                },
+                vec!["SignalsLost"],
+            ),
+            (
+                NodeEvent::MemberConnected {
+                    group,
+                    device,
+                    peer,
+                    path: Path::Direct,
+                    address,
+                },
+                vec!["MemberConnected", "GroupsChanged"],
+            ),
+            (
+                NodeEvent::MemberDisconnected {
+                    group,
+                    device,
+                    peer,
+                },
+                vec!["MemberDisconnected", "GroupsChanged"],
+            ),
+            (
+                NodeEvent::TakenOut {
+                    group,
+                    voice: FIRST_ROOM,
+                    by: None,
+                    barrier: None,
+                },
+                vec!["TakenOut", "GroupsChanged"],
+            ),
+            (
+                NodeEvent::JoinAsked {
+                    group,
+                    device,
+                    name: "Ana".into(),
+                },
+                vec!["JoinAsked"],
+            ),
+            (
+                NodeEvent::JoinAnswered { group, device },
+                vec!["JoinAsksChanged"],
+            ),
+            (NodeEvent::JoinWaiting { group }, vec!["JoinWaiting"]),
+            (NodeEvent::JoinDeclined { group }, vec![]),
+            (
+                NodeEvent::MustUpdateToJoin {
+                    group,
+                    device,
+                    name: "Ana".into(),
+                },
+                vec!["MustUpdateToJoin"],
+            ),
+            (NodeEvent::UpdateToJoin { group }, vec![]),
+            (NodeEvent::JoinExpired { group }, vec![]),
+            (
+                NodeEvent::MemberProfile {
+                    profile: profile.clone(),
+                },
+                vec!["GroupsChanged"],
+            ),
+            (
+                NodeEvent::MemberProfile {
+                    profile: profile.clone(),
+                },
+                vec![],
+            ),
+            (
+                NodeEvent::Animation {
+                    animation: animation(&inner.identity),
+                },
+                vec![],
+            ),
+            (
+                NodeEvent::Animation {
+                    animation: animation(&ana),
+                },
+                vec!["Animation"],
+            ),
+            (
+                NodeEvent::Animation {
+                    animation: animation(&ana),
+                },
+                vec![],
+            ),
+            (
+                NodeEvent::Signal {
+                    group,
+                    from: device,
+                    payload: vec![1],
+                },
+                vec!["Signal"],
+            ),
+            (
+                NodeEvent::FriendRequest {
+                    profile: profile.clone(),
+                },
+                vec!["FriendRequest", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::FriendRequestSent {
+                    device,
+                    name: "Ana".into(),
+                },
+                vec!["FriendRequestSent", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::FriendRequestFailed("no".into()),
+                vec!["FriendRequestFailed"],
+            ),
+            (
+                NodeEvent::FriendAdded {
+                    profile: profile.clone(),
+                },
+                vec!["FriendAdded", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::FriendOnline {
+                    device,
+                    peer,
+                    path: Path::Direct,
+                    hidden: false,
+                },
+                vec!["FriendOnline", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::FriendStatus {
+                    device,
+                    in_room: false,
+                    group: None,
+                    hidden: false,
+                    away: true,
+                },
+                vec!["GroupsChanged", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::MemberPresence {
+                    device,
+                    hidden: false,
+                    away: false,
+                },
+                vec!["GroupsChanged", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::MemberPresence {
+                    device,
+                    hidden: false,
+                    away: false,
+                },
+                vec![],
+            ),
+            (
+                NodeEvent::FriendOffline { device },
+                vec!["FriendOffline", "FriendsChanged"],
+            ),
+            (
+                NodeEvent::Typing {
+                    group,
+                    voice: Some(FIRST_ROOM),
+                    from: device,
+                    typing: true,
+                },
+                vec!["Typing"],
+            ),
+            (
+                NodeEvent::Typing {
+                    group,
+                    voice: None,
+                    from: device,
+                    typing: true,
+                },
+                vec![],
+            ),
+            (NodeEvent::InvitationDeclined { group, device }, vec![]),
+        ];
+        let mut found = Vec::new();
+        let mut expected = Vec::new();
+        for (event, shows) in cases {
+            let name = format!("{event:?}");
+            let name = name
+                .split(|c: char| !c.is_alphanumeric())
+                .next()
+                .unwrap_or_default()
+                .to_string();
+            handle(&inner, event).await;
+            found.push((name.clone(), shown(&mut events)));
+            expected.push((
+                name,
+                shows.into_iter().map(String::from).collect::<Vec<_>>(),
+            ));
+        }
+        assert_eq!(found, expected);
+        // What the events kept.
+        let state = inner.lock();
+        assert!(state.join_asks.is_empty());
+        assert!(state.profiles.contains_key(&device));
+        assert!(!state.friends_online.contains_key(&device));
+        assert!(!state.away.contains(&device));
+        drop(state);
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A read that fails (an answer lost to a panic in the node's turn) is tried again, a
     /// few times, and then given up.
     #[tokio::test]
