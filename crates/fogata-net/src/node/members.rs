@@ -1084,27 +1084,7 @@ impl Node {
                 self.on_sync_answer(peer, group, entries, want)
             }
             (Pending::Join(group), MemberResponse::JoinOffer { heads }) => {
-                let Some(slot) = self.groups.get(&group) else {
-                    return;
-                };
-                if let Some(entry) = slot.ctx.sign_join(hashes(&heads), now_ms()) {
-                    if let Some(slot) = self.groups.get_mut(&group) {
-                        slot.join_committed.insert(peer);
-                    }
-                    let binding = entry.join_binding(
-                        &self.identity,
-                        &self.local_peer().to_bytes(),
-                        &peer.to_bytes(),
-                    );
-                    self.request(
-                        peer,
-                        MemberRequest::JoinCommit {
-                            entry: entry.encode(),
-                            binding: Some(serde_bytes::ByteBuf::from(binding.to_vec())),
-                        },
-                        Pending::JoinCommit(group),
-                    );
-                }
+                self.on_join_offer(peer, group, heads)
             }
             // Not opened while the application is far behind: asked for again later, the
             // room whole of one member (see `room_heartbeat`), events by id of this one.
@@ -1314,6 +1294,31 @@ impl Node {
         }
         if again {
             self.request_sync(peer, group);
+        }
+    }
+
+    /// Signs this device's join on the heads a manager offered, and hands it over.
+    fn on_join_offer(&mut self, peer: PeerId, group: GroupId, heads: Vec<serde_bytes::ByteBuf>) {
+        let Some(slot) = self.groups.get(&group) else {
+            return;
+        };
+        if let Some(entry) = slot.ctx.sign_join(hashes(&heads), now_ms()) {
+            if let Some(slot) = self.groups.get_mut(&group) {
+                slot.join_committed.insert(peer);
+            }
+            let binding = entry.join_binding(
+                &self.identity,
+                &self.local_peer().to_bytes(),
+                &peer.to_bytes(),
+            );
+            self.request(
+                peer,
+                MemberRequest::JoinCommit {
+                    entry: entry.encode(),
+                    binding: Some(serde_bytes::ByteBuf::from(binding.to_vec())),
+                },
+                Pending::JoinCommit(group),
+            );
         }
     }
 }
