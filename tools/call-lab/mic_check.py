@@ -2,11 +2,14 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|broken|alsa|hang|quit>
+Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|echo|broken|alsa|hang|quit>
 """
 
+import json
+import math
 import pathlib
 import re
+import struct
 import sys
 
 run = pathlib.Path(sys.argv[1])
@@ -186,6 +189,127 @@ elif check == "rejoin":
     for left in ("a", "b"):
         if len(times.get((left, "to"), [])) != len(times.get((left, "from"), [])):
             problems.append(f"{left} left: the copies measured a different number of times")
+elif check == "echo":
+    # What each copy played in each stretch b marked (lab_phase_recorder: 16-bit mono at
+    # 16 kHz), measured at each pitch: each copy's voice (lab_tones, 330 Hz + 55 Hz per
+    # copy) and the other application's tone a's screen takes (lab_apps_tone, 880 Hz).
+    RATE = 16000
+    VOICE = {"a": 330.0, "b": 385.0}
+    SCREEN = 880.0
+    # A pitch is there when it stands 20 dB above what lies around it (the mean at 20 and
+    # 35 Hz on either side, off the 55 Hz grid of every tone) and above -50 dBFS; a voice
+    # or the screen's sound that must be heard, above -40 dBFS.
+    ABOVE_AROUND = 10.0
+    THERE = 10 ** (-50 / 20)
+    HEARD = 10 ** (-40 / 20)
+
+    def windowed(path):
+        """The samples of a recording without its first and last second (the recorder
+        starts and stops within 0.2 s of b's marks), with a Hann window; None if
+        shorter than 3 s."""
+        data = path.read_bytes() if path.exists() else b""
+        n = len(data) // 2
+        samples = struct.unpack(f"<{n}h", data[: 2 * n])[RATE : n - RATE]
+        m = len(samples)
+        if m < 3 * RATE:
+            return None
+        window = [0.5 - 0.5 * math.cos(2 * math.pi * i / (m - 1)) for i in range(m)]
+        return [x * w for x, w in zip(samples, window)], sum(window)
+
+    def amplitude(signal, hertz):
+        """The amplitude of the tone at `hertz`, as a share of full scale (Goertzel)."""
+        samples, gain = signal
+        k = 2 * math.cos(2 * math.pi * hertz / RATE)
+        s1 = s2 = 0.0
+        for x in samples:
+            s1, s2 = x + k * s1 - s2, s1
+        power = max(s1 * s1 + s2 * s2 - k * s1 * s2, 0.0)
+        return 2 * math.sqrt(power) / gain / 32768
+
+    def level(signal, hertz):
+        """(amplitude at `hertz`, amplitude around it)."""
+        around = [amplitude(signal, hertz + d) for d in (-35, -20, 20, 35)]
+        return amplitude(signal, hertz), sum(around) / len(around)
+
+    def there(found):
+        tone, around = found
+        return tone >= THERE and tone >= ABOVE_AROUND * around
+
+    def db(value):
+        return f"{20 * math.log10(value):.0f}" if value > 0 else "-inf"
+
+    stretches = sorted(
+        {p.name[len("mark-b-") : -len("-start")] for p in meet.glob("mark-b-*-start")},
+        key=lambda name: moment(f"mark-b-{name}-start"),
+    )
+    if "before" not in stretches or not any(n.startswith("after") for n in stretches):
+        problems.append(f"b did not get through the steps: {result('b')}")
+    for name in stretches:
+        watching = name == "before" or name.startswith("after")
+        b_in_call = not name.startswith("gone")
+        for role in ("a", "b"):
+            signal = windowed(run / "played" / f"{name}-{role}.raw")
+            if signal is None:
+                problems.append(f"{name}: too little of what {role} played was recorded")
+                continue
+            other = "b" if role == "a" else "a"
+            own = level(signal, VOICE[role])
+            voice = level(signal, VOICE[other])
+            screen = level(signal, SCREEN)
+            notes.append(
+                f"{name}, {role} played (dBFS, around): own voice {db(own[0])} ({db(own[1])}), "
+                f"{other}'s voice {db(voice[0])} ({db(voice[1])}), "
+                f"screen's sound {db(screen[0])} ({db(screen[1])})"
+            )
+            if there(own):
+                problems.append(
+                    f"{name}: {role} hears itself, its own voice at {db(own[0])} dBFS "
+                    f"in what it played"
+                )
+            if not b_in_call:
+                continue
+            if role == "b":
+                if voice[0] < HEARD:
+                    problems.append(f"{name}: b does not hear a ({db(voice[0])} dBFS)")
+                if watching and (screen[0] < HEARD or not there(screen)):
+                    problems.append(
+                        f"{name}: b watches but hears no screen sound ({db(screen[0])} dBFS)"
+                    )
+                if not watching and there(screen):
+                    problems.append(
+                        f"{name}: b does not watch but hears the screen's sound "
+                        f"({db(screen[0])} dBFS)"
+                    )
+            elif voice[0] < HEARD:
+                problems.append(f"{name}: a does not hear b ({db(voice[0])} dBFS)")
+    settings = (run / "settings.txt").read_text().splitlines()
+    notes += settings[1:]
+    inputs = run / "sink-inputs.json"
+    if inputs.exists():
+        try:
+            players = sorted(
+                {
+                    f"{i.get('properties', {}).get('application.process.binary', '?')}"
+                    f"({i.get('properties', {}).get('media.name', '?')})"
+                    for i in json.loads(inputs.read_text() or "[]")
+                }
+            )
+            notes.append(f"playing when b first watched: {', '.join(players)}")
+        except json.JSONDecodeError:
+            pass
+    # What a's screen took (its log with FOGATA_CALL_LOG, which the lab sets), by program.
+    taken = re.findall(
+        r"\[ScreenSound\] linking node \d+: pid=-?\d+ binary=(\S+) link_group=(\S+)",
+        (run / "a.out").read_text(errors="replace"),
+    )
+    counts = {}
+    for binary, group in taken:
+        key = binary if group == "-" else f"{binary} in {group}"
+        counts[key] = counts.get(key, 0) + 1
+    notes.append(
+        "a's screen took the outputs of "
+        + (", ".join(f"{k} ({n})" for k, n in sorted(counts.items())) or "nothing")
+    )
 elif check in ("late", "alone"):
     if "laba_mic" not in sources_between("a", 0, 1e12):
         problems.append("a never recorded from its microphone")

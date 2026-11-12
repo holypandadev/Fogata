@@ -54,7 +54,7 @@
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
 // one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices)
-// or of the call (rejoin);
+// or of the call (rejoin, echo);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
 // FOGATA_TEST_MIC_CASE=rejoin (two copies, both with the microphone on, on one computer or
@@ -487,9 +487,10 @@ Future<void> _call(WidgetTester tester) async {
     _tone = state.prefs.audioInput = pick('audioinput', 'FogataMic');
     state.prefs.audioOutput = pick('audiooutput', 'FogataTest');
     _quiet = pick('audioinput', 'FogataQuiet');
-    // Measuring: what the others say plays into a silent output, not back into the
-    // microphone that every copy shares.
-    if (_env['FOGATA_TEST_MEASURE'] != null) {
+    // Measuring, or judging what each copy plays (echo): what the others say plays
+    // into a silent output, not back into the microphone that every copy shares.
+    if (_env['FOGATA_TEST_MEASURE'] != null ||
+        _env['FOGATA_TEST_MIC_CASE'] == 'echo') {
       state.prefs.audioOutput = pick('audiooutput', 'FogataQuietOut');
     }
     // Were the microphone opened anyway, it would hear only silence.
@@ -3865,6 +3866,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 /// - quit: see [_quitWhileOpening]; copy b only waits for a to go.
 /// - devices: see [_listedAfterCall]; copy b only stays in the call.
 /// - rejoin: see [_rejoin].
+/// - echo: see [_echo].
 Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
   final call = state.callState.call!;
   switch (name) {
@@ -3965,6 +3967,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       await _mediaLetGo(tester, state);
     case 'rejoin':
       await _rejoin(tester, state);
+    case 'echo':
+      await _echo(tester, state);
     default:
       throw StateError('no microphone check called $name');
   }
@@ -4292,6 +4296,125 @@ Future<void> _rejoin(WidgetTester tester, AppState state) async {
       '${late.join(', ')}',
     );
   }
+}
+
+/// tools/call-lab/mic.sh echo (two copies, both with the microphone on, each its own
+/// tone): the sequence in which a person on Linux heard their own voice come back in a
+/// shared screen's sound. Copy a shares its screen with the other applications' sound
+/// (the lab plays a tone of its own as another application), and copy b watches it,
+/// leaves the room, enters it again and only then watches it again, once for each pause
+/// of FOGATA_TEST_ECHO_PAUSES ("1 6" when left out: the seconds out of the room). Each
+/// copy plays what it hears into a silent output of its own, which mic.sh records for
+/// every stretch b marks (`mark-b-<stretch>-start` and `-end`):
+///
+/// - before: b watches, before leaving;
+/// - gone<n>: b out of the room for the n-th time, with a alone in the call (its own level
+///   read through a loop of its own meanwhile), when the pause is 4 s or more;
+/// - between<n>: b back in the call, not watching yet;
+/// - after<n>: b watching again.
+///
+/// mic_check.py judges them: neither copy may play its own pitch, and b must play a's
+/// voice throughout and the screen's sound only while it watches.
+Future<void> _echo(WidgetTester tester, AppState state) async {
+  if (_copies != 2) throw StateError('the echo check takes two copies');
+  final first = state.callState.call!;
+  if (!first.mic) {
+    throw StateError('the echo check needs the microphone on in both copies');
+  }
+  final group = first.group;
+  final _Other other = (
+    id: first.peers.keys.single,
+    name: _names[_role == 'a' ? 'b' : 'a']!,
+  );
+  if (_role == 'a') {
+    final sources = await first.screens();
+    await first.shareScreen(
+      sources.firstWhere(
+        (s) => s.type == SourceType.Screen,
+        orElse: () => throw StateError('no screen to share'),
+      ),
+    );
+    if (!first.sharing) throw StateError('not sharing: ${first.problem}');
+    _log(
+      'sharing; with sound: ${first.sharingSound}, '
+      'can share sound: ${first.canShareSound}',
+    );
+    if (!first.sharingSound) {
+      throw StateError("the screen is shared without the applications' sound");
+    }
+    await _say(state, 'echo shared');
+    await _hear(tester, state, ['echo done'], seconds: 900);
+    return;
+  }
+  final pauses = (_env['FOGATA_TEST_ECHO_PAUSES'] ?? '1 6')
+      .split(' ')
+      .where((p) => p.isNotEmpty)
+      .map(int.parse)
+      .toList();
+  Future<void> stretch(String name, int seconds) async {
+    _mark('$name-start');
+    await _wait(tester, Duration(seconds: seconds));
+    _mark('$name-end');
+  }
+
+  // Watches a's screen in the call there is now, and waits for its sound to arrive.
+  Future<void> watch(String when) async {
+    final call = state.callState.call!;
+    final peer = _peer(state, other);
+    await _until(
+      tester,
+      "a's screen with sound offered $when",
+      () => peer.sharing && peer.sound,
+      seconds: 60,
+    );
+    call.watch(other.id);
+    await _until(
+      tester,
+      "a's screen shown $when",
+      () => peer.screen.videoWidth > 0,
+      seconds: 60,
+    );
+    final end = DateTime.now().add(const Duration(seconds: 30));
+    var packets = 0;
+    while ((packets = await _screenSoundIn(peer)) < 100) {
+      if (DateTime.now().isAfter(end)) {
+        throw StateError("no sound with a's screen $when: $packets packets");
+      }
+      await _wait(tester, const Duration(milliseconds: 300));
+    }
+    _log("a's screen sound $when: $packets packets");
+    // The sound settles (the jitter buffer, the gain) before it is judged.
+    await _wait(tester, const Duration(seconds: 3));
+  }
+
+  await _hearFrom(tester, state, other, 'echo shared');
+  await watch('before leaving');
+  await stretch('before', 12);
+  for (var round = 1; round <= pauses.length; round++) {
+    final pause = pauses[round - 1];
+    await state.leaveRoom();
+    if (pause >= 4) {
+      await _wait(tester, const Duration(seconds: 1));
+      await stretch('gone$round', pause - 2);
+      await _wait(tester, const Duration(seconds: 1));
+    } else {
+      await _wait(tester, Duration(seconds: pause));
+    }
+    await state.openRoom(group);
+    await _until(
+      tester,
+      'back in the call with a ($round)',
+      () =>
+          state.callState.call?.peers[other.id]?.connected == true &&
+          state.callState.call?.watching == null,
+      seconds: 90,
+    );
+    await _wait(tester, const Duration(seconds: 3));
+    await stretch('between$round', 8);
+    await watch('after entering again ($round)');
+    await stretch('after$round', 12);
+  }
+  await _say(state, 'echo done');
 }
 
 /// The bytes of voice received so far from [peer] (its voice channel, mid 0).

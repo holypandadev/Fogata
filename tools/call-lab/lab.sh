@@ -49,15 +49,20 @@ lab_unplug() { # role
   pactl unload-module "$(cat "$RUN/mod-mic-$1")"
 }
 
-# Plays each copy's tone into its output, again and again, until lab_stop.
+# Plays each copy's tone into its output, again and again, until lab_stop. With
+# LAB_VOICE_BINARY (the app's executable), the players say they are the app: a voice is
+# a person's, never another application's, and a shared screen taking every other
+# application's sound (FOGATA_SCREEN_SOUND_FROM empty) leaves the app's own out.
 lab_tones() { # copies
   local i r
+  local as=()
+  [ -n "${LAB_VOICE_BINARY:-}" ] && as=("PULSE_PROP_OVERRIDE_application.process.binary=$LAB_VOICE_BINARY")
   for i in $(seq 0 $(($1 - 1))); do
     r=${ROLES[$i]}
     python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" $((330 + 55 * i))
     ( trap 'kill "$(cat "$RUN/paplay-$r.pid")" 2>/dev/null; exit 0' TERM HUP INT
       while true; do
-        paplay --device="lab${r}_test" "$RUN/tone-$r.wav" 2>/dev/null &
+        env "${as[@]}" paplay --device="lab${r}_test" "$RUN/tone-$r.wav" 2>/dev/null &
         echo $! > "$RUN/paplay-$r.pid"
         wait $!
       done ) > /dev/null 2>&1 &
@@ -102,6 +107,8 @@ lab_hanging_server() {
 
 # Starts one copy: lab_copy <role> <copies> <mic> [VAR=value...]; mic is 1 (its tone), off
 # (enters muted), broken (no sound server at all) or hang (a server that never answers).
+# A shared screen takes the sound of pacat alone (the tones' player: paplay is pacat under
+# another name, and PipeWire names a program by its executable); VAR=value after it wins.
 lab_copy() {
   local role=$1 copies=$2 mic=$3
   shift 3
@@ -115,7 +122,7 @@ lab_copy() {
     "${sound[@]}" FOGATA_CALL_LOG=1 FOGATA_ROLE="$role" FOGATA_CALL="$M" \
     FOGATA_DATA_DIR="$RUN/data/$role" FOGATA_DOWNLOADS="$RUN/data/$role" \
     FOGATA_TEST_MIC="$mic" FOGATA_TEST_DEVICES="-lab$role." FOGATA_PEERS="$copies" \
-    FOGATA_SCREEN_SOUND_FROM=paplay RUST_LOG="${RUST_LOG:-warn}" "$@" \
+    FOGATA_SCREEN_SOUND_FROM=pacat RUST_LOG="${RUST_LOG:-warn}" "$@" \
     "$BUNDLE" > "$RUN/$role.out" 2>&1 &
   echo $! > "$RUN/$role.pid"
 }
@@ -147,10 +154,80 @@ lab_kill() { # pid word
   kill -9 "$p" 2>/dev/null
 }
 
+# Another application's sound, for a shared screen to take: a tone of its own (880 Hz:
+# neither a copy's voice nor a harmonic of one, all on a 55 Hz grid of odd and even steps
+# that no sum or difference of 880 and 330 reaches) from pw-cat, again and again, into a
+# sink of its own that nothing records.
+lab_apps_tone() {
+  pactl load-module module-null-sink sink_name=lab_apps sink_properties=device.description=LabApps > /dev/null
+  python3 -I "$LAB_DIR/tone.py" "$RUN/tone-apps.wav" 880 60
+  ( trap 'kill "$(cat "$RUN/pwcat-apps.pid")" 2>/dev/null; exit 0' TERM HUP INT
+    while true; do
+      pw-cat --playback --target lab_apps "$RUN/tone-apps.wav" 2>/dev/null &
+      echo $! > "$RUN/pwcat-apps.pid"
+      wait $!
+    done ) > /dev/null 2>&1 &
+  echo $! > "$RUN/tone-apps.pid"
+}
+
+# A deliberate echo, to see a check catch one: what copy a plays (the others' voices) is
+# played again by another application (pw-cat, into lab_apps), as a program that records
+# the speakers and plays them on would; a's shared screen then carries it to everyone.
+lab_echo_proof() {
+  ( parec --device=laba_quiet.monitor --format=s16le --rate=48000 --channels=1 --raw 2>/dev/null |
+      pw-cat --playback --target lab_apps --raw --format s16 --rate 48000 --channels 1 - 2>/dev/null ) &
+  echo $! > "$RUN/echo-proof.pid"
+}
+
+# Records what each copy of $2 plays (its silent output's monitor, 16-bit mono at 16 kHz)
+# for every stretch copy $1 marks (mark-<$1>-<stretch>-start and -end, call_test.dart's
+# _mark), to $RUN/played/<stretch>-<role>.raw; and what plays into the server when the
+# first stretch starts, to $RUN/sink-inputs.json.
+lab_phase_recorder() { # marking role, "roles recorded"
+  local marker=$1 roles=$2
+  mkdir -p "$RUN/played"
+  (
+    declare -A started
+    while true; do
+      for f in "$M"/mark-"$marker"-*-start; do
+        [ -e "$f" ] || continue
+        stretch=${f#"$M/mark-$marker-"}
+        stretch=${stretch%-start}
+        [ -n "${started[$stretch]:-}" ] && continue
+        started[$stretch]=1
+        [ -e "$RUN/sink-inputs.json" ] || pactl -f json list sink-inputs > "$RUN/sink-inputs.json" 2> /dev/null
+        pids=""
+        for r in $roles; do
+          parec --device="lab${r}_quiet.monitor" --format=s16le --rate=16000 --channels=1 \
+            --raw --latency-msec=50 > "$RUN/played/$stretch-$r.raw" 2> /dev/null &
+          pids="$pids $!"
+        done
+        echo "$pids" > "$RUN/played/$stretch.pids"
+      done
+      for f in "$RUN"/played/*.pids; do
+        [ -e "$f" ] || continue
+        stretch=$(basename "$f" .pids)
+        if [ -e "$M/mark-$marker-$stretch-end" ]; then
+          # shellcheck disable=SC2046
+          kill $(cat "$f") 2> /dev/null
+          mv "$f" "$f.done"
+        fi
+      done
+      sleep 0.1
+    done
+  ) &
+  echo $! > "$RUN/phases.pid"
+}
+
 lab_stop() {
   local f
   for f in "$RUN"/[a-h].pid; do [ -e "$f" ] && lab_kill "$(cat "$f")" "$BUNDLE"; done
-  for f in "$RUN"/tone-?.pid "$RUN/recorder.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
+  for f in "$RUN"/tone-?.pid "$RUN/tone-apps.pid" "$RUN/recorder.pid" "$RUN/phases.pid" \
+    "$RUN/echo-proof.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
+  for f in "$RUN"/played/*.pids; do
+    # shellcheck disable=SC2046
+    [ -e "$f" ] && kill $(cat "$f") 2> /dev/null
+  done
   [ -e "$RUN/hang.pid" ] && lab_kill "$(cat "$RUN/hang.pid")" hang.py
   [ -e "$RUN/xvfb.pid" ] && lab_kill "$(cat "$RUN/xvfb.pid")" Xvfb
 }

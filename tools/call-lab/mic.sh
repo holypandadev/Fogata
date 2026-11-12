@@ -36,6 +36,19 @@
 #            as many after 1 s and after 5 s, then a does the same; both copies have their
 #            microphone on, and each time both measure from the moment the one leaving
 #            entered until the other's voice reaches them again: any over 6 s fails
+#   echo     a shares its screen with the other applications' sound (a tone of the lab's
+#            own, 880 Hz, from pw-cat), b watches it, leaves the room, enters it again and
+#            watches it again (ECHO_PAUSES, default "1 6": the seconds out of the room each
+#            time; 4 or more also measures a alone meanwhile); both talk all along, each
+#            with a tone of its own pitch (a 330 Hz, b 385 Hz). What each copy plays is
+#            recorded for every stretch b marks, and judged by the energy at each pitch:
+#            a copy that plays its own pitch hears itself, and fails; b must hear a and
+#            the screen's sound while it watches, and not while it does not. ECHO_FROM
+#            names the program whose sound a's screen takes (pw-cat when unset; set and
+#            empty, every application's, as on a desktop); CALL_LAB_LOOPBACK=1 adds a
+#            loopback of what a plays into another output and a combined output (with
+#            ECHO_FROM empty, so they could be taken). ECHO_PROOF=1 has another
+#            application play again what a plays (b's voice among it): the check must fail
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
 #        300 and 1500). Build first as for measure.sh. Prints PASS or FAIL for each and the
 #        run folders; exits non-zero when one failed.
@@ -45,6 +58,9 @@ if [ "${1:-}" = --inside ]; then
   CHECK=$2
   source "$HERE/lab.sh"
   trap 'lab_stop; exit 1' TERM INT HUP
+  # The voices are people's, not other applications': a shared screen taking every
+  # application's sound must not take them (see lab_tones).
+  [ "$CHECK" = echo ] && export LAB_VOICE_BINARY=$(basename "$BUNDLE")
   lab_start 2
   case "$CHECK" in
     muted) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=muted; lab_copy b 2 off FOGATA_TEST_MIC_CASE=muted ;;
@@ -60,6 +76,14 @@ if [ "${1:-}" = --inside ]; then
       for role in a b; do
         lab_copy "$role" 2 1 FOGATA_TEST_MIC_CASE=rejoin FOGATA_TEST_REJOIN_TIMES="${REJOIN_TIMES:-5}"
       done
+      ;;
+    echo)
+      lab_apps_tone
+      [ "${ECHO_PROOF:-}" = 1 ] && lab_echo_proof
+      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 6}" \
+        FOGATA_SCREEN_SOUND_FROM="${ECHO_FROM-pw-cat}"
+      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 6}"
+      lab_phase_recorder b "a b"
       ;;
     quit)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"
@@ -109,7 +133,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin broken alsa hang quit:0 quit:300 quit:1500)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin echo broken alsa hang quit:0 quit:300 quit:1500)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }
@@ -128,6 +152,7 @@ for check in "${checks[@]}"; do
   export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/mic-${check/:/-}-$(date +%m%d-%H%M%S)
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
+  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_PAUSES=${ECHO_PAUSES:-1 6}" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1
   CALL_LAB_ALSA=$alsa "$HERE/session.sh" "$RUN/session" "$0" --inside "$name"
