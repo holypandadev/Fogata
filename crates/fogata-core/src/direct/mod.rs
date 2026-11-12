@@ -35,7 +35,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicU64, AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -239,19 +239,154 @@ pub struct StorageView {
 /// A chat with what goes with it here.
 #[derive(Default)]
 struct Entry {
-    chat: Chat,
+    /// Its items, read from the disk when something needs them.
+    chat: Held,
     ended_ms: Option<u64>,
     group: Option<GroupLog>,
     /// The friend's profile as last known, for when the two are no longer friends.
     profile: Option<Profile>,
-    /// The chat's history on the disk was not as this device last wrote it, when read at
-    /// this start (see [`store::Loaded::altered`]).
-    altered: bool,
 }
 
 impl Entry {
     fn group_id(&self) -> Option<GroupId> {
         self.group.as_ref().map(GroupLog::group_id)
+    }
+
+    /// The chat when it is held.
+    fn held(&self) -> Option<&Chat> {
+        self.chat.chat.get().map(|(chat, _)| chat)
+    }
+
+    /// Whether the chat has no items, without reading it.
+    fn is_empty(&self) -> bool {
+        self.held()
+            .map_or(self.chat.summary.is_empty(), Chat::is_empty)
+    }
+
+    /// What the chat's attachments take here, without reading it.
+    fn usage(&self) -> Usage {
+        self.held().map_or(self.chat.summary.usage, Chat::usage)
+    }
+
+    /// Whether this device's own items wait for the friend, without reading the chat.
+    fn waits(&self) -> bool {
+        self.held().map_or(self.chat.summary.waiting > 0, |c| {
+            c.waiting().next().is_some()
+        })
+    }
+
+    /// When something in the chat goes ([`Chat::due_ms`]), without reading it.
+    fn due_ms(&self) -> Option<u64> {
+        self.held().map_or(self.chat.summary.due_ms, Chat::due_ms)
+    }
+
+    /// The oldest charge kept in the chat, without reading it.
+    fn oldest_charge(&self) -> Option<u64> {
+        self.held()
+            .map_or(self.chat.summary.oldest_charge, Chat::oldest_charge)
+    }
+
+    /// What is known of the chat without reading it.
+    fn summary(&self) -> std::borrow::Cow<'_, Summary> {
+        match self.chat.chat.get() {
+            Some((chat, _)) => std::borrow::Cow::Owned(Summary::of(chat, self.ended_ms)),
+            None => std::borrow::Cow::Borrowed(&self.chat.summary),
+        }
+    }
+}
+
+/// How many chats keep their items in memory once something else was used: the one on
+/// screen and the few used last. Others are read again from the disk when needed (some
+/// 20 ms for 10,000 messages).
+const CHATS_HELD: usize = 4;
+
+/// A chat's items: held in memory, or read from the disk the first time something needs
+/// them, through the chat (as [`Chat`]), and let go of again when others were used since
+/// ([`ChatsState::trim`]). Only the chats' state holds them, so they are read and let go
+/// of with the chats held; a chat with records still to write is never let go of, so one
+/// read again is the chat as written.
+#[derive(Default)]
+struct Held {
+    /// The chat, and whether its history on the disk was not as this device last wrote it
+    /// when it was read (see [`store::Loaded::altered`]).
+    chat: std::cell::OnceCell<(Chat, bool)>,
+    /// Where it is read from once let go of; a chat never let go of is a new one.
+    source: Option<(Arc<DirectStore>, DevicePublicKey)>,
+    /// The chat when it was let go of, or as its summary on the disk says.
+    summary: Summary,
+    /// Writes of its records asked for and not done yet.
+    pending: Arc<AtomicUsize>,
+    /// When it was last used, for which to let go of first.
+    used: std::cell::Cell<u64>,
+}
+
+/// Counts uses of chats (see [`Held::used`]).
+static USES: AtomicU64 = AtomicU64::new(0);
+
+impl Held {
+    /// A chat read already.
+    fn here(chat: Chat, altered: bool) -> Self {
+        let held = Self::default();
+        let _ = held.chat.set((chat, altered));
+        held.used.set(USES.fetch_add(1, Ordering::Relaxed));
+        held
+    }
+
+    /// The chat, read now if it is not held.
+    fn read(&self) -> &(Chat, bool) {
+        self.used.set(USES.fetch_add(1, Ordering::Relaxed));
+        self.chat.get_or_init(|| match &self.source {
+            Some((store, friend)) => match store.load(friend) {
+                Ok(loaded) => (loaded.chat, loaded.altered),
+                Err(e) => {
+                    // Nothing is written in its place: what comes waits for a later start.
+                    tracing::warn!("a chat cannot be read: {e:#}");
+                    store.refuse_writes(friend);
+                    (Chat::default(), false)
+                }
+            },
+            None => (Chat::default(), false),
+        })
+    }
+
+    /// The chat when it is held, without reading it.
+    fn held_mut(&mut self) -> Option<&mut Chat> {
+        self.chat.get_mut().map(|(chat, _)| chat)
+    }
+
+    /// Whether the chat's history on the disk was not as this device last wrote it.
+    fn altered(&self) -> bool {
+        self.read().1
+    }
+
+    /// Lets go of the chat's items, keeping its summary, unless records of it are still to
+    /// be written (or could not be): it must read again as it is.
+    fn let_go(&mut self, store: &Arc<DirectStore>, friend: &DevicePublicKey, ended: Option<u64>) {
+        if self.pending.load(Ordering::Acquire) > 0
+            || store.lagging(friend)
+            || store.refuses_writes(friend)
+        {
+            return;
+        }
+        if let Some((chat, _)) = self.chat.take() {
+            self.summary = Summary::of(&chat, ended);
+            self.source = Some((store.clone(), *friend));
+        }
+    }
+}
+
+impl std::ops::Deref for Held {
+    type Target = Chat;
+
+    fn deref(&self) -> &Chat {
+        &self.read().0
+    }
+}
+
+impl std::ops::DerefMut for Held {
+    fn deref_mut(&mut self) -> &mut Chat {
+        self.read();
+        &mut self.chat.get_mut().expect("just read").0
     }
 }
 
@@ -286,6 +421,27 @@ struct ChatsState {
 }
 
 impl ChatsState {
+    /// Lets go of the items of the chats used least lately, past the [`CHATS_HELD`] used
+    /// last (see [`Held`]).
+    fn trim(&mut self, store: &Arc<DirectStore>) {
+        let mut held: Vec<(u64, DevicePublicKey)> = self
+            .chats
+            .iter()
+            .filter(|(_, e)| e.chat.chat.get().is_some())
+            .map(|(f, e)| (e.chat.used.get(), *f))
+            .collect();
+        if held.len() <= CHATS_HELD {
+            return;
+        }
+        held.sort_unstable_by_key(|(used, _)| std::cmp::Reverse(*used));
+        for (_, friend) in held.into_iter().skip(CHATS_HELD) {
+            if let Some(entry) = self.chats.get_mut(&friend) {
+                let ended = entry.ended_ms;
+                entry.chat.let_go(store, &friend, ended);
+            }
+        }
+    }
+
     /// Notes how much of `file` came from `friend` so far, or that its download ended
     /// (`None`): the messages with it show it changed.
     fn set_download(&mut self, friend: DevicePublicKey, file: FileId, got: Option<u64>) {
@@ -293,8 +449,9 @@ impl ChatsState {
             Some(got) => self.downloads.insert((friend, file), got),
             None => self.downloads.remove(&(friend, file)),
         };
-        if let Some(entry) = self.chats.get_mut(&friend) {
-            entry.chat.touch_file(&file);
+        // A chat not held is read whole by the next view of it anyway.
+        if let Some(chat) = self.chats.get_mut(&friend).and_then(|e| e.chat.held_mut()) {
+            chat.touch_file(&file);
         }
     }
 }
@@ -396,14 +553,13 @@ impl Chats {
                 keep_summary(&store, &friend, &summary);
             }
             let entry = Entry {
-                chat: loaded.chat,
+                chat: Held::here(loaded.chat, loaded.altered),
                 ended_ms: loaded.ended_ms,
                 profile: loaded
                     .profile
                     .and_then(|bytes| Profile::decode(&bytes).ok())
                     .filter(|p| p.device == friend),
                 group: loaded.group,
-                altered: loaded.altered,
             };
             if let Some(group) = entry.group_id() {
                 state.by_group.insert(group, friend);
@@ -495,10 +651,22 @@ impl Chats {
         friend: &DevicePublicKey,
         file: &Attachment,
     ) {
+        self.share_named(shared, group, friend, &file.id, &file.name);
+    }
+
+    /// [`Self::share`] of file `id` kept here for an attachment named `name`.
+    fn share_named(
+        &self,
+        shared: &SharedFiles,
+        group: GroupId,
+        friend: &DevicePublicKey,
+        id: &FileId,
+        name: &str,
+    ) {
         shared.insert_kept(
             group,
-            file.id,
-            self.store.file_path(friend, file),
+            *id,
+            self.store.file_path_named(friend, id, name),
             self.store.key().cloned(),
         );
     }
@@ -531,6 +699,8 @@ impl Chats {
         let summary = Summary::of(&entry.chat, entry.ended_ms);
         let (store, state, friend) = (self.store.clone(), self.state.clone(), *friend);
         let counted = self.count();
+        let pending = entry.chat.pending.clone();
+        pending.fetch_add(1, Ordering::AcqRel);
         self.writer.after(move || {
             // A journal behind what its chat holds is only brought up to date whole.
             let lagging = store.lagging(&friend);
@@ -551,6 +721,7 @@ impl Chats {
             if !saved && let Some(undo) = undo {
                 undo(&mut lock_chats(&state));
             }
+            pending.fetch_sub(1, Ordering::AcqRel);
             counted();
             let _ = done.send(saved);
         });
@@ -578,15 +749,29 @@ impl Chats {
         self.written().await
     }
 
-    /// Writes a chat's journal again whole, in turn, as the chat is then; then does `after`.
-    fn rewrite(&self, friend: &DevicePublicKey, after: impl FnOnce(&DirectStore) + Send + 'static) {
+    /// Writes a chat's journal again whole, in turn, as the chat (`entry`) is then; then
+    /// does `after`.
+    fn rewrite(
+        &self,
+        friend: &DevicePublicKey,
+        entry: &Entry,
+        after: impl FnOnce(&DirectStore) + Send + 'static,
+    ) {
         let (store, state, friend) = (self.store.clone(), self.state.clone(), *friend);
         let counted = self.count();
+        let pending = entry.chat.pending.clone();
+        pending.fetch_add(1, Ordering::AcqRel);
         self.writer.after(move || {
             rewrite(&store, &state, &friend);
             after(&store);
+            pending.fetch_sub(1, Ordering::AcqRel);
             counted();
         });
+    }
+
+    /// Lets go of the items of the chats used least lately (see [`ChatsState::trim`]).
+    fn trim(&self) {
+        self.lock().trim(&self.store);
     }
 
     /// Runs `job` on the chats' files in turn, after the records asked for before it.
@@ -940,10 +1125,12 @@ impl Core {
         let mut out: Vec<ChatSummary> = chats
             .chats
             .iter()
-            .filter(|(_, e)| !e.chat.is_empty())
+            .filter(|(_, e)| !e.is_empty())
             .map(|(friend, entry)| {
+                // From what is known of each chat, none read for it.
+                let summary = entry.summary();
                 // A pin or a deletion is not news: the last line is the last message or timer.
-                let last = entry.chat.items().iter().rev().find(|i| !i.is_aside());
+                let last = summary.last.as_ref();
                 let person = chat_person(friend, entry, book.as_ref());
                 ChatSummary {
                     online: shown.contains(friend),
@@ -952,8 +1139,8 @@ impl Core {
                     last_voice_ms: last.and_then(model::voice_preview),
                     friend: person,
                     last_ms: last.map_or(0, |i| i.got_ms.max(i.at_ms)),
-                    unread: entry.chat.unread(),
-                    timer_ms: entry.chat.timer(),
+                    unread: summary.unread,
+                    timer_ms: summary.timer_ms,
                     ended_ms: entry.ended_ms,
                 }
             })
@@ -965,7 +1152,9 @@ impl Core {
     /// A chat's newest `limit` items, and what goes with the chat. A friend never written
     /// with gives an empty chat.
     pub async fn direct_chat(&self, friend: DevicePublicKey, limit: usize) -> Result<ChatView> {
-        Ok(self.chat_view(friend, Pick::Newest(limit)).await?.view)
+        let view = self.chat_view(friend, Pick::Newest(limit)).await;
+        self.inner.direct.trim();
+        Ok(view?.view)
     }
 
     /// The items of a chat just before the item at `before` (its `seq` and id) in the chat's
@@ -993,14 +1182,17 @@ impl Core {
             start = start.min(chat.place((seq, [0; 16])));
         }
         let view = self.item_view(&chats, &friend, chat);
-        Ok(OlderItems {
+        let older = OlderItems {
             items: chat.items()[start..end]
                 .iter()
                 .filter(|i| shows(chat, i))
                 .map(view)
                 .collect(),
             more: start > 0,
-        })
+        };
+        drop(chats);
+        self.inner.direct.trim();
+        Ok(older)
     }
 
     /// What changed in a chat since a view of it read at `since` (its `version`) that holds
@@ -1015,8 +1207,11 @@ impl Core {
         from: Option<(u64, ItemId)>,
         count: usize,
     ) -> Result<ChatChanges> {
-        self.chat_view(friend, Pick::Changes { since, from, count })
-            .await
+        let changes = self
+            .chat_view(friend, Pick::Changes { since, from, count })
+            .await;
+        self.inner.direct.trim();
+        changes
     }
 
     async fn chat_view(&self, friend: DevicePublicKey, pick: Pick) -> Result<ChatChanges> {
@@ -1115,7 +1310,7 @@ impl Core {
                 }),
                 ended_ms: entry.ended_ms,
                 usage,
-                altered: entry.altered,
+                altered: entry.chat.altered(),
                 version,
             },
             removed,
@@ -1424,10 +1619,10 @@ impl Core {
         let mut total = Usage::default();
         let mut by_chat = Vec::new();
         for (friend, entry) in &chats.chats {
-            if entry.chat.is_empty() {
+            if entry.is_empty() {
                 continue;
             }
-            let mut usage = entry.chat.usage();
+            let mut usage = entry.usage();
             usage.messages = self.inner.direct.store.journal_bytes(friend);
             total.add(&usage);
             by_chat.push((chat_person(friend, entry, book.as_ref()), usage));
@@ -1579,13 +1774,13 @@ impl Chats {
         let mut chats = self.lock();
         let mut written = Vec::new();
         for (friend, entry) in chats.chats.iter_mut() {
+            // Read only when it holds such a charge.
             if entry
-                .chat
                 .oldest_charge()
                 .is_some_and(|at| at.saturating_add(2 * model::DAY_MS) <= now)
             {
                 entry.chat.prune_charges(now);
-                self.rewrite(friend, |_| {});
+                self.rewrite(friend, entry, |_| {});
                 written.push(*friend);
             }
         }
@@ -1641,10 +1836,23 @@ impl Chats {
         let Some(limit) = chats.settings.limit else {
             return changed;
         };
+        // What fits needs no chat read; what does not is chosen from every chat read whole.
+        let takes = chats
+            .chats
+            .iter()
+            .map(|(f, e)| {
+                e.usage()
+                    .attachments()
+                    .saturating_add(self.store.journal_bytes(f))
+            })
+            .fold(0, u64::saturating_add);
+        if takes <= limit {
+            return changed;
+        }
         let list: Vec<(DevicePublicKey, &Chat, u64)> = chats
             .chats
             .iter()
-            .map(|(f, e)| (*f, &e.chat, self.store.journal_bytes(f)))
+            .map(|(f, e)| (*f, &*e.chat, self.store.journal_bytes(f)))
             .collect();
         let gone = model::to_free(&list, limit, keep, only).unwrap_or_default();
         let ChatsState {
@@ -1727,16 +1935,11 @@ async fn take_group(inner: &Arc<Inner>, friend: DevicePublicKey, log: GroupLog, 
             return;
         }
         let old = entry.group.replace(log.clone());
-        let here: Vec<Attachment> = entry
-            .chat
-            .items()
-            .iter()
-            .flat_map(Item::files)
-            .filter(|f| f.local == Local::Here)
-            .cloned()
-            .collect();
-        for file in &here {
-            inner.direct.share(&inner.shared, group, &friend, file);
+        // What is kept here, from what is known of the chat: none is read for it.
+        for file in &entry.summary().here {
+            inner
+                .direct
+                .share_named(&inner.shared, group, &friend, &file.id, &file.name);
         }
         save_group(&inner.direct, &friend, &log);
         let old = old.map(|o| o.group_id()).filter(|o| *o != group);
@@ -1840,6 +2043,10 @@ async fn flush(inner: &Arc<Inner>, friend: DevicePublicKey) {
         let Some(group) = entry.group_id() else {
             return;
         };
+        // Nothing waits: the chat need not be read.
+        if !entry.waits() {
+            return;
+        }
         let now = Instant::now();
         let due = due(&entry.chat, sent, now, takes);
         for item in &due {
@@ -2444,6 +2651,122 @@ mod tests {
         assert_eq!(kept.items().len(), 3);
         let local: Vec<Local> = kept.items().iter().map(|i| i.files()[0].local).collect();
         assert_eq!(local, [Local::Removed; 3]);
+        drop(state);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Past the few chats used last, a chat's items are let go of; what runs over every chat
+    /// then reads none (what each holds, waits, takes, when something in it goes), and one
+    /// is read again, as written, only when something needs its items: a copy of an item
+    /// sent again is still known, and room to free is chosen from every chat, read for it.
+    #[test]
+    fn chats_let_go_of_are_read_again_only_when_needed() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = std::env::temp_dir().join(format!("fogata-direct-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chats = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        let friends: Vec<DevicePublicKey> = (0..6)
+            .map(|_| {
+                fogata_crypto::DeviceIdentity::generate()
+                    .unwrap()
+                    .public_key()
+            })
+            .collect();
+        let now = now_ms();
+        let file = |n: u8| Attachment {
+            id: [n; 32],
+            name: format!("photo{n}.jpg"),
+            size: 400,
+            kind: FileKind::Picture,
+            video: None,
+            local: Local::Here,
+            voice: None,
+        };
+        {
+            let mut state = chats.lock();
+            for (n, friend) in (1u8..).zip(&friends) {
+                chats.store.files_dir(friend).unwrap();
+                std::fs::write(chats.store.file_path(friend, &file(n)), [n; 400]).unwrap();
+                let entry = state.chats.entry(*friend).or_default();
+                let added = entry
+                    .chat
+                    .add(Item {
+                        id: [n; 16],
+                        mine: true,
+                        sent_ms: now,
+                        got_ms: now,
+                        seq: 0,
+                        at_ms: 0,
+                        body: Body::Message {
+                            text: format!("message {n}"),
+                            files: vec![file(n)],
+                        },
+                        // The first chat's goes in an hour.
+                        ttl_ms: if n == 1 { 3_600_000 } else { 0 },
+                        delivered: true,
+                    })
+                    .unwrap();
+                chats.journal(friend, entry, &[Record::Item { item: added }]);
+            }
+        }
+        chats.settle();
+        chats.trim();
+        let held = || {
+            chats
+                .lock()
+                .chats
+                .values()
+                .filter(|e| e.held().is_some())
+                .count()
+        };
+        assert_eq!(held(), CHATS_HELD);
+        let loads = || chats.store.loads.load(Relaxed);
+        let before = loads();
+        {
+            let state = chats.lock();
+            for (n, friend) in (1u8..).zip(&friends) {
+                let entry = &state.chats[friend];
+                assert!(!entry.is_empty() && !entry.waits());
+                assert_eq!(entry.usage().pictures, 400);
+                let due = (n == 1).then_some(now + 3_600_000);
+                assert_eq!(entry.due_ms(), due);
+                assert_eq!(entry.summary().last.as_ref().map(|i| i.id), Some([n; 16]));
+            }
+        }
+        assert!(chats.forget_old_charges(now).is_empty());
+        let shared = SharedFiles::default();
+        chats.lock().settings.limit = Some(1 << 30);
+        assert!(chats.free_space(&shared, None, None).is_empty());
+        assert_eq!(loads(), before, "a chat was read for what its summary says");
+        // A chat let go of reads again as it was: an item sent again is not kept twice.
+        let away = *friends
+            .iter()
+            .find(|f| chats.lock().chats[*f].held().is_none())
+            .unwrap();
+        {
+            let mut state = chats.lock();
+            let entry = state.chats.get_mut(&away).unwrap();
+            assert_eq!(entry.chat.items().len(), 1);
+            let again = entry.chat.items()[0].clone();
+            assert!(!entry.chat.insert(again));
+        }
+        assert_eq!(loads(), before + 1);
+        // Past the room, the oldest attachment of all goes, every chat read to choose it
+        // (the messages past it take nothing this device sent).
+        chats.lock().settings.limit = Some(5 * 400);
+        let changed = chats.free_space(&shared, None, None);
+        assert_eq!(changed.into_iter().collect::<Vec<_>>(), [friends[0]]);
+        assert!(!chats.store.file_path(&friends[0], &file(1)).exists());
+        chats.settle();
+        chats.trim();
+        assert_eq!(held(), CHATS_HELD);
+        // Read again at a start, each chat is as it was written.
+        let again = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        let state = again.lock();
+        for (n, friend) in (1u8..).zip(&friends) {
+            let local = state.chats[friend].chat.items()[0].files()[0].local;
+            assert_eq!(local, if n == 1 { Local::Removed } else { Local::Here });
+        }
         drop(state);
         std::fs::remove_dir_all(&dir).unwrap();
     }

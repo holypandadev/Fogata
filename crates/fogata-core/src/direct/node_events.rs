@@ -394,7 +394,7 @@ pub(crate) async fn on_friends_changed(inner: &Arc<Inner>, book: &FriendBook) {
         for (friend, entry) in entries.iter_mut() {
             match (book.friends.get(friend), entry.ended_ms) {
                 (None, None) => {
-                    if entry.chat.is_empty() && entry.group.is_none() {
+                    if entry.is_empty() && entry.group.is_none() {
                         continue;
                     }
                     entry.ended_ms = Some(now);
@@ -525,6 +525,7 @@ async fn tick(weak: Weak<Inner>) {
             }
             flush_waiting(&inner).await;
             fetch_waiting(&inner).await;
+            inner.direct.trim();
         }
         tokio::time::sleep(TICK).await;
     }
@@ -537,12 +538,7 @@ pub(crate) async fn flush_waiting(inner: &Arc<Inner>) {
         chats
             .connected
             .iter()
-            .filter(|f| {
-                chats
-                    .chats
-                    .get(*f)
-                    .is_some_and(|e| e.chat.waiting().next().is_some())
-            })
+            .filter(|f| chats.chats.get(*f).is_some_and(|e| e.waits()))
             .copied()
             .collect()
     };
@@ -575,6 +571,10 @@ pub(crate) fn expire(inner: &Inner, now: u64) {
     } = &mut *chats;
     let mut changed = Vec::new();
     for (friend, entry) in entries.iter_mut() {
+        // Read only when something in it is due.
+        if entry.due_ms().is_none_or(|at| at > now) {
+            continue;
+        }
         let ids = entry.chat.expired(now);
         if ids.is_empty() {
             continue;
@@ -622,7 +622,9 @@ pub(crate) fn remove_items(
     }
     // The copies put aside of a damaged journal still hold what just disappeared.
     let damaged = *friend;
-    direct.rewrite(friend, move |store| store.drop_damaged(&damaged, None));
+    direct.rewrite(friend, entry, move |store| {
+        store.drop_damaged(&damaged, None)
+    });
     gone
 }
 

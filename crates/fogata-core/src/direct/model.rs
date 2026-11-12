@@ -595,6 +595,13 @@ impl Chat {
             .any(|(item, s)| *s > since && pinned.contains(&item.id))
     }
 
+    /// Notes everything up to `seq` read. Items come after it from then on, even when the
+    /// last ones went: one placed at or below it would count as read.
+    pub fn read_up_to(&mut self, seq: u64) {
+        self.read_seq = self.read_seq.max(seq);
+        self.next_seq = self.next_seq.max(seq.saturating_add(1));
+    }
+
     /// The `seq` the next item that reaches this device gets.
     pub fn next_seq(&self) -> u64 {
         self.next_seq.max(1)

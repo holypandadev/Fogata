@@ -18,7 +18,7 @@ use fogata_proto::MAX_VOICE_BYTES;
 use super::{
     ChatsState, free_space,
     model::{
-        AUTO_PICTURE_BYTES, Attachment, Charge, Chat, FileId, FileKind, Item, Local, Pool,
+        AUTO_PICTURE_BYTES, Attachment, Charge, Chat, FileId, FileKind, Item, Local, Pool, Summary,
         VoiceInfo,
     },
     store::{DirectStore, Record, Settings},
@@ -496,7 +496,7 @@ fn others_usage(chats: &ChatsState, store: &DirectStore, friend: &DevicePublicKe
         .chats
         .iter()
         .filter(|(f, _)| *f != friend)
-        .map(|(_, e)| e.chat.usage().attachments())
+        .map(|(_, e)| e.usage().attachments())
         .fold(journals(chats, store), u64::saturating_add)
 }
 
@@ -927,6 +927,22 @@ fn due_by_themselves(
     due
 }
 
+/// Whether any of the friend's attachments `summary` lists as not here may come by itself
+/// ([`due_by_themselves`] without the day's allowances): only then is the chat read to tell.
+fn may_come(summary: &Summary, settings: &Settings, waiting: &HashSet<FileId>) -> bool {
+    summary.more_missing
+        || summary.missing.iter().any(|m| {
+            !waiting.contains(&m.id)
+                && settings.limit.is_none_or(|l| m.size <= l)
+                && (m.voice
+                    || if m.kind == FileKind::Picture && m.size <= AUTO_PICTURE_BYTES {
+                        settings.auto_pictures
+                    } else {
+                        settings.auto_files
+                    })
+        })
+}
+
 /// Starts fetching the attachments that come by themselves and are not here: voice
 /// messages, pictures up to 10 MB, and videos and files too when that is on, each within the
 /// friend's daily allowance; never one removed here, which only comes back when asked for.
@@ -944,6 +960,10 @@ pub(super) async fn fetch_by_themselves(inner: &Arc<Inner>, friend: DevicePublic
             .filter(|((f, _), (until, _))| *f == friend && at < *until)
             .map(|((_, file), _)| *file)
             .collect();
+        // The chat is read only when what is known of it says one may come.
+        if entry.held().is_none() && !may_come(&entry.summary(), &chats.settings, &waiting) {
+            return;
+        }
         due_by_themselves(&entry.chat, &chats.settings, now_ms(), &waiting)
     };
     for file in due {

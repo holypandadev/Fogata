@@ -225,7 +225,7 @@ impl Record {
                     }
                 }
             }
-            Record::Read { seq } => chat.read_seq = chat.read_seq.max(*seq),
+            Record::Read { seq } => chat.read_up_to(*seq),
             Record::File { file, local } => {
                 chat.set_local(file, *local);
             }
@@ -353,6 +353,12 @@ pub struct DirectStore {
     /// The disk takes no hard links (FAT, exFAT, some network shares), for tests.
     #[cfg(test)]
     pub(crate) no_links: std::sync::atomic::AtomicBool,
+    /// Chats that could not be read: nothing is written to them, which would replace what
+    /// they hold with what was not read.
+    refused: Mutex<HashSet<DevicePublicKey>>,
+    /// How many times a chat was read whole, for tests.
+    #[cfg(test)]
+    pub(crate) loads: std::sync::atomic::AtomicUsize,
 }
 
 /// How a sealed journal or pins ends: how many records it has, and the last one's tag,
@@ -418,6 +424,9 @@ impl DirectStore {
             plain_looks: Default::default(),
             #[cfg(test)]
             no_links: Default::default(),
+            refused: Default::default(),
+            #[cfg(test)]
+            loads: Default::default(),
         }
     }
 
@@ -605,9 +614,14 @@ impl DirectStore {
     /// that is a plain one, so the system's players know what it is (see [`kept_name`]). One
     /// kept under the name used before is moved to this one.
     pub fn file_path(&self, friend: &DevicePublicKey, file: &Attachment) -> PathBuf {
+        self.file_path_named(friend, &file.id, &file.name)
+    }
+
+    /// [`Self::file_path`] of file `id` for an attachment named `name`.
+    pub fn file_path_named(&self, friend: &DevicePublicKey, id: &FileId, name: &str) -> PathBuf {
         let dir = self.chat_dir(friend).join("files");
-        let path = dir.join(kept_name(&file.id, &file.name));
-        if let Some(before) = kept_name_before(&file.id, &file.name) {
+        let path = dir.join(kept_name(id, name));
+        if let Some(before) = kept_name_before(id, name) {
             let before = dir.join(before);
             if fs::symlink_metadata(&path).is_err()
                 && fs::symlink_metadata(&before).is_ok()
@@ -648,6 +662,9 @@ impl DirectStore {
     /// before the damage, a copy of it is put aside, and it is written again from what was
     /// kept.
     pub fn load(&self, friend: &DevicePublicKey) -> Result<Loaded> {
+        #[cfg(test)]
+        self.loads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let mut loaded = Loaded::default();
         let mut count = 0;
         let mut damaged = false;
@@ -818,8 +835,26 @@ impl DirectStore {
         self.append_split(friend, Split::of(records, chat))
     }
 
+    /// Writes nothing more to a chat that could not be read.
+    pub fn refuse_writes(&self, friend: &DevicePublicKey) {
+        self.refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(*friend);
+    }
+
+    pub fn refuses_writes(&self, friend: &DevicePublicKey) -> bool {
+        self.refused
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(friend)
+    }
+
     /// [`Self::append`] of records split already, as they were when `chat` held them.
     pub fn append_split(&self, friend: &DevicePublicKey, split: Split) -> Result<bool> {
+        if self.refuses_writes(friend) {
+            bail!("this chat could not be read; nothing is written to it");
+        }
         if self.lagging(friend) {
             return Ok(true);
         }
@@ -901,6 +936,9 @@ impl DirectStore {
         chat: &Chat,
         ended_ms: Option<u64>,
     ) -> Result<()> {
+        if self.refuses_writes(friend) {
+            bail!("this chat could not be read; nothing is written to it");
+        }
         let written = self.write_whole(friend, chat, ended_ms);
         self.measure(friend);
         written
