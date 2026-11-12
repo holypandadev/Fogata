@@ -103,9 +103,20 @@ async fn a_device_added_again_is_asked_whatever_write_fails() {
         );
 
         let store = Store::open(dir.clone()).unwrap();
+        // The log file too: a log is added to in place, which its folder does not stop.
+        let log = dir
+            .join("logs")
+            .join(format!("{}.log", hex::encode(id.as_bytes())));
+        let unwritable_log = case == "log";
         writable(&dir.join(unwritable), false);
+        if unwritable_log {
+            fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+        }
         let kept = store.save_offered_group(&offered, &ana.public_key());
         writable(&dir.join(unwritable), true);
+        if unwritable_log {
+            fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
+        }
         assert!(kept.is_err(), "{case}: the write went through");
         drop(store);
         let (runs, _) = on_start(&dir, id).await;
