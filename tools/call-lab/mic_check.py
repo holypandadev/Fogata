@@ -25,8 +25,18 @@ def moment(name):
     return int(path.read_text().split()[0]) / 1000 if path.exists() else None
 
 
-def recordings(role):
-    """(time, sources) of each change in what the copy records: its sources then."""
+# A recording the sound server has not linked to a source yet shows as "none"
+# (recording.py). One is so for an instant when it starts and when its source is made
+# again, which the sampler (every 0.2 s) sometimes sees; one that stays so this long
+# records nothing, and is a fault.
+UNLINKED_FOR = 1.0
+
+
+def recordings(role, unlinked=False):
+    """(time, sources) of each change in what the copy records: its sources then. A
+    recording not linked to a source yet ("none") counts only once it has stayed so for
+    UNLINKED_FOR seconds, or from its first instant with `unlinked` (for the checks where
+    any recording at all is the fault)."""
     mine = pid(role)
     out = []
     for line in (run / "recordings.log").read_text().splitlines():
@@ -34,21 +44,38 @@ def recordings(role):
         out.append(
             (float(time), [e.split(":", 1)[1] for e in entries if e.split(":", 1)[0] == mine])
         )
-    return out
+    if unlinked:
+        return out
+    settled = []
+    since = None  # when the copy's unlinked recording was first seen
+    for i, (time, sources) in enumerate(out):
+        if "none" not in sources:
+            since = None
+            settled.append((time, sources))
+            continue
+        since = time if since is None else since
+        linked = [s for s in sources if s != "none"]
+        # The log holds changes only: this state lasts until the next line, the last one
+        # until the run ended.
+        until = out[i + 1][0] if i + 1 < len(out) else float("inf")
+        settled.append((time, linked))
+        if until - since >= UNLINKED_FOR:
+            settled.append((max(time, since + UNLINKED_FOR), sources))
+    return settled
 
 
-def sources_between(role, start, end):
+def sources_between(role, start, end, unlinked=False):
     """Every source the copy recorded from at some moment in [start, end)."""
-    seen = sources_at(role, start)
-    for time, sources in recordings(role):
+    seen = sources_at(role, start, unlinked)
+    for time, sources in recordings(role, unlinked):
         if start <= time < end:
             seen.update(sources)
     return seen
 
 
-def sources_at(role, at):
+def sources_at(role, at, unlinked=False):
     current = []
-    for time, sources in recordings(role):
+    for time, sources in recordings(role, unlinked):
         if time > at:
             break
         current = sources
@@ -79,13 +106,13 @@ if check == "muted":
     if None in (joined, unmute, mute, end):
         problems.append(f"b did not get through the steps: {result('b')}")
     else:
-        before = sources_between("b", 0, unmute)
+        before = sources_between("b", 0, unmute, unlinked=True)
         if before:
             problems.append(f"b recorded while muted, before unmuting: {sorted(before)}")
         on = sources_at("b", unmute + 3)
         if on != {"labb_quiet_mic"}:
             problems.append(f"b unmuted but records from {sorted(on) or 'nothing'}")
-        after = sources_between("b", mute + 2, end)
+        after = sources_between("b", mute + 2, end, unlinked=True)
         if after:
             problems.append(f"b still records 2 s after muting: {sorted(after)}")
         # When the recording ended after the mute.
@@ -145,7 +172,7 @@ elif check in ("broken", "alsa", "hang"):
     notes.append(f"the platform answered {answers}")
     if check == "hang" and answers[:2] != ["timeout", "timeout"]:
         problems.append(f"a server that never answers was not asked twice: {answers}")
-    if sources_between("a", 0, 1e12):
+    if sources_between("a", 0, 1e12, unlinked=True):
         problems.append("a recorded something from the lab's server")
 elif check == "quit":
     quit_at = moment("mark-a-quit")
@@ -159,7 +186,7 @@ elif check == "quit":
     else:
         ended = int(text.split()[-1]) / 1000
         notes.append(f"ended {1000 * (ended - quit_at):.0f} ms after quitting")
-        late = sources_between("a", ended + 0.5, 1e12)
+        late = sources_between("a", ended + 0.5, 1e12, unlinked=True)
         if late:
             problems.append(f"something of a records after it ended: {sorted(late)}")
         recorded = sources_between("a", 0, 1e12)

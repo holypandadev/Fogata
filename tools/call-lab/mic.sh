@@ -30,7 +30,8 @@
 #   media    a turns its camera (the made-up one) on and shares the display, b shows both,
 #            and a stops both, twice: the video library must then hold no more streams,
 #            tracks, cameras' capturers or screen stoppers than before, in the call, and
-#            nothing on either copy 5 s after it (a capture left running would show)
+#            nothing on either copy 5 s after it (a capture left running would show).
+#            Needs a debug build: the made-up camera exists only there
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
 #        300 and 1500). Build first as for measure.sh. Prints PASS or FAIL for each and the
 #        run folders; exits non-zero when one failed.
@@ -107,6 +108,14 @@ failed=0
 for check in "${checks[@]}"; do
   name=${check%%:*}
   [ "$name" != "$check" ] && export QUIT_AFTER=${check#*:}
+  # A debug build runs from the Dart kernel beside it; a profile or release one has none.
+  if [ "$name" = media ] && [ ! -e "$(dirname "$BUNDLE")/data/flutter_assets/kernel_blob.bin" ]; then
+    echo "FAIL media"
+    echo "  problem: $BUNDLE is not a debug build, and the made-up camera exists only in one:"
+    echo "  flutter build linux --debug -t integration_test/call_test.dart"
+    failed=1
+    continue
+  fi
   export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/mic-${check/:/-}-$(date +%m%d-%H%M%S)
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
