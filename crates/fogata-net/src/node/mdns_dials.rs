@@ -48,6 +48,16 @@ const MAX_MDNS_WAITING: usize = 128;
 /// gave.
 pub(super) type MdnsTold = Vec<(std::net::IpAddr, Vec<Multiaddr>)>;
 
+/// Who an mDNS answer came from, for the share of new peers it is counted on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Teller {
+    /// One of this computer's own addresses.
+    ThisComputer,
+    /// An address where a member or friend was reached (`Wanted::is_known`).
+    Known,
+    Stranger,
+}
+
 /// Whether `address`, which a response from `by` told of, may be dialled from a device on
 /// the networks of `own` (see [`Node::own_blocks`]): one at `by` itself, or on a local
 /// network (see [`addr::is_lan`]); a carrier-grade NAT or unique-local IPv6 one only when
@@ -137,10 +147,7 @@ impl Node {
             }
         }
         for (peer, tellers) in by_peer {
-            if tellers
-                .iter()
-                .any(|(by, _)| self.mdns_lets_in_free(peer, *by))
-            {
+            if self.mdns_lets_in_free(peer) {
                 self.dial_mdns_told(peer, tellers);
             } else {
                 // Behind those told of before, who get the shares first.
@@ -204,23 +211,56 @@ impl Node {
         self.dial_mdns_peer(peer, addresses, own);
     }
 
-    /// Whether mDNS may dial `peer`, which a response from `from` told of, on no share of new
-    /// peers: anyone on the network can make up any number of peers, with any addresses, so
-    /// only a few new ones from each address that answers are dialled ([`Self::mdns_lets_in`]).
-    /// They are not wanted (kept, never closed for others) until they prove something.
-    /// Copies on this very computer (tests, a second profile) are not limited, nor one
-    /// already let in or connected.
-    fn mdns_lets_in_free(&self, peer: PeerId, from: std::net::IpAddr) -> bool {
-        self.listen_addrs.iter().any(|a| addr::ip(a) == Some(from))
-            || self.lan_seen.contains(&peer)
+    /// Whether mDNS may dial `peer` on no share of new peers, since it is no new peer: one
+    /// already let in or connected, or one that proved membership of a group here or is a
+    /// friend recognised in this session. Anyone on the network can make up any number of
+    /// peers, with any addresses, so only a few new ones from each address that answers are
+    /// dialled ([`Self::mdns_lets_in`]); they are not wanted (kept, never closed for others)
+    /// until they prove something.
+    ///
+    /// The transport identity is new at every start of a device (node.rs, `start_with`), so
+    /// a member that started again, or one never met, cannot be known before it connects:
+    /// for those the address it answers from counts ([`Self::mdns_share`]). A neighbour that
+    /// names a member's peer at made-up addresses gets that peer dialled as one let in on a
+    /// share would be: at most [`MAX_MDNS_DIALLED`] addresses at once, those of its own
+    /// answer first, each address once while mDNS keeps it (it keeps 8 of a peer's), and
+    /// again [`MDNS_RETRIES`] times only at the addresses sent from (the neighbour's own),
+    /// never while the member is connected.
+    fn mdns_lets_in_free(&self, peer: PeerId) -> bool {
+        self.lan_seen.contains(&peer)
             || self.swarm.is_connected(&peer)
+            || self.members.contains_key(&peer)
+            || self.is_friend_peer(&peer)
     }
 
     /// Whether mDNS may dial `peer`, which a response from `from` told of: freely
-    /// ([`Self::mdns_lets_in_free`]), or on the share of new peers of that address, not when
-    /// it told of too many lately (nor when all addresses together did).
+    /// ([`Self::mdns_lets_in_free`]), or on a share of new peers ([`Self::mdns_share`]).
     fn mdns_lets_in(&mut self, peer: PeerId, from: std::net::IpAddr, now: Instant) -> bool {
-        self.mdns_lets_in_free(peer, from) || self.limits.take_mdns_peer(from, now)
+        self.mdns_lets_in_free(peer) || self.mdns_share(from, now)
+    }
+
+    /// Takes one of the shares of new peers for an answer from `from`: this computer's own
+    /// (`Limits::take_mdns_own`: copies here, never held behind the local network's crowd);
+    /// an address where a member or friend was reached, on its own share only
+    /// (`Limits::take_mdns_known`: a device this one looks for most likely answers there);
+    /// any other, on its own share and the local network's (`Limits::take_mdns_peer`).
+    fn mdns_share(&mut self, from: std::net::IpAddr, now: Instant) -> bool {
+        match self.mdns_teller(from) {
+            Teller::ThisComputer => self.limits.take_mdns_own(now),
+            Teller::Known => self.limits.take_mdns_known(from, now),
+            Teller::Stranger => self.limits.take_mdns_peer(from, now),
+        }
+    }
+
+    /// What `from`, an address an mDNS answer came from, is to this device.
+    fn mdns_teller(&self, from: std::net::IpAddr) -> Teller {
+        if self.listen_addrs.iter().any(|a| addr::ip(a) == Some(from)) {
+            Teller::ThisComputer
+        } else if self.wanted.is_known(from) {
+            Teller::Known
+        } else {
+            Teller::Stranger
+        }
     }
 
     /// Keeps `peer`, which mDNS told of but no share could take, to dial once one can, after
@@ -263,7 +303,16 @@ impl Node {
         }
         let now = Instant::now();
         let own_blocks = self.own_blocks();
-        for (peer, tellers) in std::mem::take(&mut self.mdns_waiting) {
+        // Those this computer or an address where a member or friend was reached told of go
+        // first, each in the order told of: they do not wait behind the crowd.
+        let (first, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.mdns_waiting)
+            .into_iter()
+            .partition(|(_, tellers)| {
+                tellers
+                    .iter()
+                    .any(|(by, _)| self.mdns_teller(*by) != Teller::Stranger)
+            });
+        for (peer, tellers) in first.into_iter().chain(rest) {
             let mut still: MdnsTold = Vec::new();
             for (by, told) in tellers {
                 for address in told {
@@ -286,8 +335,14 @@ impl Node {
             if still.is_empty() {
                 continue;
             }
-            // The peer's own answer is counted first, as when it was told of.
-            still.sort_by_key(|(by, told)| !told.iter().any(|a| addr::ip(a) == Some(*by)));
+            // A share that does not count on the local network's first, then the peer's own
+            // answer, as when it was told of.
+            still.sort_by_key(|(by, told)| {
+                (
+                    self.mdns_teller(*by) == Teller::Stranger,
+                    !told.iter().any(|a| addr::ip(a) == Some(*by)),
+                )
+            });
             if still
                 .iter()
                 .any(|(by, _)| self.mdns_lets_in(peer, *by, now))
@@ -463,17 +518,13 @@ impl Node {
             };
             let own = retry.own.clone();
             // Only what an answer heard now said, each try on its share (see
-            // `MDNS_RETRIES`); copies on this same computer are not limited.
+            // `MDNS_RETRIES`).
             if self.teller_muted(&teller) {
                 tracing::debug!(%peer, %teller, "a peer mDNS found is not dialled again");
                 self.mdns_retry.remove(&peer);
                 continue;
             }
-            let this_computer = self
-                .listen_addrs
-                .iter()
-                .any(|a| addr::ip(a) == Some(teller));
-            if !(this_computer || self.limits.take_mdns_peer(teller, now)) {
+            if !self.mdns_share(teller, now) {
                 // The share is spent (other devices answering at the same time took it):
                 // the try waits for it, as mDNS tells of the peer only once.
                 tracing::debug!(%peer, %teller, "a peer mDNS found waits to be dialled again");
@@ -988,6 +1039,196 @@ mod tests {
             first,
             "peers told of after the member were dialled before it"
         );
+        node.shutdown().await.unwrap();
+    }
+
+    /// Spends every share of new peers of the local network, and fills the queue behind
+    /// them, as a crowd of strangers (or a neighbour making up peers from a few addresses)
+    /// would.
+    fn crowd(n: &mut Node) {
+        for host in 0..8u8 {
+            let from = std::net::IpAddr::from([192, 168, 1, 60 + host]);
+            for i in 0..16u32 {
+                let at: Multiaddr = format!("/ip4/{from}/udp/{}/quic-v1", 5000 + i)
+                    .parse()
+                    .unwrap();
+                n.dial_mdns_found(vec![(PeerId::random(), at, Some(from))]);
+            }
+        }
+        assert!(n.mdns_waiting.len() >= 64, "the crowd did not wait");
+    }
+
+    fn dialled_at(n: &Node, peer: PeerId) -> Vec<Multiaddr> {
+        (n.mdns_dials.iter())
+            .filter(|(p, _)| *p == peer)
+            .flat_map(|(_, a)| a.iter().cloned())
+            .collect()
+    }
+
+    /// A member mDNS tells of while a crowd has spent the local network's shares and waits
+    /// for them is dialled at once: one that already proved membership here (its transport
+    /// identity is known), and one never met that answers from an address where a member
+    /// was reached before (a member started again comes back under a new identity, so only
+    /// its address can be known).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_told_of_when_the_shares_are_spent_is_dialled_at_once() {
+        let (node, _group) = lone_member();
+        let (known_peer, known_address) = inspect(&node, |n| {
+            crowd(n);
+            let member = PeerId::random();
+            let address: Multiaddr = "/ip4/192.168.1.30/udp/4001/quic-v1".parse().unwrap();
+            n.members.insert(
+                member,
+                crate::node::Member {
+                    device: fogata_crypto::DeviceIdentity::generate()
+                        .unwrap()
+                        .public_key(),
+                    path: crate::Path::Lan,
+                    address: address.clone(),
+                    told: crate::Path::Lan,
+                    worse_since: None,
+                },
+            );
+            let by = std::net::IpAddr::from([192, 168, 1, 30]);
+            n.dial_mdns_found(vec![(member, address.clone(), Some(by))]);
+            let known_peer = dialled_at(n, member) == [address];
+            // Started again: a new identity, at the address it was reached at.
+            let again = PeerId::random();
+            let reached = std::net::IpAddr::from([192, 168, 1, 31]);
+            n.wanted.set_known([reached]);
+            let address: Multiaddr = "/ip4/192.168.1.31/udp/4001/quic-v1".parse().unwrap();
+            n.dial_mdns_found(vec![(again, address.clone(), Some(reached))]);
+            (known_peer, dialled_at(n, again) == [address])
+        })
+        .await;
+        assert!(
+            known_peer,
+            "a member known by its transport identity waited"
+        );
+        assert!(
+            known_address,
+            "a member at an address it was reached at waited"
+        );
+        node.shutdown().await.unwrap();
+    }
+
+    /// A neighbour that names a member's transport identity (heard on the network) at made-up
+    /// addresses, as many as it likes, gets it dialled at no more than a peer let in on a
+    /// share would be: at most `MAX_MDNS_DIALLED` addresses at once, as many again once
+    /// those fail, and the retries only at those, never more; and nothing while the member
+    /// is connected.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_neighbour_naming_a_member_at_made_up_addresses_gets_a_bounded_number_dialled() {
+        let (node, _group) = lone_member();
+        let (dials, distinct) = inspect(&node, |n| {
+            let member = PeerId::random();
+            n.members.insert(
+                member,
+                crate::node::Member {
+                    device: fogata_crypto::DeviceIdentity::generate()
+                        .unwrap()
+                        .public_key(),
+                    path: crate::Path::Lan,
+                    address: "/ip4/192.168.1.30/udp/4001/quic-v1".parse().unwrap(),
+                    told: crate::Path::Lan,
+                    worse_since: None,
+                },
+            );
+            let neighbour = std::net::IpAddr::from([192, 168, 1, 66]);
+            for round in 0..10u32 {
+                let made_up: Vec<_> = (0..100u32)
+                    .map(|i| {
+                        let at = format!("/ip4/192.168.1.66/udp/{}/quic-v1", round * 100 + i);
+                        (member, at.parse().unwrap(), Some(neighbour))
+                    })
+                    .collect();
+                n.dial_mdns_found(made_up);
+                // Every dial fails, and every retry is let through at once.
+                for _ in 0..4 {
+                    let pending: Vec<ConnectionId> = n
+                        .mdns_dialling
+                        .get(&member)
+                        .map(|d| d.pending.iter().copied().collect())
+                        .unwrap_or_default();
+                    for id in pending {
+                        n.mdns_dial_failed(member, id);
+                    }
+                    if let Some(retry) = n.mdns_retry.get_mut(&member) {
+                        retry.at = Instant::now();
+                    }
+                    n.retry_mdns_dials();
+                }
+            }
+            let dials: Vec<usize> = (n.mdns_dials.iter())
+                .filter(|(p, _)| *p == member)
+                .map(|(_, a)| a.len())
+                .collect();
+            let mut distinct = dialled_at(n, member);
+            distinct.sort();
+            distinct.dedup();
+            (dials, distinct.len())
+        })
+        .await;
+        assert!(
+            dials.iter().all(|d| *d <= MAX_MDNS_DIALLED),
+            "dialled as {dials:?}"
+        );
+        // Ten events of a hundred addresses each: the first dial and those that waited for
+        // it, then the retries at what was dialled; whatever came past that was left out.
+        // (mDNS itself keeps 8 addresses of a peer and tells of each once.)
+        assert!(
+            distinct <= 10 * 2 * MAX_MDNS_DIALLED,
+            "{distinct} addresses"
+        );
+        assert!(
+            dials.len() <= 10 * (2 + MDNS_RETRIES as usize),
+            "dialled as {dials:?}"
+        );
+        node.shutdown().await.unwrap();
+    }
+
+    /// Copies on this computer (tests, the call lab's 8 copies each started again a few
+    /// times, a second profile) are dialled at once while a crowd waits; a neighbour sending
+    /// from this computer's address, where the system lets it, gets no more than this
+    /// computer's own share, and those past it wait their turn rather than being dropped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copies_on_this_computer_have_a_share_of_their_own_with_a_ceiling() {
+        let (node, _group) = lone_member();
+        let (copies, spoofed, waiting, later) = inspect(&node, |n| {
+            n.listen_addrs = vec!["/ip4/192.168.1.20/udp/4001/quic-v1".parse().unwrap()];
+            crowd(n);
+            let here = std::net::IpAddr::from([192, 168, 1, 20]);
+            let tell = |n: &mut Node, port: u32| {
+                let peer = PeerId::random();
+                let at: Multiaddr = format!("/ip4/192.168.1.20/udp/{port}/quic-v1")
+                    .parse()
+                    .unwrap();
+                n.dial_mdns_found(vec![(peer, at, Some(here))]);
+                !dialled_at(n, peer).is_empty()
+            };
+            // The call lab: 8 copies, started 5 times.
+            let copies = (0..40).filter(|i| tell(n, 30000 + i)).count();
+            // A neighbour spoofing this computer's address with made-up peers.
+            let spoofed = (0..50).filter(|i| tell(n, 40000 + i)).count();
+            let waiting = n.mdns_waiting.len();
+            // A minute later the shares are full again: what this computer told of goes
+            // before the crowd that waited longer.
+            n.limits = Default::default();
+            let before = n.mdns_dials.len();
+            n.retry_mdns_dials();
+            let later: Vec<bool> = n.mdns_dials[before..]
+                .iter()
+                .map(|(_, a)| a.iter().all(|a| addr::ip(a) == Some(here)))
+                .collect();
+            (copies, spoofed, waiting, later)
+        })
+        .await;
+        assert_eq!(copies, 40, "copies on this computer waited");
+        assert_eq!(spoofed, 64 - 40, "past this computer's share");
+        assert_eq!(waiting, 96 + 26, "those past it were dropped");
+        // This computer's 26 first, then the crowd's 32 of the local network's share.
+        assert_eq!(later.len(), 26 + 32, "dialled as {later:?}");
+        assert!(later[..26].iter().all(|h| *h) && !later[26..].iter().any(|h| *h));
         node.shutdown().await.unwrap();
     }
 

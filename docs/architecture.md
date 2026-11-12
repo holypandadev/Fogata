@@ -461,8 +461,15 @@ Discovery is layered; every layer runs in parallel and none is required.
    the place of one never reached); and only 8 new peers told of by one address (the
    response's, not those it names, which are whatever its sender likes; a peer counts for
    the first response that lets it in, what looks like its own answer, sent from an
-   address it names, first), 32 in all, are dialled at once, then 8 and 32 a minute (not
-   counting copies on this same computer). The others wait, in the order they were told
+   address it names, first), 32 in all, are dialled at once, then 8 and 32 a minute. An
+   address where a member or friend was reached has its own 8 and counts nowhere else (a
+   member started again comes back under a new transport identity, so only its address can
+   be known beforehand), and this computer's own addresses have 64 at once and 64 a minute
+   of their own (copies here: tests, the call lab, a second profile; a neighbour that sends
+   from this computer's address, which Linux drops but macOS and Windows may not, gets no
+   more). A peer that proved membership here or is a friend recognised in this session is
+   no new peer and takes no share. The others wait, the answers of this computer and of
+   known addresses first, each in the order they were told
    of, at most 128 (as many as mDNS keeps; one it no longer keeps leaves), and are dialled
    as those shares fill again: mDNS tells of a peer once, and one that keeps answering is
    never told of again, so a member turned away while a crowd of devices on the network, or

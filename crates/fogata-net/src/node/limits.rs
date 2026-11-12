@@ -213,6 +213,14 @@ const MDNS_ALL_BURST: f64 = 32.0;
 const MDNS_ALL_PER_SECOND: f64 = 32.0 / 60.0;
 /// Addresses whose mDNS budget is kept; past it, those whose bucket is full again go.
 const MDNS_SOURCES_KEPT: usize = 256;
+/// Peers new to this device that mDNS may tell of from this computer's own addresses, all
+/// of them together: copies here (tests; the call lab, up to 8 copies, each started again
+/// many times; a second profile) are a few new peers a minute, each told of once (on every
+/// interface, for one peer let in). A neighbour that sends from this computer's address,
+/// which Linux drops but macOS and Windows may not, gets no more than this; and it counts
+/// nowhere else, so copies here never wait behind the local network's crowd.
+const MDNS_OWN_BURST: f64 = 64.0;
+const MDNS_OWN_PER_SECOND: f64 = 64.0 / 60.0;
 
 /// A friend's profile, banner or bio, or a member's profile, is taken at most twice in this
 /// long from each (one on connecting, and a change right after it): each one rewrites a file
@@ -427,6 +435,7 @@ pub(super) struct Limits {
     animations: Held<(DevicePublicKey, fogata_friends::Animated), Animation>,
     mdns_sources: HashMap<std::net::IpAddr, Bucket>,
     mdns_all: Option<Bucket>,
+    mdns_own: Option<Bucket>,
     stranger_sources: HashMap<Source, Bucket>,
 }
 
@@ -790,28 +799,46 @@ impl Limits {
 
     /// Whether a peer new to this device that mDNS found at `from` is dialled now.
     pub(super) fn take_mdns_peer(&mut self, from: std::net::IpAddr, now: Instant) -> bool {
+        let all = self
+            .mdns_all
+            .get_or_insert_with(|| Bucket::full(MDNS_ALL_BURST, now));
+        all.refill(now, MDNS_ALL_BURST, MDNS_ALL_PER_SECOND);
+        if all.tokens < 1.0 || !self.take_mdns_source(from, now) {
+            return false;
+        }
+        if let Some(all) = self.mdns_all.as_mut() {
+            all.tokens -= 1.0;
+        }
+        true
+    }
+
+    /// Whether a peer new to this device that mDNS found at `from`, an address where a
+    /// member or friend was reached, is dialled now: on that address's own share only, not
+    /// on the one of the whole local network, which a crowd of strangers may have spent.
+    pub(super) fn take_mdns_known(&mut self, from: std::net::IpAddr, now: Instant) -> bool {
+        self.take_mdns_source(from, now)
+    }
+
+    /// Whether a peer new to this device that mDNS found at one of this computer's own
+    /// addresses is dialled now (see [`MDNS_OWN_BURST`]).
+    pub(super) fn take_mdns_own(&mut self, now: Instant) -> bool {
+        self.mdns_own
+            .get_or_insert_with(|| Bucket::full(MDNS_OWN_BURST, now))
+            .take(now, MDNS_OWN_BURST, MDNS_OWN_PER_SECOND)
+    }
+
+    /// One of `from`'s share of new peers, if any is left.
+    fn take_mdns_source(&mut self, from: std::net::IpAddr, now: Instant) -> bool {
         if self.mdns_sources.len() >= MDNS_SOURCES_KEPT {
             self.mdns_sources.retain(|_, bucket| {
                 bucket.refill(now, MDNS_PEER_BURST, MDNS_PEERS_PER_SECOND);
                 bucket.tokens < MDNS_PEER_BURST
             });
         }
-        let all = self
-            .mdns_all
-            .get_or_insert_with(|| Bucket::full(MDNS_ALL_BURST, now));
-        all.refill(now, MDNS_ALL_BURST, MDNS_ALL_PER_SECOND);
-        if all.tokens < 1.0 {
-            return false;
-        }
-        let taken = self
-            .mdns_sources
+        self.mdns_sources
             .entry(from)
             .or_insert_with(|| Bucket::full(MDNS_PEER_BURST, now))
-            .take(now, MDNS_PEER_BURST, MDNS_PEERS_PER_SECOND);
-        if taken {
-            all.tokens -= 1.0;
-        }
-        taken
+            .take(now, MDNS_PEER_BURST, MDNS_PEERS_PER_SECOND)
     }
 
     /// Whether a request from a peer that is neither a member nor a friend here, coming
@@ -960,6 +987,18 @@ mod tests {
             .count();
         assert_eq!(taken, MDNS_ALL_BURST as usize);
         assert!(limits.mdns_sources.len() <= MDNS_SOURCES_KEPT);
+        // An address where a member was reached still has its own share, the local
+        // network's spent.
+        let member: std::net::IpAddr = [192, 168, 1, 20].into();
+        assert!(!limits.take_mdns_peer(member, start));
+        let taken = (0..1000)
+            .filter(|_| limits.take_mdns_known(member, start))
+            .count();
+        assert_eq!(taken, MDNS_PEER_BURST as usize);
+        // This computer's own: a share of their own, the rest spent, with a ceiling.
+        let taken = (0..1000).filter(|_| limits.take_mdns_own(start)).count();
+        assert_eq!(taken, MDNS_OWN_BURST as usize);
+        assert!(limits.take_mdns_own(start + Duration::from_secs(1)));
     }
 
     #[test]
