@@ -267,30 +267,7 @@ impl Node {
                 part,
             } => self.on_admitted_request(peer, group_id, entries, part),
             MemberRequest::JoinDeclined { group_id, revoke } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                if slot.ctx.joining().is_none() {
-                    return MemberResponse::Refused;
-                }
-                // Only the manager who wrote the invite can sign its `Revoke`: anyone else who
-                // learnt the group's id, another member among them, could otherwise end the
-                // join. Another manager's no reaches this device once the issuer confirms it.
-                if !revoke.is_some_and(|r| slot.ctx.refused_by_issuer(&r)) {
-                    tracing::info!(
-                        "{} said a manager refused the join, without the inviting manager's \
-                         signature; still waiting",
-                        short_peer(&peer)
-                    );
-                    // Shown the invite again later, it may have the signed one by then.
-                    slot.join_sent.remove(&peer);
-                    return MemberResponse::Refused;
-                }
-                self.emit(NodeEvent::JoinDeclined { group });
-                MemberResponse::Ack
+                self.on_join_declined_request(peer, group_id, revoke)
             }
             MemberRequest::Direct { group_id, messages } => {
                 self.on_direct_request(peer, &group_id, messages)
@@ -984,6 +961,39 @@ impl Node {
         } else {
             MemberResponse::Refused
         }
+    }
+
+    /// Takes a manager's no to this device's join.
+    fn on_join_declined_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        revoke: Option<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        if slot.ctx.joining().is_none() {
+            return MemberResponse::Refused;
+        }
+        // Only the manager who wrote the invite can sign its `Revoke`: anyone else who
+        // learnt the group's id, another member among them, could otherwise end the
+        // join. Another manager's no reaches this device once the issuer confirms it.
+        if !revoke.is_some_and(|r| slot.ctx.refused_by_issuer(&r)) {
+            tracing::info!(
+                "{} said a manager refused the join, without the inviting manager's \
+                 signature; still waiting",
+                short_peer(&peer)
+            );
+            // Shown the invite again later, it may have the signed one by then.
+            slot.join_sent.remove(&peer);
+            return MemberResponse::Refused;
+        }
+        self.emit(NodeEvent::JoinDeclined { group });
+        MemberResponse::Ack
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
