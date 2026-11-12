@@ -1088,31 +1088,7 @@ impl Node {
                 self.on_friend_hello_request(peer, local, remote, hidden, mac, sealed)
             }
             FriendRequest::LinkRequest { mac, sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(link) = f.link.as_ref().filter(|l| !l.is_expired(now)) else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_link_request(
-                    &self.identity,
-                    link,
-                    &local,
-                    &remote,
-                    &mac,
-                    &sealed,
-                ) {
-                    Ok(intro) => {
-                        f.link = None;
-                        self.received_request(peer, intro);
-                        FriendResponse::Pending
-                    }
-                    Err(e) => {
-                        tracing::debug!("refused a link request from {peer}: {e}");
-                        FriendResponse::Refused
-                    }
-                }
+                self.on_friend_link_request(peer, local, remote, now, mac, sealed)
             }
             FriendRequest::CodeStart { gate, spake } => {
                 // Kept, as checked above.
@@ -1630,6 +1606,43 @@ impl Node {
         }
         self.mark_friend_online(peer, from.device, from.hidden);
         FriendResponse::HelloReply { sealed: reply }
+    }
+
+    /// Takes a friend request made with this device's link.
+    fn on_friend_link_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        now: u64,
+        mac: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(link) = f.link.as_ref().filter(|l| !l.is_expired(now)) else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_link_request(
+            &self.identity,
+            link,
+            &local,
+            &remote,
+            &mac,
+            &sealed,
+        ) {
+            Ok(intro) => {
+                f.link = None;
+                self.received_request(peer, intro);
+                FriendResponse::Pending
+            }
+            Err(e) => {
+                tracing::debug!("refused a link request from {peer}: {e}");
+                FriendResponse::Refused
+            }
+        }
     }
 
     /// Records a checked friend request that came from `peer`.
