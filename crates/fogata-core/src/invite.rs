@@ -23,6 +23,13 @@ struct InviteData {
     token: String,
     #[serde(default)]
     addrs: Vec<String>,
+    /// The level of judgment of the group's log when the invite was made (see
+    /// `fogata_state::Level`): a copy that does not judge at it would refuse the log it is
+    /// let in with, so it tells its person to update before it tries. Absent in invites
+    /// made before it, and skipped by the versions before it, which read the rest as they
+    /// did: that is why it is a field of its own and not a new `v`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    level: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -31,6 +38,9 @@ pub struct Invite {
     pub ticket: Ticket,
     pub token: InviteToken,
     pub addrs: Vec<Multiaddr>,
+    /// The group's level of judgment when the invite was made (see [`InviteData`]), as its
+    /// number; `None` in an invite made before invites said it.
+    pub level: Option<u32>,
 }
 
 impl Invite {
@@ -64,6 +74,7 @@ pub fn make(
         ticket,
         token,
         addrs,
+        level: Some(log.level().number()),
     }))
 }
 
@@ -74,6 +85,7 @@ pub fn encode(invite: &Invite) -> String {
         ticket: hex::encode(invite.ticket.encode()),
         token: hex::encode(invite.token),
         addrs: invite.addrs.iter().map(ToString::to_string).collect(),
+        level: invite.level,
     };
     let json = serde_json::to_vec(&data).expect("invite data always serialises");
     format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(json))
@@ -95,6 +107,15 @@ pub fn decode(text: &str) -> Result<Invite> {
         3 => {}
         1 | 2 => bail!("this invite is from an older version; ask for a new one"),
         _ => bail!("this invite needs a newer version of Fogata"),
+    }
+    // A group that went up to a level this version does not judge at: its log would stop
+    // there, and this device would wait for ever to be let in. Said before anything is
+    // tried, rather than once a manager has let it in.
+    if data
+        .level
+        .is_some_and(|n| n > fogata_state::Level::CURRENT.number())
+    {
+        bail!("this invite needs a newer version of Fogata: its group uses newer rules");
     }
     let ticket = hex::decode(&data.ticket)
         .ok()
@@ -119,6 +140,7 @@ pub fn decode(text: &str) -> Result<Invite> {
         ticket,
         token,
         addrs: data.addrs.iter().filter_map(|a| a.parse().ok()).collect(),
+        level: data.level,
     })
 }
 
@@ -209,6 +231,7 @@ mod tests {
             ticket: ticket.clone(),
             token: [7u8; 16],
             addrs: vec![addr.clone()],
+            level: Some(3),
         });
         let invite = decode(&text).unwrap();
         assert_eq!(invite.name, "friends");
@@ -228,6 +251,7 @@ mod tests {
                 ticket: ticket.clone(),
                 token: [7u8; 16],
                 addrs: Vec::new(),
+                level: None,
             }))
             .unwrap()
             .name
@@ -246,6 +270,95 @@ mod tests {
         let old = URL_SAFE_NO_PAD.encode(br#"{"v":2,"name":"x","ticket":"00","rendezvous":"00"}"#);
         let error = decode(&format!("{PREFIX}{old}")).unwrap_err().to_string();
         assert!(error.contains("older version"));
+    }
+
+    /// How 0.1.0-beta.9 reads an invite, as it was written then (`invite.rs` of that
+    /// release, the parts that decide whether it reads): versions before the level hint
+    /// open the invites this version makes.
+    mod as_beta_nine {
+        use super::*;
+
+        #[derive(Deserialize)]
+        struct InviteData {
+            v: u8,
+            name: String,
+            ticket: String,
+            #[serde(default)]
+            token: String,
+            #[serde(default)]
+            addrs: Vec<String>,
+        }
+
+        /// The group's id, name, token and addresses as that version reads them, or why not.
+        pub(super) fn decode(text: &str) -> Result<(Ticket, String, InviteToken, usize)> {
+            let body = text.trim().strip_prefix(PREFIX).context("not an invite")?;
+            let json = URL_SAFE_NO_PAD.decode(body)?;
+            let data: InviteData = serde_json::from_slice(&json)?;
+            match data.v {
+                3 => {}
+                1 | 2 => bail!("this invite is from an older version; ask for a new one"),
+                _ => bail!("this invite needs a newer version of Fogata"),
+            }
+            let ticket = hex::decode(&data.ticket)
+                .ok()
+                .and_then(|b| Ticket::decode(&b).ok())
+                .context("the invite is damaged")?;
+            let token = hex::decode(&data.token)
+                .ok()
+                .and_then(|b| InviteToken::try_from(b).ok())
+                .context("the invite is damaged")?;
+            Ok((ticket, data.name, token, data.addrs.len()))
+        }
+    }
+
+    /// An invite says the level its group judges at. Versions before it (0.1.0-beta.9)
+    /// read it whole and go on as they did, the level aside; this one reads one made
+    /// before it, and tells its person to update, before trying, when the group judges at
+    /// a level above every one it knows. A field it does not know is skipped.
+    #[test]
+    fn an_invite_says_its_group_s_level_and_older_versions_still_read_it() {
+        let admin = DeviceIdentity::generate().unwrap();
+        let mut log = GroupLog::create(&admin, "friends", 1_000).unwrap();
+        log.raise_level(&admin, fogata_state::Level::CURRENT, 1_001)
+            .unwrap();
+        let text = make(&mut log, &admin, 7, Vec::new(), 1_002).unwrap();
+        let invite = decode(&text).unwrap();
+        assert_eq!(invite.level, Some(fogata_state::Level::CURRENT.number()));
+        let (ticket, name, token, _) = as_beta_nine::decode(&text).unwrap();
+        assert_eq!(
+            (ticket, name, token),
+            (invite.ticket.clone(), invite.name.clone(), invite.token)
+        );
+
+        let with = |level: Option<u32>, extra: &str| {
+            let mut json = serde_json::to_value(InviteData {
+                v: 3,
+                name: "friends".into(),
+                ticket: hex::encode(invite.ticket.encode()),
+                token: hex::encode(invite.token),
+                addrs: vec!["/ip4/203.0.113.5/udp/4001/quic-v1".into()],
+                level,
+            })
+            .unwrap();
+            if !extra.is_empty() {
+                json[extra] = serde_json::json!({"later": [1, 2]});
+            }
+            format!("{PREFIX}{}", URL_SAFE_NO_PAD.encode(json.to_string()))
+        };
+        // Made before invites said the level: read as it was.
+        let before = with(None, "");
+        assert_eq!(decode(&before).unwrap().level, None);
+        assert!(as_beta_nine::decode(&before).is_ok());
+        // A level above this version's: told to update, before anything is tried; the
+        // version before, which knows no such field, tries.
+        let ahead = with(Some(fogata_state::Level::CURRENT.number() + 1), "");
+        let refused = decode(&ahead).unwrap_err().to_string();
+        assert!(refused.contains("needs a newer version"), "{refused}");
+        assert!(as_beta_nine::decode(&ahead).is_ok());
+        // A field neither knows: skipped by both.
+        let more = with(Some(2), "spare");
+        assert_eq!(decode(&more).unwrap().level, Some(2));
+        assert!(as_beta_nine::decode(&more).is_ok());
     }
 
     #[test]
@@ -268,6 +381,7 @@ mod tests {
             ticket,
             token: [7; 16],
             addrs: vec!["/ip4/203.0.113.5/udp/4001/quic-v1".parse().unwrap()],
+            level: Some(3),
         });
         let json = URL_SAFE_NO_PAD
             .decode(text.strip_prefix(PREFIX).unwrap())

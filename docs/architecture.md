@@ -2973,7 +2973,14 @@ shown among the rest by time and marked "seen on this device".
 A manager issues a ticket `{ group_id, ticket_id, issuer, expires }`, signed, and notes it in
 the log with a random token (`Invite`). The invite link carries the ticket, the group name,
 the token and addresses of online members; never the members' own rendezvous secret, so a
-leaked invite reveals nothing once it was used or has expired. While the invite is open, the
+leaked invite reveals nothing once it was used or has expired. It also says the level of
+judgment of the group's log when it was made (`level`, 5.1): a copy that does not judge at
+that level would refuse the log it is let in with and wait for ever, so it tells its person
+that the invite needs a newer Fogata as it reads the link, before it tries. The field is one
+of its own, in the same format (`v` 3): versions before it skip it and read the rest as they
+did, so they still open links to groups at a level they know (and, for a level they do not
+know, are refused by the managers and told by the log, as below); a link without it, made
+before, reads as it did. While the invite is open, the
 managers announce themselves on the DHT under a rendezvous secret derived from the token, and
 the invited device looks there and announces itself too. The device dials all the addresses
 the invite gives for a member at once and keeps the first that answers; one by one, a first
