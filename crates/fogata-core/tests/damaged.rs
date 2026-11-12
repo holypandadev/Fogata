@@ -40,6 +40,9 @@ fn a_log_cut_short_keeps_the_entries_before_the_cut() {
     let file = dir.join("logs").join(format!("{}.log", group.group_id));
     let whole = fs::read(&file).unwrap();
 
+    // Cut in its last entry, as a computer that stops while an entry is added leaves it: the
+    // entries before are kept, and the part of one, never all there, is no damage to put
+    // aside.
     fs::write(&file, &whole[..whole.len() - 5]).unwrap();
     let read = store.load_log(&group).unwrap();
     assert_eq!(read.len(), 2);
@@ -48,13 +51,14 @@ fn a_log_cut_short_keeps_the_entries_before_the_cut() {
     let aside = dir
         .join("logs")
         .join(format!("{}.log.damaged", group.group_id));
-    assert_eq!(fs::read(&aside).unwrap(), whole[..whole.len() - 5]);
+    assert!(!aside.exists());
 
-    // Garbage after the entries is damage too; the entries stay.
+    // Garbage after the entries is damage: the entries stay, and a copy is put aside.
     let mut longer = whole.clone();
     longer.extend_from_slice(&[0, 0, 0, 3, 1, 2, 3]);
     fs::write(&file, &longer).unwrap();
     assert_eq!(store.load_log(&group).unwrap().len(), 3);
+    assert_eq!(fs::read(&aside).unwrap(), longer);
     fs::remove_dir_all(&dir).unwrap();
 }
 
