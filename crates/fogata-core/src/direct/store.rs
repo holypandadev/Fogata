@@ -3080,6 +3080,73 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// What reading every chat at a start costs, sealed: 20 chats of 10,000 messages each,
+    /// as the core reads them as it starts (the time, and what this process holds more
+    /// once they are read, by `ps`).
+    /// `cargo test --release -p fogata-core --lib cost_of_many_chats -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn cost_of_many_chats() {
+        use std::time::Instant;
+        let dir = std::env::var_os("FOGATA_COST_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+            .join(format!("fogata-cost-chats-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let key = DataKey::generate().unwrap();
+        let mut chat = Chat::default();
+        for n in 0..10_000u32 {
+            let mut id = [0u8; 16];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            chat.insert(Item {
+                id,
+                mine: n % 2 == 0,
+                sent_ms: u64::from(n) * 1000,
+                got_ms: u64::from(n) * 1000,
+                seq: u64::from(n),
+                at_ms: u64::from(n) * 1000,
+                body: Body::Message {
+                    text: format!(
+                        "message {n}: see you at eight in the square, I'll bring the guitar"
+                    ),
+                    files: Vec::new(),
+                },
+                ttl_ms: 0,
+                delivered: true,
+            });
+        }
+        let store = DirectStore::open_sealed(&dir, Some(key.clone()));
+        for _ in 0..20 {
+            let friend = DeviceIdentity::generate().unwrap().public_key();
+            store.rewrite(&friend, &chat, None).unwrap();
+        }
+        drop(chat);
+        let rss_kb = || {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap()
+        };
+        let before = rss_kb();
+        let start = Instant::now();
+        let chats = DirectStore::open_sealed(&dir, Some(key)).chats();
+        let took = start.elapsed();
+        let after = rss_kb();
+        assert_eq!(chats.len(), 20);
+        assert!(chats.iter().all(|(_, l)| l.chat.items().len() == 10_000));
+        eprintln!(
+            "20 sealed chats of 10,000 messages read in {:.0} ms; the process holds {} MB more",
+            took.as_secs_f64() * 1000.0,
+            after.saturating_sub(before) / 1024
+        );
+        drop(chats);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// What sealing costs: a journal of 10,000 messages written whole, read back and added
     /// to, plain and sealed, and a large attachment kept, read, and sealed in its place.
     /// `cargo test --release -p fogata-core --lib cost_of_sealing -- --ignored --nocapture`,
