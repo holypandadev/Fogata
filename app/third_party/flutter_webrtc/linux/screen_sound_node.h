@@ -2,7 +2,7 @@
 #define FLUTTER_WEBRTC_SCREEN_SOUND_NODE_H_
 
 // Fogata: which sound outputs a shared screen's sound may take, by a node's properties
-// alone. Header only, with neither PipeWire nor libwebrtc, so that its test
+// and whose it is. Header only, with neither PipeWire nor libwebrtc, so that its test
 // (common/cpp/test/screen_sound_node_test.cc) builds anywhere.
 
 #include <cstring>
@@ -57,6 +57,52 @@ const char* PassedOnBecause(Lookup lookup, const std::string& binary) {
   if (is(role, "Filter") || is(role, "filter")) return "media.role";
   if (SoundServerBinary(binary)) return "sound server's binary";
   return nullptr;
+}
+
+// What is known of whose an output is: the process and the executable its properties
+// give (application.process.id, application.process.binary without the " (deleted)"
+// the kernel adds), 0 or empty while not known, and the process its client connected
+// from as the server saw it (pipewire.sec.pid; every stream of a PulseAudio program has
+// the one pipewire-pulse client's).
+struct OutputOwner {
+  int pid = 0;
+  int client_pid = 0;
+  std::string binary;
+};
+
+// This application as its own outputs name it. `only_from`, for tests: the one program
+// whose sound is taken. `sandboxed`: it runs in a Flatpak, whose processes are numbered
+// in a namespace of each sandbox's own (the first program of every sandbox is 2): a
+// process number another sandboxed program's output gives may then be this one's, and
+// the server's number for a client is not in this one's namespace at all. Only the
+// executable tells there.
+struct ThisApp {
+  int pid = 0;
+  std::string binary;
+  std::string only_from;
+  bool sandboxed = false;
+};
+
+// Whether an output is this application's own (its call, its sounds, another copy of
+// it), or, for tests, not the one program whose sound is taken: never linked.
+inline bool OwnOutput(const OutputOwner& output, const ThisApp& app) {
+  if (!app.binary.empty() && output.binary == app.binary) return true;
+  // In a sandbox the numbers say nothing, unless nothing else can.
+  if (!app.sandboxed || app.binary.empty()) {
+    if (output.pid != 0 && output.pid == app.pid) return true;
+    if (output.client_pid != 0 && output.client_pid == app.pid) return true;
+  }
+  // A program only once its executable is known: until then it may be the one.
+  return !app.only_from.empty() && !output.binary.empty() &&
+         output.binary != app.only_from;
+}
+
+// Whether enough is known of an output to link it: its process or its executable (the
+// client's process alone says nothing of a PulseAudio program's stream), and with
+// `only_from` its executable. Until then it may be this application's own.
+inline bool OwnerKnown(const OutputOwner& output, const ThisApp& app) {
+  if (!app.only_from.empty()) return !output.binary.empty();
+  return output.pid != 0 || !output.binary.empty();
 }
 
 }  // namespace flutter_webrtc_plugin

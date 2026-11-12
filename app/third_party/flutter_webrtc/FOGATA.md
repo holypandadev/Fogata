@@ -242,10 +242,13 @@ others in a call would hear their own voices back. Instead:
   linked only once its process or executable is known, whose it is is decided again on
   every update of its properties, and one found to be this application's own loses the
   links already made (a call's sound stream made again when a viewer comes back had
-  everyone hear themselves). It feeds 10 ms frames of 48 kHz stereo to the loopback
+  everyone hear themselves). In a Flatpak only the executable tells (`OwnOutput` in
+  `linux/screen_sound_node.h`): every sandbox numbers its processes from 1, so another
+  sandboxed program's stream could give this one's process number and be left out. It
+  feeds 10 ms frames of 48 kHz stereo to the loopback
   audio source. A link it made is let go (`pw_proxy_destroy`) when either of its ports
   goes away. For tests, `FOGATA_SCREEN_SOUND_FROM` names the one program whose sound is
-  taken (debug builds); with `FOGATA_CALL_LOG` set each decision (node, process,
+  taken (debug builds), judged once the output's executable is known; with `FOGATA_CALL_LOG` set each decision (node, process,
   executable, client's process, `node.link-group`, taken or not and why) goes to standard
   error as `[ScreenSound]`.
 - `linux/screen_sound_node.h` (new): an output that passes on sound from elsewhere is

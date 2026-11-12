@@ -89,6 +89,12 @@ std::string OnlyFrom() {
 #endif
 }
 
+// Whether this runs in a Flatpak, whose processes are numbered apart (see ThisApp in
+// screen_sound_node.h).
+bool Sandboxed() {
+  return access("/.flatpak-info", F_OK) == 0;
+}
+
 struct Node {
   bool app_output = false;
   // Whose it is comes from the node's full properties, a moment after it appears,
@@ -124,9 +130,7 @@ struct Watched;
 
 struct PipeWireAppsCapturer::State {
   scoped_refptr<RTCAudioSource> source;
-  std::string own_binary = OwnBinary();
-  std::string only_from = OnlyFrom();
-  pid_t own_pid = getpid();
+  ThisApp app{int(getpid()), OwnBinary(), OnlyFrom(), Sandboxed()};
 
   pw_thread_loop* loop = nullptr;
   pw_context* context = nullptr;
@@ -193,16 +197,10 @@ void Judge(State* s, uint32_t id, Node& node) {
     if (client != s->clients.end()) client_pid = client->second;
   }
   const std::string binary = BinaryName(node.binary);
-  const bool own =
-      (node.pid != 0 && node.pid == s->own_pid) ||
-      (client_pid != 0 && client_pid == s->own_pid) ||
-      (!binary.empty() && !s->own_binary.empty() && s->own_binary == binary) ||
-      (!s->only_from.empty() && s->only_from != binary);
+  const OutputOwner owner{node.pid, client_pid, binary};
   const bool was_left_out = node.own || node.passed_on != nullptr;
-  node.own = node.own || own;
-  // The client's process alone does not make a node known: every stream of a
-  // PulseAudio application belongs to the one pipewire-pulse client.
-  node.known = node.known || node.pid != 0 || !binary.empty() || node.own;
+  node.own = node.own || OwnOutput(owner, s->app);
+  node.known = node.known || OwnerKnown(owner, s->app) || node.own;
   const bool left_out = node.own || node.passed_on != nullptr;
   if (left_out && !was_left_out) Unlink(s, id);
   if (Tracing()) {
@@ -211,7 +209,7 @@ void Judge(State* s, uint32_t id, Node& node) {
                  "client_pid=%d own_pid=%d link_group=%s -> %s%s\n",
                  id, node.pid, binary.empty() ? "?" : binary.c_str(),
                  node.client == SPA_ID_INVALID ? -1 : int(node.client),
-                 client_pid, int(s->own_pid),
+                 client_pid, s->app.pid,
                  node.link_group.empty() ? "-" : node.link_group.c_str(),
                  node.own                    ? "own, not linked"
                  : node.passed_on != nullptr ? "passed on, not linked: "
