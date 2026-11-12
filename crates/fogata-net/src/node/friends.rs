@@ -1117,29 +1117,7 @@ impl Node {
                 self.on_friend_banner_request(peer, local, remote, sealed)
             }
             FriendRequest::Bio { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_bio_update(
-                    &self.identity,
-                    &device,
-                    &local,
-                    &remote,
-                    &sealed,
-                ) {
-                    Ok(bio) => {
-                        self.friend_update(FriendUpdate::Bio(bio));
-                        FriendResponse::Ack
-                    }
-                    Err(e) => {
-                        tracing::debug!("refused a bio from {peer}: {e}");
-                        FriendResponse::Refused
-                    }
-                }
+                self.on_friend_bio_request(peer, local, remote, sealed)
             }
             FriendRequest::Animation { sealed } => {
                 // Kept, as checked above.
@@ -1709,6 +1687,33 @@ impl Node {
                 FriendResponse::Ack
             }
             Err(_) => FriendResponse::Refused,
+        }
+    }
+
+    /// Takes a friend's bio.
+    fn on_friend_bio_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_bio_update(&self.identity, &device, &local, &remote, &sealed) {
+            Ok(bio) => {
+                self.friend_update(FriendUpdate::Bio(bio));
+                FriendResponse::Ack
+            }
+            Err(e) => {
+                tracing::debug!("refused a bio from {peer}: {e}");
+                FriendResponse::Refused
+            }
         }
     }
 
