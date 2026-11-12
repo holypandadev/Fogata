@@ -5150,6 +5150,16 @@ when the requester is online; cancelling the request ends that.
 ## 8. Testing
 
 - Unit tests for the crypto and wire formats.
+- Integration tests of each crate in its `tests/` folder, through its public calls only:
+  for fogata-ffi, the main things a person does through the calls the screens make, with no
+  Flutter (`tests/smoke.rs`: a profile, a group joined with an invite, a friend made from
+  it, a direct chat with files, a voice room with its chat, signals and files, a restart
+  on the same folder, as the screens get them: the bridge's types, its events and the
+  words of its errors), one core through the bridge and the other on its own, over the
+  loopback interface; and the parts of the core's error messages the app explains in its
+  own words (`app/test/core_errors.txt`), which the core must still write
+  (`tests/error_texts.rs`) and `explain()` must look for exactly
+  (`app/test/explain_test.dart`).
 - Fuzzing of every decoder of what comes from outside (other devices, pasted links, files on
   the disk): long runs of damaged inputs and libFuzzer targets, `tools/fuzz.sh`; see
   `docs/fuzzing.md`.

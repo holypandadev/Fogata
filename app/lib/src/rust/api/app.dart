@@ -9,7 +9,7 @@ import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
 import 'types.dart';
 
-// These functions are ignored because they are not marked as `pub`: `animated`, `appears_offline`, `blocking`, `bridge_enabled`, `deliver`, `device`, `file_id`, `firewall_finding`, `group_id`, `pass_on`, `pref`, `raise_open_files_limit`, `room_for_more`, `run`, `save_received`, `seal_off`, `sound_of`, `to_avatar`, `use_keychain`, `voice_id`, `wait_until_free`, `workers`
+// These functions are ignored because they are not marked as `pub`: `animated`, `appears_offline`, `blocking`, `bridge_enabled`, `deliver`, `device`, `file_id`, `firewall_finding`, `group_id`, `pass_on`, `pref`, `raise_open_files_limit`, `room_for_more`, `run`, `save_received`, `seal_off`, `sound_of`, `take_kept_events`, `to_avatar`, `use_keychain`, `voice_id`, `wait_until_free`, `workers`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Sink`
 
 /// The screens took `count` more of the events given to them (see [`events`]). Those of a

@@ -11,4 +11,6 @@ mod frb_generated;
 mod idle;
 mod logs;
 mod sounds;
+#[doc(hidden)]
+pub mod testing;
 mod voice;

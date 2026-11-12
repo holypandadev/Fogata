@@ -67,6 +67,10 @@ const EARLY_EVENTS: usize = 256;
 const GIVEN_AT_MOST: usize = EARLY_EVENTS;
 /// Told when the screens took events, or a new stream or core starts.
 static TAKEN: tokio::sync::Notify = tokio::sync::Notify::const_new();
+/// The network a core started by [`start`] uses in place of the computer's, set by the
+/// crate's own tests only ([`crate::testing`]): its own port, the peers to dial, no DHT, no
+/// mDNS and no releases page. Never set by the application.
+pub(crate) static TEST_NETWORK: Mutex<Option<NetOptions>> = Mutex::new(None);
 
 /// Where the core's events go: the screens' stream, or, until they listen, a queue, so a
 /// notice the core gives as it starts (a damaged list restored, the identity open on
@@ -106,6 +110,20 @@ pub fn events_taken(count: u32) {
     sink.given = sink.given.saturating_sub(count as usize).max(kept);
     drop(sink);
     TAKEN.notify_waiters();
+}
+
+/// The events kept for the screens until they listen, taken as the screens take them
+/// ([`events_taken`]): for the crate's own tests ([`crate::testing`]), which read the
+/// events the screens would get without a stream of the bridge's.
+pub(crate) fn take_kept_events() -> Vec<UiEvent> {
+    let taken: Vec<UiEvent> = SINK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .early
+        .drain(..)
+        .collect();
+    events_taken(u32::try_from(taken.len()).unwrap_or(u32::MAX));
+    taken
 }
 
 /// Runs `work` with the core on the core's runtime. A panic in it, or in a task of the
@@ -370,10 +388,14 @@ pub async fn start(data_dir: String) -> Result<UiProfile> {
                         .with_filter(EnvFilter::new(crate::logs::LEVELS)),
                 )
                 .try_init();
+            let tested = TEST_NETWORK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let options = NetOptions {
                 bridge: bridge_enabled(Path::new(&data_dir)),
                 hidden: appears_offline(Path::new(&data_dir)),
-                ..NetOptions::default()
+                ..tested.clone().unwrap_or_default()
             };
             let dir = PathBuf::from(data_dir);
             let free = dir.clone();
@@ -390,7 +412,9 @@ pub async fn start(data_dir: String) -> Result<UiProfile> {
                 let _runtime = RUNTIME.enter();
                 let mut updates = fogata_core::updates::UpdateOptions::compiled_in();
                 // Tests and labs: friends and members only, never the releases page.
-                if std::env::var("FOGATA_UPDATE_WEB").is_ok_and(|v| v.trim() == "off") {
+                if tested.is_some()
+                    || std::env::var("FOGATA_UPDATE_WEB").is_ok_and(|v| v.trim() == "off")
+                {
                     updates.web = None;
                 }
                 if let Err(e) = core.start_updates(updates) {
