@@ -1126,52 +1126,7 @@ impl Node {
                 self.on_friend_unfriend_request(peer, local, remote, now, sealed)
             }
             FriendRequest::Mutual { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                f.answered.retain(|_, answers| {
-                    answers.retain(|(t, _)| t.elapsed() < DAY);
-                    !answers.is_empty()
-                });
-                let answers = f.answered.entry(device).or_default();
-                if !may_answer(answers, Instant::now(), None) {
-                    return FriendResponse::Refused;
-                }
-                let points =
-                    match fogata_friends::open_mutual_ask(&self.identity, &local, &remote, &sealed)
-                    {
-                        Ok(points) => points,
-                        Err(e) => {
-                            tracing::debug!("cannot answer about friends in common: {e}");
-                            return FriendResponse::Refused;
-                        }
-                    };
-                // Counted before the answer is worked out: a question that fails at its last
-                // point costs as much as one that does not.
-                if !may_answer(answers, Instant::now(), Some(points.len())) {
-                    return FriendResponse::Refused;
-                }
-                let friends: Vec<DevicePublicKey> = f
-                    .book
-                    .friends
-                    .keys()
-                    .filter(|d| **d != device)
-                    .copied()
-                    .collect();
-                let reply = fogata_friends::mutual_answer(&points, &friends).and_then(|answer| {
-                    fogata_friends::mutual_reply(&device, &answer, &local, &remote)
-                });
-                match reply {
-                    Ok(sealed) => FriendResponse::Mutual { sealed },
-                    Err(e) => {
-                        tracing::debug!("cannot answer about friends in common: {e}");
-                        FriendResponse::Refused
-                    }
-                }
+                self.on_friend_mutual_request(peer, local, remote, sealed)
             }
             FriendRequest::Direct { entries } => {
                 // Kept, as checked above.
@@ -1737,6 +1692,60 @@ impl Node {
             self.changed();
         }
         FriendResponse::Unfriended { sealed: ack }
+    }
+
+    /// Answers a friend's question about friends in common.
+    fn on_friend_mutual_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        f.answered.retain(|_, answers| {
+            answers.retain(|(t, _)| t.elapsed() < DAY);
+            !answers.is_empty()
+        });
+        let answers = f.answered.entry(device).or_default();
+        if !may_answer(answers, Instant::now(), None) {
+            return FriendResponse::Refused;
+        }
+        let points = match fogata_friends::open_mutual_ask(&self.identity, &local, &remote, &sealed)
+        {
+            Ok(points) => points,
+            Err(e) => {
+                tracing::debug!("cannot answer about friends in common: {e}");
+                return FriendResponse::Refused;
+            }
+        };
+        // Counted before the answer is worked out: a question that fails at its last
+        // point costs as much as one that does not.
+        if !may_answer(answers, Instant::now(), Some(points.len())) {
+            return FriendResponse::Refused;
+        }
+        let friends: Vec<DevicePublicKey> = f
+            .book
+            .friends
+            .keys()
+            .filter(|d| **d != device)
+            .copied()
+            .collect();
+        let reply = fogata_friends::mutual_answer(&points, &friends)
+            .and_then(|answer| fogata_friends::mutual_reply(&device, &answer, &local, &remote));
+        match reply {
+            Ok(sealed) => FriendResponse::Mutual { sealed },
+            Err(e) => {
+                tracing::debug!("cannot answer about friends in common: {e}");
+                FriendResponse::Refused
+            }
+        }
     }
 
     /// Records a checked friend request that came from `peer`.
