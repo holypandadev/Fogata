@@ -1067,12 +1067,28 @@ impl Node {
         }
         // The application is far behind (see events.rs): a call step or an offered group,
         // which would only add to its events, is refused; the friend tells its own person
-        // the step did not go, or offers the group again later.
-        if matches!(
-            request,
-            FriendRequest::Call { .. } | FriendRequest::Group { .. } | FriendRequest::Direct { .. }
-        ) && self.events.full()
-        {
+        // the step did not go, or offers the group again later. Every kind is named, with
+        // no wildcard: a kind added to `FriendRequest` is placed here on purpose.
+        let adds_events = match &request {
+            FriendRequest::Call { .. }
+            | FriendRequest::Group { .. }
+            | FriendRequest::Direct { .. } => true,
+            FriendRequest::Probe { .. }
+            | FriendRequest::Hello { .. }
+            | FriendRequest::LinkRequest { .. }
+            | FriendRequest::CodeStart { .. }
+            | FriendRequest::CodeFinish { .. }
+            | FriendRequest::Accept { .. }
+            | FriendRequest::Profile { .. }
+            | FriendRequest::Status { .. }
+            | FriendRequest::Heartbeat
+            | FriendRequest::Banner { .. }
+            | FriendRequest::Unfriend { .. }
+            | FriendRequest::Mutual { .. }
+            | FriendRequest::Animation { .. }
+            | FriendRequest::Bio { .. } => false,
+        };
+        if adds_events && self.events.full() {
             return FriendResponse::Refused;
         }
         let local = self.local_peer().to_bytes();
