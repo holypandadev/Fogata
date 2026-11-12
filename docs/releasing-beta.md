@@ -277,6 +277,9 @@ refuses a folder that holds any key already.
         signature gets Apple's timestamp, so it stays valid after the certificate expires),
         then
         `ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-universal.zip`.
+        The identity of the releases is `Apple Development: contact@holypanda.dev
+        (6TZ99NVN92)`, of team `TB49TD97MX` (releases up to 0.1.0-beta.9 carry an earlier
+        certificate of the same team).
         Sign every release with the same identity, or macOS forgets the permissions testers
         gave Fogata and the updater refuses the new bundle. Every signature carries the
         certificate, which anyone can read from the app (`codesign -dv --verbose=4`): an
@@ -385,8 +388,9 @@ refuses a folder that holds any key already.
   installs it, from friends or from the web; installed copies keep running. When the newest
   release has expired, a new tester cannot be brought up to date at all. So release at least
   every 150 days. beta.8 expires on 2027-05-10.
-- **The Apple Development certificate expires a year after it was made** (the current one on
-  2027-06-26). Signatures made before stay valid (they are timestamped), so installed Macs
+- **The Apple Development certificate expires a year after it was made** (the current one,
+  `Apple Development: contact@holypanda.dev (6TZ99NVN92)` of team `TB49TD97MX`, on
+  2027-11-12). Signatures made before stay valid (they are timestamped), so installed Macs
   keep running; the next release needs a new certificate of the same team (2d). If the Apple
   account or its team is lost, every Mac tester must install again: the updater and
   `Checks.swift` pin the team.

@@ -32,7 +32,7 @@ NOTE_DAYS = 75
 # (date, UTC, what ends then, what to do before). Change a line when its thing is renewed,
 # in the same commit as whatever renewed it.
 DEADLINES = [
-    ("2027-06-26T15:00:13Z",
+    ("2027-11-12T13:27:00Z",
      "the Apple Development certificate that signs the Mac app expires",
      "make a new one in Xcode, in the same team (the updater pins the team, not the "
      "certificate), and sign the next release with it; installed copies keep running, their "
