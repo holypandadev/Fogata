@@ -1124,6 +1124,216 @@ mod tests {
         },
     };
 
+    /// The name of a request's kind. Its match has no wildcard: a kind added to
+    /// `MemberRequest` does not compile here until it is named, and then belongs in
+    /// `one_of_each` below and in the answers expected of it.
+    fn request_kind(request: &MemberRequest) -> &'static str {
+        match request {
+            MemberRequest::Challenge { .. } => "Challenge",
+            MemberRequest::Deliver(_) => "Deliver",
+            MemberRequest::Spread { .. } => "Spread",
+            MemberRequest::Roster { .. } => "Roster",
+            MemberRequest::Sync { .. } => "Sync",
+            MemberRequest::Push { .. } => "Push",
+            MemberRequest::JoinRequest { .. } => "JoinRequest",
+            MemberRequest::JoinCommit { .. } => "JoinCommit",
+            MemberRequest::Profile { .. } => "Profile",
+            MemberRequest::RoomSync { .. } => "RoomSync",
+            MemberRequest::Addresses { .. } => "Addresses",
+            MemberRequest::Signal { .. } => "Signal",
+            MemberRequest::Presence { .. } => "Presence",
+            MemberRequest::Admitted { .. } => "Admitted",
+            MemberRequest::JoinDeclined { .. } => "JoinDeclined",
+            MemberRequest::OtherSession => "OtherSession",
+            MemberRequest::Direct { .. } => "Direct",
+            MemberRequest::GroupBanner { .. } => "GroupBanner",
+            MemberRequest::GroupPicture { .. } => "GroupPicture",
+            MemberRequest::RoomEvents { .. } => "RoomEvents",
+            MemberRequest::KeyProblem { .. } => "KeyProblem",
+            MemberRequest::FriendAsk { .. } => "FriendAsk",
+        }
+    }
+
+    /// The name of an answer's kind.
+    fn response_kind(response: &MemberResponse) -> &'static str {
+        match response {
+            MemberResponse::Proof(_) => "Proof",
+            MemberResponse::NotMember => "NotMember",
+            MemberResponse::Ack => "Ack",
+            MemberResponse::Refused => "Refused",
+            MemberResponse::Roster { .. } => "Roster",
+            MemberResponse::SyncReply { .. } => "SyncReply",
+            MemberResponse::JoinOffer { .. } => "JoinOffer",
+            MemberResponse::JoinAccepted { .. } => "JoinAccepted",
+            MemberResponse::JoinWaiting => "JoinWaiting",
+            MemberResponse::JoinDeclined => "JoinDeclined",
+            MemberResponse::RoomLog { .. } => "RoomLog",
+        }
+    }
+
+    /// A request of every kind about `group`, each with the least it can hold: what passes
+    /// or fails before its content is looked at.
+    fn one_of_each(group: GroupId) -> Vec<MemberRequest> {
+        let group_id = || group.as_bytes().to_vec();
+        let wire = || fogata_proto::WireMessage {
+            version: 1,
+            group_id: group_id(),
+            epoch: 0,
+            sender: vec![0; 32],
+            timestamp_ms: 0,
+            message_id: vec![0; 16],
+            nonce: vec![0; 24],
+            ciphertext: vec![0; 64],
+            signature: vec![0; 64],
+        };
+        vec![
+            MemberRequest::Challenge {
+                challenge: vec![1; 32],
+                tags: Vec::new(),
+            },
+            MemberRequest::Deliver(wire()),
+            MemberRequest::Spread {
+                message: wire(),
+                reached: Vec::new(),
+            },
+            MemberRequest::Roster {
+                group_id: group_id(),
+                heads: None,
+                banner: None,
+                picture: None,
+            },
+            MemberRequest::Sync {
+                group_id: group_id(),
+                have: Vec::new(),
+            },
+            MemberRequest::Push {
+                group_id: group_id(),
+                entries: Vec::new(),
+            },
+            MemberRequest::JoinRequest {
+                ticket: vec![1, 2, 3],
+            },
+            MemberRequest::JoinCommit {
+                entry: vec![1, 2, 3],
+                binding: None,
+            },
+            MemberRequest::Profile {
+                profile: vec![1, 2, 3],
+                animation: None,
+            },
+            MemberRequest::RoomSync {
+                group_id: group_id(),
+                from: 0,
+            },
+            MemberRequest::Addresses {
+                addresses: Vec::new(),
+            },
+            MemberRequest::Signal {
+                group_id: group_id(),
+                payload: vec![0; 16],
+            },
+            MemberRequest::Presence {
+                hidden: false,
+                away: false,
+            },
+            MemberRequest::Admitted {
+                group_id: group_id(),
+                entries: Vec::new(),
+                part: None,
+            },
+            MemberRequest::JoinDeclined {
+                group_id: group_id(),
+                revoke: None,
+            },
+            MemberRequest::OtherSession,
+            MemberRequest::Direct {
+                group_id: group_id(),
+                messages: Vec::new(),
+            },
+            MemberRequest::GroupBanner {
+                group_id: group_id(),
+                banner: vec![1, 2, 3],
+            },
+            MemberRequest::GroupPicture {
+                group_id: group_id(),
+                picture: vec![1, 2, 3],
+            },
+            MemberRequest::RoomEvents {
+                group_id: group_id(),
+                ids: Vec::new(),
+            },
+            MemberRequest::KeyProblem {
+                group_id: group_id(),
+                epoch: 0,
+            },
+            MemberRequest::FriendAsk {
+                sealed: vec![1, 2, 3],
+            },
+        ]
+    }
+
+    /// What a request of every kind gets from a lone manager of a group: asked by a peer that
+    /// proved nothing, by a member, and by a member about a group this device is not in.
+    /// Only a challenge is answered whoever asks (with a decoy when it names no group); what
+    /// serves or changes a group goes to its members alone. The answers to what these least
+    /// requests hold beyond that are in the tests of each kind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_member_request_is_answered_by_who_asks() {
+        let (node, group) = lone_member();
+        let elsewhere = GroupLog::create(&DeviceIdentity::generate().unwrap(), "h", 1)
+            .unwrap()
+            .group_id();
+        let found = inspect(&node, move |n| {
+            let (stranger, bea) = (PeerId::random(), PeerId::random());
+            add_member(n, group, bea);
+            let mut found = Vec::new();
+            for ((here, there), other) in one_of_each(group)
+                .into_iter()
+                .zip(one_of_each(group))
+                .zip(one_of_each(elsewhere))
+            {
+                let kind = request_kind(&here);
+                let answers = [
+                    n.on_request(stranger, here),
+                    n.on_request(bea, there),
+                    n.on_request(bea, other),
+                ]
+                .map(|a| response_kind(&a));
+                found.push((kind, answers));
+            }
+            found
+        })
+        .await;
+        let refused = ["Refused"; 3];
+        let to_members = |answer| ["Refused", answer, "Refused"];
+        let expected = [
+            ("Challenge", ["Proof"; 3]),
+            ("Deliver", to_members("Ack")),
+            ("Spread", to_members("Ack")),
+            ("Roster", to_members("Roster")),
+            ("Sync", to_members("SyncReply")),
+            ("Push", to_members("Ack")),
+            ("JoinRequest", refused),
+            ("JoinCommit", refused),
+            ("Profile", refused),
+            ("RoomSync", to_members("RoomLog")),
+            ("Addresses", refused),
+            ("Signal", refused),
+            ("Presence", ["Refused", "Ack", "Ack"]),
+            ("Admitted", refused),
+            ("JoinDeclined", refused),
+            ("OtherSession", ["Refused", "Ack", "Ack"]),
+            ("Direct", refused),
+            ("GroupBanner", refused),
+            ("GroupPicture", refused),
+            ("RoomEvents", to_members("RoomLog")),
+            ("KeyProblem", to_members("Ack")),
+            ("FriendAsk", refused),
+        ];
+        assert_eq!(found, expected);
+        node.shutdown().await.unwrap();
+    }
+
     /// A member asking for the log and the rooms' past again and again is answered up to
     /// its budget, and refused after it, while another member is still answered.
     #[tokio::test(flavor = "multi_thread")]
