@@ -248,35 +248,7 @@ impl Node {
                 self.on_group_picture_request(peer, group_id, picture)
             }
             MemberRequest::Push { group_id, entries } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                let entries: Vec<Vec<u8>> = entries.iter().map(SharedBytes::to_vec).collect();
-                if !self.groups.contains_key(&group) {
-                    return MemberResponse::Refused;
-                }
-                // A removal shown by a peer that is no member here is judged away from the
-                // loop (see judging.rs): refused before it pays when too many wait.
-                let member = self.groups[&group].members.contains(&peer);
-                if !member && !self.judging.has_room(peer) {
-                    return MemberResponse::Refused;
-                }
-                let entries = self.within_entry_budget(peer, entries);
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                if !member {
-                    let Some(trial) = slot.ctx.removal_trial(&entries) else {
-                        return MemberResponse::Refused;
-                    };
-                    return if self.judging.add(peer, group, Job::Removal(trial)) {
-                        MemberResponse::Ack
-                    } else {
-                        MemberResponse::Refused
-                    };
-                }
-                self.take_pushed(peer, group, &entries);
-                MemberResponse::Ack
+                self.on_push_request(peer, group_id, entries)
             }
             MemberRequest::JoinRequest { ticket } => {
                 let Ok(ticket) = Ticket::decode(&ticket) else {
@@ -929,6 +901,44 @@ impl Node {
         if slot.ctx.take_picture(picture) {
             self.picture_changed(group, Some(peer));
         }
+        MemberResponse::Ack
+    }
+
+    /// Takes log entries pushed by a member, or a removal shown by a peer that is none.
+    fn on_push_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        entries: Vec<SharedBytes>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        let entries: Vec<Vec<u8>> = entries.iter().map(SharedBytes::to_vec).collect();
+        if !self.groups.contains_key(&group) {
+            return MemberResponse::Refused;
+        }
+        // A removal shown by a peer that is no member here is judged away from the
+        // loop (see judging.rs): refused before it pays when too many wait.
+        let member = self.groups[&group].members.contains(&peer);
+        if !member && !self.judging.has_room(peer) {
+            return MemberResponse::Refused;
+        }
+        let entries = self.within_entry_budget(peer, entries);
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        if !member {
+            let Some(trial) = slot.ctx.removal_trial(&entries) else {
+                return MemberResponse::Refused;
+            };
+            return if self.judging.add(peer, group, Job::Removal(trial)) {
+                MemberResponse::Ack
+            } else {
+                MemberResponse::Refused
+            };
+        }
+        self.take_pushed(peer, group, &entries);
         MemberResponse::Ack
     }
 
