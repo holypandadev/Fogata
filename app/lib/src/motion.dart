@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
 import 'moving.dart' show windowFocused;
+import 'test_switches.dart';
 
 // Less motion, for the people who asked their system for it (macOS's Reduce motion,
 // Windows' "Animation effects" off, GNOME's Animations off): the springs land at once
@@ -76,7 +77,7 @@ class _FollowMotionState extends State<FollowMotion> {
   }
 
   void _readWindows() {
-    if (windowFocused.value) _set(windowsAnimationsOff());
+    if (windowFocused.value) _set(windowsAsksLessMotion());
   }
 
   void _set(bool on) {
@@ -96,6 +97,14 @@ class _FollowMotionState extends State<FollowMotion> {
     );
   }
 }
+
+/// What Windows says of its "Animation effects" ([windowsAnimationsOff]), but for the
+/// application's own tests, which must see the same on every computer: a server, as the
+/// ones that run them, has those effects off, and every spring there landed at once.
+@visibleForTesting
+bool Function() windowsAsksLessMotion = testSwitch('FLUTTER_TEST') != null
+    ? () => false
+    : windowsAnimationsOff;
 
 /// Whether Windows' "Animation effects" are off (`SPI_GETCLIENTAREAANIMATION`); false
 /// when it cannot be read.
