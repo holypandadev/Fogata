@@ -1114,26 +1114,7 @@ impl Node {
                 self.on_friend_status_request(peer, local, remote, sealed)
             }
             FriendRequest::Banner { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_banner_update(
-                    &self.identity,
-                    &device,
-                    &local,
-                    &remote,
-                    &sealed,
-                ) {
-                    Ok(banner) => {
-                        self.friend_update(FriendUpdate::Banner(banner));
-                        FriendResponse::Ack
-                    }
-                    Err(_) => FriendResponse::Refused,
-                }
+                self.on_friend_banner_request(peer, local, remote, sealed)
             }
             FriendRequest::Bio { sealed } => {
                 // Kept, as checked above.
@@ -1700,6 +1681,31 @@ impl Node {
                     hidden: status.hidden,
                     away: status.away && !status.hidden && !status.in_room,
                 });
+                FriendResponse::Ack
+            }
+            Err(_) => FriendResponse::Refused,
+        }
+    }
+
+    /// Takes a friend's banner.
+    fn on_friend_banner_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_banner_update(&self.identity, &device, &local, &remote, &sealed)
+        {
+            Ok(banner) => {
+                self.friend_update(FriendUpdate::Banner(banner));
                 FriendResponse::Ack
             }
             Err(_) => FriendResponse::Refused,
