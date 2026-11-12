@@ -475,16 +475,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             voice,
             by,
             barrier,
-        } => {
-            inner.shared.clear_group(group);
-            inner.emit(CoreEvent::TakenOut {
-                group,
-                voice,
-                by,
-                barrier,
-            });
-            inner.emit(CoreEvent::GroupsChanged);
-        }
+        } => handle_taken_out(inner, group, voice, by, barrier),
         NodeEvent::InvitationDeclined { group, device } => {
             let Ok(Some(log)) = inner.node.group(group).await else {
                 return;
@@ -952,6 +943,24 @@ async fn handle_friends_changed(inner: &Arc<Inner>) {
         save_friends_soon(inner, book);
     }
     inner.emit(CoreEvent::FriendsChanged);
+}
+
+/// This device was taken out of a group's voice room.
+fn handle_taken_out(
+    inner: &Arc<Inner>,
+    group: GroupId,
+    voice: fogata_net::VoiceRoomId,
+    by: Option<DevicePublicKey>,
+    barrier: Option<fogata_net::Barrier>,
+) {
+    inner.shared.clear_group(group);
+    inner.emit(CoreEvent::TakenOut {
+        group,
+        voice,
+        by,
+        barrier,
+    });
+    inner.emit(CoreEvent::GroupsChanged);
 }
 
 #[cfg(test)]
