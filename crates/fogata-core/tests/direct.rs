@@ -592,6 +592,12 @@ async fn a_message_deleted_here_goes_from_here_only_and_for_good() {
             .item
             .id
     };
+    // Bea has Ana's message before Ana deletes her copy of it: one deleted before it went
+    // never goes, and Ana has it in her chat from the moment she sent it.
+    chat_until(&bea, ana.me(), "Ana's message on Bea's side", |c| {
+        texts(c).len() == 3
+    })
+    .await;
     // The friend's message and this device's own.
     ana.delete_direct_message(bea.me(), id("delete")).unwrap();
     ana.delete_direct_message(bea.me(), id("mine")).unwrap();
@@ -601,11 +607,11 @@ async fn a_message_deleted_here_goes_from_here_only_and_for_good() {
     );
     assert!(ana.delete_direct_message(bea.me(), id("delete")).is_err());
     // Bea keeps her copy.
-    let chat = chat_until(&bea, ana.me(), "Ana's message on Bea's side", |c| {
-        texts(c).len() == 3
-    })
-    .await;
-    assert_eq!(texts(&chat).len(), 3);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(
+        texts(&bea.direct_chat(ana.me(), 100).await.unwrap()).len(),
+        3
+    );
 
     // Gone after a restart too.
     ana.shutdown().await.unwrap();
