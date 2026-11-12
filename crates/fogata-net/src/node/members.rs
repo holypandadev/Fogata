@@ -1081,48 +1081,7 @@ impl Node {
                 self.on_roster_answer(peer, group, peers)
             }
             (Pending::Sync(group), MemberResponse::SyncReply { entries, want }) => {
-                if !self.groups.contains_key(&group) {
-                    return;
-                }
-                let entries: Vec<Vec<u8>> = entries.into_iter().map(|e| e.into_vec()).collect();
-                let sent = entries.len();
-                let entries = self.within_entry_budget(peer, entries);
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return;
-                };
-                let taken = slot.ctx.insert_encoded(&entries);
-                let ahead = taken.ahead;
-                let (new, refused) = (taken.new, taken.refused);
-                // An answer holds a part of what this device lacks: while one brings new
-                // entries, all of them within the member's budget and none refused, the next
-                // is asked for at once rather than at the next roster.
-                let again = !new.is_empty() && entries.len() == sent && refused.is_empty();
-                // As much as one message carries: the rest goes at the next sync.
-                let want = hashes(&want);
-                let wanted: Vec<SharedBytes> = slot
-                    .ctx
-                    .encoded_part(want)
-                    .into_iter()
-                    .map(SharedBytes::from)
-                    .collect();
-                self.refused_entries(&refused);
-                self.after_group_change(group, new, Some(peer));
-                if ahead {
-                    self.group_went_past_this_version(group);
-                }
-                if !wanted.is_empty() {
-                    self.request(
-                        peer,
-                        MemberRequest::Push {
-                            group_id: group.as_bytes().to_vec(),
-                            entries: wanted,
-                        },
-                        Pending::Push,
-                    );
-                }
-                if again {
-                    self.request_sync(peer, group);
-                }
+                self.on_sync_answer(peer, group, entries, want)
             }
             (Pending::Join(group), MemberResponse::JoinOffer { heads }) => {
                 let Some(slot) = self.groups.get(&group) else {
@@ -1303,6 +1262,58 @@ impl Node {
                 dials += 1;
             }
             self.reach_through(peer, other, group);
+        }
+    }
+
+    /// Takes a member's answer to a sync: entries this device lacked, and those it wants.
+    fn on_sync_answer(
+        &mut self,
+        peer: PeerId,
+        group: GroupId,
+        entries: Vec<serde_bytes::ByteBuf>,
+        want: Vec<serde_bytes::ByteBuf>,
+    ) {
+        if !self.groups.contains_key(&group) {
+            return;
+        }
+        let entries: Vec<Vec<u8>> = entries.into_iter().map(|e| e.into_vec()).collect();
+        let sent = entries.len();
+        let entries = self.within_entry_budget(peer, entries);
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return;
+        };
+        let taken = slot.ctx.insert_encoded(&entries);
+        let ahead = taken.ahead;
+        let (new, refused) = (taken.new, taken.refused);
+        // An answer holds a part of what this device lacks: while one brings new
+        // entries, all of them within the member's budget and none refused, the next
+        // is asked for at once rather than at the next roster.
+        let again = !new.is_empty() && entries.len() == sent && refused.is_empty();
+        // As much as one message carries: the rest goes at the next sync.
+        let want = hashes(&want);
+        let wanted: Vec<SharedBytes> = slot
+            .ctx
+            .encoded_part(want)
+            .into_iter()
+            .map(SharedBytes::from)
+            .collect();
+        self.refused_entries(&refused);
+        self.after_group_change(group, new, Some(peer));
+        if ahead {
+            self.group_went_past_this_version(group);
+        }
+        if !wanted.is_empty() {
+            self.request(
+                peer,
+                MemberRequest::Push {
+                    group_id: group.as_bytes().to_vec(),
+                    entries: wanted,
+                },
+                Pending::Push,
+            );
+        }
+        if again {
+            self.request_sync(peer, group);
         }
     }
 }
