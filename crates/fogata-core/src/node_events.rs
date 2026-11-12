@@ -322,15 +322,17 @@ fn save_animations(inner: &Arc<Inner>, animations: Vec<Animation>, more: bool) {
     inner.writer.soon(writer::File::Animations, move || {
         let saved = if more {
             store.save_animations_holding(&animations, |bytes, dir| {
-                let inner = weak
-                    .upgrade()
-                    .ok_or_else(|| anyhow::anyhow!("Fogata is stopping"))?;
+                // Written as the core goes (its last writes): unchecked then, as before.
+                let Some(inner) = weak.upgrade() else {
+                    return Ok(None);
+                };
                 crate::shares::hold_disk(
                     &inner,
                     bytes,
                     dir,
                     "not enough free space for the animations",
                 )
+                .map(Some)
             })
         } else {
             store.save_animations(&animations)
