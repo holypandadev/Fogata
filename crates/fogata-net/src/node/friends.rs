@@ -1091,58 +1091,7 @@ impl Node {
                 self.on_friend_link_request(peer, local, remote, now, mac, sealed)
             }
             FriendRequest::CodeStart { gate, spake } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let identity = self.identity.clone();
-                let profile = f.book.profile.clone();
-                let Some(code) = f.code.as_mut().filter(|c| now <= c.expires_ms) else {
-                    return FriendResponse::Refused;
-                };
-                if !fogata_friends::code_gate_ok(&code.secrets, &local, &remote, &gate) {
-                    return FriendResponse::Refused;
-                }
-                // Only runs that end badly count: a last message that does not open, or none
-                // in time. A device that asks again with its run still open (the answer was
-                // lost, the connection dropped) starts it again for free.
-                let expired = f
-                    .inviting
-                    .iter()
-                    .filter(|(p, (_, at))| **p != peer && at.elapsed() >= CODE_RUN)
-                    .map(|(p, _)| *p)
-                    .collect::<Vec<_>>();
-                for gone in expired {
-                    f.inviting.remove(&gone);
-                    code.failed += 1;
-                }
-                if code.failed >= MAX_FAILED_RUNS {
-                    f.code = None;
-                    f.inviting.clear();
-                    self.info("the friend code failed too many times; it no longer works");
-                    return FriendResponse::Refused;
-                }
-                let Ok(gate) = <[u8; 32]>::try_from(gate.as_slice()) else {
-                    return FriendResponse::Refused;
-                };
-                let start = CodeStart { gate, spake };
-                match fogata_friends::code_reply(
-                    &identity,
-                    &profile,
-                    &code.secrets,
-                    &local,
-                    &remote,
-                    &start,
-                ) {
-                    Ok((inviter, reply)) => {
-                        f.inviting.insert(peer, (inviter, Instant::now()));
-                        FriendResponse::CodeReply {
-                            spake: reply.spake,
-                            sealed: reply.sealed,
-                        }
-                    }
-                    Err(_) => FriendResponse::Refused,
-                }
+                self.on_friend_code_start_request(peer, local, remote, now, gate, spake)
             }
             FriendRequest::CodeFinish { sealed } => {
                 // Kept, as checked above.
@@ -1642,6 +1591,70 @@ impl Node {
                 tracing::debug!("refused a link request from {peer}: {e}");
                 FriendResponse::Refused
             }
+        }
+    }
+
+    /// Answers the start of a run of this device's friend code.
+    fn on_friend_code_start_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        now: u64,
+        gate: Vec<u8>,
+        spake: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let identity = self.identity.clone();
+        let profile = f.book.profile.clone();
+        let Some(code) = f.code.as_mut().filter(|c| now <= c.expires_ms) else {
+            return FriendResponse::Refused;
+        };
+        if !fogata_friends::code_gate_ok(&code.secrets, &local, &remote, &gate) {
+            return FriendResponse::Refused;
+        }
+        // Only runs that end badly count: a last message that does not open, or none
+        // in time. A device that asks again with its run still open (the answer was
+        // lost, the connection dropped) starts it again for free.
+        let expired = f
+            .inviting
+            .iter()
+            .filter(|(p, (_, at))| **p != peer && at.elapsed() >= CODE_RUN)
+            .map(|(p, _)| *p)
+            .collect::<Vec<_>>();
+        for gone in expired {
+            f.inviting.remove(&gone);
+            code.failed += 1;
+        }
+        if code.failed >= MAX_FAILED_RUNS {
+            f.code = None;
+            f.inviting.clear();
+            self.info("the friend code failed too many times; it no longer works");
+            return FriendResponse::Refused;
+        }
+        let Ok(gate) = <[u8; 32]>::try_from(gate.as_slice()) else {
+            return FriendResponse::Refused;
+        };
+        let start = CodeStart { gate, spake };
+        match fogata_friends::code_reply(
+            &identity,
+            &profile,
+            &code.secrets,
+            &local,
+            &remote,
+            &start,
+        ) {
+            Ok((inviter, reply)) => {
+                f.inviting.insert(peer, (inviter, Instant::now()));
+                FriendResponse::CodeReply {
+                    spake: reply.spake,
+                    sealed: reply.sealed,
+                }
+            }
+            Err(_) => FriendResponse::Refused,
         }
     }
 
