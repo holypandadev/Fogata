@@ -372,19 +372,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             change,
         } => handle_room(inner, now, group, voice, change).await,
         // A call's group is never saved, and a chat's is kept with its chat.
-        NodeEvent::GroupChanged(group) => {
-            if direct::on_group_changed(inner, group).await {
-                return;
-            }
-            if inner.is_call(group) {
-                calls::on_group_changed(inner, group).await;
-            } else {
-                inner.save_group(group).await;
-            }
-            // A member may have gone.
-            forget_gone_soon(inner);
-            inner.emit(CoreEvent::GroupsChanged);
-        }
+        NodeEvent::GroupChanged(group) => handle_group_changed(inner, group).await,
         NodeEvent::JoinAsked {
             group,
             device,
@@ -887,6 +875,21 @@ async fn handle_room(
     if home {
         inner.emit(CoreEvent::GroupsChanged);
     }
+}
+
+/// A group's log changed.
+async fn handle_group_changed(inner: &Arc<Inner>, group: GroupId) {
+    if direct::on_group_changed(inner, group).await {
+        return;
+    }
+    if inner.is_call(group) {
+        calls::on_group_changed(inner, group).await;
+    } else {
+        inner.save_group(group).await;
+    }
+    // A member may have gone.
+    forget_gone_soon(inner);
+    inner.emit(CoreEvent::GroupsChanged);
 }
 
 #[cfg(test)]
