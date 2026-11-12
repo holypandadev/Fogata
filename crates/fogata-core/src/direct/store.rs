@@ -1511,6 +1511,195 @@ impl DirectStore {
         bytes
     }
 
+    /// Reads a chat's journal from its end back, one record at a time, without holding the
+    /// chat: each of its items (messages, changes of the timer, calls; pins are apart) as it
+    /// stands now, the newest first, to `each`, until `each` says to stop. Sealed, every
+    /// record is opened as a link of the chain back from how the journal ends (its tails):
+    /// what is read is what this device wrote, in its order, with nothing taken out of it
+    /// nor cut off its end. A journal that does not read so (damaged, cut short, not as its
+    /// tails say, another chat's, of the earlier form) is an error, and the chat is read
+    /// whole instead ([`Self::load`]), which keeps what came before the damage and puts a
+    /// copy aside: nothing is lost. Returns how many items `each` got. Blocking, and for a
+    /// chat none of whose records are being written.
+    pub fn scan_back(
+        &self,
+        friend: &DevicePublicKey,
+        mut each: impl FnMut(Item) -> bool,
+    ) -> Result<usize> {
+        let path = self.journal_path(friend);
+        let mut file = match fs::File::open(&path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
+        let len = file.metadata()?.len();
+        // Where each record is, from the lengths before them alone.
+        let mut at = 0u64;
+        if self.key.is_some() && len > 0 {
+            let mut header = [0u8; HEADER_LEN];
+            file.read_exact(&mut header)?;
+            if sealed_form(&header) != Some(Form::Chain) {
+                bail!("{} is not a chain of records", path.display());
+            }
+            at = HEADER_LEN as u64;
+        }
+        let max = (MAX_RECORD_BYTES + if self.key.is_some() { BOX_OVERHEAD } else { 0 }) as u64;
+        let mut records: Vec<(u64, usize)> = Vec::new();
+        {
+            let mut lengths = io::BufReader::with_capacity(64 << 10, fs::File::open(&path)?);
+            lengths.seek(SeekFrom::Start(at))?;
+            while at < len {
+                let mut prefix = [0u8; 4];
+                if len - at < 4 || lengths.read_exact(&mut prefix).is_err() {
+                    bail!("{} is damaged", path.display());
+                }
+                let size = u64::from(u32::from_be_bytes(prefix));
+                if size > max || len - at - 4 < size {
+                    bail!("{} is damaged", path.display());
+                }
+                records.push((at + 4, size as usize));
+                at += 4 + size;
+                lengths.seek_relative(size as i64)?;
+            }
+        }
+        let context = chain_context(JOURNAL, &chat_name(friend));
+        if self.key.is_some() {
+            // Ends as its tails say: nothing cut off its end, no older copy put back.
+            let tails = match self
+                .tails
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(friend)
+                .cloned()
+            {
+                Some(tails) => tails,
+                None => self
+                    .read_tails(friend)?
+                    .context("no tails to check the journal by")?,
+            };
+            let last = match records.last() {
+                Some(&(start, size)) => {
+                    let mut tag = [0u8; TAG_LEN];
+                    file.seek(SeekFrom::Start(start + size as u64 - TAG_LEN as u64))?;
+                    file.read_exact(&mut tag)?;
+                    Some(Tail {
+                        records: records.len(),
+                        tag,
+                    })
+                }
+                None => None,
+            };
+            if tails.journal != last {
+                bail!("{} is not as it was last written", path.display());
+            }
+        }
+        let mut gone: HashSet<ItemId> = HashSet::new();
+        let mut delivered: HashSet<ItemId> = HashSet::new();
+        let mut local: HashMap<FileId, Local> = HashMap::new();
+        let mut played: HashSet<FileId> = HashSet::new();
+        let mut not_voice: HashSet<FileId> = HashSet::new();
+        let mut not_picture: HashSet<FileId> = HashSet::new();
+        let mut given = 0;
+        let mut bytes = Vec::new();
+        for (k, &(start, size)) in records.iter().enumerate().rev() {
+            bytes.resize(size, 0);
+            file.seek(SeekFrom::Start(start))?;
+            file.read_exact(&mut bytes)?;
+            let opened = match &self.key {
+                Some(key) => {
+                    // Bound to the record before it, whose tag ends just before its length.
+                    let mut before = CHAIN_START;
+                    if k > 0 {
+                        file.seek(SeekFrom::Start(start - 4 - TAG_LEN as u64))?;
+                        file.read_exact(&mut before)?;
+                    }
+                    Some(
+                        key.open_link(&context, &before, &bytes)
+                            .map_err(|_| anyhow::anyhow!("{} is damaged", path.display()))?,
+                    )
+                }
+                None => None,
+            };
+            let plain = opened.as_deref().map_or(&bytes[..], |plain| &plain[..]);
+            let record: Record = serde_json::from_slice(plain)
+                .with_context(|| format!("{} is damaged", path.display()))?;
+            // What a later record says of an item is what stands now: the first one met.
+            match record {
+                Record::Item { mut item } => {
+                    if gone.contains(&item.id) {
+                        continue;
+                    }
+                    item.delivered |= delivered.contains(&item.id);
+                    for f in item.files_mut() {
+                        if let Some(now) = local.get(&f.id) {
+                            f.local = *now;
+                        }
+                        if not_voice.contains(&f.id) {
+                            f.voice = None;
+                        } else if played.contains(&f.id)
+                            && let Some(voice) = f.voice.as_mut()
+                        {
+                            voice.played = true;
+                        }
+                        if not_picture.contains(&f.id) && f.kind == super::model::FileKind::Picture
+                        {
+                            f.kind = super::model::FileKind::File;
+                        }
+                    }
+                    given += 1;
+                    if !each(item) {
+                        break;
+                    }
+                }
+                Record::Delivered { ids } => delivered.extend(ids),
+                Record::Gone { ids } => gone.extend(ids),
+                Record::File { file, local: now } => {
+                    local.entry(file).or_insert(now);
+                }
+                Record::Played { file } => {
+                    played.insert(file);
+                }
+                Record::NotVoice { file } => {
+                    not_voice.insert(file);
+                }
+                Record::NotPicture { file } => {
+                    not_picture.insert(file);
+                }
+                Record::Read { .. }
+                | Record::Ended { .. }
+                | Record::VoiceCharge { .. }
+                | Record::FileCharge { .. } => {}
+            }
+        }
+        Ok(given)
+    }
+
+    /// A page of a chat's items read back from the end of its journal ([`Self::scan_back`]):
+    /// the `count` items just before the place `before` (an item's `seq` and id; the end
+    /// when not given), oldest first, and whether older ones are there.
+    pub fn page_back(
+        &self,
+        friend: &DevicePublicKey,
+        before: Option<(u64, ItemId)>,
+        count: usize,
+    ) -> Result<(Vec<Item>, bool)> {
+        let mut page = Vec::new();
+        let mut more = false;
+        self.scan_back(friend, |item| {
+            if before.is_some_and(|b| (item.seq, item.id) >= b) {
+                return true;
+            }
+            if page.len() == count {
+                more = true;
+                return false;
+            }
+            page.push(item);
+            true
+        })?;
+        page.reverse();
+        Ok((page, more))
+    }
+
     /// Removes a chat's folder: its messages, files, group and the friend's profile.
     pub fn remove_chat(&self, friend: &DevicePublicKey) -> Result<()> {
         let dir = self.chat_dir(friend);
@@ -2141,9 +2330,10 @@ mod tests {
     /// deliveries, reads, files that come or go, played voice messages, files that were not
     /// what they said, charges, pins and unpins, deletions, the two no longer friends and
     /// again. After each, the summary kept is the one the chat read whole gives, plain and
-    /// sealed.
+    /// sealed; and now and then the journal read back from its end, whole or by pages,
+    /// gives the chat's items as the chat read whole holds them.
     #[test]
-    fn the_summary_kept_is_always_the_chat_s_read_whole() {
+    fn the_summary_and_the_journal_read_back_are_the_chat_s_read_whole() {
         let now = crate::now_ms();
         for (seed, key) in [
             (7, None),
@@ -2289,10 +2479,133 @@ mod tests {
                     Some(chat.read_whole(&dir, key.as_ref())),
                     "seed {seed}, step {step}: {records:?}"
                 );
+                if step % 20 == 0 || step == 299 {
+                    let whole: Vec<Item> = DirectStore::open_sealed(&dir, key.clone())
+                        .load(&chat.friend)
+                        .unwrap()
+                        .chat
+                        .items()
+                        .iter()
+                        .filter(|i| !i.is_aside())
+                        .cloned()
+                        .collect();
+                    let mut back = Vec::new();
+                    store
+                        .scan_back(&chat.friend, |item| {
+                            back.push(item);
+                            true
+                        })
+                        .unwrap();
+                    back.reverse();
+                    assert_eq!(back, whole, "seed {seed}, step {step}");
+                    // By pages of 7, each before the oldest of the last.
+                    let mut paged: Vec<Item> = Vec::new();
+                    let mut before = None;
+                    loop {
+                        let (page, more) = store.page_back(&chat.friend, before, 7).unwrap();
+                        before = page.first().map(|i| (i.seq, i.id));
+                        paged.splice(0..0, page);
+                        if !more {
+                            break;
+                        }
+                    }
+                    assert_eq!(paged, whole, "seed {seed}, step {step}, by pages");
+                }
             }
             assert!(chat.chat.items().len() > 20);
             fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /// A journal that does not read back as written is not read back: cut short in a record
+    /// or by whole records, an older copy put back, another chat's put in its place. The
+    /// chat read whole instead keeps every record before the damage, and puts a copy aside.
+    #[test]
+    fn a_journal_that_is_not_as_written_is_not_read_back() {
+        for key in [None, Some(DataKey::generate().unwrap())] {
+            let sealed = key.is_some();
+            let dir = folder(&format!("back-{sealed}"));
+            let store = DirectStore::open_sealed(&dir, key.clone());
+            let friend = DeviceIdentity::generate().unwrap().public_key();
+            let other = DeviceIdentity::generate().unwrap().public_key();
+            let mut chat = Written {
+                store: &store,
+                friend,
+                chat: Chat::default(),
+                ended: None,
+            };
+            let mut other_chat = Written {
+                store: &store,
+                friend: other,
+                chat: Chat::default(),
+                ended: None,
+            };
+            for n in 1..=5 {
+                chat.add(&[Record::Item {
+                    item: item(n, false, vec![]),
+                }]);
+                other_chat.add(&[Record::Item {
+                    item: item(n, false, vec![]),
+                }]);
+            }
+            let count = |store: &DirectStore| store.scan_back(&friend, |_| true);
+            assert_eq!(count(&store).unwrap(), 5);
+            let path = store.journal_path(&friend);
+            let whole = fs::read(&path).unwrap();
+            let (page, more) = store.page_back(&friend, None, 2).unwrap();
+            assert_eq!((page.len(), more), (2, true));
+            // Cut inside its last record.
+            fs::write(&path, &whole[..whole.len() - 3]).unwrap();
+            assert!(count(&store).is_err());
+            let read = DirectStore::open_sealed(&dir, key.clone())
+                .load(&friend)
+                .unwrap();
+            assert_eq!(read.chat.items().len(), 4, "every record before the damage");
+            assert!(read.altered);
+            assert!(
+                fs::read_dir(store.chat_dir(&friend))
+                    .unwrap()
+                    .flatten()
+                    .any(|e| e
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("journal.damaged"))
+            );
+            // Read whole, it was written again from what was kept, and reads back.
+            assert_eq!(
+                count(&DirectStore::open_sealed(&dir, key.clone())).unwrap(),
+                4
+            );
+            if sealed {
+                let now = fs::read(&path).unwrap();
+                // Whole records cut off its end, or the older copy put back: not as its
+                // tails say.
+                let reader = DirectStore::open_sealed(&dir, key.clone());
+                let cut = &now[..now.len() - record_len(&now)];
+                fs::write(&path, cut).unwrap();
+                assert!(count(&reader).is_err(), "records cut off its end");
+                fs::write(&path, &whole).unwrap();
+                assert!(count(&reader).is_err(), "an older copy");
+                // Another chat's journal does not open as this one's.
+                fs::write(&path, fs::read(store.journal_path(&other)).unwrap()).unwrap();
+                assert!(count(&reader).is_err(), "another chat's journal");
+                fs::write(&path, &now).unwrap();
+                assert_eq!(count(&reader).unwrap(), 4);
+            }
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// The bytes of the last record of a sealed journal, with its length.
+    fn record_len(journal: &[u8]) -> usize {
+        let mut at = HEADER_LEN;
+        let mut last = 0;
+        while at < journal.len() {
+            let len = u32::from_be_bytes(journal[at..at + 4].try_into().unwrap()) as usize;
+            last = 4 + len;
+            at += last;
+        }
+        last
     }
 
     fn model_day() -> u64 {
@@ -3698,11 +4011,21 @@ mod tests {
         let start = Instant::now();
         assert_eq!(chats.lock().chats[&friend].chat.items().len(), 10_000);
         let opened_ms = ms(start);
+        // Another read back from its journal's end, whole (as a search would) and by a page.
+        let other = *chats.lock().chats.keys().nth(1).unwrap();
+        let start = Instant::now();
+        assert_eq!(chats.store.scan_back(&other, |_| true).unwrap(), 10_000);
+        let back_ms = ms(start);
+        let start = Instant::now();
+        let (page, more) = chats.store.page_back(&other, None, 200).unwrap();
+        assert!(page.len() == 200 && more);
+        let page_ms = ms(start);
         eprintln!(
             "20 sealed chats of 10,000 messages: all read whole in {read_all:.0} ms, holding \
              {held_all} MB more; a first start that keeps their summaries {first_ms:.0} ms; a \
              start from the summaries {start_ms:.1} ms, holding {held_start} MB more; one chat \
-             read when opened {opened_ms:.1} ms"
+             read when opened {opened_ms:.1} ms; one read back whole {back_ms:.1} ms, its \
+             newest 200 {page_ms:.1} ms"
         );
         drop(chats);
         fs::remove_dir_all(&dir).unwrap();

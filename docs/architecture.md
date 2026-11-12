@@ -1643,6 +1643,47 @@ added) is let go too, and a new one is made when someone writes.
   aside (a damaged group log keeps every entry that reads, past the damage too). Part of a record that a full disk cut short is taken off the end
   at once, and the journal and pins are written whole at the next change, so what comes
   later never lands behind a broken record.
+- **Summaries, and what is held in memory.** Beside each chat's journal is its `summary`
+  (sealed whole for the chat in a folder with a key, plain JSON without one): what the list
+  of chats shows (the last line, unread messages, the timer, whether it can only be read),
+  what its attachments take, when something in it goes next, how many of this device's
+  items wait for a receipt, its oldest charge, the files kept here (which its group serves)
+  and up to 64 of the friend's files not here. It is worked out whole from the chat each
+  time records are written (`model::Summary::of`), and written after them, with each
+  file's length and last 16 bytes (a sealed record's tag). A start takes a chat from its
+  summary only while the journal and pins end exactly so and, sealed, are chains that end
+  as their tails say, with no rewrite cut short; otherwise (a folder from before
+  summaries, a journal changed, cut short or put back, a summary lost, damaged, older,
+  newer or another chat's) the chat is read whole as before and its summary written
+  again. An account move leaves summaries out and sealing a plain folder removes plain
+  ones; both are made again. So a start reads no journal, and a chat's items are read
+  when something needs them: the chat on screen, a message that comes or goes, a receipt,
+  a file. The four chats used last stay in memory; the others are let go of (their
+  summary kept) at the next tick or view, unless records of them are still being written
+  or could not be, so one read again is the chat as written. What runs over every chat
+  reads none: the list, what chats take, what waits, what runs out, old charges, what
+  comes by itself; each reads a chat only when its summary says something is there, and
+  then decides on the chat read whole. Room to free is checked from the summaries, and
+  chosen, when needed, from every chat read whole. A chat that cannot be read again is
+  written to no more until a later start. Measured on a Mac (release build) with 20 sealed
+  chats of 10,000 messages: reading every chat whole took 374 ms and held some 47 MB; a
+  start from the summaries takes 2.4 ms and holds nothing that shows; a folder's first
+  start, which reads every chat and keeps its summary, 554 to 603 ms; a chat read when
+  opened, 19 ms.
+- **Reading back.** A chat's journal can be read from its end without holding the chat
+  (`DirectStore::scan_back`, and `page_back` for the items before a place): the place of
+  each record comes from the lengths before them, and each record, read from the last
+  back, is opened as a link of its chain with the tag that ends the record before it.
+  The last one must end as the tails say, so what is read is what this device wrote, in
+  its order, with nothing cut off its end or taken from its middle, back to the first
+  record, which is bound to the chain's start. What later records say of an item
+  (delivered, a file's state, played, not a voice message or picture, gone) is met before
+  the item and applied to it. A journal that does not read so is not read back: the chat
+  is read whole instead, which keeps what came before the damage and puts a copy aside.
+  Nothing is added to the files for this, and no index is kept. 10,000 messages read back
+  whole take 29 ms, the newest 200 under 1 ms (same Mac). It is there for a search
+  over old messages, which the screens do not have yet; the chat on screen is read whole,
+  as its pinned messages, files and every change need the chat.
 - **No longer friends.** When either removes the other, the chat stays on both devices, can
   only be read, says so, and its group stops; each can delete it on their own device.
   Becoming friends again resumes it. Removing Fogata's data, or losing the device without
