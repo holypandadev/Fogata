@@ -1111,29 +1111,7 @@ impl Node {
                 self.on_friend_call_request(peer, local, remote, sealed)
             }
             FriendRequest::Status { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_status(&self.identity, &local, &remote, &sealed) {
-                    Ok(status) => {
-                        let group = status
-                            .group
-                            .and_then(|g| fogata_crypto::GroupId::from_bytes(&g).ok());
-                        self.emit(NodeEvent::FriendStatus {
-                            device,
-                            in_room: status.in_room,
-                            group,
-                            hidden: status.hidden,
-                            away: status.away && !status.hidden && !status.in_room,
-                        });
-                        FriendResponse::Ack
-                    }
-                    Err(_) => FriendResponse::Refused,
-                }
+                self.on_friend_status_request(peer, local, remote, sealed)
             }
             FriendRequest::Banner { sealed } => {
                 // Kept, as checked above.
@@ -1689,6 +1667,39 @@ impl Node {
         match fogata_friends::open_call_message(&self.identity, &local, &remote, &sealed) {
             Ok(message) => {
                 self.on_call_step(peer, device, message);
+                FriendResponse::Ack
+            }
+            Err(_) => FriendResponse::Refused,
+        }
+    }
+
+    /// Takes a friend's status: in a room, hidden or away.
+    fn on_friend_status_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_status(&self.identity, &local, &remote, &sealed) {
+            Ok(status) => {
+                let group = status
+                    .group
+                    .and_then(|g| fogata_crypto::GroupId::from_bytes(&g).ok());
+                self.emit(NodeEvent::FriendStatus {
+                    device,
+                    in_room: status.in_room,
+                    group,
+                    hidden: status.hidden,
+                    away: status.away && !status.hidden && !status.in_room,
+                });
                 FriendResponse::Ack
             }
             Err(_) => FriendResponse::Refused,
