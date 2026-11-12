@@ -1123,61 +1123,7 @@ impl Node {
                 self.on_friend_animation_request(peer, local, remote, sealed)
             }
             FriendRequest::Unfriend { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let device =
-                    match fogata_friends::open_unfriend(&self.identity, &local, &remote, &sealed) {
-                        Ok(device) => device,
-                        Err(e) => {
-                            tracing::debug!("refused a removal from {peer}: {e}");
-                            return FriendResponse::Refused;
-                        }
-                    };
-                if !f.answers_removal(&device, now) {
-                    tracing::debug!("refused a removal from a device this one does not know");
-                    return FriendResponse::Refused;
-                }
-                // Signed, so that only this device's answer ends the removal over there.
-                let digest = fogata_friends::removal_digest(&sealed);
-                let Ok(ack) =
-                    fogata_friends::unfriend_ack(&self.identity, &device, &local, &remote, &digest)
-                else {
-                    return FriendResponse::Refused;
-                };
-                // Both may have removed the other at once.
-                let mut changed = f.book.departed(&device);
-                match f.book.removed_by(&device, now) {
-                    Ok(true) => {
-                        changed = true;
-                        f.recent = Some(Instant::now());
-                        f.last_lookup = None;
-                        f.contacted.retain(|(_, c)| *c != Contact::Update);
-                        let peers: Vec<PeerId> = f
-                            .online
-                            .iter()
-                            .filter(|(_, d)| **d == device)
-                            .map(|(p, _)| *p)
-                            .collect();
-                        for peer in &peers {
-                            f.online.remove(peer);
-                        }
-                        f.targets.retain(|_, t| *t != Target::Friend(device));
-                        // Announce under the new secret at the next slot.
-                        self.provided.1 = None;
-                        if !peers.is_empty() {
-                            self.emit(NodeEvent::FriendOffline { device });
-                        }
-                        self.update_online_friends();
-                    }
-                    Ok(false) => {}
-                    Err(e) => self.info(format!("cannot forget the friend: {e}")),
-                }
-                if changed {
-                    self.changed();
-                }
-                FriendResponse::Unfriended { sealed: ack }
+                self.on_friend_unfriend_request(peer, local, remote, now, sealed)
             }
             FriendRequest::Mutual { sealed } => {
                 // Kept, as checked above.
@@ -1726,6 +1672,71 @@ impl Node {
                 FriendResponse::Refused
             }
         }
+    }
+
+    /// Takes a friend's removal of this device, and answers it signed.
+    fn on_friend_unfriend_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        now: u64,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let device = match fogata_friends::open_unfriend(&self.identity, &local, &remote, &sealed) {
+            Ok(device) => device,
+            Err(e) => {
+                tracing::debug!("refused a removal from {peer}: {e}");
+                return FriendResponse::Refused;
+            }
+        };
+        if !f.answers_removal(&device, now) {
+            tracing::debug!("refused a removal from a device this one does not know");
+            return FriendResponse::Refused;
+        }
+        // Signed, so that only this device's answer ends the removal over there.
+        let digest = fogata_friends::removal_digest(&sealed);
+        let Ok(ack) =
+            fogata_friends::unfriend_ack(&self.identity, &device, &local, &remote, &digest)
+        else {
+            return FriendResponse::Refused;
+        };
+        // Both may have removed the other at once.
+        let mut changed = f.book.departed(&device);
+        match f.book.removed_by(&device, now) {
+            Ok(true) => {
+                changed = true;
+                f.recent = Some(Instant::now());
+                f.last_lookup = None;
+                f.contacted.retain(|(_, c)| *c != Contact::Update);
+                let peers: Vec<PeerId> = f
+                    .online
+                    .iter()
+                    .filter(|(_, d)| **d == device)
+                    .map(|(p, _)| *p)
+                    .collect();
+                for peer in &peers {
+                    f.online.remove(peer);
+                }
+                f.targets.retain(|_, t| *t != Target::Friend(device));
+                // Announce under the new secret at the next slot.
+                self.provided.1 = None;
+                if !peers.is_empty() {
+                    self.emit(NodeEvent::FriendOffline { device });
+                }
+                self.update_online_friends();
+            }
+            Ok(false) => {}
+            Err(e) => self.info(format!("cannot forget the friend: {e}")),
+        }
+        if changed {
+            self.changed();
+        }
+        FriendResponse::Unfriended { sealed: ack }
     }
 
     /// Records a checked friend request that came from `peer`.
