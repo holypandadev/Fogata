@@ -60,6 +60,7 @@
    // from a capture's end) locked again the queue it already held; and a thread that
    // queues while holding a lock of its own (fogata_sound_start.h's PlatformQueue)
    // would deadlock with any task that takes that lock.
+   // Upstream 1.6.3 does the same.
    for (;;) {
      TaskClosure task;
      {

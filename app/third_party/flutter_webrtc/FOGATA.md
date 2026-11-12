@@ -914,6 +914,21 @@ source left after it runs nothing. `linux/flutter_webrtc_plugin.cc` makes the ru
 the plugin's `FlutterWebRTC` and lets it go after, so what that queues while it goes still
 finds it.
 
+## The Windows task runner
+
+Taken from upstream 1.6.3 (its "run task runner tasks without holding the queue lock",
+and the order the plugin's members are freed in):
+
+- `windows/task_runner_windows.cc`: `ProcessTasks` ran each task with the queue's lock
+  held, so a task that queued another locked the same `std::mutex` again on the platform
+  thread. Fogata's own tasks do: a shared window that closes (`OnStop` in
+  `common/cpp/src/flutter_screen_capture.cc`, posted to the platform thread) sends
+  `mediaStreamTrackEnded`, and every event of the plugin's channels goes through the
+  runner. The lock is now held only to take a task.
+- `windows/flutter_webrtc_plugin.cc`: the runner is declared before the plugin's
+  `FlutterWebRTC`, so it is freed after it, as on Linux: freed first, it was gone while
+  `FlutterWebRTC` was torn down and posted its last events through it.
+
 ## A made-up camera for tests (Linux)
 
 - `linux/test_camera.{h,cc}` (new): in a debug build (no `NDEBUG`), with

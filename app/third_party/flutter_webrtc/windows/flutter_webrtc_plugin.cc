@@ -68,7 +68,8 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
   // Fogata: declared before webrtc_, so it goes after it, as on Linux: what
   // FlutterWebRTC queues while it goes (a capture's end) still finds the runner, and
   // the queue of a sound still starting closes before the runner goes
-  // (flutter_screen_capture.cc). Declared after, the runner went first.
+  // (flutter_screen_capture.cc). Declared after, the runner went first. Upstream
+  // 1.6.3 does the same.
   std::unique_ptr<TaskRunner> task_runner_;
   std::unique_ptr<FlutterWebRTC> webrtc_;
   BinaryMessenger* messenger_;
