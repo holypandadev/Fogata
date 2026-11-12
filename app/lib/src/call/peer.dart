@@ -62,6 +62,11 @@ class CallPeer {
   /// When [connection] was made.
   DateTime? _madeAt;
 
+  /// [connection]'s offer or answer went while the link to them was down, or it was left
+  /// waiting to be agreed when the link went ([Call.memberGone]): its signals went nowhere,
+  /// and it is tried anew once the link is back ([Call.memberBack]).
+  bool _blind = false;
+
   /// Times the first offer and answer were tried again.
   int _waits = 0;
 

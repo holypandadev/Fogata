@@ -52,6 +52,11 @@ Duration stateAgainEvery = const Duration(seconds: 15);
 @visibleForTesting
 void Function(String to, Map<String, dynamic> message)? signalsForTests;
 
+/// The same, with the sender, for tests of several calls that signal each other.
+@visibleForTesting
+void Function(String from, String to, Map<String, dynamic> message)?
+signalsBetweenForTests;
+
 /// How a call agrees with each participant on a connection: the signals it sends and
 /// takes, its offers and answers, and the tries that keep them going until one is agreed.
 extension _Signalling on Call {
@@ -236,10 +241,12 @@ extension _Signalling on Call {
       case 'again':
         // The other side has no working connection and asks for a new offer; one made a
         // moment ago is still on its way, and another would only replace it (both sides
-        // ask and offer again after a failure, and every new offer undid the last).
+        // ask and offer again after a failure, and every new offer undid the last). One
+        // made while the link to them was down went nowhere, however recent.
         final made = peer._madeAt;
         final fresh =
             made != null &&
+            !peer._blind &&
             DateTime.now().difference(made) < Call.connectWithin &&
             peer.state != RTCPeerConnectionState.RTCPeerConnectionStateFailed;
         if (me.compareTo(from) < 0 && !peer.connected && !fresh) {
@@ -249,6 +256,10 @@ extension _Signalling on Call {
   }
 
   void _signal(String to, Map<String, dynamic> message) {
+    if (signalsBetweenForTests case final sent?) {
+      sent(me, to, message);
+      return;
+    }
     if (signalsForTests case final sent?) {
       sent(to, message);
       return;
@@ -353,6 +364,7 @@ extension _Signalling on Call {
     final sdp = await _describe(peer, connection, offer, 'offer');
     await _tune(peer, connection);
     _signal(peer.id, {'t': 'offer', 'sdp': sdp, 'n': number});
+    _sentWhileGone(peer);
   }
 
   Future<void> _answer(CallPeer peer, String sdp, Object? number) async {
@@ -386,6 +398,7 @@ extension _Signalling on Call {
     final sdp = await _describe(peer, connection, answer, 'answer');
     await _tune(peer, connection);
     _signal(peer.id, {'t': 'answer', 'sdp': sdp, 'n': ?number});
+    _sentWhileGone(peer);
     peer._agreed?.complete();
     peer._agreed = null;
   }

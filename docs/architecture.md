@@ -1793,7 +1793,13 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   offers offers again while there is no answer (after 5 s, then up to every 30 s), and the
   other side asks for an offer the same way, the first time as soon as it makes the
   connection's place (a side that kept a connection from before, with a call there that is
-  gone, offers only when asked). Only the room's participants get a connection: a signal
+  gone, offers only when asked). When the core loses its link with a participant (a
+  network change, a short outage) and has it again, a connection with it that is not up
+  and whose offer or answer went while the link was down, or was still being agreed when
+  it went, is tried again at once (the smaller id offers, the other asks), rather than
+  after its tries ran out; one made after the link came back is not, so the two sides'
+  tries do not undo each other, and a whole network coming back tries each participant
+  once. Only the room's participants get a connection: a signal
   from a member that is not in the room is dropped, and one that arrives before the room
   says its sender is in it, or before this device's call has made its connection with the
   sender, waits for that (the last 4 of each sender): those already in a room offer as soon

@@ -1320,6 +1320,71 @@ class Call extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Participants whose link with this device is down, as the core said ([memberGone]):
+  /// signals to them go nowhere until it is back.
+  final Set<String> _unreachable = {};
+
+  /// The core lost its link with [id] (a network change, a short outage). A connection
+  /// with it that is not up, and any made until the link is back, cannot be agreed: the
+  /// signals of either side are dropped on the way. Each is tried anew as soon as the link
+  /// is back ([memberBack]), rather than seconds later, after its tries ran out or it was
+  /// given up on as one that never came up ([connectWithin]).
+  void memberGone(String id) {
+    if (_closed) return;
+    _unreachable.add(id);
+    final peer = peers[id];
+    if (peer != null && !peer.connected) peer._blind = true;
+  }
+
+  /// The core has a link with [id] again (or tells a new way to it): a connection with it
+  /// that is not up after it could not be reached is tried again now, as with one that
+  /// failed: the side with the smaller id offers, the other asks for an offer. Once: a
+  /// connection made since then is no longer blind, so the core telling the same again,
+  /// or the other side's asking crossing this side's offer, makes no second one (see
+  /// 'again' in [_handle]). A whole network coming back tries each participant once.
+  void memberBack(String id) {
+    final wasGone = _unreachable.remove(id);
+    final peer = peers[id];
+    if (_closed ||
+        _bridge == null ||
+        peer == null ||
+        peer.connected ||
+        peer._keptOut ||
+        peer.voiceless ||
+        // Told of a way to it while nothing was lost (a better path), or tried already.
+        !(wasGone || peer._blind)) {
+      return;
+    }
+    _trace('${id.substring(0, 8)} reachable again; trying again');
+    peer._waits = 0;
+    _watch(peer);
+    if (me.compareTo(id) > 0) {
+      peer._blind = false;
+      _signal(id, {'t': 'again'});
+      return;
+    }
+    // In its turn, after what came before it: the other side's asking may have made a
+    // connection meanwhile ('again' in [_handle]), and so may another word of the link;
+    // one made since the link came back is not blind, and is left to come up.
+    unawaited(
+      peer
+          ._inTurn(() async {
+            if (_closed || peers[id] != peer || peer.connected) return;
+            if (!peer._blind && peer.connection != null) return;
+            await _offer(peer);
+          })
+          .catchError((Object e) {
+            _trace('offer to ${id.substring(0, 8)}: $e');
+          }),
+    );
+  }
+
+  /// [peer]'s offer or answer was just sent: one sent while the link to it is down went
+  /// nowhere, and its connection will not come up ([memberBack] tries again).
+  void _sentWhileGone(CallPeer peer) {
+    peer._blind = _unreachable.contains(peer.id);
+  }
+
   /// The signal a device in the room without a call sends (see [AppState]'s refused call):
   /// whoever gets it stops connecting to it and shows it as there without sound.
   static const noVoice = 'novoice';
@@ -1404,6 +1469,9 @@ class Call extends ChangeNotifier {
       return;
     }
     _trace('got ${message['t']} from ${from.substring(0, 8)}');
+    // Whatever comes from them came over a link that works: their outage is over, whether
+    // or not the core has said so yet (see [memberBack]).
+    _unreachable.remove(from);
     final peer = peers[from];
     if (message['t'] == noVoice) {
       await _theyHaveNoCall(from, peer);
@@ -1505,6 +1573,8 @@ class Call extends ChangeNotifier {
     }
     peer.connection = connection;
     peer._madeAt = DateTime.now();
+    // Nothing of it sent yet (see [_sentWhileGone]).
+    peer._blind = false;
     peer.state = RTCPeerConnectionState.RTCPeerConnectionStateNew;
     final gathered = peer._gathered = Completer<void>();
     connection.onTrack = (event) => _onTrack(peer, connection, event);

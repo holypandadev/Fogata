@@ -101,6 +101,10 @@ extension _Events on AppState {
         } else {
           carried.remove(e.device);
         }
+        // Back after an outage: the call tries again at once what could not be agreed.
+        if (call case final call? when call.group == e.group) {
+          call.memberBack(e.device!);
+        }
         contacts.changed();
       case UiEventKind.memberDisconnected:
         contacts.paths[e.group]?.remove(e.device);
@@ -108,6 +112,9 @@ extension _Events on AppState {
         if (e.device case final device?) {
           typing.gone(device);
           _typingChanged();
+          if (call case final call? when call.group == e.group) {
+            call.memberGone(device);
+          }
         }
         contacts.changed();
       case UiEventKind.friendRequest:
