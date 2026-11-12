@@ -1120,32 +1120,7 @@ impl Node {
                 self.on_friend_bio_request(peer, local, remote, sealed)
             }
             FriendRequest::Animation { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_animation_update(
-                    &self.identity,
-                    &device,
-                    &local,
-                    &remote,
-                    &sealed,
-                ) {
-                    Ok(animation) => {
-                        // At most a couple every few seconds from each (see limits.rs).
-                        if let Some(animation) = self.limits.animation(animation, Instant::now()) {
-                            self.emit(NodeEvent::Animation { animation });
-                        }
-                        FriendResponse::Ack
-                    }
-                    Err(e) => {
-                        tracing::debug!("refused an animation from {peer}: {e}");
-                        FriendResponse::Refused
-                    }
-                }
+                self.on_friend_animation_request(peer, local, remote, sealed)
             }
             FriendRequest::Unfriend { sealed } => {
                 // Kept, as checked above.
@@ -1712,6 +1687,42 @@ impl Node {
             }
             Err(e) => {
                 tracing::debug!("refused a bio from {peer}: {e}");
+                FriendResponse::Refused
+            }
+        }
+    }
+
+    /// Takes the animation of a friend's picture.
+    fn on_friend_animation_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_animation_update(
+            &self.identity,
+            &device,
+            &local,
+            &remote,
+            &sealed,
+        ) {
+            Ok(animation) => {
+                // At most a couple every few seconds from each (see limits.rs).
+                if let Some(animation) = self.limits.animation(animation, Instant::now()) {
+                    self.emit(NodeEvent::Animation { animation });
+                }
+                FriendResponse::Ack
+            }
+            Err(e) => {
+                tracing::debug!("refused an animation from {peer}: {e}");
                 FriendResponse::Refused
             }
         }
