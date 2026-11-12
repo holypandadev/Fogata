@@ -130,6 +130,8 @@ pub(crate) struct InterfaceState<U, T> {
     max_ttl: Duration,
     /// Ids of this instance's latest queries, and when each was sent.
     asked: VecDeque<(u16, Instant)>,
+    /// The DNS-SD service asked for and answered (Fogata, see `Config::service_name`).
+    service_name: String,
     probe_state: ProbeState,
     local_peer_id: PeerId,
 }
@@ -229,6 +231,7 @@ where
             ttl: config.ttl,
             max_ttl: 2 * config.query_interval,
             asked: VecDeque::new(),
+            service_name: config.service_name,
             probe_state: Default::default(),
             local_peer_id,
         })
@@ -295,7 +298,7 @@ where
         loop {
             // 1st priority: Low latency: Create packet ASAP after timeout.
             if this.timeout.poll_next_unpin(cx).is_ready() {
-                let query = build_query();
+                let query = build_query(&this.service_name);
                 tracing::debug!(
                     address=%this.addr,
                     id=u16::from_be_bytes([query[0], query[1]]),
@@ -358,8 +361,9 @@ where
             match this
                 .recv_socket
                 .poll_read(cx, &mut this.recv_buffer)
-                .map_ok(|(len, from)| MdnsPacket::new_from_bytes(&this.recv_buffer[..len], from))
-            {
+                .map_ok(|(len, from)| {
+                    MdnsPacket::new_from_bytes(&this.recv_buffer[..len], from, &this.service_name)
+                }) {
                 Poll::Ready(Ok(Ok(Some(MdnsPacket::Query(query))))) => {
                     tracing::trace!(
                         address=%this.addr,
@@ -392,6 +396,7 @@ where
                         this.local_peer_id,
                         relevant_addrs,
                         this.ttl,
+                        &this.service_name,
                     ));
                     continue;
                 }
@@ -448,8 +453,11 @@ where
                         "received service discovery from remote address on address"
                     );
 
-                    this.send_buffer
-                        .push_back(build_service_discovery_response(disc.query_id(), this.ttl));
+                    this.send_buffer.push_back(build_service_discovery_response(
+                        disc.query_id(),
+                        this.ttl,
+                        &this.service_name,
+                    ));
                     continue;
                 }
                 Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {

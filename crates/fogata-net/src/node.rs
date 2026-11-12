@@ -132,6 +132,15 @@ const QUIC_IDLE: Duration = Duration::from_secs(30);
 const SEEN_LIMIT: usize = 4096;
 
 pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents), NetError> {
+    start_with(config, None)
+}
+
+/// [`start`], with mDNS on `mdns_service` rather than libp2p's (see
+/// [`crate::start_on_mdns_service`]).
+pub(crate) fn start_with(
+    config: NodeConfig,
+    mdns_service: Option<String>,
+) -> Result<(NodeHandle, crate::NodeEvents), NetError> {
     let setup = |e: &dyn std::fmt::Display| NetError::Setup(e.to_string());
 
     // A new transport identity for every session, unrelated to the device identity, so the
@@ -149,6 +158,7 @@ pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents
     let options = Options {
         use_dht: config.use_dht,
         use_mdns: config.use_mdns,
+        mdns_service,
         bridge: config.bridge,
         relay_peers: relay_peers.clone(),
         wanted: wanted.clone(),

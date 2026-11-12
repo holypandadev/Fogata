@@ -34,7 +34,7 @@ use libp2p_identity::PeerId;
 use libp2p_swarm::_address_translation;
 
 use super::dns;
-use crate::{META_QUERY_SERVICE_FQDN, SERVICE_NAME_FQDN};
+use crate::META_QUERY_SERVICE_FQDN;
 
 /// A valid mDNS packet received by the service.
 #[derive(Debug)]
@@ -47,21 +47,31 @@ pub(crate) enum MdnsPacket {
     ServiceDiscovery(MdnsServiceDiscovery),
 }
 
+/// Whether `name`, fully qualified, is that of `service` (Fogata: see `Config::service_name`).
+fn is_service(name: &str, service: &str) -> bool {
+    name.strip_suffix('.') == Some(service)
+}
+
 impl MdnsPacket {
+    /// Reads a packet for `service`: queries for others are not answered, and answers of
+    /// others tell of no one.
     pub(crate) fn new_from_bytes(
         buf: &[u8],
         from: SocketAddr,
+        service: &str,
     ) -> Result<Option<MdnsPacket>, hickory_proto::ProtoError> {
         let packet = Message::from_vec(buf)?;
 
         if packet.queries.is_empty() {
-            return Ok(Some(MdnsPacket::Response(MdnsResponse::new(&packet, from))));
+            return Ok(Some(MdnsPacket::Response(MdnsResponse::new(
+                &packet, from, service,
+            ))));
         }
 
         if packet
             .queries
             .iter()
-            .any(|q| q.name().to_utf8() == SERVICE_NAME_FQDN)
+            .any(|q| is_service(&q.name().to_utf8(), service))
         {
             return Ok(Some(MdnsPacket::Query(MdnsQuery {
                 from,
@@ -153,13 +163,14 @@ pub(crate) struct MdnsResponse {
 }
 
 impl MdnsResponse {
-    /// Creates a new `MdnsResponse` based on the provided `Packet`.
-    pub(crate) fn new(packet: &Message, from: SocketAddr) -> MdnsResponse {
+    /// Creates a new `MdnsResponse` based on the provided `Packet`, with the peers it tells
+    /// of under `service`.
+    pub(crate) fn new(packet: &Message, from: SocketAddr, service: &str) -> MdnsResponse {
         let peers = packet
             .answers
             .iter()
             .filter_map(|record| {
-                if record.name.to_string() != SERVICE_NAME_FQDN {
+                if !is_service(&record.name.to_string(), service) {
                     return None;
                 }
 
@@ -345,6 +356,35 @@ pub(crate) fn observed_is_link_local(observed: &Multiaddr) -> bool {
 mod tests {
     use super::{super::dns::build_query_response, *};
 
+    /// Devices of another service name (Fogata: a test's own, see `Config::service_name`)
+    /// neither answer this one's queries nor tell it of anyone.
+    #[test]
+    fn only_packets_of_the_same_service_count() {
+        let from: SocketAddr = "192.168.1.20:5353".parse().unwrap();
+        let other = "_fogata-test-0123abcd._udp.local";
+        let query = dns::build_query(other);
+        assert!(matches!(
+            MdnsPacket::new_from_bytes(&query, from, other),
+            Ok(Some(MdnsPacket::Query(_)))
+        ));
+        assert!(matches!(
+            MdnsPacket::new_from_bytes(&query, from, crate::SERVICE_NAME),
+            Ok(None)
+        ));
+        let peer = PeerId::random();
+        let mut address: Multiaddr = "/ip4/192.168.1.20/udp/4001/quic-v1".parse().unwrap();
+        address.push(Protocol::P2p(peer));
+        let packets = build_query_response(1, peer, vec![&address], Duration::from_secs(60), other);
+        for packet in packets {
+            let told = |service| match MdnsPacket::new_from_bytes(&packet, from, service) {
+                Ok(Some(MdnsPacket::Response(response))) => response.discovered_peers().count(),
+                _ => panic!("not a response"),
+            };
+            assert_eq!(told(other), 1);
+            assert_eq!(told(crate::SERVICE_NAME), 0);
+        }
+    }
+
     #[test]
     fn test_create_mdns_peer() {
         let ttl = 300;
@@ -360,6 +400,7 @@ mod tests {
             peer_id,
             vec![&addr1, &addr2],
             Duration::from_secs(60),
+            crate::SERVICE_NAME,
         );
 
         for bytes in packets {
@@ -368,7 +409,7 @@ mod tests {
                 .answers
                 .iter()
                 .filter_map(|record| {
-                    if record.name.to_utf8() != SERVICE_NAME_FQDN {
+                    if !is_service(&record.name.to_utf8(), crate::SERVICE_NAME) {
                         return None;
                     }
                     let RData::PTR(record_value) = &record.data else {
@@ -419,6 +460,7 @@ mod tests_ipv6 {
             peer_id,
             vec![&announced_addr],
             Duration::from_secs(300),
+            crate::SERVICE_NAME,
         );
 
         for bytes in packets {
@@ -430,7 +472,7 @@ mod tests_ipv6 {
                 0,
                 0,
             ));
-            let response = MdnsResponse::new(&packet, link_local_src);
+            let response = MdnsResponse::new(&packet, link_local_src, crate::SERVICE_NAME);
 
             let discovered: Vec<_> = response
                 .extract_discovered(Instant::now(), local_peer_id, Duration::from_secs(300))

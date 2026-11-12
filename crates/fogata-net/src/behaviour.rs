@@ -63,6 +63,9 @@ pub(crate) struct Behaviour {
 pub(crate) struct Options {
     pub(crate) use_dht: bool,
     pub(crate) use_mdns: bool,
+    /// The service mDNS asks for and answers, when not libp2p's (see
+    /// [`crate::start_on_mdns_service`]).
+    pub(crate) mdns_service: Option<String>,
     pub(crate) bridge: bool,
     /// The peers the relay serves: those that proved membership of a group other than a
     /// direct chat's (a chat's group has no relay).
@@ -100,10 +103,13 @@ impl Behaviour {
             // libp2p stops asking as soon as any device answers, then asks again only every
             // five minutes: a lost answer, or a friend that restarts while this device's
             // firewall keeps it from coming in, would wait that long on the same network.
-            let config = mdns::Config {
+            let mut config = mdns::Config {
                 query_interval: MDNS_QUERY_INTERVAL,
                 ..mdns::Config::default()
             };
+            if let Some(service) = options.mdns_service {
+                config.service_name = service;
+            }
             Some(mdns::tokio::Behaviour::new(config, peer_id)?)
         } else {
             None

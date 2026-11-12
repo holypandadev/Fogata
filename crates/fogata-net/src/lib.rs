@@ -1467,6 +1467,20 @@ pub fn start(config: NodeConfig) -> Result<(NodeHandle, NodeEvents), NetError> {
     node::start(config)
 }
 
+/// For tests over the real local network: [`start`], with mDNS asking for and answering
+/// `service` (such as `_fogata-test-0123abcd._udp.local`) instead of libp2p's
+/// `_p2p._udp.local`, so that only the nodes started with it find each other there, and no
+/// other device on the network (the user's own Fogata, another test, any libp2p program)
+/// takes part. Fails for a name mDNS packets cannot carry: labels of 1 to 63 ASCII
+/// characters, separated by dots.
+#[doc(hidden)]
+pub fn start_on_mdns_service(
+    config: NodeConfig,
+    service: &str,
+) -> Result<(NodeHandle, NodeEvents), NetError> {
+    node::start_with(config, Some(service.to_owned()))
+}
+
 /// Stretches a friend code made or used at `unix_secs` away from the async threads; it takes
 /// a noticeable moment.
 async fn stretch(code: FriendCode, unix_secs: u64) -> Result<CodeSecrets, NetError> {

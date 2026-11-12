@@ -26,7 +26,7 @@ use libp2p_core::Multiaddr;
 use libp2p_identity::PeerId;
 use rand::{RngExt, distr::Alphanumeric};
 
-use crate::{META_QUERY_SERVICE, SERVICE_NAME};
+use crate::META_QUERY_SERVICE;
 
 /// DNS TXT records can have up to 255 characters as a single string value.
 ///
@@ -69,9 +69,10 @@ pub(crate) fn decode_character_string(mut from: &[u8]) -> Result<Cow<'_, [u8]>, 
     Ok(Cow::Borrowed(from))
 }
 
-/// Builds the binary representation of a DNS query to send on the network.
-pub(crate) fn build_query() -> MdnsPacket {
-    let mut out = Vec::with_capacity(33);
+/// Builds the binary representation of a DNS query for `service` to send on the network.
+pub(crate) fn build_query(service: &str) -> MdnsPacket {
+    // The header, the name (two bytes more than its text) and the flags.
+    let mut out = Vec::with_capacity(12 + service.len() + 2 + 4);
 
     // Program-generated transaction ID; unused by our implementation.
     append_u16(&mut out, rand::random());
@@ -89,7 +90,7 @@ pub(crate) fn build_query() -> MdnsPacket {
 
     // Our single question.
     // The name.
-    append_qname(&mut out, SERVICE_NAME);
+    append_qname(&mut out, service.as_bytes());
 
     // Flags.
     append_u16(&mut out, 0x0c);
@@ -109,6 +110,7 @@ pub(crate) fn build_query_response(
     peer_id: PeerId,
     mut addresses: Vec<&Multiaddr>,
     ttl: Duration,
+    service: &str,
 ) -> Vec<MdnsPacket> {
     // Convert the TTL into seconds.
     let ttl = duration_to_secs(ttl);
@@ -140,7 +142,13 @@ pub(crate) fn build_query_response(
         }
 
         if records.len() == MAX_RECORDS_PER_PACKET {
-            packets.push(query_response_packet(id, &peer_name_bytes, &records, ttl));
+            packets.push(query_response_packet(
+                id,
+                &peer_name_bytes,
+                &records,
+                ttl,
+                service,
+            ));
             records.clear();
         }
     }
@@ -148,7 +156,13 @@ pub(crate) fn build_query_response(
     // If there are still unpacked records, i.e. if the number of records is not
     // a multiple of `MAX_RECORDS_PER_PACKET`, create a final packet.
     if !records.is_empty() {
-        packets.push(query_response_packet(id, &peer_name_bytes, &records, ttl));
+        packets.push(query_response_packet(
+            id,
+            &peer_name_bytes,
+            &records,
+            ttl,
+            service,
+        ));
     }
 
     // If no packets have been built at all, because `addresses` is empty,
@@ -159,19 +173,25 @@ pub(crate) fn build_query_response(
             &peer_name_bytes,
             &Vec::new(),
             ttl,
+            service,
         ));
     }
 
     packets
 }
 
-/// Builds the response to a service discovery DNS query.
-pub(crate) fn build_service_discovery_response(id: u16, ttl: Duration) -> MdnsPacket {
+/// Builds the response to a service discovery DNS query, naming `service`.
+pub(crate) fn build_service_discovery_response(
+    id: u16,
+    ttl: Duration,
+    service: &str,
+) -> MdnsPacket {
     // Convert the TTL into seconds.
     let ttl = duration_to_secs(ttl);
 
-    // This capacity was determined empirically.
-    let mut out = Vec::with_capacity(69);
+    // The header, the meta query's name, flags, TTL, length, and the service's name (each
+    // name two bytes more than its text).
+    let mut out = Vec::with_capacity(12 + META_QUERY_SERVICE.len() + 2 + 10 + service.len() + 2);
 
     append_u16(&mut out, id);
     // 0x84 flag for an answer.
@@ -195,8 +215,8 @@ pub(crate) fn build_service_discovery_response(id: u16, ttl: Duration) -> MdnsPa
 
     // Service name.
     {
-        let mut name = Vec::with_capacity(SERVICE_NAME.len() + 2);
-        append_qname(&mut name, SERVICE_NAME);
+        let mut name = Vec::with_capacity(service.len() + 2);
+        append_qname(&mut name, service.as_bytes());
         append_u16(&mut out, name.len() as u16);
         out.extend_from_slice(&name);
     }
@@ -208,7 +228,13 @@ pub(crate) fn build_service_discovery_response(id: u16, ttl: Duration) -> MdnsPa
 }
 
 /// Constructs an MDNS query response packet for an address lookup.
-fn query_response_packet(id: u16, peer_id: &[u8], records: &[Vec<u8>], ttl: u32) -> MdnsPacket {
+fn query_response_packet(
+    id: u16,
+    peer_id: &[u8],
+    records: &[Vec<u8>],
+    ttl: u32,
+    service: &str,
+) -> MdnsPacket {
     let mut out = Vec::with_capacity(records.len() * MAX_TXT_RECORD_SIZE);
 
     append_u16(&mut out, id);
@@ -222,7 +248,7 @@ fn query_response_packet(id: u16, peer_id: &[u8], records: &[Vec<u8>], ttl: u32)
 
     // Our single answer.
     // The name.
-    append_qname(&mut out, SERVICE_NAME);
+    append_qname(&mut out, service.as_bytes());
 
     // Flags.
     append_u16(&mut out, 0x000c);
@@ -401,7 +427,7 @@ mod tests {
 
     #[test]
     fn build_query_correct() {
-        let query = build_query();
+        let query = build_query(crate::SERVICE_NAME);
         assert!(Message::from_vec(&query).is_ok());
     }
 
@@ -415,6 +441,7 @@ mod tests {
             my_peer_id,
             vec![&addr1, &addr2],
             Duration::from_secs(60),
+            crate::SERVICE_NAME,
         );
         for packet in packets {
             assert!(Message::from_vec(&packet).is_ok());
@@ -423,7 +450,8 @@ mod tests {
 
     #[test]
     fn build_service_discovery_response_correct() {
-        let query = build_service_discovery_response(0x1234, Duration::from_secs(120));
+        let query =
+            build_service_discovery_response(0x1234, Duration::from_secs(120), crate::SERVICE_NAME);
         assert!(Message::from_vec(&query).is_ok());
     }
 

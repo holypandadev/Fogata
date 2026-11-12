@@ -11,6 +11,15 @@
 //! its signing identifier in about 2 ms a flow. The bound leaves room for the test binary on
 //! macOS, and still fails a round that waits for a query interval (30 s) or for mDNS to
 //! tell of a peer again.
+//!
+//! The devices ask for and answer an mDNS service of this run's own
+//! ([`fogata_net::start_on_mdns_service`]), over the computer's real interfaces: no other
+//! device on the network takes part (the user's own Fogata, another run of this test, any
+//! libp2p program), which would make the result depend on what else answers there, and the
+//! test's devices take no part in theirs. What other devices answering does to discovery is
+//! for the unit tests (fogata-net's node/mdns_dials.rs, libp2p-mdns's found.rs and
+//! behaviour.rs). `FOGATA_TEST_MDNS_SHARED=1` puts the devices on libp2p's service, among
+//! all the others on the network, as the application is.
 
 use std::{
     sync::Arc,
@@ -21,8 +30,24 @@ use fogata_crypto::DeviceIdentity;
 use fogata_net::{GroupSetup, NodeConfig, NodeEvent, NodeEvents, NodeHandle};
 use fogata_state::GroupLog;
 
-fn node(identity: Arc<DeviceIdentity>, groups: Vec<GroupLog>) -> (NodeHandle, NodeEvents) {
-    fogata_net::start(NodeConfig {
+/// An mDNS service of this run's own, or none (libp2p's) with `FOGATA_TEST_MDNS_SHARED`.
+fn service() -> Option<String> {
+    if std::env::var_os("FOGATA_TEST_MDNS_SHARED").is_some() {
+        return None;
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
+    let run = nanos ^ std::process::id().rotate_left(16);
+    Some(format!("_fogata-test-{run:08x}._udp.local"))
+}
+
+fn node(
+    identity: Arc<DeviceIdentity>,
+    groups: Vec<GroupLog>,
+    service: Option<&str>,
+) -> (NodeHandle, NodeEvents) {
+    let config = NodeConfig {
         identity,
         groups: groups.into_iter().map(GroupSetup::Member).collect(),
         friends: None,
@@ -34,7 +59,11 @@ fn node(identity: Arc<DeviceIdentity>, groups: Vec<GroupLog>) -> (NodeHandle, No
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
-    })
+    };
+    match service {
+        Some(service) => fogata_net::start_on_mdns_service(config, service),
+        None => fogata_net::start(config),
+    }
     .unwrap()
 }
 
@@ -74,10 +103,13 @@ async fn two_devices_starting_together_find_each_other_beside_an_older_one() {
         return;
     }
     trace();
+    let service = service();
+    println!("mDNS service: {}", service.as_deref().unwrap_or("libp2p's"));
+    let service = service.as_deref();
     // Started earlier, of a group of its own: it answers every query at once.
     let stale = Arc::new(DeviceIdentity::generate().unwrap());
     let other = GroupLog::create(&stale, "other", 1).unwrap();
-    let (_stale, _stale_events) = node(stale, vec![other]);
+    let (_stale, _stale_events) = node(stale, vec![other], service);
     tokio::time::sleep(Duration::from_secs(2)).await;
     let rounds: usize = std::env::var("FOGATA_ROUNDS")
         .ok()
@@ -89,8 +121,8 @@ async fn two_devices_starting_together_find_each_other_beside_an_older_one() {
         let bea = Arc::new(DeviceIdentity::generate().unwrap());
         let mut ours = GroupLog::create(&ana, "ours", 1).unwrap();
         ours.add(&ana, bea.public_key(), "bea", 2).unwrap();
-        let (node_a, mut events_a) = node(ana, vec![ours.clone()]);
-        let (node_b, _events_b) = node(bea, vec![ours]);
+        let (node_a, mut events_a) = node(ana, vec![ours.clone()], service);
+        let (node_b, _events_b) = node(bea, vec![ours], service);
         tracing::info!(a = %node_a.local_peer(), b = %node_b.local_peer(), "round started");
         took.push(connected_within(&mut events_a, Duration::from_secs(25)).await);
         node_a.shutdown().await.unwrap();

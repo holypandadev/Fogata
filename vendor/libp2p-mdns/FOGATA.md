@@ -105,5 +105,14 @@ crate by `[patch.crates-io]` in the workspace's Cargo.toml. Only these changes:
    Beside it, fogata-net lets the peers that no share of new peers could take wait for one,
    in turn (`MAX_MDNS_WAITING` in node/mdns_dials.rs): a peer is told of only once.
 
+8. `src/lib.rs` (`Config::service_name`), `src/behaviour/iface/dns.rs` and
+   `src/behaviour/iface/query.rs`: the DNS-SD service asked for and answered can be set
+   (libp2p's `_p2p._udp.local` by default; a name with an empty or over-long label is
+   refused by `Behaviour::new`). Only devices on the same one find each other: fogata-net's
+   `start_on_mdns_service` gives a test's devices a name of its own, over the real network,
+   so that no other device there (the user's own Fogata, another test, any libp2p program)
+   takes part (crates/fogata-net/tests/mdns_stale.rs). Tests:
+   `only_packets_of_the_same_service_count`, `only_a_service_name_packets_can_carry_is_taken`.
+
 The crate is not a workspace member: `tools/check.sh` runs its tests with
 `cargo test -p libp2p-mdns --lib`.

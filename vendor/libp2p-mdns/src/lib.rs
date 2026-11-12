@@ -44,10 +44,9 @@ mod behaviour;
 pub use crate::behaviour::tokio;
 pub use crate::behaviour::{Behaviour, Event};
 
-/// The DNS service name for all libp2p peers used to query for addresses.
-const SERVICE_NAME: &[u8] = b"_p2p._udp.local";
-/// `SERVICE_NAME` as a Fully Qualified Domain Name.
-const SERVICE_NAME_FQDN: &str = "_p2p._udp.local.";
+/// The DNS service name for all libp2p peers used to query for addresses (the default of
+/// [`Config::service_name`]).
+const SERVICE_NAME: &str = "_p2p._udp.local";
 /// The meta query for looking up the `SERVICE_NAME`.
 const META_QUERY_SERVICE: &[u8] = b"_services._dns-sd._udp.local";
 /// `META_QUERY_SERVICE` as a Fully Qualified Domain Name.
@@ -69,6 +68,11 @@ pub struct Config {
     pub query_interval: Duration,
     /// Use IPv6 instead of IPv4.
     pub enable_ipv6: bool,
+    /// Fogata: the DNS-SD service asked for and answered, libp2p's `_p2p._udp.local` unless
+    /// set: only devices that use the same one find each other. A test gives its devices a
+    /// name of their own, so that no other device on the network takes part in it. Labels
+    /// of 1 to 63 ASCII characters, separated by dots.
+    pub service_name: String,
 }
 
 impl Default for Config {
@@ -77,6 +81,7 @@ impl Default for Config {
             ttl: Duration::from_secs(6 * 60),
             query_interval: Duration::from_secs(5 * 60),
             enable_ipv6: false,
+            service_name: SERVICE_NAME.to_owned(),
         }
     }
 }

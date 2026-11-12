@@ -164,6 +164,19 @@ where
 {
     /// Builds a new `Mdns` behaviour.
     pub fn new(config: Config, local_peer_id: PeerId) -> io::Result<Self> {
+        // Fogata: a name its packets can carry (see `Config::service_name`).
+        let name = &config.service_name;
+        if !name.is_ascii()
+            || name.len() > 255
+            || name
+                .split('.')
+                .any(|label| label.is_empty() || label.len() > 63)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("not a DNS-SD service name: {name:?}"),
+            ));
+        }
         let (tx, rx) = mpsc::channel(10); // Chosen arbitrarily.
 
         Ok(Self {
@@ -526,6 +539,34 @@ mod tests {
             panic!("not told of again");
         };
         assert_eq!(found, vec![(newcomer, newcomer_at)]);
+    }
+
+    /// A service name its packets cannot carry is refused, not met later in a panic.
+    #[::tokio::test]
+    async fn only_a_service_name_packets_can_carry_is_taken() {
+        let config = |name: &str| Config {
+            service_name: name.to_owned(),
+            ..Config::default()
+        };
+        for name in ["_p2p._udp.local", "_fogata-test-0123abcd._udp.local"] {
+            assert!(
+                TokioMdns::new(config(name), PeerId::random()).is_ok(),
+                "{name}"
+            );
+        }
+        let long = format!("_{}._udp.local", "x".repeat(63));
+        for name in [
+            "",
+            "_p2p..local",
+            "_p2p._udp.local.",
+            "_pé._udp.local",
+            &long,
+        ] {
+            assert!(
+                TokioMdns::new(config(name), PeerId::random()).is_err(),
+                "{name}"
+            );
+        }
     }
 
     /// The tasks of the interfaces end when the behaviour goes.
