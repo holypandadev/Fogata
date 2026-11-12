@@ -350,6 +350,9 @@ pub struct DirectStore {
     /// How many times the attachments were read to tell whether one is plain, for tests.
     #[cfg(test)]
     pub(crate) plain_looks: std::sync::atomic::AtomicUsize,
+    /// The disk takes no hard links (FAT, exFAT, some network shares), for tests.
+    #[cfg(test)]
+    pub(crate) no_links: std::sync::atomic::AtomicBool,
 }
 
 /// How a sealed journal or pins ends: how many records it has, and the last one's tag,
@@ -413,6 +416,8 @@ impl DirectStore {
             all_sealed: Default::default(),
             #[cfg(test)]
             plain_looks: Default::default(),
+            #[cfg(test)]
+            no_links: Default::default(),
         }
     }
 
@@ -1286,7 +1291,12 @@ impl DirectStore {
         if kept.id != copy.id || from == to || fs::symlink_metadata(&to).is_ok() {
             return Ok(());
         }
-        if fs::hard_link(&from, &to).is_ok() {
+        #[cfg(test)]
+        let linked = !self.no_links.load(std::sync::atomic::Ordering::Relaxed)
+            && fs::hard_link(&from, &to).is_ok();
+        #[cfg(not(test))]
+        let linked = fs::hard_link(&from, &to).is_ok();
+        if linked {
             return Ok(());
         }
         let _room = hold(

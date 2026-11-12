@@ -2716,4 +2716,75 @@ mod tests {
         core.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    /// A file that came, kept under the other names its messages give it, on a disk that
+    /// takes no links: each copy holds its room on the disk as the file did, taken before
+    /// the chats are held (holding takes the core's own lock). Without room it shows only
+    /// under its own name; with room, under every name.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn copies_under_other_names_need_room_on_the_disk() {
+        let dir = std::env::temp_dir().join(format!("fogata-other-names-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = crate::NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        };
+        let (core, _events) = crate::Core::start(dir.clone(), options).unwrap();
+        let inner = core.inner.clone();
+        let direct = &inner.direct;
+        direct
+            .store
+            .no_links
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        direct.store.files_dir(&friend).unwrap();
+        let named = |name: &str| Attachment {
+            id: [7; 32],
+            name: name.into(),
+            size: 400,
+            kind: FileKind::Picture,
+            video: None,
+            local: Local::Missing,
+            voice: None,
+        };
+        {
+            let mut chats = direct.lock();
+            let entry = chats.chats.entry(friend).or_default();
+            for (id, name) in [(1u8, "photo.jpg"), (2, "photo.jpeg")] {
+                entry.chat.insert(Item {
+                    id: [id; 16],
+                    mine: false,
+                    sent_ms: 1,
+                    got_ms: 1,
+                    seq: u64::from(id),
+                    at_ms: 1,
+                    body: Body::Message {
+                        text: String::new(),
+                        files: vec![named(name)],
+                    },
+                    ttl_ms: 0,
+                    delivered: true,
+                });
+            }
+        }
+        let (came, other) = (named("photo.jpg"), named("photo.jpeg"));
+        let dest = direct.store.file_path(&friend, &came);
+        let copy = direct.store.file_path(&friend, &other);
+        let group = fogata_crypto::GroupId::random().unwrap();
+        core.use_free_space(|_| Some(0));
+        std::fs::write(&dest, [3; 400]).unwrap();
+        fetch::fetched_file(&inner, friend, &came, group, &dest, false);
+        assert!(dest.exists() && !copy.exists());
+        core.use_free_space(|_| None);
+        fetch::fetched_file(&inner, friend, &came, group, &dest, false);
+        assert_eq!(std::fs::read(&copy).unwrap(), [3; 400]);
+        // Nothing stays held once the copies are made.
+        assert!(inner.copying.lock().unwrap().is_empty());
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -755,8 +755,8 @@ fn throw_away(
 /// An attachment arrived whole: kept and served, unless its message went meanwhile. Room
 /// is made for it; for one that came `by_itself`, in its own chat only, and when that is
 /// not enough it is not kept and stays to be asked for.
-fn fetched_file(
-    inner: &Inner,
+pub(super) fn fetched_file(
+    inner: &Arc<Inner>,
     friend: DevicePublicKey,
     attachment: &Attachment,
     group: GroupId,
@@ -764,6 +764,35 @@ fn fetched_file(
     by_itself: bool,
 ) {
     let direct = &inner.direct;
+    // A copy under another name, where the disk takes no links, holds its room on the disk
+    // as the file did: held here, before the chats are, since holding takes the core's own
+    // lock, never taken under theirs. Held for every other name the file has now, the most
+    // the copies can take; a name added meanwhile gets what is left.
+    let others = direct.lock().chats.get(&friend).map_or(0, |entry| {
+        entry
+            .chat
+            .copies_of(&attachment.id)
+            .iter()
+            .filter(|copy| copy.name != attachment.name)
+            .count() as u64
+    });
+    let mut room = if others == 0 {
+        None
+    } else {
+        let bytes = attachment.size.saturating_mul(others);
+        match crate::shares::hold_disk(
+            inner,
+            bytes,
+            dest.parent().unwrap_or(dest),
+            "not enough free space for this file",
+        ) {
+            Ok(held) => Some((held, bytes)),
+            Err(e) => {
+                tracing::info!("a file kept here is linked under its other names, not copied: {e}");
+                None
+            }
+        }
+    };
     let mut chats = direct.lock();
     if by_itself
         && let Some(limit) = chats.settings.limit
@@ -784,7 +813,16 @@ fn fetched_file(
     };
     // Every message with this file shows it under its own name's ending.
     for copy in entry.chat.copies_of(&attachment.id) {
-        if let Err(e) = direct.store.link_copy(&friend, attachment, &copy) {
+        let linked = direct
+            .store
+            .link_copy_holding(&friend, attachment, &copy, |bytes, _| match room.as_mut() {
+                Some((_, left)) if *left >= bytes => {
+                    *left -= bytes;
+                    Ok(())
+                }
+                _ => anyhow::bail!("not enough free space for this file"),
+            });
+        if let Err(e) = linked {
             tracing::warn!("a file kept here does not show under another name: {e:#}");
         }
     }
@@ -801,6 +839,8 @@ fn fetched_file(
         direct.share(&inner.shared, group, &friend, attachment);
     }
     drop(chats);
+    // The copies take their room themselves now.
+    drop(room);
     free_space(
         inner,
         Some((&friend, &attachment.id)),
