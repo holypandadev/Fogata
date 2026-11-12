@@ -225,58 +225,7 @@ impl Node {
         }
         match request {
             MemberRequest::Challenge { challenge, tags } => {
-                // Whoever asks gets an answer of the same shape: a proof sealed with the
-                // epoch's key, or random bytes when this device cannot answer. Nobody without
-                // a group's key can name it, gets a device key or finds out whether this
-                // device is in a group; only a named group gets a challenge back.
-                let decoy = |epoch: u32| {
-                    SealedProof::decoy(epoch)
-                        .map(|d| MemberResponse::Proof(WireProof::from(&d)))
-                        .unwrap_or(MemberResponse::Refused)
-                };
-                let Ok(challenge) = <[u8; 32]>::try_from(challenge.as_slice()) else {
-                    return decoy(0);
-                };
-                // The newest epoch both sides know, so a member who missed a rotation can
-                // still connect and catch up.
-                let Some((group, keys)) = self.named_group(&peer, &challenge, &tags) else {
-                    return decoy(0);
-                };
-                let slot = &self.groups[&group];
-                // An older key, or the current one while someone who left still has it,
-                // is no sign the asker is still in: it proves itself first, and once it
-                // has, it is asked to ask again.
-                if !slot.ctx.key_kept_in(keys.epoch()) && !slot.members.contains(&peer) {
-                    let slot = self.groups.get_mut(&group).expect("checked above");
-                    slot.held_back.insert(peer);
-                    self.interesting.insert(peer);
-                    self.hinted.entry(peer).or_default().insert(group);
-                    let older = !slot
-                        .ctx
-                        .known_epochs()
-                        .iter()
-                        .take(MAX_TAGS)
-                        .any(|n| *n == keys.epoch());
-                    self.challenge_with(peer, group, older.then_some(keys.epoch()));
-                    return decoy(keys.epoch());
-                }
-                let local = self.local_peer().to_bytes();
-                let proof = MembershipProof::create(
-                    &keys,
-                    &self.identity,
-                    &local,
-                    &peer.to_bytes(),
-                    &challenge,
-                );
-                let Ok(sealed) = proof.seal(&keys, &local, &peer.to_bytes(), &challenge) else {
-                    return decoy(keys.epoch());
-                };
-                // Membership is proved both ways, also under the epoch the asker named: it
-                // may be older than the newest few (a member that missed many rotations).
-                self.interesting.insert(peer);
-                self.hinted.entry(peer).or_default().insert(group);
-                self.challenge_with(peer, group, Some(keys.epoch()));
-                MemberResponse::Proof(WireProof::from(&sealed))
+                self.on_challenge_request(peer, challenge, tags)
             }
             MemberRequest::Deliver(wire) => {
                 let Some(group) = group_of(&wire.group_id) else {
@@ -862,6 +811,62 @@ impl Node {
                 }
             }
         }
+    }
+
+    /// Answers a [`MemberRequest::Challenge`], whoever asks.
+    fn on_challenge_request(
+        &mut self,
+        peer: PeerId,
+        challenge: Vec<u8>,
+        tags: Vec<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        // Whoever asks gets an answer of the same shape: a proof sealed with the
+        // epoch's key, or random bytes when this device cannot answer. Nobody without
+        // a group's key can name it, gets a device key or finds out whether this
+        // device is in a group; only a named group gets a challenge back.
+        let decoy = |epoch: u32| {
+            SealedProof::decoy(epoch)
+                .map(|d| MemberResponse::Proof(WireProof::from(&d)))
+                .unwrap_or(MemberResponse::Refused)
+        };
+        let Ok(challenge) = <[u8; 32]>::try_from(challenge.as_slice()) else {
+            return decoy(0);
+        };
+        // The newest epoch both sides know, so a member who missed a rotation can
+        // still connect and catch up.
+        let Some((group, keys)) = self.named_group(&peer, &challenge, &tags) else {
+            return decoy(0);
+        };
+        let slot = &self.groups[&group];
+        // An older key, or the current one while someone who left still has it,
+        // is no sign the asker is still in: it proves itself first, and once it
+        // has, it is asked to ask again.
+        if !slot.ctx.key_kept_in(keys.epoch()) && !slot.members.contains(&peer) {
+            let slot = self.groups.get_mut(&group).expect("checked above");
+            slot.held_back.insert(peer);
+            self.interesting.insert(peer);
+            self.hinted.entry(peer).or_default().insert(group);
+            let older = !slot
+                .ctx
+                .known_epochs()
+                .iter()
+                .take(MAX_TAGS)
+                .any(|n| *n == keys.epoch());
+            self.challenge_with(peer, group, older.then_some(keys.epoch()));
+            return decoy(keys.epoch());
+        }
+        let local = self.local_peer().to_bytes();
+        let proof =
+            MembershipProof::create(&keys, &self.identity, &local, &peer.to_bytes(), &challenge);
+        let Ok(sealed) = proof.seal(&keys, &local, &peer.to_bytes(), &challenge) else {
+            return decoy(keys.epoch());
+        };
+        // Membership is proved both ways, also under the epoch the asker named: it
+        // may be older than the newest few (a member that missed many rotations).
+        self.interesting.insert(peer);
+        self.hinted.entry(peer).or_default().insert(group);
+        self.challenge_with(peer, group, Some(keys.epoch()));
+        MemberResponse::Proof(WireProof::from(&sealed))
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
