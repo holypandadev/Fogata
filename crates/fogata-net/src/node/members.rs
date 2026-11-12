@@ -1122,17 +1122,7 @@ impl Node {
                 }
             }
             (Pending::JoinCommit(group), MemberResponse::JoinWaiting) => {
-                // This manager asks its person; it answers with `Admitted` or `JoinDeclined`.
-                // The others are still asked, so any manager can let the device in. Only
-                // while still joining: the answer can come after the `Admitted` that let
-                // this device in, and would say it still waits.
-                if self
-                    .groups
-                    .get(&group)
-                    .is_some_and(|s| s.ctx.joining().is_some())
-                {
-                    self.emit(NodeEvent::JoinWaiting { group });
-                }
+                self.on_join_waiting(group)
             }
             (Pending::Join(group), MemberResponse::JoinDeclined) => {
                 // Unsigned, so anyone could say it: an updated manager sends its signed
@@ -1331,6 +1321,21 @@ impl Node {
                 },
                 Pending::RoomSync(group, next),
             );
+        }
+    }
+
+    /// Takes a manager's word that its person is asked about this device's join.
+    fn on_join_waiting(&mut self, group: GroupId) {
+        // This manager asks its person; it answers with `Admitted` or `JoinDeclined`.
+        // The others are still asked, so any manager can let the device in. Only
+        // while still joining: the answer can come after the `Admitted` that let
+        // this device in, and would say it still waits.
+        if self
+            .groups
+            .get(&group)
+            .is_some_and(|s| s.ctx.joining().is_some())
+        {
+            self.emit(NodeEvent::JoinWaiting { group });
         }
     }
 }
