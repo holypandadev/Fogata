@@ -1,10 +1,11 @@
 part of '../call.dart';
 
-/// Signals from devices that are not participants yet. The room's participants and the
+/// Signals from devices that have no connection here yet. The room's participants and the
 /// signals from them arrive by different ways and in either order: a signal that comes
-/// first waits here until its sender is a participant, and signals from anyone else are
-/// dropped, so a member of the group that is not in the room cannot open a connection and
-/// receive what this device sends.
+/// first waits here until its sender is a participant and the call has made its connection
+/// with it (a call that is starting makes none before its media bridge and microphone are
+/// ready), and signals from anyone else are dropped, so a member of the group that is not
+/// in the room cannot open a connection and receive what this device sends.
 @visibleForTesting
 class EarlySignals {
   /// Signals kept per device; older ones are dropped.

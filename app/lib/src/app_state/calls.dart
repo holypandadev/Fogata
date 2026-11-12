@@ -223,6 +223,7 @@ extension _Calls on AppState {
     }
     if (!allowed) {
       micTest.unblock();
+      _forgetSignalsBefore();
       say(l10n.callNoSoundSystem, error: true);
       // The others in the room would otherwise keep trying to connect to this device.
       _noCallIn = group;
@@ -257,8 +258,38 @@ extension _Calls on AppState {
     fresh.onProblem = (text) => say(text, error: true);
     fresh.onNotice = say;
     fresh.onMicUnusable = (text) => micUnusable(fresh, text);
+    // What the others sent while the call was not made yet, in the order it came: kept by
+    // the call until it has its connection with each of them (see [Call.onSignal]).
+    if (_signalsFor == group) {
+      for (final MapEntry(key: from, value: texts) in _signalsBefore.entries) {
+        for (final text in texts) {
+          unawaited(fresh.onSignal(from, text));
+        }
+      }
+    }
+    _forgetSignalsBefore();
     await fresh.start();
     _followCall();
+  }
+
+  /// Keeps a call signal from [from] for [group]'s call, which this device has not made
+  /// yet: the core hands on signals only of a room this device is in. Those of another
+  /// room, kept before, go.
+  void _keepForCall(String group, String from, String text) {
+    if (_signalsFor != group) {
+      _signalsBefore.clear();
+      _signalsFor = group;
+    }
+    final kept = _signalsBefore.putIfAbsent(from, () => []);
+    kept.add(text);
+    if (kept.length > AppState._signalsEach) kept.removeAt(0);
+  }
+
+  /// Forgets the signals kept for a call not made yet: the call that starts took them, or
+  /// none starts.
+  void _forgetSignalsBefore() {
+    _signalsBefore.clear();
+    _signalsFor = null;
   }
 
   void _tellNoCall(String group, String device) {

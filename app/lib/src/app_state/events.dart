@@ -165,6 +165,9 @@ extension _Events on AppState {
           call.onSignal(e.device!, e.text ?? '');
         } else if (call == null && e.group != null && e.group == _noCallIn) {
           _tellNoCall(e.group!, e.device!);
+        } else if (call == null && e.group != null) {
+          // The room was just entered, and its call is not made yet.
+          _keepForCall(e.group!, e.device!, e.text ?? '');
         }
       case UiEventKind.signalsLost:
         _onSignalsLost(e);

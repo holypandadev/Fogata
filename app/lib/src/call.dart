@@ -322,6 +322,10 @@ class Call extends ChangeNotifier {
   bool _closed = false;
   final _early = EarlySignals();
 
+  /// Signals waiting for their sender's connection here (see [EarlySignals]), for tests.
+  @visibleForTesting
+  int get signalsWaiting => _early.waiting;
+
   /// The local renderers being made ready by [start]; [stop] waits for them.
   Future<void>? _rendering;
 
@@ -1286,9 +1290,17 @@ class Call extends ChangeNotifier {
         } catch (e) {
           _trace('offer to ${id.substring(0, 8)}: $e');
         }
+      } else {
+        // Asked for an offer at once. One that has no connection with this device offers
+        // by itself as it hears this device came in, and lets this pass (its offer is on
+        // its way); one that kept a connection from before, with a call here that is gone
+        // (this device crashed, or its leaving and coming back reached it as one), would
+        // otherwise offer only when the first asking goes, seconds later.
+        _signal(id, {'t': 'again'});
       }
       _watch(peer);
-      // Its signals may have come before it was known to be in the room.
+      // Its signals may have come before it was known to be in the room, or before its
+      // connection here could be made.
       for (final message in _early.take(id)) {
         await peer._inTurn(() => _handleSafely(peer, id, message));
       }
@@ -1372,7 +1384,7 @@ class Call extends ChangeNotifier {
   }
 
   Future<void> onSignal(String from, String text) async {
-    if (_closed || _bridge == null) return;
+    if (_closed) return;
     final Map<String, dynamic> message;
     try {
       message = jsonDecode(text) as Map<String, dynamic>;
@@ -1407,8 +1419,11 @@ class Call extends ChangeNotifier {
     }
     if (peer == null) {
       // Only participants of the room get a connection. The room may just not have told
-      // this device yet that the sender is in it: the signal waits a moment for that.
-      if (!_early.isParticipant(from)) _early.keep(from, message);
+      // this device yet that the sender is in it, or this call may not have made its
+      // connection with them yet (it is still starting: its media bridge, its microphone):
+      // the signal waits for that. Dropped, the first offer of someone already in the room
+      // when this device comes in would be lost, and the next one is seconds away.
+      _early.keep(from, message);
       return;
     }
     if (peer._queued >= CallPeer.maxQueued && message['t'] != 'answer') {

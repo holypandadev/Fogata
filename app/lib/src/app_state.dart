@@ -1465,6 +1465,22 @@ class AppState extends ChangeNotifier {
   /// 10 s.
   final Map<String, DateTime> _noCallTold = {};
 
+  /// Call signals that came for the room of [_signalsFor] while this device had no call
+  /// there yet, by sender, the last [_signalsEach] of each: the core is in a room a moment
+  /// before its call is made, and those already in it offer as soon as they hear this
+  /// device came in. The call takes them as it starts ([_startCall]).
+  String? _signalsFor;
+  final Map<String, List<String>> _signalsBefore = {};
+
+  /// As many as a call keeps of each sender not connected yet (`EarlySignals.perDevice`).
+  static const _signalsEach = 4;
+
+  /// The call signals kept for [group]'s call, for tests.
+  @visibleForTesting
+  int signalsKeptFor(String group) => _signalsFor == group
+      ? _signalsBefore.values.fold(0, (n, l) => n + l.length)
+      : 0;
+
   /// Sends a call signal through the core; tests see it instead.
   @visibleForTesting
   void Function(String group, String device, String payload) sendSignal =
@@ -1702,6 +1718,8 @@ class AppState extends ChangeNotifier {
       _quietUntil[group] = DateTime.now().millisecondsSinceEpoch + 3000;
       final camera = call?.camera ?? false;
       await _endCall();
+      // Signals kept until now were for a call this device is no longer in.
+      _forgetSignalsBefore();
       if (!await succeeds(() => api.joinRoom(groupId: group, voice: target))) {
         // Full, for one: the core said no before leaving the room this device was in,
         // which goes on as it was, with its call.
