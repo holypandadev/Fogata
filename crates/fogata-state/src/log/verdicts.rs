@@ -156,7 +156,7 @@ impl GroupLog {
             read: digest(self.group_id, &read),
             refused: read
                 .iter()
-                .filter(|h| !self.entries.contains_key(*h))
+                .filter(|h| !self.entries.contains_key(h))
                 .copied()
                 .collect(),
             waiting: read
@@ -170,7 +170,7 @@ impl GroupLog {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .iter()
-                .filter(|(h, _)| read.contains(*h) && self.entries.contains_key(*h))
+                .filter(|(h, _)| read.contains(*h) && self.entries.contains_key(h))
                 .map(|(h, s)| (*h, *s))
                 .collect(),
         }
