@@ -233,6 +233,8 @@ extern crate std;
 mod ed25519;
 mod error;
 mod group;
+#[cfg(test)]
+mod vectors;
 
 pub use self::{
     ed25519::Ed25519Group,

@@ -32,3 +32,11 @@ dev-dependencies or features, so its tests module runs under `cfg(test)` alone (
 `std` feature) and two small helpers stand in for the dev-dependencies `hex` and
 `num-bigint`. The known-answer tests of the published crate pass unchanged, so the exchange is
 the same; `the_secrets_of_a_run_are_wiped` checks the wiping.
+
+`src/vectors.rs` (added) runs whole exchanges with a fixed stream of random bytes and checks
+each message sent and each key against `src/vectors.txt` (added), recorded with the published
+crate on curve25519-dalek 4: Fogata's own identities and passwords of the length Fogata uses,
+a run whose two codes differ, the symmetric run, and second messages no honest run sends
+(wrong length or side, bytes that are no point, the identity and small-order points, encodings
+that are not canonical). Friend codes and move codes run between devices that may hold
+different versions of this crate, so no line of it may change.
