@@ -525,6 +525,18 @@ the application's own short sounds included, for as long as the call lasts.
   The log says which: "Fogata: advanced ducking on" or "... not offered by this audio
   module".
 
+## Devices listed off the main thread (macOS)
+
+Taken from upstream 1.6.3 (its "discover capture devices off the main thread in
+getSources"):
+
+- `FlutterRTCMediaStream.m` (both copies, identical): `getSources` finds the cameras and
+  asks the audio module for its inputs and outputs on a queue of the system's, and answers
+  on the main thread. The first camera discovery of a process loads the system's camera
+  extensions and waits for the camera daemon (about a second), and the audio module's
+  lists wait for WebRTC's worker thread; on the main thread, Flutter's UI thread on macOS,
+  the window froze meanwhile (the settings opened, a call started, a device plugged in).
+
 ## The others' voices play without a microphone (macOS)
 
 WebRTC-SDK's AudioEngine audio module plays and records with one AVAudioEngine. Asked to
