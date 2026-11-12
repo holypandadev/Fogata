@@ -1102,22 +1102,7 @@ impl Node {
                 }
             }
             (Pending::RoomSync(group, from), MemberResponse::RoomLog { messages, more }) => {
-                // The room came whole from a member: nothing to ask again.
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.room_again = None;
-                }
-                let all = self.open_room_log(peer, group, messages, false);
-                // The rest comes in further parts; each one must move on.
-                if let Some(next) = more.filter(|n| all && *n > from && *n <= MAX_ROOM_EVENTS) {
-                    self.request(
-                        peer,
-                        MemberRequest::RoomSync {
-                            group_id: group.as_bytes().to_vec(),
-                            from: next,
-                        },
-                        Pending::RoomSync(group, next),
-                    );
-                }
+                self.on_room_sync_answer(peer, group, from, messages, more)
             }
             (Pending::RoomEvents(group), MemberResponse::RoomLog { messages, .. }) => {
                 self.open_room_log(peer, group, messages, true);
@@ -1318,6 +1303,33 @@ impl Node {
                     binding: Some(serde_bytes::ByteBuf::from(binding.to_vec())),
                 },
                 Pending::JoinCommit(group),
+            );
+        }
+    }
+
+    /// Takes a part of a group's rooms a member sent, and asks for the next.
+    fn on_room_sync_answer(
+        &mut self,
+        peer: PeerId,
+        group: GroupId,
+        from: u32,
+        messages: Vec<fogata_proto::WireMessage>,
+        more: Option<u32>,
+    ) {
+        // The room came whole from a member: nothing to ask again.
+        if let Some(slot) = self.groups.get_mut(&group) {
+            slot.room_again = None;
+        }
+        let all = self.open_room_log(peer, group, messages, false);
+        // The rest comes in further parts; each one must move on.
+        if let Some(next) = more.filter(|n| all && *n > from && *n <= MAX_ROOM_EVENTS) {
+            self.request(
+                peer,
+                MemberRequest::RoomSync {
+                    group_id: group.as_bytes().to_vec(),
+                    from: next,
+                },
+                Pending::RoomSync(group, next),
             );
         }
     }
