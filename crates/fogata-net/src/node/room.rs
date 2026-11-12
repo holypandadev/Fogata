@@ -1911,6 +1911,247 @@ mod tests {
         assert_eq!(fit_chat(trackers.iter_mut(), budget), 0);
     }
 
+    /// Two members of a group whose devices keep different amounts of chat (one in many
+    /// groups, past its own bound: [`fit_chat`]) still answer each other's room questions
+    /// alike: who is in the room and which files it lists are the same on both, and the same
+    /// for a member that asks either of them; what one lets go of the chat it does not take
+    /// back from the other's answer, and the other loses nothing for asking it. Only how far
+    /// back the chat goes differs, which is this device's own.
+    #[test]
+    fn devices_keeping_less_chat_still_agree_on_the_room() {
+        use fogata_state::{EVENT_SLACK_BYTES, MAX_CHAT_CHARS};
+        let key = || DeviceIdentity::generate().unwrap().public_key();
+        let people = [key(), key(), key()];
+        let tracker = || RoomTracker::new(key()).weighing(crate::group::room_record_weight);
+        let mut events: HashMap<Vec<u8>, RoomEvent> = HashMap::new();
+        let mut records = Vec::new();
+        let mut n = 0u32;
+        let mut send = |sender, input, weight: usize| {
+            n += 1;
+            let mut message_id = [0u8; 16];
+            message_id[..4].copy_from_slice(&n.to_be_bytes());
+            let mut wire = record(0, 0);
+            wire.message_id = message_id.to_vec();
+            wire.ciphertext = vec![5; weight - crate::group::room_record_weight(&wire)];
+            events.insert(
+                wire.message_id.clone(),
+                RoomEvent {
+                    room: [1; 16],
+                    sender,
+                    timestamp_ms: 1_000 + u64::from(n),
+                    message_id,
+                    input,
+                },
+            );
+            records.push(wire);
+        };
+        for who in people {
+            let join = RoomInput::Join {
+                started_ms: 1_000,
+                nick: "m".into(),
+            };
+            send(who, join, 300);
+        }
+        let heavy = "\u{1}".repeat(MAX_CHAT_CHARS);
+        for i in 0..120u8 {
+            let who = people[usize::from(i) % people.len()];
+            if i % 10 == 0 {
+                let file = FileInfo {
+                    id: [i; 32],
+                    name: format!("clip{i}.mp4"),
+                    size: 1000,
+                    video: Some(VideoPreview {
+                        thumb: vec![9; 1024],
+                        width: 2,
+                        height: 2,
+                        duration_ms: 1,
+                    }),
+                };
+                send(who, RoomInput::Share(file), 2000);
+            }
+            let chat = RoomInput::Chat {
+                nick: "m".into(),
+                text: heavy.clone(),
+            };
+            send(who, chat, 6 * MAX_CHAT_CHARS + 1 + EVENT_SLACK_BYTES);
+        }
+        let apply_all = |t: &mut RoomTracker<WireMessage>, records: &[WireMessage]| {
+            for wire in records {
+                t.apply(events[&wire.message_id].clone(), wire.clone(), 1_000);
+            }
+        };
+        let (mut small, mut large) = (tracker(), tracker());
+        apply_all(&mut small, &records);
+        apply_all(&mut large, &records);
+        let all_chat = large.chat_weights();
+        let budget = all_chat.iter().map(|l| l.3).sum::<usize>() / 3;
+        assert!(fit_chat(std::iter::once(&mut small), budget) > 0);
+        let kept = |t: &RoomTracker<WireMessage>| -> Vec<[u8; 16]> {
+            t.chat_weights().iter().map(|l| l.2).collect()
+        };
+        let (small_chat, large_chat) = (kept(&small), kept(&large));
+        assert!(small_chat.len() < large_chat.len());
+        // The room as each says it: who is in it and its files.
+        let room = |t: &RoomTracker<WireMessage>| {
+            let room = t.room().unwrap();
+            let who: Vec<(DevicePublicKey, String)> = room
+                .participants
+                .iter()
+                .map(|(d, p)| (*d, p.nick.clone()))
+                .collect();
+            (who, room.files.clone())
+        };
+        assert_eq!(room(&small), room(&large));
+        assert_eq!(room(&small).1.len(), 12);
+        // A member that comes online asks either: the same room.
+        let (mut from_small, mut from_large) = (tracker(), tracker());
+        apply_all(&mut from_small, &small.snapshot());
+        apply_all(&mut from_large, &large.snapshot());
+        assert_eq!(room(&from_small), room(&large));
+        assert_eq!(room(&from_large), room(&large));
+        assert_eq!(kept(&from_small), small_chat);
+        assert_eq!(kept(&from_large), large_chat);
+        // Each asks the other: nothing changes on either.
+        apply_all(&mut large, &small.snapshot());
+        apply_all(&mut small, &large.snapshot());
+        assert_eq!(kept(&large), large_chat);
+        assert_eq!(kept(&small), small_chat, "what was let go came back");
+        assert_eq!(room(&small), room(&large));
+    }
+
+    /// The ten rooms of a group whose every room has eight devices of a member that floods
+    /// it: each device shares as many videos with the biggest picture as the room takes from
+    /// it, and one says 500 of the heaviest lines; numbered on from `n`.
+    fn flooded_group(n: &mut u32) -> Vec<RoomTracker<WireMessage>> {
+        use fogata_state::{
+            EVENT_SLACK_BYTES, MAX_CHAT_CHARS, MAX_IN_ROOM, MAX_SHARES_EACH, MAX_THUMB_BYTES,
+        };
+        let key = || DeviceIdentity::generate().unwrap().public_key();
+        let devices: Vec<DevicePublicKey> = (0..MAX_IN_ROOM).map(|_| key()).collect();
+        let me = key();
+        let heavy = "\u{1}".repeat(MAX_CHAT_CHARS);
+        let thumb = vec![9; MAX_THUMB_BYTES];
+        (0..10u8)
+            .map(|v| {
+                let mut t = RoomTracker::new(me).weighing(crate::group::room_record_weight);
+                t.set_room_for(MAX_IN_ROOM, 10);
+                let mut send = |t: &mut RoomTracker<WireMessage>, sender, input, weight| {
+                    *n += 1;
+                    let mut message_id = [0u8; 16];
+                    message_id[..4].copy_from_slice(&n.to_be_bytes());
+                    let mut wire = record(0, 0);
+                    wire.message_id = message_id.to_vec();
+                    wire.ciphertext = vec![5; weight - crate::group::room_record_weight(&wire)];
+                    let event = RoomEvent {
+                        room: [v; 16],
+                        sender,
+                        timestamp_ms: 1_000 + u64::from(*n),
+                        message_id,
+                        input,
+                    };
+                    t.apply(event, wire, 1_000);
+                };
+                for (d, device) in devices.iter().enumerate() {
+                    let join = RoomInput::Join {
+                        started_ms: 1_000,
+                        nick: "m".into(),
+                    };
+                    send(&mut t, *device, join, 300);
+                    for i in 0..MAX_SHARES_EACH as u32 {
+                        let mut id = [0u8; 32];
+                        id[..4].copy_from_slice(&(d as u32 * 1_000 + i).to_be_bytes());
+                        let file = FileInfo {
+                            id,
+                            name: format!("f{i:03}"),
+                            size: 1,
+                            video: Some(VideoPreview {
+                                thumb: thumb.clone(),
+                                width: 2,
+                                height: 2,
+                                duration_ms: 1,
+                            }),
+                        };
+                        let weight = MAX_THUMB_BYTES.div_ceil(3) * 4 + 4 + EVENT_SLACK_BYTES;
+                        send(&mut t, *device, RoomInput::Share(file), weight);
+                    }
+                }
+                for _ in 0..500 {
+                    let chat = RoomInput::Chat {
+                        nick: "m".into(),
+                        text: heavy.clone(),
+                    };
+                    let weight = 6 * MAX_CHAT_CHARS + 1 + EVENT_SLACK_BYTES;
+                    send(&mut t, devices[0], chat, weight);
+                }
+                t
+            })
+            .collect()
+    }
+
+    /// This process's resident memory, in bytes.
+    fn resident() -> u64 {
+        #[cfg(target_os = "linux")]
+        {
+            let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
+            let pages: u64 = statm.split_whitespace().nth(1).unwrap().parse().unwrap();
+            pages * 4096
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let out = std::process::Command::new("ps")
+                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
+                .output()
+                .unwrap();
+            let kib: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
+            kib * 1024
+        }
+    }
+
+    /// What the rooms of ten groups, each flooded as [`flooded_group`] does, make a device
+    /// keep: with every group's own bounds only (`bounded` false), or also within the bound
+    /// on the chat of all its rooms ([`fit_chat`], every slot of the node, here after each
+    /// group came). Linux and macOS, one at a time:
+    /// `cargo test -p fogata-net --lib device_room_memory -- --ignored --nocapture`.
+    fn measure_device_room_memory(bounded: bool) {
+        let before = resident();
+        let mut n = 0;
+        let mut trackers = Vec::new();
+        for _ in 0..10 {
+            trackers.extend(flooded_group(&mut n));
+            if bounded {
+                fit_chat(trackers.iter_mut(), ROOM_CHAT_BYTES);
+            }
+        }
+        let after = resident();
+        let chat: usize = trackers
+            .iter()
+            .flat_map(|t| t.chat_weights())
+            .map(|l| l.3)
+            .sum();
+        let shares: usize = trackers.iter().map(RoomTracker::share_bytes).sum();
+        let records: usize = trackers.iter().map(|t| t.snapshot().len()).sum();
+        println!(
+            "10 groups{}: {records} records kept; chat {} MiB, shares {} MiB as counted; {} MiB \
+             resident",
+            if bounded { ", chat bounded" } else { "" },
+            chat >> 20,
+            shares >> 20,
+            after.saturating_sub(before) >> 20
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_device_room_memory_bounded() {
+        measure_device_room_memory(true);
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_device_room_memory_per_group_only() {
+        measure_device_room_memory(false);
+    }
+
     /// A busy device in many groups, every room of each full of honest chat (500 lines of
     /// 300 characters), keeps all of it within the bound.
     #[test]
