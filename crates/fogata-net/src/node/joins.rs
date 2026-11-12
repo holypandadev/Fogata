@@ -525,7 +525,7 @@ mod tests {
     use crate::{
         NodeConfig, NodeHandle,
         group::GroupSetup,
-        node::{Node, start, tests::inspect},
+        node::{Node, Pending, start, tests::inspect},
     };
 
     /// A node joining a group with an invite, and the group.
@@ -584,6 +584,33 @@ mod tests {
             .unwrap()
             .join_committed
             .insert(peer);
+    }
+
+    /// What a manager's answers to this device's join leave: a refusal of the invite shown
+    /// or of the signed join lets go of that manager for now, an unsigned no only of the
+    /// invite shown to it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_managers_no_to_a_join_lets_go_of_it_as_before() {
+        let (node, group) = joining_node();
+        let found = inspect(&node, move |n| {
+            let (ana, cai, dan) = (PeerId::random(), PeerId::random(), PeerId::random());
+            for peer in [ana, cai, dan] {
+                committed(n, group, peer);
+                n.groups.get_mut(&group).unwrap().join_sent.insert(peer);
+            }
+            n.on_response(ana, Pending::Join(group), MemberResponse::Refused);
+            n.on_response(cai, Pending::JoinCommit(group), MemberResponse::Refused);
+            n.on_response(dan, Pending::Join(group), MemberResponse::JoinDeclined);
+            let slot = &n.groups[&group];
+            [ana, cai, dan].map(|p| {
+                (
+                    slot.join_sent.contains(&p),
+                    slot.join_committed.contains(&p),
+                )
+            })
+        })
+        .await;
+        assert_eq!(found, [(false, false), (false, false), (false, true)]);
     }
 
     #[tokio::test(flavor = "multi_thread")]

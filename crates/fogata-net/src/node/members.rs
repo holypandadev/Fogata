@@ -1530,6 +1530,83 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// What answers of each kind leave in a lone manager's group, for those no other test
+    /// here gives: a roster from a member and from a peer that is none, refusals of a
+    /// roster, a sync, a room, a refusal sent and a banner or picture record, and a leave
+    /// acknowledged by a peer that is no member.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn answers_of_each_kind_leave_the_group_as_before() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let (stranger, bea, cai) = (PeerId::random(), PeerId::random(), PeerId::random());
+            add_member(n, group, bea);
+            let roster = || MemberResponse::Roster {
+                peers: vec![serde_bytes::ByteBuf::from(cai.to_bytes())],
+            };
+            n.on_response(stranger, Pending::Roster(group), roster());
+            n.on_response(bea, Pending::Roster(group), roster());
+            let slot = &n.groups[&group];
+            let rosters = (
+                slot.rosters.contains_key(&stranger),
+                slot.rosters
+                    .get(&bea)
+                    .map(|(listed, _)| listed.contains(&cai)),
+            );
+            n.on_response(bea, Pending::Roster(group), MemberResponse::Refused);
+            let roster_refused = n.groups[&group].roster_refused.contains(&bea);
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.syncing.insert(bea, Instant::now());
+            slot.room_asked.insert(bea, Instant::now());
+            slot.refusing.insert(bea, (None, 1));
+            n.on_response(bea, Pending::Sync(group), MemberResponse::Refused);
+            n.on_response(bea, Pending::RoomSync(group, 0), MemberResponse::Refused);
+            n.on_response(bea, Pending::Refusal(group), MemberResponse::Ack);
+            let slot = &n.groups[&group];
+            let kept = (
+                slot.syncing.contains_key(&bea),
+                slot.room_asked.contains_key(&bea),
+                slot.refusing.contains_key(&bea),
+            );
+            let digest = [7; 32];
+            n.on_response(bea, Pending::Banner(group, digest), MemberResponse::Refused);
+            n.on_response(
+                bea,
+                Pending::Picture(group, digest),
+                MemberResponse::Refused,
+            );
+            let slot = &n.groups[&group];
+            let records_refused = (
+                slot.banner_refused.get(&bea) == Some(&digest),
+                slot.picture_refused.get(&bea) == Some(&digest),
+            );
+            n.on_response(bea, Pending::Picture(group, digest), MemberResponse::Ack);
+            let picture_refused = n.groups[&group].picture_refused.contains_key(&bea);
+            n.on_response(stranger, Pending::Leave(group), MemberResponse::Ack);
+            let still_here = n.groups.contains_key(&group);
+            (
+                rosters,
+                roster_refused,
+                kept,
+                records_refused,
+                picture_refused,
+                still_here,
+            )
+        })
+        .await;
+        assert_eq!(
+            found,
+            (
+                (false, Some(true)),
+                true,
+                (false, false, false),
+                (true, true),
+                false,
+                true
+            )
+        );
+        node.shutdown().await.unwrap();
+    }
+
     /// A member asking for the log and the rooms' past again and again is answered up to
     /// its budget, and refused after it, while another member is still answered.
     #[tokio::test(flavor = "multi_thread")]
