@@ -429,25 +429,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             hidden,
             ..
         } => handle_friend_online(inner, now, device, path, hidden),
-        NodeEvent::FriendOffline { device } => {
-            {
-                let mut state = inner.lock();
-                state.friends_online.remove(&device);
-                state.friend_rooms.remove(&device);
-                state.forget_away_if_gone(&device);
-                // One that appeared offline was last seen when it hid.
-                if !state.hidden.contains(&device) {
-                    state
-                        .meta
-                        .last_seen
-                        .insert(hex::encode(device.as_bytes()), now);
-                }
-            }
-            inner.save_meta();
-            inner.emit(CoreEvent::FriendOffline { device });
-            inner.emit(CoreEvent::FriendsChanged);
-            calls::on_offline(inner, device).await;
-        }
+        NodeEvent::FriendOffline { device } => handle_friend_offline(inner, now, device).await,
         NodeEvent::Call { from, message } => calls::on_call(inner, from, message).await,
         NodeEvent::CallUndelivered { to, call, refused } => {
             calls::on_undelivered(inner, to, call, refused).await
@@ -932,6 +914,27 @@ fn handle_friend_online(
     inner.save_meta();
     inner.emit(CoreEvent::FriendOnline { device });
     inner.emit(CoreEvent::FriendsChanged);
+}
+
+/// A friend went offline.
+async fn handle_friend_offline(inner: &Arc<Inner>, now: u64, device: DevicePublicKey) {
+    {
+        let mut state = inner.lock();
+        state.friends_online.remove(&device);
+        state.friend_rooms.remove(&device);
+        state.forget_away_if_gone(&device);
+        // One that appeared offline was last seen when it hid.
+        if !state.hidden.contains(&device) {
+            state
+                .meta
+                .last_seen
+                .insert(hex::encode(device.as_bytes()), now);
+        }
+    }
+    inner.save_meta();
+    inner.emit(CoreEvent::FriendOffline { device });
+    inner.emit(CoreEvent::FriendsChanged);
+    calls::on_offline(inner, device).await;
 }
 
 #[cfg(test)]
