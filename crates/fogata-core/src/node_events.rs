@@ -445,26 +445,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             device,
             hidden,
             away,
-        } => {
-            let changed = {
-                let mut state = inner.lock();
-                let hidden = if hidden {
-                    state.hidden.insert(device)
-                } else {
-                    state.hidden.remove(&device)
-                };
-                let away = if away {
-                    state.away.insert(device)
-                } else {
-                    state.away.remove(&device)
-                };
-                hidden || away
-            };
-            if changed {
-                inner.emit(CoreEvent::GroupsChanged);
-                inner.emit(CoreEvent::FriendsChanged);
-            }
-        }
+        } => handle_member_presence(inner, device, hidden, away),
         NodeEvent::FriendsChanged => {
             // A friend may have gone.
             forget_gone_soon(inner);
@@ -946,6 +927,28 @@ fn handle_friend_status(
         inner.emit(CoreEvent::GroupsChanged);
     }
     inner.emit(CoreEvent::FriendsChanged);
+}
+
+/// A member's presence: hidden, away or neither.
+fn handle_member_presence(inner: &Arc<Inner>, device: DevicePublicKey, hidden: bool, away: bool) {
+    let changed = {
+        let mut state = inner.lock();
+        let hidden = if hidden {
+            state.hidden.insert(device)
+        } else {
+            state.hidden.remove(&device)
+        };
+        let away = if away {
+            state.away.insert(device)
+        } else {
+            state.away.remove(&device)
+        };
+        hidden || away
+    };
+    if changed {
+        inner.emit(CoreEvent::GroupsChanged);
+        inner.emit(CoreEvent::FriendsChanged);
+    }
 }
 
 #[cfg(test)]
