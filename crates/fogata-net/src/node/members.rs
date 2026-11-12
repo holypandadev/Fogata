@@ -278,17 +278,7 @@ impl Node {
                 self.on_key_problem_request(peer, group_id, epoch)
             }
             MemberRequest::Presence { hidden, away } => {
-                let Some(member) = self.members.get(&peer) else {
-                    return self.keep_early(peer, |e| e.presence = Some((hidden, away)));
-                };
-                let device = member.device;
-                let away = away && !hidden;
-                self.emit(NodeEvent::MemberPresence {
-                    device,
-                    hidden,
-                    away,
-                });
-                MemberResponse::Ack
+                self.on_presence_request(peer, hidden, away)
             }
             MemberRequest::Profile { profile, animation } => {
                 let Some(member) = self.members.get(&peer) else {
@@ -1003,6 +993,21 @@ impl Node {
         };
         let new = slot.ctx.mend_reported_key(&device, epoch, now_ms());
         self.after_group_change(group, new, None);
+        MemberResponse::Ack
+    }
+
+    /// Takes a peer's presence: hidden, away or neither.
+    fn on_presence_request(&mut self, peer: PeerId, hidden: bool, away: bool) -> MemberResponse {
+        let Some(member) = self.members.get(&peer) else {
+            return self.keep_early(peer, |e| e.presence = Some((hidden, away)));
+        };
+        let device = member.device;
+        let away = away && !hidden;
+        self.emit(NodeEvent::MemberPresence {
+            device,
+            hidden,
+            away,
+        });
         MemberResponse::Ack
     }
 
