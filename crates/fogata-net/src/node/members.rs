@@ -257,28 +257,7 @@ impl Node {
             MemberRequest::RoomSync { group_id, from } => {
                 self.on_room_sync_request(peer, group_id, from)
             }
-            MemberRequest::Addresses { addresses } => {
-                // Kept for a peer that may still be proving its membership (both ends verify
-                // each other at once), but only ever dialled for members.
-                if !self.swarm.is_connected(&peer) {
-                    return MemberResponse::Refused;
-                }
-                let addresses = lan_quic(addresses);
-                let changed = self.member_lan.get(&peer) != Some(&addresses);
-                self.member_lan.insert(peer, addresses);
-                // A first try that only knew public addresses may have failed.
-                if changed
-                    && self
-                        .lan_redialled
-                        .get(&peer)
-                        .is_none_or(|t| t.elapsed() >= LAN_REDIAL)
-                {
-                    self.lan_redialled.insert(peer, Instant::now());
-                    self.quic_tried.remove(&peer);
-                }
-                self.want_datagrams(peer);
-                MemberResponse::Ack
-            }
+            MemberRequest::Addresses { addresses } => self.on_addresses_request(peer, addresses),
             MemberRequest::Signal { group_id, payload } => {
                 let Some(group) = group_of(&group_id) else {
                     return MemberResponse::Refused;
@@ -960,6 +939,34 @@ impl Node {
         let (messages, more) = self.room_snapshot(group, from);
         self.charge_served(device, messages.iter().map(wire_bytes).sum());
         MemberResponse::RoomLog { messages, more }
+    }
+
+    /// Keeps the local addresses a peer sends.
+    fn on_addresses_request(
+        &mut self,
+        peer: PeerId,
+        addresses: Vec<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        // Kept for a peer that may still be proving its membership (both ends verify
+        // each other at once), but only ever dialled for members.
+        if !self.swarm.is_connected(&peer) {
+            return MemberResponse::Refused;
+        }
+        let addresses = lan_quic(addresses);
+        let changed = self.member_lan.get(&peer) != Some(&addresses);
+        self.member_lan.insert(peer, addresses);
+        // A first try that only knew public addresses may have failed.
+        if changed
+            && self
+                .lan_redialled
+                .get(&peer)
+                .is_none_or(|t| t.elapsed() >= LAN_REDIAL)
+        {
+            self.lan_redialled.insert(peer, Instant::now());
+            self.quic_tried.remove(&peer);
+        }
+        self.want_datagrams(peer);
+        MemberResponse::Ack
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
