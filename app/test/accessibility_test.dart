@@ -184,6 +184,7 @@ AppState _ringing({bool ringing = true}) {
         voiceRooms: const [],
         openInvites: g.openInvites,
         needsUpdate: false,
+        raiseAnyway: false,
       ),
   ];
   state.contacts.friends = [

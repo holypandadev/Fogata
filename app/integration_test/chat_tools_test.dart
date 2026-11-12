@@ -103,6 +103,7 @@ AppState _state(Screen page) {
               ],
               openInvites: 0,
               needsUpdate: false,
+              raiseAnyway: false,
             ),
           ]
           ..nav.page = page);

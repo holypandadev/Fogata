@@ -2165,6 +2165,17 @@ class AppState extends ChangeNotifier {
   }
 
   /// Who manages [group]: the first [first] in it, or everyone (`null`).
+  /// Turns a group's stronger protection on although `behind` (device ids, those the
+  /// person confirmed) have not updated Fogata (managers, once the group waited long
+  /// enough: [UiGroup.raiseAnyway]).
+  Future<bool> raiseGroupLevelAnyway(String group, List<String> behind) async {
+    final ok = await succeeds(
+      () => api.raiseGroupLevelAnyway(groupId: group, behind: behind),
+    );
+    await refreshGroups();
+    return ok;
+  }
+
   Future<bool> setGroupManagers(String group, int? first) async {
     final ok = await succeeds(
       () => api.setGroupManagers(groupId: group, first: first),

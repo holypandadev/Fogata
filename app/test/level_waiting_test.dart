@@ -35,6 +35,7 @@ AppState _settings({
   required bool manager,
   List<UiPerson>? behind,
   bool needsUpdate = false,
+  bool raiseAnyway = false,
 }) => AppState('/nonexistent/fogata-level-waiting-test')
   ..contacts.profile = const UiProfile(person: _ana, fingerprint: '7Q4M K2XR')
   ..contacts.groups = [
@@ -55,6 +56,7 @@ AppState _settings({
       openInvites: 0,
       levelBehind: behind,
       needsUpdate: needsUpdate,
+      raiseAnyway: raiseAnyway,
     ),
   ]
   ..contacts.members['g'] = [
@@ -99,6 +101,29 @@ void main() {
     await _show(tester, _settings(manager: true, behind: [_bea, _leo]));
     expect(tester.takeException(), isNull);
     expect(find.text(waiting), findsOneWidget);
+  });
+
+  testWidgets('only a group that waited long enough may be turned on anyway', (
+    tester,
+  ) async {
+    await _show(tester, _settings(manager: true, behind: [_bea, _leo]));
+    expect(find.byKey(const ValueKey('raise-anyway')), findsNothing);
+    await _show(
+      tester,
+      _settings(manager: true, behind: [_bea, _leo], raiseAnyway: true),
+    );
+    expect(find.text(waiting), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('raise-anyway')));
+    await tester.pumpAndSettle();
+    // The confirmation names who will have to update.
+    expect(find.text('Turn on stronger protection now?'), findsOneWidget);
+    expect(
+      find.textContaining('Bea, Leo will have to update Fogata'),
+      findsOneWidget,
+    );
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('Turn on stronger protection now?'), findsNothing);
   });
 
   testWidgets('nothing is said when nobody holds the group back', (
@@ -159,6 +184,7 @@ void main() {
           voiceRooms: g.voiceRooms,
           openInvites: g.openInvites,
           needsUpdate: false,
+          raiseAnyway: false,
         ),
     ];
     expect(s.notices.list, isEmpty);

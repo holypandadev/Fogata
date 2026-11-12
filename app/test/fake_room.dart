@@ -112,6 +112,7 @@ AppState fakeRoom({
         room: summary,
         openInvites: 0,
         needsUpdate: false,
+        raiseAnyway: false,
       ),
     ]
     ..nav.page = Screen.room

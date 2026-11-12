@@ -76,6 +76,7 @@ void _limit(AppState state, int max, {int gaming = 2}) {
       room: g.room,
       openInvites: 0,
       needsUpdate: false,
+      raiseAnyway: false,
     ),
   ];
 }
@@ -223,6 +224,7 @@ void main() {
         room: g.room,
         openInvites: 0,
         needsUpdate: false,
+        raiseAnyway: false,
       ),
     ];
     await _show(tester, state);

@@ -32,6 +32,7 @@ UiGroup _live(String id, int people) {
     room: room,
     openInvites: 0,
     needsUpdate: false,
+    raiseAnyway: false,
   );
 }
 

@@ -89,6 +89,10 @@ pub struct UiGroup {
     /// For a manager, while the group waits to go up to the protection this version gives:
     /// the members whose Fogata must be updated first. None otherwise.
     pub level_behind: Option<Vec<UiPerson>>,
+    /// For a manager, while the group waits: it has waited long enough that it may be
+    /// raised anyway ([`super::app::raise_group_level_anyway`]), leaving `level_behind` to
+    /// update before they take part again.
+    pub raise_anyway: bool,
     /// A manager raised the group to rules this version of Fogata does not know: until it
     /// is updated, this device stays with the group as it was then and sees none of its
     /// changes since. Said again after a restart, until Fogata is updated.
@@ -1029,6 +1033,7 @@ pub(crate) fn group(g: GroupView) -> UiGroup {
         }),
         level_behind: (!g.level_behind.is_empty())
             .then(|| g.level_behind.iter().map(person).collect()),
+        raise_anyway: g.raise_anyway,
         needs_update: g.level_ahead.is_some(),
     }
 }

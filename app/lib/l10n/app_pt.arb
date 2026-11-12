@@ -1520,5 +1520,9 @@
   "groupUpdateTitle": "Este grupo precisa de um Fogata mais novo",
   "groupUpdateText": "Alguém que o gerencia ativou uma proteção mais forte, que esta versão do Fogata não tem. Até você atualizar, o grupo fica como estava: você não vê o que mudou nele desde então. O Fogata recebe atualizações dos seus amigos e grupos e oferece uma no topo quando estiver pronta.",
   "bellGroupUpdate": "“{group}” precisa de um Fogata mais novo",
-  "bellGroupUpdateText": "Até você atualizar, não verá o que mudou no grupo."
+  "bellGroupUpdateText": "Até você atualizar, não verá o que mudou no grupo.",
+  "groupSettingsRaiseAnyway": "Ativar mesmo assim",
+  "groupSettingsRaiseAnywayTitle": "Ativar a proteção mais forte agora?",
+  "groupSettingsRaiseAnywayText": "{names} terão de atualizar o Fogata antes de voltar a participar deste grupo: até lá, não verão o que mudar nele. O grupo já esperou uma semana por eles.",
+  "groupSettingsRaiseAnywayConfirm": "Ativar"
 }

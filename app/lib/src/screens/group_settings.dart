@@ -929,7 +929,8 @@ class _Members extends StatelessWidget {
           const SizedBox(height: 12),
         ],
         // Who holds the group back from its stronger protection: they only need to
-        // update. Nothing to do here for the manager but to tell them.
+        // update. The manager can tell them; once the group has waited long enough, it
+        // can also turn it on without them, after naming who will have to update.
         if (group.levelBehind case final behind?
             when group.manager && behind.isNotEmpty) ...[
           Container(
@@ -938,11 +939,40 @@ class _Members extends StatelessWidget {
               color: c.blueSoft,
               borderRadius: BorderRadius.circular(14),
             ),
-            child: Text(
-              l10n.groupSettingsLevelWaiting(
-                behind.map((p) => p.name).join(', '),
-              ),
-              style: tx(c.blue, size: 13),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  l10n.groupSettingsLevelWaiting(
+                    behind.map((p) => p.name).join(', '),
+                  ),
+                  style: tx(c.blue, size: 13),
+                ),
+                if (group.raiseAnyway) ...[
+                  const SizedBox(height: 8),
+                  FgButton(
+                    key: const ValueKey('raise-anyway'),
+                    text: l10n.groupSettingsRaiseAnyway,
+                    height: 30,
+                    fontSize: 13,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                    onTap: () async {
+                      final yes = await confirmDialog(
+                        context,
+                        title: l10n.groupSettingsRaiseAnywayTitle,
+                        text: l10n.groupSettingsRaiseAnywayText(
+                          behind.map((p) => p.name).join(', '),
+                        ),
+                        action: l10n.groupSettingsRaiseAnywayConfirm,
+                      );
+                      if (!yes) return;
+                      await state.raiseGroupLevelAnyway(group.id, [
+                        for (final p in behind) p.id,
+                      ]);
+                    },
+                  ),
+                ],
+              ],
             ),
           ),
           const SizedBox(height: 12),

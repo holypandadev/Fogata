@@ -48,6 +48,7 @@ void main() {
             ],
             openInvites: 0,
             needsUpdate: false,
+            raiseAnyway: false,
           ),
         ]
         ..roomState.roomGroup = 'g'
@@ -133,6 +134,7 @@ void main() {
             ],
             openInvites: 0,
             needsUpdate: false,
+            raiseAnyway: false,
           ),
         ]
         ..roomState.roomGroup = 'g'

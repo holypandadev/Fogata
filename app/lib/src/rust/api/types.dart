@@ -874,6 +874,11 @@ class UiGroup {
   /// the members whose Fogata must be updated first. None otherwise.
   final List<UiPerson>? levelBehind;
 
+  /// For a manager, while the group waits: it has waited long enough that it may be
+  /// raised anyway ([`super::app::raise_group_level_anyway`]), leaving `level_behind` to
+  /// update before they take part again.
+  final bool raiseAnyway;
+
   /// A manager raised the group to rules this version of Fogata does not know: until it
   /// is updated, this device stays with the group as it was then and sees none of its
   /// changes since. Said again after a restart, until Fogata is updated.
@@ -900,6 +905,7 @@ class UiGroup {
     required this.outranks,
     this.keptOut,
     this.levelBehind,
+    required this.raiseAnyway,
     required this.needsUpdate,
   });
 
@@ -925,6 +931,7 @@ class UiGroup {
       outranks.hashCode ^
       keptOut.hashCode ^
       levelBehind.hashCode ^
+      raiseAnyway.hashCode ^
       needsUpdate.hashCode;
 
   @override
@@ -952,6 +959,7 @@ class UiGroup {
           outranks == other.outranks &&
           keptOut == other.keptOut &&
           levelBehind == other.levelBehind &&
+          raiseAnyway == other.raiseAnyway &&
           needsUpdate == other.needsUpdate;
 }
 

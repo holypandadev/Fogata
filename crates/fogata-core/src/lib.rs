@@ -79,6 +79,17 @@ pub fn now_ms() -> u64 {
 /// How long a group this device left still runs at start, so that its leave reaches the
 /// members who were away; as long as members look up the keys of older epochs.
 const LEAVE_DELIVERY_MS: u64 = 14 * 24 * 3600 * 1000;
+/// How long a group this device manages waits to go up to the level of judgment this
+/// version gives, held back by members never seen at it, before a manager may raise it
+/// anyway ([`Core::raise_group_level_anyway`]): those members must then update before they
+/// take part again. A week: Fogata's updates reach a member within a day or two of its
+/// next start, from any friend or member that has them, and a group that meets once a
+/// week sees each member that still uses Fogata in that time; one not seen at the level
+/// after a week has stopped using Fogata, cannot update, or keeps the group back on
+/// purpose (the network does not tell a copy that lists a lower level from an older one).
+/// Shorter would leave behind the person away for a few days; longer keeps the group's
+/// weaker rules for the very member they are about.
+pub const LEVEL_WAIT_MS: u64 = 7 * 24 * 3600 * 1000;
 /// A friend's group invitations are announced at most [`OFFER_NOTICES`] times in this long;
 /// the others still wait in the list.
 const OFFER_NOTICE_MS: u64 = 60_000;
@@ -184,6 +195,10 @@ pub struct GroupView {
     /// (see [`fogata_state::Level`]): the members whose Fogata was not seen to be new
     /// enough for it, who hold it back until they update. Empty otherwise.
     pub level_behind: Vec<Person>,
+    /// For a manager whose group waits to go up ([`Self::level_behind`] not empty): it has
+    /// waited [`LEVEL_WAIT_MS`] or longer, and may be raised anyway
+    /// ([`Core::raise_group_level_anyway`]), leaving those members to update first.
+    pub raise_anyway: bool,
     /// A level above every one this version judges at that a manager raised the group to
     /// (see [`fogata_state::GroupLog::level_ahead`]): this device follows the group only once Fogata is
     /// updated. Kept with the log, so it is told again after a restart, until then.

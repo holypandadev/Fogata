@@ -6159,4 +6159,18 @@ class L10nZh extends L10n {
 
   @override
   String get bellGroupUpdateText => '在你更新之前，你看不到群组的变化。';
+
+  @override
+  String get groupSettingsRaiseAnyway => '仍然开启';
+
+  @override
+  String get groupSettingsRaiseAnywayTitle => '现在开启更强的保护吗？';
+
+  @override
+  String groupSettingsRaiseAnywayText(String names) {
+    return '$names需要先更新Fogata，才能再次参与这个群组：在那之前，他们看不到群组的变化。群组已经等了他们一周。';
+  }
+
+  @override
+  String get groupSettingsRaiseAnywayConfirm => '开启';
 }

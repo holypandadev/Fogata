@@ -2616,7 +2616,17 @@ every other member was seen at the level this version judges at (`raise_level_wh
 in fogata-net, the manager above it going first when connected): a group with a member on an
 older copy stays where it is, under the old rules, until that member updates. The group's
 settings show its managers that the group waits, and which members have not updated
-(`GroupView::level_behind`); nothing raises it past them. Copies before levels kept a `Level` entry as a kind they do not know,
+(`GroupView::level_behind`). One such member could otherwise keep the group under the old
+rules for ever (one that stopped using Fogata, cannot update, or connects listing a lower
+level on purpose), so once the group has waited a week (`LEVEL_WAIT_MS` in fogata-core,
+counted on the manager's device from when it first saw the group wait, kept in `meta.json`
+across restarts) its settings offer to raise it anyway, after a confirmation that names who
+will have to update before taking part again (`Core::raise_group_level_anyway`, refused if
+who is behind changed since it was shown). A week: updates reach a member within a day or two
+of its next start, from any friend or member that has them, and a group that meets once a
+week sees in that time every member that still uses Fogata. The members left behind refuse
+the `Level` entry, keep the group as it was there, and are told that it needs a newer Fogata
+(below); nothing of theirs is lost, and they take part again once updated. Copies before levels kept a `Level` entry as a kind they do not know,
 changing nothing: that one change came without a level, before any copy was handed out.
 
 Nobody is let into a group that went up whose copy does not judge at its level: such a copy
@@ -2631,7 +2641,7 @@ shows its invite to; its person is told, once per invite or friend, that that pe
 update Fogata first (`NodeEvent::MustUpdateToJoin`). A joining device sent a log with a
 signed `Level` entry above every level it knows tells its person to update
 (`NodeEvent::UpdateToJoin`). A member's copy given such an entry (a manager raised the group
-past it, see 5.1's raise "anyway" below) refuses it and waits on what is signed after it, as
+past it anyway, above) refuses it and waits on what is signed after it, as
 above: the group stays there as it was (members, keys, rooms), and what changed since never
 reaches it. It keeps the refused entry aside (`GroupLog::level_ahead`): never sent, never
 signed on, stored after the log's entries and refused again when the log is read, so the

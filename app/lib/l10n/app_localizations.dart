@@ -9288,6 +9288,30 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Until you update, you won’t see what changed in the group.'**
   String get bellGroupUpdateText;
+
+  /// Group settings › Members, a button under groupSettingsLevelWaiting, shown to those who manage the group once it has waited a week: turns the stronger protection on without waiting for the members who have not updated.
+  ///
+  /// In en, this message translates to:
+  /// **'Turn it on anyway'**
+  String get groupSettingsRaiseAnyway;
+
+  /// Title of the confirmation asked after groupSettingsRaiseAnyway.
+  ///
+  /// In en, this message translates to:
+  /// **'Turn on stronger protection now?'**
+  String get groupSettingsRaiseAnywayTitle;
+
+  /// Text of the confirmation asked after groupSettingsRaiseAnyway. {names} lists the members who have not updated Fogata, separated by commas: they cannot follow the group until they update.
+  ///
+  /// In en, this message translates to:
+  /// **'{names} will have to update Fogata before they can take part in this group again: until then, they won’t see what changes in it. The group has waited a week for them.'**
+  String groupSettingsRaiseAnywayText(String names);
+
+  /// The confirming button of the confirmation asked after groupSettingsRaiseAnyway.
+  ///
+  /// In en, this message translates to:
+  /// **'Turn it on'**
+  String get groupSettingsRaiseAnywayConfirm;
 }
 
 class _L10nDelegate extends LocalizationsDelegate<L10n> {

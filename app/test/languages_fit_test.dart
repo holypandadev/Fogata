@@ -243,6 +243,8 @@ AppState _members() {
       openInvites: g.openInvites,
       // And gone past this version: the note every member sees comes first.
       needsUpdate: true,
+      // Waited long enough: the button that turns it on anyway shows too.
+      raiseAnyway: true,
       levelBehind: [for (var i = 1; i < 4; i++) other(i)],
     ),
   ];
@@ -355,6 +357,7 @@ AppState _needingUpdate(AppState state) {
       keptOut: g.keptOut,
       levelBehind: g.levelBehind,
       needsUpdate: true,
+      raiseAnyway: g.raiseAnyway,
     ),
   ];
   return state;

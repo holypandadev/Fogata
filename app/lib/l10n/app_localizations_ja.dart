@@ -6250,4 +6250,18 @@ class L10nJa extends L10n {
 
   @override
   String get bellGroupUpdateText => 'アップデートするまで、グループの変更は表示されません。';
+
+  @override
+  String get groupSettingsRaiseAnyway => 'それでもオンにする';
+
+  @override
+  String get groupSettingsRaiseAnywayTitle => 'より強い保護を今すぐオンにしますか？';
+
+  @override
+  String groupSettingsRaiseAnywayText(String names) {
+    return '$namesは、Fogataをアップデートするまでこのグループに参加できなくなり、それまでグループの変更も表示されません。グループは1週間待ちました。';
+  }
+
+  @override
+  String get groupSettingsRaiseAnywayConfirm => 'オンにする';
 }

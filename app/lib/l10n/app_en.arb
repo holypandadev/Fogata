@@ -8971,5 +8971,26 @@
   "bellGroupUpdateText": "Until you update, you won’t see what changed in the group.",
   "@bellGroupUpdateText": {
     "description": "Notifications (the bell), under bellGroupUpdate: what not updating means."
+  },
+  "groupSettingsRaiseAnyway": "Turn it on anyway",
+  "@groupSettingsRaiseAnyway": {
+    "description": "Group settings › Members, a button under groupSettingsLevelWaiting, shown to those who manage the group once it has waited a week: turns the stronger protection on without waiting for the members who have not updated."
+  },
+  "groupSettingsRaiseAnywayTitle": "Turn on stronger protection now?",
+  "@groupSettingsRaiseAnywayTitle": {
+    "description": "Title of the confirmation asked after groupSettingsRaiseAnyway."
+  },
+  "groupSettingsRaiseAnywayText": "{names} will have to update Fogata before they can take part in this group again: until then, they won’t see what changes in it. The group has waited a week for them.",
+  "@groupSettingsRaiseAnywayText": {
+    "description": "Text of the confirmation asked after groupSettingsRaiseAnyway. {names} lists the members who have not updated Fogata, separated by commas: they cannot follow the group until they update.",
+    "placeholders": {
+      "names": {
+        "type": "String"
+      }
+    }
+  },
+  "groupSettingsRaiseAnywayConfirm": "Turn it on",
+  "@groupSettingsRaiseAnywayConfirm": {
+    "description": "The confirming button of the confirmation asked after groupSettingsRaiseAnyway."
   }
 }

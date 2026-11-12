@@ -80,6 +80,7 @@ AppState state({required bool first, int? until}) {
         ],
         openInvites: 0,
         needsUpdate: false,
+        raiseAnyway: false,
         outranks: first ? const ['bea', 'leo'] : const [],
         keptOut: first
             ? [

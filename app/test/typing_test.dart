@@ -264,6 +264,7 @@ void main() {
           ],
           openInvites: 0,
           needsUpdate: false,
+          raiseAnyway: false,
           outranks: const [],
         ),
       ];

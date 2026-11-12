@@ -6755,4 +6755,19 @@ class L10nRu extends L10n {
   @override
   String get bellGroupUpdateText =>
       'Пока вы не обновитесь, вы не увидите, что изменилось в группе.';
+
+  @override
+  String get groupSettingsRaiseAnyway => 'Всё равно включить';
+
+  @override
+  String get groupSettingsRaiseAnywayTitle =>
+      'Включить более сильную защиту сейчас?';
+
+  @override
+  String groupSettingsRaiseAnywayText(String names) {
+    return '$names смогут снова участвовать в этой группе только после обновления Fogata: до тех пор они не увидят, что в ней меняется. Группа ждала их неделю.';
+  }
+
+  @override
+  String get groupSettingsRaiseAnywayConfirm => 'Включить';
 }

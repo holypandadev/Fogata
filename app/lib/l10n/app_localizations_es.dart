@@ -6671,4 +6671,19 @@ class L10nEs extends L10n {
   @override
   String get bellGroupUpdateText =>
       'Hasta que actualices, no verás lo que cambió en el grupo.';
+
+  @override
+  String get groupSettingsRaiseAnyway => 'Activarla de todos modos';
+
+  @override
+  String get groupSettingsRaiseAnywayTitle =>
+      '¿Activar ahora la protección más fuerte?';
+
+  @override
+  String groupSettingsRaiseAnywayText(String names) {
+    return '$names tendrán que actualizar Fogata antes de volver a participar en este grupo: hasta entonces, no verán lo que cambie en él. El grupo ya los esperó una semana.';
+  }
+
+  @override
+  String get groupSettingsRaiseAnywayConfirm => 'Activarla';
 }

@@ -338,6 +338,18 @@ Future<void> demote({required String groupId, required String memberId}) =>
       memberId: memberId,
     );
 
+/// Turns a group's stronger protection on although the members in `behind` (device ids)
+/// have not updated Fogata, once the group has waited long enough (managers, see
+/// `UiGroup::raise_anyway`). `behind` is who the person was shown and confirmed: nothing
+/// happens when that changed meanwhile.
+Future<void> raiseGroupLevelAnyway({
+  required String groupId,
+  required List<String> behind,
+}) => RustLib.instance.api.crateApiAppRaiseGroupLevelAnyway(
+  groupId: groupId,
+  behind: behind,
+);
+
 /// Who manages a group: the first `first` on its list, or everyone (`None`).
 Future<void> setGroupManagers({required String groupId, int? first}) => RustLib
     .instance

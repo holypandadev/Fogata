@@ -63,6 +63,7 @@ AppState ladder(int mine, {int? managers}) {
         voiceRooms: const [UiVoiceRoom(id: AppState.firstRoom, name: '')],
         openInvites: 0,
         needsUpdate: false,
+        raiseAnyway: false,
         keptOut: const [],
       ),
     ]
@@ -286,6 +287,7 @@ void main() {
           voiceRooms: [UiVoiceRoom(id: AppState.firstRoom, name: '')],
           openInvites: 0,
           needsUpdate: false,
+          raiseAnyway: false,
           keptOut: [],
         ),
       ]

@@ -969,6 +969,20 @@ pub async fn demote(group_id: String, member_id: String) -> Result<()> {
     run(|core| async move { core.demote(id, member).await }).await
 }
 
+/// Turns a group's stronger protection on although the members in `behind` (device ids)
+/// have not updated Fogata, once the group has waited long enough (managers, see
+/// `UiGroup::raise_anyway`). `behind` is who the person was shown and confirmed: nothing
+/// happens when that changed meanwhile.
+pub async fn raise_group_level_anyway(group_id: String, behind: Vec<String>) -> Result<()> {
+    let id = self::group_id(&group_id)?;
+    let behind = behind
+        .iter()
+        .map(String::as_str)
+        .map(device)
+        .collect::<Result<Vec<_>>>()?;
+    run(|core| async move { core.raise_group_level_anyway(id, behind).await }).await
+}
+
 /// Who manages a group: the first `first` on its list, or everyone (`None`).
 pub async fn set_group_managers(group_id: String, first: Option<u8>) -> Result<()> {
     let id = self::group_id(&group_id)?;

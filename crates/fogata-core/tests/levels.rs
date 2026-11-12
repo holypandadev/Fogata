@@ -72,3 +72,48 @@ async fn a_manager_sees_who_holds_the_group_back_and_cannot_add_a_friend_too_old
     drop(ana);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// A group held back by a member never seen at this version's level may be raised anyway,
+/// but only once it has waited a week (kept across restarts), and only leaving behind the
+/// members its manager was shown: then it goes up, and nobody holds it back any more.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_that_waited_a_week_goes_up_anyway_naming_who_is_left_behind() {
+    let base = std::env::temp_dir().join(format!("fogata-anyway-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (dir, bea) = ana_with_an_old_friend(&base);
+    let bea = bea.profile.device;
+    let (ana, _events) = Core::start(dir.clone(), options()).unwrap();
+    let held = ana.create_group("crew", 0, &[bea]).await.unwrap();
+    let view = |groups: Vec<fogata_core::GroupView>| groups.into_iter().find(|g| g.id == held);
+    let first = view(ana.groups().await.unwrap()).unwrap();
+    assert!(!first.level_behind.is_empty() && !first.raise_anyway);
+    let early = ana.raise_group_level_anyway(held, vec![bea]).await;
+    assert!(early.is_err());
+    ana.shutdown().await.unwrap();
+    drop(ana);
+
+    // Started to wait more than a week ago.
+    let store = Store::open(dir.clone()).unwrap();
+    let mut meta = store.meta();
+    let key = hex::encode(held.as_bytes());
+    let since = *meta.level_wait.get(&key).expect("the wait is kept");
+    meta.level_wait
+        .insert(key.clone(), since - fogata_core::LEVEL_WAIT_MS - 1);
+    store.save_meta(&meta).unwrap();
+    drop(store);
+
+    let (ana, _events) = Core::start(dir, options()).unwrap();
+    let waited = view(ana.groups().await.unwrap()).unwrap();
+    assert!(waited.raise_anyway);
+    assert_eq!(waited.level_behind.len(), 1);
+    // Not with others named than those who are behind.
+    assert!(ana.raise_group_level_anyway(held, vec![]).await.is_err());
+    ana.raise_group_level_anyway(held, vec![bea]).await.unwrap();
+    // Up: nobody holds it back any more, and it waits no longer.
+    let up = view(ana.groups().await.unwrap()).unwrap();
+    assert!(up.level_behind.is_empty() && !up.raise_anyway);
+
+    ana.shutdown().await.unwrap();
+    drop(ana);
+    let _ = std::fs::remove_dir_all(&base);
+}

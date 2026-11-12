@@ -53,6 +53,7 @@ void main() {
           voiceRooms: [UiVoiceRoom(id: AppState.firstRoom, name: '')],
           openInvites: 0,
           needsUpdate: false,
+          raiseAnyway: false,
         ),
       ]
       ..nav.membersGroup = 'g'

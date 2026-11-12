@@ -11,8 +11,8 @@ use fogata_state::{Body, GroupLog, VoiceRoomId};
 
 use crate::{
     ActivityView, ActivityWhat, Core, CoreEvent, GroupView, InvitationView, JoinAsk, KeptOutView,
-    MemberView, RoomSummary, UndoneKind, VoiceRoomView, direct, invite, now_ms, person, shares,
-    store, store::DeclineLeave,
+    MemberView, Person, RoomSummary, UndoneKind, VoiceRoomView, direct, invite, now_ms, person,
+    shares, store, store::DeclineLeave,
 };
 
 /// Whether a device seen at capability level `seen` (the network's `caps`;
@@ -128,7 +128,7 @@ impl Core {
                 .or_else(|| live.iter().find(|(_, r)| !r.participants.is_empty()))
                 .map(|(_, room)| summary(room));
             // Before the lock below: a person's name takes it too.
-            let level_behind =
+            let level_behind: Vec<Person> =
                 if state.is_manager(&me) && state.level < fogata_state::Level::CURRENT {
                     self.behind_level(state, fogata_state::Level::CURRENT)
                         .into_iter()
@@ -137,6 +137,7 @@ impl Core {
                 } else {
                     Vec::new()
                 };
+            let raise_anyway = self.level_waited(id, !level_behind.is_empty(), now);
             let st = self.inner.lock();
             let online = st
                 .online
@@ -176,6 +177,7 @@ impl Core {
                 outranks: state.below(&me).to_vec(),
                 kept_out,
                 level_behind,
+                raise_anyway,
                 level_ahead: group.level_ahead,
             });
         }
@@ -596,6 +598,28 @@ impl Core {
         .await
     }
 
+    /// Notes whether group `group`, managed here, waits to go up to this version's level
+    /// (`waiting`: members hold it back), and since when, kept across restarts; returns
+    /// whether it has waited [`crate::LEVEL_WAIT_MS`] by `now`, so that a manager may raise
+    /// it anyway. A group that stops waiting starts again from nothing.
+    fn level_waited(&self, group: GroupId, waiting: bool, now: u64) -> bool {
+        let key = hex::encode(group.as_bytes());
+        let (since, changed) = {
+            let mut st = self.inner.lock();
+            let wait = &mut st.meta.level_wait;
+            if waiting {
+                let had = wait.contains_key(&key);
+                (Some(*wait.entry(key).or_insert(now)), !had)
+            } else {
+                (None, wait.remove(&key).is_some())
+            }
+        };
+        if changed {
+            self.inner.save_meta();
+        }
+        since.is_some_and(|since| now.saturating_sub(since) >= crate::LEVEL_WAIT_MS)
+    }
+
     /// The members other than this device whose copy was never seen judging at `level` (see
     /// the network's `caps`): those that keep the group from going up to it.
     fn behind_level(
@@ -685,6 +709,47 @@ impl Core {
                 level.number(),
                 behind.join(", ")
             );
+            log.raise_level(id, level, now_ms())?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Raises a group to the level of judgment this version gives although some members
+    /// were never seen at it (managers): only once it has waited [`crate::LEVEL_WAIT_MS`]
+    /// for them, as the group's settings show. Their copies stop at the `Level` entry, keep
+    /// the group as it was there, and tell their person that it needs a newer Fogata (see
+    /// [`GroupLog::level_ahead`]); they take part again once updated. `behind` is who the
+    /// person confirmed leaving behind: the raise does not happen when that changed
+    /// meanwhile (one more member behind, say), so nobody is left behind unnamed.
+    pub async fn raise_group_level_anyway(
+        &self,
+        group: GroupId,
+        behind: Vec<DevicePublicKey>,
+    ) -> Result<()> {
+        let level = fogata_state::Level::CURRENT;
+        let since = self
+            .inner
+            .lock()
+            .meta
+            .level_wait
+            .get(&hex::encode(group.as_bytes()))
+            .copied();
+        anyhow::ensure!(
+            since.is_some_and(|s| now_ms().saturating_sub(s) >= crate::LEVEL_WAIT_MS),
+            "this group has not waited long enough for its members to update"
+        );
+        self.change_group(group, |log, id| {
+            let state = log.state();
+            let mut now_behind = self.behind_level(&state, level);
+            let mut confirmed = behind;
+            now_behind.sort_unstable();
+            confirmed.sort_unstable();
+            anyhow::ensure!(
+                now_behind == confirmed,
+                "who has to update changed; look at the group's members again"
+            );
+            drop(state);
             log.raise_level(id, level, now_ms())?;
             Ok(())
         })

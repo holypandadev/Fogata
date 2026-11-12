@@ -22,6 +22,7 @@ UiGroup _group(String id, String name) => UiGroup(
   voiceRooms: const [],
   openInvites: 0,
   needsUpdate: false,
+  raiseAnyway: false,
 );
 
 UiMember _member(int i) => UiMember(

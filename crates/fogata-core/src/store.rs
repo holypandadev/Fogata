@@ -247,6 +247,11 @@ pub struct Meta {
     /// and when last. Dialled again at start, before the DHT finds anyone.
     #[serde(default)]
     pub reached: BTreeMap<String, Reached>,
+    /// Since when each group this device manages (by group id in hex) has waited to go up
+    /// to the level of judgment this version gives, held back by members never seen at it:
+    /// past [`crate::LEVEL_WAIT_MS`] a manager may raise it anyway.
+    #[serde(default)]
+    pub level_wait: BTreeMap<String, u64>,
 }
 
 /// A device reached at an address, and when last.
@@ -501,6 +506,7 @@ impl Store {
         Meta {
             last_seen: part(&value, "last_seen"),
             last_room: part(&value, "last_room"),
+            level_wait: part(&value, "level_wait"),
             port: part(&value, "port"),
             reached: value
                 .get("reached")
