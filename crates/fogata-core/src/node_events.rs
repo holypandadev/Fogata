@@ -348,14 +348,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
     match event {
         NodeEvent::Listening(_) => {}
         NodeEvent::ExternalAddress(address) => inner.emit(CoreEvent::Address(address)),
-        NodeEvent::Reached { address, device } => {
-            inner.lock().meta.note_reached(
-                address.to_string(),
-                hex::encode(device.as_bytes()),
-                now_ms(),
-            );
-            inner.save_meta();
-        }
+        NodeEvent::Reached { address, device } => handle_reached(inner, address, device),
         NodeEvent::PortChangesPerDestination => inner.emit(CoreEvent::HardNat),
         NodeEvent::Info(text) => inner.emit(CoreEvent::Info(text)),
         NodeEvent::OtherSession => inner.emit(CoreEvent::OtherSession),
@@ -861,6 +854,16 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             inner.emit(CoreEvent::GroupsChanged);
         }
     }
+}
+
+/// Keeps an address a device was reached at, for the next start.
+fn handle_reached(inner: &Arc<Inner>, address: fogata_net::Multiaddr, device: DevicePublicKey) {
+    inner.lock().meta.note_reached(
+        address.to_string(),
+        hex::encode(device.as_bytes()),
+        now_ms(),
+    );
+    inner.save_meta();
 }
 
 #[cfg(test)]
