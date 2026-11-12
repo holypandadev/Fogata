@@ -477,21 +477,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             barrier,
         } => handle_taken_out(inner, group, voice, by, barrier),
         NodeEvent::InvitationDeclined { group, device } => {
-            let Ok(Some(log)) = inner.node.group(group).await else {
-                return;
-            };
-            let book = inner.node.friends().await.ok().flatten();
-            let who = book
-                .and_then(|b| b.friends.get(&device).map(|f| f.profile.name.clone()))
-                .or_else(|| inner.lock().profiles.get(&device).map(|p| p.name.clone()))
-                .filter(|n| !n.is_empty())
-                .unwrap_or_else(|| device.short_fingerprint());
-            inner.emit(CoreEvent::InvitationDeclined {
-                group,
-                name: log.state().name,
-                device,
-                who,
-            });
+            handle_invitation_declined(inner, group, device).await
         }
         NodeEvent::GroupOffered { log, by } => {
             let group = log.group_id();
@@ -961,6 +947,25 @@ fn handle_taken_out(
         barrier,
     });
     inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// A friend declined an invitation to a group.
+async fn handle_invitation_declined(inner: &Arc<Inner>, group: GroupId, device: DevicePublicKey) {
+    let Ok(Some(log)) = inner.node.group(group).await else {
+        return;
+    };
+    let book = inner.node.friends().await.ok().flatten();
+    let who = book
+        .and_then(|b| b.friends.get(&device).map(|f| f.profile.name.clone()))
+        .or_else(|| inner.lock().profiles.get(&device).map(|p| p.name.clone()))
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| device.short_fingerprint());
+    inner.emit(CoreEvent::InvitationDeclined {
+        group,
+        name: log.state().name,
+        device,
+        who,
+    });
 }
 
 #[cfg(test)]
