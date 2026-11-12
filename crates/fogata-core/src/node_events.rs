@@ -428,24 +428,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             path,
             hidden,
             ..
-        } => {
-            {
-                let mut state = inner.lock();
-                state.friends_online.insert(device, path);
-                if hidden {
-                    state.hidden.insert(device);
-                } else {
-                    state.hidden.remove(&device);
-                    state
-                        .meta
-                        .last_seen
-                        .insert(hex::encode(device.as_bytes()), now);
-                }
-            }
-            inner.save_meta();
-            inner.emit(CoreEvent::FriendOnline { device });
-            inner.emit(CoreEvent::FriendsChanged);
-        }
+        } => handle_friend_online(inner, now, device, path, hidden),
         NodeEvent::FriendOffline { device } => {
             {
                 let mut state = inner.lock();
@@ -923,6 +906,32 @@ fn handle_animation(inner: &Arc<Inner>, animation: Animation) {
     // Kept for the next start: shown while the friend or member is away too.
     save_animations(inner, saved, true);
     inner.emit(CoreEvent::Animation { device });
+}
+
+/// A friend came online, or its path changed.
+fn handle_friend_online(
+    inner: &Arc<Inner>,
+    now: u64,
+    device: DevicePublicKey,
+    path: Path,
+    hidden: bool,
+) {
+    {
+        let mut state = inner.lock();
+        state.friends_online.insert(device, path);
+        if hidden {
+            state.hidden.insert(device);
+        } else {
+            state.hidden.remove(&device);
+            state
+                .meta
+                .last_seen
+                .insert(hex::encode(device.as_bytes()), now);
+        }
+    }
+    inner.save_meta();
+    inner.emit(CoreEvent::FriendOnline { device });
+    inner.emit(CoreEvent::FriendsChanged);
 }
 
 #[cfg(test)]
