@@ -2305,6 +2305,169 @@ mod tests {
         assert!(may_answer(&mut answers, hour(25), Some(1008)));
     }
 
+    /// The name of a friend request's kind. Its match has no wildcard: a kind added to
+    /// `FriendRequest` does not compile here until it is named, and then belongs in
+    /// `one_friend_request_of_each` below and in the answers expected of it.
+    fn friend_request_kind(request: &FriendRequest) -> &'static str {
+        match request {
+            FriendRequest::Probe { .. } => "Probe",
+            FriendRequest::Hello { .. } => "Hello",
+            FriendRequest::LinkRequest { .. } => "LinkRequest",
+            FriendRequest::CodeStart { .. } => "CodeStart",
+            FriendRequest::CodeFinish { .. } => "CodeFinish",
+            FriendRequest::Accept { .. } => "Accept",
+            FriendRequest::Profile { .. } => "Profile",
+            FriendRequest::Group { .. } => "Group",
+            FriendRequest::Status { .. } => "Status",
+            FriendRequest::Heartbeat => "Heartbeat",
+            FriendRequest::Call { .. } => "Call",
+            FriendRequest::Banner { .. } => "Banner",
+            FriendRequest::Unfriend { .. } => "Unfriend",
+            FriendRequest::Mutual { .. } => "Mutual",
+            FriendRequest::Direct { .. } => "Direct",
+            FriendRequest::Animation { .. } => "Animation",
+            FriendRequest::Bio { .. } => "Bio",
+        }
+    }
+
+    /// The name of a friend answer's kind.
+    fn friend_response_kind(response: &FriendResponse) -> &'static str {
+        match response {
+            FriendResponse::ProbeReply { .. } => "ProbeReply",
+            FriendResponse::HelloReply { .. } => "HelloReply",
+            FriendResponse::CodeReply { .. } => "CodeReply",
+            FriendResponse::Pending => "Pending",
+            FriendResponse::Ack => "Ack",
+            FriendResponse::Refused => "Refused",
+            FriendResponse::Mutual { .. } => "Mutual",
+            FriendResponse::Unfriended { .. } => "Unfriended",
+        }
+    }
+
+    /// A friend request of every kind, each with the least it can hold: what passes or
+    /// fails before its sealed content is opened.
+    fn one_friend_request_of_each() -> Vec<FriendRequest> {
+        let sealed = || vec![1, 2, 3];
+        vec![
+            FriendRequest::Probe { nonce: vec![1; 16] },
+            FriendRequest::Hello {
+                mac: sealed(),
+                sealed: sealed(),
+            },
+            FriendRequest::LinkRequest {
+                mac: sealed(),
+                sealed: sealed(),
+            },
+            FriendRequest::CodeStart {
+                gate: vec![1; 32],
+                spake: sealed(),
+            },
+            FriendRequest::CodeFinish { sealed: sealed() },
+            FriendRequest::Accept {
+                mac: sealed(),
+                sealed: sealed(),
+            },
+            FriendRequest::Profile { sealed: sealed() },
+            FriendRequest::Group {
+                entries: Vec::new(),
+                declined: None,
+                part: None,
+            },
+            FriendRequest::Status { sealed: sealed() },
+            FriendRequest::Heartbeat,
+            FriendRequest::Call { sealed: sealed() },
+            FriendRequest::Banner { sealed: sealed() },
+            FriendRequest::Unfriend { sealed: sealed() },
+            FriendRequest::Mutual { sealed: sealed() },
+            FriendRequest::Direct {
+                entries: Vec::new(),
+            },
+            FriendRequest::Animation { sealed: sealed() },
+            FriendRequest::Bio { sealed: sealed() },
+        ]
+    }
+
+    /// What a friend request of every kind gets: from a peer that is no friend, from a
+    /// friend online, and from anyone when this device keeps no friends. Only a probe is
+    /// answered whoever asks; what a friend sends is opened only for a friend online, and
+    /// sealed content that does not open is refused. The answers to what opens are in the
+    /// tests of each kind.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn every_friend_request_is_answered_by_who_asks() {
+        use fogata_friends::FriendBook;
+        let node = |friends: bool| {
+            let identity = Arc::new(DeviceIdentity::generate().unwrap());
+            let book = friends.then(|| FriendBook::new(&identity, "Ana", 1).unwrap());
+            start(NodeConfig {
+                identity,
+                groups: Vec::new(),
+                friends: book,
+                listen_port: 0,
+                bootstrap: Vec::new(),
+                use_dht: false,
+                use_mdns: false,
+                bridge: false,
+                peers: Vec::new(),
+                remembered: Vec::new(),
+                hidden: false,
+            })
+            .unwrap()
+            .0
+        };
+        let (ana, cai) = (node(true), node(false));
+        let answers = inspect(&ana, |n| {
+            let (stranger, bea) = (PeerId::random(), PeerId::random());
+            let device = DeviceIdentity::generate().unwrap().public_key();
+            n.friends.as_mut().unwrap().online.insert(bea, device);
+            one_friend_request_of_each()
+                .into_iter()
+                .zip(one_friend_request_of_each())
+                .map(|(stranger_asks, bea_asks)| {
+                    let kind = friend_request_kind(&stranger_asks);
+                    let answers = [
+                        n.on_friend_request(stranger, stranger_asks),
+                        n.on_friend_request(bea, bea_asks),
+                    ]
+                    .map(|a| friend_response_kind(&a));
+                    (kind, answers)
+                })
+                .collect::<Vec<_>>()
+        })
+        .await;
+        let without = inspect(&cai, |n| {
+            let peer = PeerId::random();
+            one_friend_request_of_each()
+                .into_iter()
+                .map(|request| friend_response_kind(&n.on_friend_request(peer, request)))
+                .collect::<Vec<_>>()
+        })
+        .await;
+        let refused = ["Refused"; 2];
+        let expected = [
+            ("Probe", ["ProbeReply"; 2]),
+            ("Hello", refused),
+            ("LinkRequest", refused),
+            ("CodeStart", refused),
+            ("CodeFinish", refused),
+            ("Accept", refused),
+            ("Profile", refused),
+            ("Group", refused),
+            ("Status", refused),
+            ("Heartbeat", ["Refused", "Ack"]),
+            ("Call", refused),
+            ("Banner", refused),
+            ("Unfriend", refused),
+            ("Mutual", refused),
+            ("Direct", refused),
+            ("Animation", refused),
+            ("Bio", refused),
+        ];
+        assert_eq!(answers, expected);
+        assert_eq!(without, ["Refused"; 17]);
+        ana.shutdown().await.unwrap();
+        cai.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_friend_code_outlives_answers_lost_on_the_way() {
         use fogata_friends::{CodeReply, FriendBook};
