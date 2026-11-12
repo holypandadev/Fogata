@@ -227,16 +227,7 @@ impl Node {
             MemberRequest::Challenge { challenge, tags } => {
                 self.on_challenge_request(peer, challenge, tags)
             }
-            MemberRequest::Deliver(wire) => {
-                let Some(group) = group_of(&wire.group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if !self.is_member_of(&group, &peer) || !self.take_group_message(peer, &wire) {
-                    return MemberResponse::Refused;
-                }
-                self.receive(peer, wire, Forward::Flooded);
-                MemberResponse::Ack
-            }
+            MemberRequest::Deliver(wire) => self.on_deliver_request(peer, wire),
             MemberRequest::Spread { message, reached } => {
                 let Some(group) = group_of(&message.group_id) else {
                     return MemberResponse::Refused;
@@ -867,6 +858,22 @@ impl Node {
         self.hinted.entry(peer).or_default().insert(group);
         self.challenge_with(peer, group, Some(keys.epoch()));
         MemberResponse::Proof(WireProof::from(&sealed))
+    }
+
+    /// Takes a group message a member delivers.
+    fn on_deliver_request(
+        &mut self,
+        peer: PeerId,
+        wire: fogata_proto::WireMessage,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&wire.group_id) else {
+            return MemberResponse::Refused;
+        };
+        if !self.is_member_of(&group, &peer) || !self.take_group_message(peer, &wire) {
+            return MemberResponse::Refused;
+        }
+        self.receive(peer, wire, Forward::Flooded);
+        MemberResponse::Ack
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
