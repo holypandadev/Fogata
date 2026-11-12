@@ -1085,71 +1085,7 @@ impl Node {
         match request {
             FriendRequest::Probe { nonce } => self.on_friend_probe_request(local, remote, nonce),
             FriendRequest::Hello { mac, sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                // A friend online already says hello once per connection: one saying it
-                // again and again is answered only so often (see limits.rs).
-                if let Some(device) = f.online.get(&peer).copied()
-                    && !self.limits.take_friend_hello(device, Instant::now())
-                {
-                    tracing::debug!("{} said hello too often", device.fingerprint());
-                    return FriendResponse::Refused;
-                }
-                // Keyed by the secret shared with the friend that sent it: tried with each
-                // friend's.
-                let own: Vec<FriendSecret> = f.book.own_secrets().cloned().collect();
-                let own: Vec<&FriendSecret> = own.iter().collect();
-                let devices: Vec<DevicePublicKey> = f.book.friends.keys().copied().collect();
-                let opened = devices.into_iter().find_map(|device| {
-                    let pair = f.pair(&self.identity, &device)?;
-                    fogata_friends::open_hello(
-                        &self.identity,
-                        &pair,
-                        &own,
-                        &local,
-                        &remote,
-                        &mac,
-                        &sealed,
-                    )
-                    .ok()
-                    .filter(|from| from.device == device)
-                });
-                // A hello that proves the friend has our current friend secret says it was
-                // delivered.
-                let current = opened.as_ref().is_some_and(|from| from.knows == Some(0));
-                let Some(from) = opened else {
-                    tracing::debug!("refused a hello from {peer}");
-                    return FriendResponse::Refused;
-                };
-                let Some(friend) = f.book.friends.get(&from.device) else {
-                    tracing::debug!("hello from {}, not a friend", from.device.fingerprint());
-                    return FriendResponse::Refused;
-                };
-                // Not again with every hello of a friend that says it has an older one.
-                let newer = (from.knows_version < f.book.profile.version_ms
-                    && self.limits.hello_profile(from.device, Instant::now()))
-                .then_some(&f.book.profile);
-                let reply = match fogata_friends::hello_reply(
-                    &self.identity,
-                    &from.device,
-                    &local,
-                    &remote,
-                    friend.profile.version_ms,
-                    newer,
-                    hidden,
-                ) {
-                    Ok(reply) => reply,
-                    Err(_) => return FriendResponse::Refused,
-                };
-                // A hello keyed by our current friend secret says the friend has it.
-                if current && !friend.delivered {
-                    f.book.set_delivered(&from.device);
-                    self.changed();
-                }
-                self.mark_friend_online(peer, from.device, from.hidden);
-                FriendResponse::HelloReply { sealed: reply }
+                self.on_friend_hello_request(peer, local, remote, hidden, mac, sealed)
             }
             FriendRequest::LinkRequest { mac, sealed } => {
                 // Kept, as checked above.
@@ -1625,6 +1561,75 @@ impl Node {
         FriendResponse::ProbeReply {
             tag: f.book.secret.probe_tag(&nonce, &local, &remote).to_vec(),
         }
+    }
+
+    /// Answers a friend's hello.
+    fn on_friend_hello_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        hidden: bool,
+        mac: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        // A friend online already says hello once per connection: one saying it
+        // again and again is answered only so often (see limits.rs).
+        if let Some(device) = f.online.get(&peer).copied()
+            && !self.limits.take_friend_hello(device, Instant::now())
+        {
+            tracing::debug!("{} said hello too often", device.fingerprint());
+            return FriendResponse::Refused;
+        }
+        // Keyed by the secret shared with the friend that sent it: tried with each
+        // friend's.
+        let own: Vec<FriendSecret> = f.book.own_secrets().cloned().collect();
+        let own: Vec<&FriendSecret> = own.iter().collect();
+        let devices: Vec<DevicePublicKey> = f.book.friends.keys().copied().collect();
+        let opened = devices.into_iter().find_map(|device| {
+            let pair = f.pair(&self.identity, &device)?;
+            fogata_friends::open_hello(&self.identity, &pair, &own, &local, &remote, &mac, &sealed)
+                .ok()
+                .filter(|from| from.device == device)
+        });
+        // A hello that proves the friend has our current friend secret says it was
+        // delivered.
+        let current = opened.as_ref().is_some_and(|from| from.knows == Some(0));
+        let Some(from) = opened else {
+            tracing::debug!("refused a hello from {peer}");
+            return FriendResponse::Refused;
+        };
+        let Some(friend) = f.book.friends.get(&from.device) else {
+            tracing::debug!("hello from {}, not a friend", from.device.fingerprint());
+            return FriendResponse::Refused;
+        };
+        // Not again with every hello of a friend that says it has an older one.
+        let newer = (from.knows_version < f.book.profile.version_ms
+            && self.limits.hello_profile(from.device, Instant::now()))
+        .then_some(&f.book.profile);
+        let reply = match fogata_friends::hello_reply(
+            &self.identity,
+            &from.device,
+            &local,
+            &remote,
+            friend.profile.version_ms,
+            newer,
+            hidden,
+        ) {
+            Ok(reply) => reply,
+            Err(_) => return FriendResponse::Refused,
+        };
+        // A hello keyed by our current friend secret says the friend has it.
+        if current && !friend.delivered {
+            f.book.set_delivered(&from.device);
+            self.changed();
+        }
+        self.mark_friend_online(peer, from.device, from.hidden);
+        FriendResponse::HelloReply { sealed: reply }
     }
 
     /// Records a checked friend request that came from `peer`.
