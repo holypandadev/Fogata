@@ -4334,6 +4334,10 @@ class L10nIt extends L10n {
       'Il nuovo computer non ha accettato quel codice, quindi non è stato inviato nulla. Controllalo e digitalo di nuovo. Se non funziona ancora, ottieni un nuovo codice lì.';
 
   @override
+  String get moveOthersAnswered =>
+      'Più computer hanno risposto a questo codice e nessuno lo conosceva, quindi non è stato inviato nulla. Un altro dispositivo potrebbe cercare di impedire il trasferimento. Ottieni un nuovo codice sul nuovo computer e riprova.';
+
+  @override
   String get moveUpdateBoth =>
       'L’altro computer ha una versione più vecchia di Fogata. Aggiorna entrambi i computer alla stessa versione e riprova. Non è stato trasferito nulla.';
 

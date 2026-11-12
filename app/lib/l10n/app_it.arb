@@ -944,6 +944,7 @@
   "moveLookingForCode": "Ricerca del computer che mostra questo codice…",
   "moveOfflineWhileMoving": "Durante il trasferimento Fogata va offline su questo computer.",
   "moveWrongCodeNote": "Il nuovo computer non ha accettato quel codice, quindi non è stato inviato nulla. Controllalo e digitalo di nuovo. Se non funziona ancora, ottieni un nuovo codice lì.",
+  "moveOthersAnswered": "Più computer hanno risposto a questo codice e nessuno lo conosceva, quindi non è stato inviato nulla. Un altro dispositivo potrebbe cercare di impedire il trasferimento. Ottieni un nuovo codice sul nuovo computer e riprova.",
   "moveUpdateBoth": "L’altro computer ha una versione più vecchia di Fogata. Aggiorna entrambi i computer alla stessa versione e riprova. Non è stato trasferito nulla.",
   "moveCantReachNew": "Impossibile raggiungere il nuovo computer.",
   "moveCantReachNewNote": "Si sono cercati a vicenda per 3 minuti. Mettili sulla stessa rete (lo stesso Wi-Fi o un cavo) e riprova. Il tuo account è ancora qui e Fogata è di nuovo online.",

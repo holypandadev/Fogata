@@ -4394,6 +4394,10 @@ class L10nEs extends L10n {
       'El equipo nuevo no aceptó ese código, así que no se envió nada. Revísalo y vuelve a escribirlo. Si sigue fallando, consigue un código nuevo allí.';
 
   @override
+  String get moveOthersAnswered =>
+      'Varios equipos respondieron a este código y ninguno lo conocía, así que no se envió nada. Puede que otro dispositivo intente impedir el traslado. Consigue un código nuevo en el equipo nuevo y vuelve a intentarlo.';
+
+  @override
   String get moveUpdateBoth =>
       'El otro equipo tiene una versión anterior de Fogata. Actualiza los dos equipos a la misma versión y vuelve a intentarlo. No se movió nada.';
 

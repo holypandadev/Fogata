@@ -405,6 +405,38 @@ void main() {
   });
 
   testWidgets(
+    'a code several computers answered says so and is not tried again',
+    (tester) async {
+      final move = _move(MoveStep.looking, sending: true);
+      final state = fakeRoom(people: 1)..accountMove = move;
+      await _show(
+        tester,
+        const SizedBox(width: 700, child: MoveAccountPage()),
+        state,
+      );
+      move
+        ..step = MoveStep.failed
+        ..failure = 'others_answered'
+        ..changed();
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(find.textContaining('Several computers answered'), findsOneWidget);
+      expect(find.textContaining('didn’t accept that code'), findsNothing);
+      // Not a typo: the field is not marked wrong.
+      expect(find.byKey(const ValueKey('move-code-ok')), findsOneWidget);
+      expect(state.accountMove!.failureWords, contains('Several computers'));
+      await tester.enterText(find.byType(TextField), 'k7qm2 xr9pd');
+      await tester.pump();
+      await tester.tap(find.byKey(const ValueKey('move-continue')));
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(
+        find.textContaining('already failed to match once'),
+        findsOneWidget,
+      );
+      await _done(tester);
+    },
+  );
+
+  testWidgets(
     'the person’s pill says offline while the core is stopped for a move',
     (tester) async {
       final state = fakeRoom(people: 1)

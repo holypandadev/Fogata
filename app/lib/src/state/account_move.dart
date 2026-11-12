@@ -196,6 +196,7 @@ class AccountMove extends ChangeNotifier {
     final why = reasonWords;
     return switch (failure) {
       'wrong_code' => l10n.accountMoveWrongCode,
+      'others_answered' => l10n.moveOthersAnswered,
       'expired' => l10n.accountMoveExpired,
       'too_many_tries' => l10n.accountMoveTooManyTries,
       'no_contact' => l10n.accountMoveNoContact,

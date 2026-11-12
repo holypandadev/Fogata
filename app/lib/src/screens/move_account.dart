@@ -1260,7 +1260,10 @@ class _MoveAccountPageState extends State<MoveAccountPage> {
 
   void _changed() {
     final move = _move;
-    if (move != null && move.failure == 'wrong_code' && move.code != null) {
+    // A code several computers answered is not tried again either: each got a guess.
+    if (move != null &&
+        (move.failure == 'wrong_code' || move.failure == 'others_answered') &&
+        move.code != null) {
       _wrongCodes.add(_codeKey(move.code!));
     }
     if (mounted) setState(() {});
@@ -1490,6 +1493,11 @@ class _MoveAccountPageState extends State<MoveAccountPage> {
         icon: Ic.warningCircle,
         tone: 'red',
         child: Text(l10n.moveWrongCodeNote),
+      ),
+      'others_answered' => _Note(
+        icon: Ic.warningCircle,
+        tone: 'red',
+        child: Text(l10n.moveOthersAnswered),
       ),
       'no_contact' => _Note(
         icon: Ic.wifiOff,

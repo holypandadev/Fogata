@@ -4334,6 +4334,10 @@ class L10nDe extends L10n {
       'Der neue Computer hat diesen Code nicht akzeptiert, daher wurde nichts gesendet. Prüfe ihn und gib ihn erneut ein. Wenn es weiter scheitert, hol dir dort einen neuen Code.';
 
   @override
+  String get moveOthersAnswered =>
+      'Mehrere Computer haben auf diesen Code geantwortet und keiner kannte ihn, daher wurde nichts gesendet. Ein anderes Gerät versucht vielleicht, den Umzug zu verhindern. Hol dir auf dem neuen Computer einen neuen Code und versuche es erneut.';
+
+  @override
   String get moveUpdateBoth =>
       'Der andere Computer hat eine ältere Version von Fogata. Aktualisiere beide Computer auf dieselbe Version und versuche es erneut. Nichts wurde umgezogen.';
 

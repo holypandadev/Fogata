@@ -4370,6 +4370,10 @@ class L10nFr extends L10n {
       'Le nouvel ordinateur n’a pas accepté ce code : rien n’a été envoyé. Vérifie-le et tape-le de nouveau. Si ça échoue encore, obtiens un nouveau code là-bas.';
 
   @override
+  String get moveOthersAnswered =>
+      'Plusieurs ordinateurs ont répondu à ce code et aucun ne le connaissait : rien n’a été envoyé. Un autre appareil essaie peut-être d’empêcher le transfert. Obtiens un nouveau code sur le nouvel ordinateur et réessaie.';
+
+  @override
   String get moveUpdateBoth =>
       'L’autre ordinateur a une version plus ancienne de Fogata. Mets à jour les deux ordinateurs vers la même version et réessaie. Rien n’a été transféré.';
 

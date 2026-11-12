@@ -3997,6 +3997,10 @@ class L10nZh extends L10n {
       '新电脑不接受这个迁移码，因此没有发送任何内容。请检查后重新输入。如果仍然失败，请在那台电脑上获取新的迁移码。';
 
   @override
+  String get moveOthersAnswered =>
+      '有多台电脑响应了这个迁移码，但都不知道它，因此没有发送任何内容。可能有其他设备在试图阻止迁移。请在新电脑上获取新的迁移码后重试。';
+
+  @override
   String get moveUpdateBoth =>
       '另一台电脑上的 Fogata 版本较旧。请将两台电脑更新到同一版本后再试一次。没有迁移任何内容。';
 

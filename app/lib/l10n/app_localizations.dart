@@ -5821,6 +5821,12 @@ abstract class L10n {
   /// **'The new computer didn’t accept that code, so nothing was sent. Check it and type it again. If it still fails, get a new code there.'**
   String get moveWrongCodeNote;
 
+  /// Move account: error when more than one computer answered the code typed and none of them knew it (a typo makes only the new computer answer, so another device may be trying to stop the move).
+  ///
+  /// In en, this message translates to:
+  /// **'Several computers answered this code and none of them knew it, so nothing was sent. Another device may be trying to stop the move. Get a new code on the new computer and try again.'**
+  String get moveOthersAnswered;
+
   /// Move account: on either computer, when the other one has a version of Fogata from before moves changed (0.1.0-beta.7 or older).
   ///
   /// In en, this message translates to:

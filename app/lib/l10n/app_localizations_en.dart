@@ -4218,6 +4218,10 @@ class L10nEn extends L10n {
       'The new computer didn’t accept that code, so nothing was sent. Check it and type it again. If it still fails, get a new code there.';
 
   @override
+  String get moveOthersAnswered =>
+      'Several computers answered this code and none of them knew it, so nothing was sent. Another device may be trying to stop the move. Get a new code on the new computer and try again.';
+
+  @override
   String get moveUpdateBoth =>
       'The other computer has an older version of Fogata. Update both computers to the same version and try again. Nothing was moved.';
 

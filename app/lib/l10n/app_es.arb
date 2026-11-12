@@ -944,6 +944,7 @@
   "moveLookingForCode": "Buscando el equipo que muestra este código…",
   "moveOfflineWhileMoving": "Fogata se desconecta en este equipo mientras se mueve la cuenta.",
   "moveWrongCodeNote": "El equipo nuevo no aceptó ese código, así que no se envió nada. Revísalo y vuelve a escribirlo. Si sigue fallando, consigue un código nuevo allí.",
+  "moveOthersAnswered": "Varios equipos respondieron a este código y ninguno lo conocía, así que no se envió nada. Puede que otro dispositivo intente impedir el traslado. Consigue un código nuevo en el equipo nuevo y vuelve a intentarlo.",
   "moveUpdateBoth": "El otro equipo tiene una versión anterior de Fogata. Actualiza los dos equipos a la misma versión y vuelve a intentarlo. No se movió nada.",
   "moveCantReachNew": "No se puede conectar con el equipo nuevo.",
   "moveCantReachNewNote": "Los dos se buscaron durante 3 minutos. Ponlos en la misma red (la misma Wi-Fi o un cable) y vuelve a intentarlo. Tu cuenta sigue aquí y Fogata vuelve a estar en línea.",

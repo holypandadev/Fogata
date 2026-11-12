@@ -5984,6 +5984,10 @@
   "@moveWrongCodeNote": {
     "description": "Move account: error after a wrong code."
   },
+  "moveOthersAnswered": "Several computers answered this code and none of them knew it, so nothing was sent. Another device may be trying to stop the move. Get a new code on the new computer and try again.",
+  "@moveOthersAnswered": {
+    "description": "Move account: error when more than one computer answered the code typed and none of them knew it (a typo makes only the new computer answer, so another device may be trying to stop the move)."
+  },
   "moveUpdateBoth": "The other computer has an older version of Fogata. Update both computers to the same version and try again. Nothing was moved.",
   "@moveUpdateBoth": {
     "description": "Move account: on either computer, when the other one has a version of Fogata from before moves changed (0.1.0-beta.7 or older)."

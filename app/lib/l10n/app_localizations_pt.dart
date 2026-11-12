@@ -4355,6 +4355,10 @@ class L10nPt extends L10n {
       'O novo computador não aceitou esse código, então nada foi enviado. Confira e digite de novo. Se ainda falhar, gere um novo código lá.';
 
   @override
+  String get moveOthersAnswered =>
+      'Vários computadores responderam a esse código e nenhum o conhecia, então nada foi enviado. Outro dispositivo pode estar tentando impedir a transferência. Gere um novo código no novo computador e tente de novo.';
+
+  @override
   String get moveUpdateBoth =>
       'O outro computador tem uma versão mais antiga do Fogata. Atualize os dois computadores para a mesma versão e tente de novo. Nada foi transferido.';
 
