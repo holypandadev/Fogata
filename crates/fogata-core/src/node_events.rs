@@ -398,39 +398,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
         NodeEvent::Removed { group, log } => handle_removed(inner, group, log).await,
         NodeEvent::MemberProfile { profile } => handle_member_profile(inner, profile),
-        NodeEvent::Animation { animation } => {
-            if animation.device == inner.identity.public_key() {
-                return;
-            }
-            let key = (animation.device, animation.of);
-            let device = animation.device;
-            let saved = {
-                let mut state = inner.lock();
-                if state
-                    .animations
-                    .get(&key)
-                    .is_some_and(|a| a.version_ms >= animation.version_ms)
-                {
-                    return;
-                }
-                state.animations.insert(key, animation);
-                // Bounded: the oldest go first past it.
-                while state.animations.len() > MAX_ANIMATIONS {
-                    let oldest = state
-                        .animations
-                        .iter()
-                        .min_by_key(|(_, a)| a.version_ms)
-                        .map(|(k, _)| *k);
-                    if let Some(oldest) = oldest {
-                        state.animations.remove(&oldest);
-                    }
-                }
-                state.animations.values().cloned().collect::<Vec<_>>()
-            };
-            // Kept for the next start: shown while the friend or member is away too.
-            save_animations(inner, saved, true);
-            inner.emit(CoreEvent::Animation { device });
-        }
+        NodeEvent::Animation { animation } => handle_animation(inner, animation),
         NodeEvent::Signal {
             group,
             from,
@@ -920,6 +888,41 @@ fn handle_member_profile(inner: &Arc<Inner>, profile: Profile) {
         save_profiles_soon(inner);
         inner.emit(CoreEvent::GroupsChanged);
     }
+}
+
+/// A friend's or member's animation.
+fn handle_animation(inner: &Arc<Inner>, animation: Animation) {
+    if animation.device == inner.identity.public_key() {
+        return;
+    }
+    let key = (animation.device, animation.of);
+    let device = animation.device;
+    let saved = {
+        let mut state = inner.lock();
+        if state
+            .animations
+            .get(&key)
+            .is_some_and(|a| a.version_ms >= animation.version_ms)
+        {
+            return;
+        }
+        state.animations.insert(key, animation);
+        // Bounded: the oldest go first past it.
+        while state.animations.len() > MAX_ANIMATIONS {
+            let oldest = state
+                .animations
+                .iter()
+                .min_by_key(|(_, a)| a.version_ms)
+                .map(|(k, _)| *k);
+            if let Some(oldest) = oldest {
+                state.animations.remove(&oldest);
+            }
+        }
+        state.animations.values().cloned().collect::<Vec<_>>()
+    };
+    // Kept for the next start: shown while the friend or member is away too.
+    save_animations(inner, saved, true);
+    inner.emit(CoreEvent::Animation { device });
 }
 
 #[cfg(test)]
