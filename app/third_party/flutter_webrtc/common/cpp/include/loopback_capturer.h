@@ -26,6 +26,17 @@ class LoopbackCapturer {
 
   // Stop capturing and clean up platform resources.
   virtual void Stop() = 0;
+
+  // Fogata: Start and Stop each in two parts, for the platform thread, which must not
+  // wait on the system's sound service (Windows; fogata_sound_start.h). Open() opens the
+  // capture without feeding anything and may wait seconds: never on the platform thread.
+  // Start() after it only starts feeding. Quiet() stops feeding the source and lets go
+  // of it, quickly; nothing of libwebrtc is touched after it. Close() lets go of the
+  // rest, and may wait: never on the platform thread. Stop() is Quiet() then Close().
+  // Where nothing waits, Open() has nothing to do and Quiet() stops it all.
+  virtual bool Open() { return true; }
+  virtual void Quiet() { Stop(); }
+  virtual void Close() {}
 };
 
 }  // namespace flutter_webrtc_plugin

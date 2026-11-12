@@ -16,7 +16,11 @@
 #include <cstdlib>
 #endif
 
+#include <chrono>
+#include <iostream>
 #include <stdexcept>
+#include <thread>
+#include <utility>
 
 namespace flutter_webrtc_plugin {
 
@@ -41,8 +45,125 @@ static bool OwnWindow(const scoped_refptr<MediaSource>& source) {
 #endif
 }
 
+namespace {
+
+// Fogata: stops a screen's sound without waiting on the audio service here, on the
+// platform thread: its feeding stops at once (Quiet: its threads end within a few
+// milliseconds, and nothing of libwebrtc is touched after), and the rest is let go of on
+// a thread of its own (Windows: stopping and releasing the WASAPI client may wait on a
+// stalled audio service). Elsewhere Stop() does not wait on it.
+void StopElsewhere(std::unique_ptr<LoopbackCapturer> capturer) {
+  if (!capturer) return;
+#ifdef _WIN32
+  capturer->Quiet();
+  std::shared_ptr<LoopbackCapturer> rest(std::move(capturer));
+  std::thread([rest]() { rest->Close(); }).detach();
+#else
+  capturer->Stop();
+#endif
+}
+
+#ifdef _WIN32
+// Fogata: how long a share's answer waits for its sound to start: the activation's own
+// limit (5 s, application_loopback_capturer.cc) and 2 s for the client's set-up, the 7 s
+// the platform thread itself waited before. It takes tens of milliseconds when the audio
+// service is well; a start that takes longer goes on without its sound, as one that
+// fails, and whatever opens after is let go of.
+constexpr std::chrono::milliseconds kSoundStartLimit(7000);
+
+#ifndef NDEBUG
+// For tests (debug builds): FOGATA_TEST_SOUND_STALL=<milliseconds> holds each start of
+// a screen's sound that long before it opens, as a slow or stalled audio service does.
+int TestSoundStall() {
+  char* value = nullptr;
+  size_t length = 0;
+  if (_dupenv_s(&value, &length, "FOGATA_TEST_SOUND_STALL") != 0 ||
+      value == nullptr) {
+    return 0;
+  }
+  const int ms = std::atoi(value);
+  free(value);
+  return ms;
+}
+#endif
+
+// The opening of a loopback capture, as SoundStart runs it.
+class LoopbackOpening : public SoundOpening {
+ public:
+  explicit LoopbackOpening(std::unique_ptr<LoopbackCapturer> capturer)
+      : capturer_(std::move(capturer)) {}
+
+  bool Open() override {
+#ifndef NDEBUG
+    const int stall = TestSoundStall();
+    if (stall > 0) std::this_thread::sleep_for(std::chrono::milliseconds(stall));
+#endif
+    return capturer_->Open();
+  }
+
+  void Close() override {
+    if (capturer_) capturer_->Close();
+  }
+
+  // Once opened and handed over, on the platform thread.
+  std::unique_ptr<LoopbackCapturer> Take() { return std::move(capturer_); }
+
+ private:
+  std::unique_ptr<LoopbackCapturer> capturer_;
+};
+#endif
+
+}  // namespace
+
+#ifdef _WIN32
+// Fogata: what getDisplayMedia answers once the share's sound is known: the stream with
+// its picture (already captured) and, if the sound starts, its sound.
+struct FlutterScreenCapture::PendingSound {
+  std::shared_ptr<MethodResultProxy> result;
+  // streamId and videoTracks; audioTracks is added with the answer.
+  EncodableMap params;
+  std::string stream_id;
+  std::string video_track_id;
+  scoped_refptr<RTCMediaStream> stream;
+  scoped_refptr<RTCDesktopCapturer> capturer;
+  scoped_refptr<RTCAudioSource> source;
+  scoped_refptr<RTCAudioTrack> track;
+  std::shared_ptr<SoundStart> start;
+};
+#endif
+
 FlutterScreenCapture::FlutterScreenCapture(FlutterWebRTCBase* base)
-    : base_(base) {}
+    : base_(base) {
+#ifdef _WIN32
+  // The plugin's runner (a hidden window's messages) is made before this and goes
+  // after it (windows/flutter_webrtc_plugin.cc).
+  TaskRunner* runner = base_->task_runner_;
+  PlatformQueue::Enqueue enqueue;
+  if (runner != nullptr) {
+    enqueue = [runner](std::function<void()> task) {
+      runner->EnqueueTask(std::move(task));
+    };
+  }
+  sound_queue_ = std::make_shared<PlatformQueue>(std::move(enqueue));
+#endif
+}
+
+FlutterScreenCapture::~FlutterScreenCapture() {
+#ifdef _WIN32
+  // Nothing reaches the platform thread from here on. A sound still starting answers
+  // nobody (the engine is going) and lets go of itself once it opens; it holds nothing
+  // of libwebrtc's nor of this. A running one stops feeding now, before libwebrtc ends
+  // (~FlutterWebRTCBase), and is let go of on a thread of its own.
+  sound_queue_->Close();
+  if (pending_sound_) {
+    pending_sound_->start->Cancel();
+    pending_sound_.reset();
+  }
+  StopElsewhere(std::move(loopback_capturer_));
+  loopback_audio_source_ = nullptr;
+  loopback_owner_ = nullptr;
+#endif
+}
 
 bool FlutterScreenCapture::BuildDesktopSourcesList(const EncodableList& types,
                                                    bool force_reload) {
@@ -186,6 +307,9 @@ void FlutterScreenCapture::OnPaused(
 // address and be taken for it.
 void FlutterScreenCapture::OnStop(scoped_refptr<RTCDesktopCapturer> capturer) {
   OnPlatformThread([this, capturer]() {
+#ifdef _WIN32
+    if (FailPendingSound(capturer.get())) return;
+#endif
     StopSoundOf(capturer.get());
     capture_tracks_.erase(capturer.get());
   });
@@ -193,6 +317,11 @@ void FlutterScreenCapture::OnStop(scoped_refptr<RTCDesktopCapturer> capturer) {
 
 void FlutterScreenCapture::OnError(scoped_refptr<RTCDesktopCapturer> capturer) {
   OnPlatformThread([this, capturer]() {
+#ifdef _WIN32
+    // A share not yet answered is answered with the error instead: Dart has no track
+    // to be told about.
+    if (FailPendingSound(capturer.get())) return;
+#endif
     // Fogata: no sound goes on without its picture, and Dart is told the capture
     // ended (as the portal's and macOS's are), so the share stops instead of
     // showing a frozen picture.
@@ -221,8 +350,7 @@ void FlutterScreenCapture::OnPlatformThread(std::function<void()> task) {
 // stops: the old one's end must leave the new sound alone.
 void FlutterScreenCapture::StopSoundOf(RTCDesktopCapturer* capturer) {
   if (loopback_capturer_ && capturer == loopback_owner_) {
-    loopback_capturer_->Stop();
-    loopback_capturer_.reset();
+    StopElsewhere(std::move(loopback_capturer_));
     loopback_audio_source_ = nullptr;
     loopback_owner_ = nullptr;
   }
@@ -449,10 +577,12 @@ void FlutterScreenCapture::GetDisplayMedia(
   if (capture_audio) {
     // Stop any previous loopback session before starting a new one.
     if (loopback_capturer_) {
-      loopback_capturer_->Stop();
-      loopback_capturer_.reset();
+      StopElsewhere(std::move(loopback_capturer_));
       loopback_owner_ = nullptr;
     }
+#ifdef _WIN32
+    SupersedePendingSound();
+#endif
 
     RTCAudioOptions loopback_opts = ScreenSoundOptions(constraints);
     const std::string loopback_source_label =
@@ -468,6 +598,25 @@ void FlutterScreenCapture::GetDisplayMedia(
 
     loopback_capturer_ =
         CreateLoopbackCapturer(source_id, source->type() == kWindow);
+
+#ifdef _WIN32
+    // Fogata: the sound starts off the platform thread, and the share is answered once
+    // it has, could not, or took too long (BeginSound); the picture goes on meanwhile.
+    if (loopback_capturer_) {
+      auto pending = std::make_shared<PendingSound>();
+      pending->result = std::shared_ptr<MethodResultProxy>(std::move(result));
+      pending->params = params;
+      pending->stream_id = uuid;
+      pending->video_track_id = track->id().std_string();
+      pending->stream = stream;
+      pending->capturer = desktop_capturer;
+      pending->source = loopback_audio_source_;
+      pending->track = audio_track;
+      loopback_audio_source_ = nullptr;
+      BeginSound(std::move(pending), std::move(loopback_capturer_));
+      return;
+    }
+#endif
 
     if (loopback_capturer_ && loopback_capturer_->Start(loopback_audio_source_)) {
       loopback_owner_ = desktop_capturer.get();
@@ -499,6 +648,108 @@ void FlutterScreenCapture::GetDisplayMedia(
 
   result->Success(EncodableValue(params));
 }
+
+#ifdef _WIN32
+void FlutterScreenCapture::BeginSound(std::shared_ptr<PendingSound> pending,
+                                      std::unique_ptr<LoopbackCapturer> loopback) {
+  pending_sound_ = pending;
+  std::shared_ptr<PlatformQueue> queue = sound_queue_;
+  // Weak: the start holds this callback, and the pending share holds the start.
+  std::weak_ptr<PendingSound> weak = pending;
+  pending->start = SoundStart::Begin(
+      std::make_shared<LoopbackOpening>(std::move(loopback)), kSoundStartLimit,
+      [queue](std::function<void()> task) { return queue->Post(std::move(task)); },
+      [](std::shared_ptr<SoundOpening> opening) {
+        // Closing may wait on the audio service: on a thread of its own.
+        std::thread([opening]() { opening->Close(); }).detach();
+      },
+      // Called only on the platform thread, from a task queued while the queue was
+      // open, so while this is there: the queue closes as this goes, and the runner
+      // runs nothing once the plugin started going.
+      [this, weak](SoundOutcome outcome) {
+        std::shared_ptr<PendingSound> settled = weak.lock();
+        if (settled) SoundSettled(settled, outcome);
+      });
+}
+
+void FlutterScreenCapture::SoundSettled(
+    const std::shared_ptr<PendingSound>& pending,
+    SoundOutcome outcome) {
+  // A share no longer pending was answered when it stopped being (Cancel came first,
+  // and then nothing is told): never twice.
+  if (pending_sound_ != pending) return;
+  pending_sound_.reset();
+  std::shared_ptr<SoundOpening> opening = pending->start->TakeOpened();
+  if (opening) {
+    std::unique_ptr<LoopbackCapturer> loopback =
+        static_cast<LoopbackOpening*>(opening.get())->Take();
+    // Opened: Start only starts the threads that read it and feed the source.
+    if (loopback && loopback->Start(pending->source)) {
+      // None was started meanwhile (one start at a time, and a share with sound stops
+      // the one before), but two never go on together.
+      StopElsewhere(std::move(loopback_capturer_));
+      loopback_capturer_ = std::move(loopback);
+      loopback_audio_source_ = pending->source;
+      loopback_owner_ = pending->capturer.get();
+
+      scoped_refptr<RTCAudioTrack> audio_track = pending->track;
+      EncodableMap audio_info;
+      audio_info[EncodableValue("id")] =
+          EncodableValue(audio_track->id().std_string());
+      audio_info[EncodableValue("label")] =
+          EncodableValue(audio_track->id().std_string());
+      audio_info[EncodableValue("kind")] =
+          EncodableValue(audio_track->kind().std_string());
+      audio_info[EncodableValue("enabled")] =
+          EncodableValue(audio_track->enabled());
+
+      EncodableList audioTracks;
+      audioTracks.push_back(EncodableValue(audio_info));
+      pending->params[EncodableValue("audioTracks")] = EncodableValue(audioTracks);
+
+      pending->stream->AddTrack(audio_track);
+      base_->local_tracks_[audio_track->id().std_string()] = audio_track;
+      pending->result->Success(EncodableValue(pending->params));
+      return;
+    }
+    StopElsewhere(std::move(loopback));
+  }
+  if (outcome == SoundOutcome::kTimedOut) {
+    std::cerr << "[LoopbackCapturer] The sound did not start in "
+              << kSoundStartLimit.count() / 1000
+              << " s: the share goes on without it.\n";
+  }
+  // Loopback init failed or took too long — continue without audio.
+  AnswerWithoutSound(*pending);
+}
+
+void FlutterScreenCapture::AnswerWithoutSound(PendingSound& pending) {
+  pending.params[EncodableValue("audioTracks")] = EncodableValue(EncodableList());
+  pending.result->Success(EncodableValue(pending.params));
+}
+
+void FlutterScreenCapture::SupersedePendingSound() {
+  std::shared_ptr<PendingSound> pending = std::move(pending_sound_);
+  pending_sound_ = nullptr;
+  if (pending && pending->start->Cancel()) AnswerWithoutSound(*pending);
+}
+
+bool FlutterScreenCapture::FailPendingSound(RTCDesktopCapturer* capturer) {
+  if (!pending_sound_ || pending_sound_->capturer.get() != capturer) return false;
+  std::shared_ptr<PendingSound> pending = std::move(pending_sound_);
+  pending_sound_ = nullptr;
+  // Never false here: a share that was told is no longer pending.
+  if (!pending->start->Cancel()) return false;
+  // As a capture that does not start: no stream nor track is kept.
+  capture_tracks_.erase(capturer);
+  pending->capturer->DeRegisterDesktopCapturerObserver();
+  base_->local_tracks_.erase(pending->video_track_id);
+  base_->local_streams_.erase(pending->stream_id);
+  pending->result->Error("Bad Arguments",
+                         "the screen or window could not be captured");
+  return true;
+}
+#endif
 
 #ifdef __linux__
 void FlutterScreenCapture::GetDisplayMediaFromPortal(

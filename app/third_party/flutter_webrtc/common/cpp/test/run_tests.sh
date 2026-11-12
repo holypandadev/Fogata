@@ -2,7 +2,8 @@
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
 # renderer's, a connection's received tracks', the retired textures', a shared screen's sound
 # and the silent input against a PipeWire server of the tests' own (no daemon is reached),
-# an event channel's, and a desktop capture's end with ThreadSanitizer, the check of the
+# an event channel's, a desktop capture's end and the Windows screen sound's start
+# with ThreadSanitizer, the check of the
 # noise suppression table, the order the system's
 # default microphone and speaker are listed in, which outputs a shared
 # screen's sound takes, the portal's frame conversion, and libwebrtc
@@ -77,6 +78,12 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/event_channel_test"
   "$root/common/cpp/src/flutter_utf8_sanitize.cc" "$root/linux/portal_screen_capturer.cc" \
   -L"$lib" -Wl,-rpath,"$lib" -lwebrtc -lpthread -o "$out/screen_capture_end_test"
 TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/screen_capture_end_test"
+# A shared screen's sound started off the platform thread (Windows; fogata_sound_start.h):
+# told once or cancelled, what opens late or unwanted let go of once, with a fake audio
+# service that answers at once, late or never: ThreadSanitizer, plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/common/cpp/include" \
+  "$here/sound_start_test.cc" -lpthread -o "$out/sound_start_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/sound_start_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -I"$root/common/cpp/include" -I"$webrtc/include" \
   "$here/denoise_table_test.cc" -ldl -o "$out/denoise_table_test"
 "$out/denoise_table_test"

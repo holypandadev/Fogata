@@ -29,13 +29,26 @@ class ApplicationLoopbackCapturer : public LoopbackCapturer {
   // Pass 0 (default) to capture all system audio.
   void SetTargetProcessId(DWORD pid) { target_pid_ = pid; }
 
+  // Fogata: Start() after Open() only starts the threads that read and feed; without
+  // Open() first it opens too, waiting for that. Stop() is Quiet() then Close(). See
+  // LoopbackCapturer for which of these may wait on the audio service.
   bool Start(scoped_refptr<RTCAudioSource> source) override;
   void Stop() override;
+  bool Open() override;
+  void Quiet() override;
+  void Close() override;
 
  private:
   // Returns a fully-initialised IAudioClient ready for Start(), or nullptr.
-  // Also populates mix_format_.
+  // Also populates mix_format_. On the calling thread, in the multithreaded apartment.
   IAudioClient* TryInitApplicationLoopback();
+  // Lets go of the client, its capture service, format and event, whichever are held.
+  void ReleaseClient();
+
+  // Fogata: whether Open() succeeded and Close() has not run since. Written by Open() on
+  // the opening thread and read by Start() on the platform thread once the opening is
+  // handed over there (under fogata_sound_start.h's lock).
+  bool opened_ = false;
 
   void CaptureThread();
   void FeederThread();

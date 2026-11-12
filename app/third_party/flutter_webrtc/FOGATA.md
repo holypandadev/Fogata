@@ -396,15 +396,13 @@ went with no sound at all.
   PCM at 48 kHz, two channels; a whole screen's keeps the endpoint's format. Both channels
   go to the source as they came (the package mixed them into one), as on Linux: a call
   that agreed on stereo for the screen's sound encodes both.
-- `windows/application_loopback_capturer.cc`: `TryInitApplicationLoopback` closes the
-  event its worker sets only after the worker ended; the package closed it first, so a
-  worker still going after 7 s set whatever object the handle's value then named. The
-  start still runs on the platform thread and waits for that worker (the audio service
-  answering, 5 s at most for the activation, then the client's set-up): a stalled
-  service freezes the window while a share with sound starts. Moving it off that thread
-  takes `getDisplayMedia` answering later (`MethodResultProxy`), the loopback members
-  set back on the platform thread, and a share stopped meanwhile; not done, as nobody
-  can run the Windows build before it ships.
+- `windows/application_loopback_capturer.cc`: the activation's answer sets an event of
+  the handler's own, and the handler and the opening thread decide by an atomic exchange
+  which came second: an answer after the 5 s the opening waits lets go of the client it
+  brings, and the opening keeps its references to a handler it gave up on (one small
+  object and one event each time), so a late answer never sets a closed handle nor one
+  whose value Windows gave to another object. The package closed the event while its
+  worker could still set it. The start no longer runs on the platform thread (below).
 - `windows/loopback_capturer_factory.cc`: a window whose process cannot be found (closed
   meanwhile, an id that is no window) gets no sound at all; the package took the whole
   system's sound then.
@@ -413,6 +411,46 @@ went with no sound at all.
   the plugin lists it by its handle, and take its sound while another program plays
   (none may come) and once its own program plays too (it must); whoever runs it starts
   those programs, playing into a virtual output.
+
+## A screen's sound started off the platform thread (Windows)
+
+The package started a share's sound on the platform thread, inside `getDisplayMedia`: the
+activation (waited for 7 s, then for as long as the audio service took), the client's
+set-up and its start; and stopped it there too. A slow or stalled audio service froze the
+window as a share with sound started or stopped.
+
+- `common/cpp/include/loopback_capturer.h`, `windows/application_loopback_capturer.{h,cc}`:
+  `Open` (the activation, the client's set-up and start, in the multithreaded apartment
+  for the while) and `Close` (the client's stop and release) are the parts that may wait
+  on the audio service. `Start` after `Open` only starts the threads that read and feed;
+  `Quiet` only ends them (the reading one is woken at once, the feeding one within 10 ms)
+  and lets go of the source. `Start` without `Open`, and `Stop`, do everything, as before
+  (`windows/test/loopback_test.cc`).
+- `common/cpp/include/fogata_sound_start.h` (new): `SoundStart` runs `Open` on a thread
+  of its own and gives up at a limit. It ends as opened, failed, timed out or cancelled,
+  told once on the platform thread through a `PlatformQueue` (which refuses once its
+  owner went), unless the platform thread cancelled it first. What opens too late or
+  is no longer wanted is closed off the platform thread and never handed over; an opened
+  sound nobody took (the plugin went) is closed when the start goes. Tested with
+  ThreadSanitizer by `common/cpp/test/sound_start_test.cc` (in `run_tests.sh`), with an
+  audio service that answers at once, late or never.
+- `common/cpp/src/flutter_screen_capture.cc`, `common/cpp/include/flutter_screen_capture.h`:
+  `getDisplayMedia` starts the picture as before and returns. The answer is the same as
+  before, given once the sound is known: with the sound's track, or with none when it
+  could not start or took over 7 s (the activation's own 5 s and 2 s for the set-up, the
+  platform thread's wait before). Meanwhile, a second share with sound has the first one
+  answered without its sound, as a share with sound stopped a running one before; the
+  picture's capture ending (`OnStop`, `OnError`) answers the error of a capture that does
+  not start, keeping no stream nor track. A running sound stops with `Quiet` on the
+  platform thread and `Close` on a thread of its own. When the plugin goes, a sound still
+  starting answers nobody and is closed once it opens; a running one stops feeding before
+  libwebrtc ends. For tests, `FOGATA_TEST_SOUND_STALL=<milliseconds>` (debug builds)
+  holds each start that long first, as a stalled audio service would.
+- `windows/flutter_webrtc_plugin.cc`: the task runner is made before the plugin's
+  `FlutterWebRTC` and goes after it, as on Linux (it went first), so the sound's queue
+  closes before the runner goes. `windows/task_runner_windows.cc`: each task runs with
+  the queue let go of; it ran under the queue's lock, so a task that queued another (a
+  capture's end, which sends an event) locked it again.
 
 ## Window sharing (macOS)
 

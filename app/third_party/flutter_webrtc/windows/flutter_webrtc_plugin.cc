@@ -47,9 +47,9 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
   FlutterWebRTCPluginImpl(PluginRegistrar* registrar,
                           std::unique_ptr<MethodChannel> channel)
       : channel_(std::move(channel)),
+        task_runner_(std::make_unique<TaskRunnerWindows>()),
         messenger_(registrar->messenger()),
-        textures_(registrar->texture_registrar()),
-        task_runner_(std::make_unique<TaskRunnerWindows>()) {
+        textures_(registrar->texture_registrar()) {
     webrtc_ = std::make_unique<FlutterWebRTC>(this);
     g_shared_instance = webrtc_.get();
   }
@@ -65,10 +65,14 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
 
  private:
   std::unique_ptr<MethodChannel> channel_;
+  // Fogata: declared before webrtc_, so it goes after it, as on Linux: what
+  // FlutterWebRTC queues while it goes (a capture's end) still finds the runner, and
+  // the queue of a sound still starting closes before the runner goes
+  // (flutter_screen_capture.cc). Declared after, the runner went first.
+  std::unique_ptr<TaskRunner> task_runner_;
   std::unique_ptr<FlutterWebRTC> webrtc_;
   BinaryMessenger* messenger_;
   TextureRegistrar* textures_;
-  std::unique_ptr<TaskRunner> task_runner_;
 };
 
 }  // namespace flutter_webrtc_plugin

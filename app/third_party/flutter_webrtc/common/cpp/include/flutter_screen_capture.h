@@ -6,6 +6,7 @@
 
 #include <memory>
 
+#include "fogata_sound_start.h"
 #include "loopback_capturer.h"
 #include "rtc_audio_source.h"
 #include "rtc_audio_track.h"
@@ -18,6 +19,7 @@ class FlutterScreenCapture : public MediaListObserver,
                              public DesktopCapturerObserver {
  public:
   FlutterScreenCapture(FlutterWebRTCBase* base);
+  ~FlutterScreenCapture();
 
   void GetDisplayMedia(const EncodableMap& constraints,
                        std::unique_ptr<MethodResultProxy> result);
@@ -90,6 +92,34 @@ class FlutterScreenCapture : public MediaListObserver,
   // called on libwebrtc's capture thread, while the platform thread starts and stops
   // captures and their sound.
   void OnPlatformThread(std::function<void()> task);
+
+#ifdef _WIN32
+  // Fogata: a share whose sound is still starting, off the platform thread
+  // (fogata_sound_start.h): getDisplayMedia answers once it has started, could not or
+  // took too long. At most one; only touched on the platform thread.
+  struct PendingSound;
+  std::shared_ptr<PendingSound> pending_sound_;
+  // Tasks from the sound's own threads reach the platform thread through this, closed
+  // as this goes (before the plugin's task runner does).
+  std::shared_ptr<PlatformQueue> sound_queue_;
+
+  // Starts the sound of the share |pending| describes, and answers it once that is
+  // known.
+  void BeginSound(std::shared_ptr<PendingSound> pending,
+                  std::unique_ptr<LoopbackCapturer> loopback);
+  // How the start of |pending|'s sound ended: the answer, with or without its sound.
+  void SoundSettled(const std::shared_ptr<PendingSound>& pending,
+                    SoundOutcome outcome);
+  // Answers |pending| with its picture alone, as a share whose sound could not start.
+  void AnswerWithoutSound(PendingSound& pending);
+  // A share with sound asked for while |pending_sound_|'s still starts: that one goes
+  // without its sound, as a running one is stopped by the new share.
+  void SupersedePendingSound();
+  // The capture of the share whose sound still starts ended (|capturer|'s OnStop or
+  // OnError): it is answered with the error of a capture that could not start, and
+  // nothing of it is kept. False if that share is not |capturer|'s.
+  bool FailPendingSound(RTCDesktopCapturer* capturer);
+#endif
 };
 
 }  // namespace flutter_webrtc_plugin

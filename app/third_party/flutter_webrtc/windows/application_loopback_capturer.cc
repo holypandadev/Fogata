@@ -6,9 +6,12 @@
 #include <chrono>
 #include <cstring>
 #include <iostream>
+#include <memory>
 #include <mmdeviceapi.h>
 #include <roapi.h>
+#include <thread>
 #include <timeapi.h>
+#include <type_traits>
 
 // ---------------------------------------------------------------------------
 // ApplicationLoopbackAudio API types
@@ -58,21 +61,58 @@ struct HandleDeleter {
 };
 using UniqueHandle = std::unique_ptr<std::remove_pointer_t<HANDLE>, HandleDeleter>;
 
+// Fogata: the activation's answer comes on a thread of the system's, maybe after the
+// opening thread gave up waiting for it (the audio service stalled). Whoever comes
+// second of the answer and the giving up decides, through |state_|: an answer that comes
+// after the giving up lets go of the client it brings, as nobody will take it; one that
+// came first is taken. The opening thread keeps its reference to a handler it gave up
+// on (and to the operation), never releasing it: the late answer then always finds the
+// handler and its event alive, whether or not the operation holds the handler itself,
+// for the cost of one small object and one event per activation the service never
+// answered in time.
 class ActivationCompletionHandler
     : public IActivateAudioInterfaceCompletionHandler {
  public:
   UniqueHandle event_{CreateEvent(nullptr, FALSE, FALSE, nullptr)};
+  // Read by the opening thread only once Answered returned true.
   IAudioClient* client_ = nullptr;
   HRESULT activation_result_ = E_FAIL;
+
+  ~ActivationCompletionHandler() {
+    if (client_) client_->Release();
+  }
+
+  // Waits up to |ms| for the answer. False when it did not come: the handler is then
+  // given up on, and an answer that comes later lets go of what it brings.
+  bool Answered(DWORD ms) {
+    if (event_ && WaitForSingleObject(event_.get(), ms) == WAIT_OBJECT_0) {
+      return true;
+    }
+    // An answer that came between the wait's end and now counts.
+    return state_.exchange(kAbandoned) == kAnswered;
+  }
 
   // IActivateAudioInterfaceCompletionHandler
   HRESULT STDMETHODCALLTYPE ActivateCompleted(
       IActivateAudioInterfaceAsyncOperation* op) override {
+    HRESULT result = E_FAIL;
     IUnknown* unk = nullptr;
-    op->GetActivateResult(&activation_result_, &unk);
-    if (SUCCEEDED(activation_result_) && unk) {
-      unk->QueryInterface(IID_PPV_ARGS(&client_));
-      unk->Release();
+    const HRESULT hr = op->GetActivateResult(&result, &unk);
+    if (FAILED(hr)) result = hr;
+    IAudioClient* client = nullptr;
+    if (SUCCEEDED(result) && unk) {
+      unk->QueryInterface(IID_PPV_ARGS(&client));
+    }
+    if (unk) unk->Release();
+    activation_result_ = result;
+    client_ = client;
+    if (state_.exchange(kAnswered) == kAbandoned) {
+      // Given up on already: nobody takes the client.
+      if (client_) {
+        client_->Release();
+        client_ = nullptr;
+      }
+      return S_OK;
     }
     if (event_) SetEvent(event_.get());
     return S_OK;
@@ -106,6 +146,10 @@ class ActivationCompletionHandler
   }
 
  private:
+  static constexpr int kWaiting = 0;
+  static constexpr int kAnswered = 1;
+  static constexpr int kAbandoned = 2;
+  std::atomic<int> state_{kWaiting};
   volatile ULONG ref_ = 1;
 };
 
@@ -119,60 +163,76 @@ ApplicationLoopbackCapturer::~ApplicationLoopbackCapturer() {
   Stop();
 }
 
+// Fogata: Open() is the part of the start that waits on the audio service: the
+// activation, the client's set-up and its start. The application calls it on a thread
+// of its own (fogata_sound_start.h); it joins the multithreaded apartment for the while,
+// as ActivateAudioInterfaceAsync's handler is agile and answers on a thread of the
+// system's, and the activation needs no message loop. The capture's client starts here
+// too: until Start() starts reading, WASAPI drops what overflows its buffer.
+bool ApplicationLoopbackCapturer::Open() {
+  if (opened_) return true;
+  const HRESULT init_hr = RoInitialize(RO_INIT_MULTITHREADED);
+  if (FAILED(init_hr)) {
+    // A thread of the single-threaded apartment (RPC_E_CHANGED_MODE): Start() opens
+    // on a thread of its own instead.
+    std::cerr << "[LoopbackCapturer] RoInitialize failed: 0x" << std::hex
+              << init_hr << "\n";
+    return false;
+  }
+  bool opened = false;
+  audio_client_ = TryInitApplicationLoopback();
+  if (!audio_client_) {
+    std::cerr << "[LoopbackCapturer] ApplicationLoopback init failed.\n";
+  } else {
+    buffer_ready_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+    HRESULT hr = buffer_ready_event_ != nullptr ? S_OK : E_OUTOFMEMORY;
+    if (SUCCEEDED(hr)) {
+      hr = audio_client_->SetEventHandle(buffer_ready_event_);
+      if (FAILED(hr)) {
+        std::cerr << "[LoopbackCapturer] SetEventHandle failed: 0x" << std::hex
+                  << hr << "\n";
+      }
+    }
+    if (SUCCEEDED(hr)) {
+      hr = audio_client_->GetService(IID_PPV_ARGS(&capture_client_));
+      if (FAILED(hr)) {
+        std::cerr
+            << "[LoopbackCapturer] GetService(IAudioCaptureClient) failed: 0x"
+            << std::hex << hr << "\n";
+      }
+    }
+    if (SUCCEEDED(hr)) {
+      hr = audio_client_->Start();
+      if (FAILED(hr)) {
+        std::cerr << "[LoopbackCapturer] IAudioClient::Start failed: 0x"
+                  << std::hex << hr << "\n";
+      }
+    }
+    opened = SUCCEEDED(hr);
+  }
+  if (!opened) {
+    ReleaseClient();
+  }
+  opened_ = opened;
+  RoUninitialize();
+  return opened;
+}
+
 bool ApplicationLoopbackCapturer::Start(
     scoped_refptr<RTCAudioSource> source) {
   if (running_) return true;
 
-    source_ = source;
-
-  audio_client_ = TryInitApplicationLoopback();
-  if (!audio_client_) {
-    std::cerr << "[LoopbackCapturer] ApplicationLoopback init failed.\n";
-    return false;
+  if (!opened_) {
+    // Fogata: opened here only where nothing opened it first (windows/test/
+    // loopback_test.cc), on a thread of its own, which joins the multithreaded
+    // apartment whatever apartment this one is in; this one waits for it.
+    bool opened = false;
+    std::thread opener([this, &opened]() { opened = Open(); });
+    opener.join();
+    if (!opened) return false;
   }
 
-  buffer_ready_event_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-  if (buffer_ready_event_ == nullptr) {
-    audio_client_->Release();
-    audio_client_ = nullptr;
-    return false;
-  }
-
-  HRESULT hr = audio_client_->SetEventHandle(buffer_ready_event_);
-  if (FAILED(hr)) {
-    std::cerr << "[LoopbackCapturer] SetEventHandle failed: 0x" << std::hex
-              << hr << "\n";
-    audio_client_->Release();
-    audio_client_ = nullptr;
-    CloseHandle(buffer_ready_event_);
-    buffer_ready_event_ = nullptr;
-    return false;
-  }
-
-  hr = audio_client_->GetService(IID_PPV_ARGS(&capture_client_));
-  if (FAILED(hr)) {
-    std::cerr << "[LoopbackCapturer] GetService(IAudioCaptureClient) failed: 0x"
-              << std::hex << hr << "\n";
-    audio_client_->Release();
-    audio_client_ = nullptr;
-    CloseHandle(buffer_ready_event_);
-    buffer_ready_event_ = nullptr;
-    return false;
-  }
-
-  hr = audio_client_->Start();
-  if (FAILED(hr)) {
-    std::cerr << "[LoopbackCapturer] IAudioClient::Start failed: 0x"
-              << std::hex << hr << "\n";
-    capture_client_->Release();
-    capture_client_ = nullptr;
-    audio_client_->Release();
-    audio_client_ = nullptr;
-    CloseHandle(buffer_ready_event_);
-    buffer_ready_event_ = nullptr;
-    return false;
-  }
-
+  source_ = source;
   running_ = true;
 
   // Cache audio format for FeederThread (mix_format_ lives on this thread).
@@ -203,6 +263,16 @@ bool ApplicationLoopbackCapturer::Start(
 }
 
 void ApplicationLoopbackCapturer::Stop() {
+  Quiet();
+  Close();
+  // std::cout << "[LoopbackCapturer] Capture stopped.\n";
+}
+
+// Fogata: quick, and the only part of the stop the platform thread runs. The capture
+// thread is woken at once (it waits on the buffer event, 200 ms at most a turn); the
+// feeder wakes within 10 ms (its timer; 40 ms at most a turn). Neither calls the audio
+// service: they read the client's shared buffer and hand frames to the source.
+void ApplicationLoopbackCapturer::Quiet() {
   if (!running_) return;
   running_ = false;
 
@@ -216,15 +286,33 @@ void ApplicationLoopbackCapturer::Stop() {
   if (feeder_thread_.joinable()) {
     feeder_thread_.join();
   }
+  source_ = nullptr;
+}
 
+// Fogata: stopping and letting go of the client may wait on the audio service; the
+// application calls this on a thread of its own, after Quiet() on the platform thread.
+void ApplicationLoopbackCapturer::Close() {
+  Quiet();
+  if (!opened_) return;
+  opened_ = false;
+  // On a thread of its own the multithreaded apartment is joined for the while; on one
+  // already in an apartment (the test's, through Stop) this changes nothing.
+  const HRESULT init_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  ReleaseClient();
+  if (SUCCEEDED(init_hr)) CoUninitialize();
+}
+
+void ApplicationLoopbackCapturer::ReleaseClient() {
   if (audio_client_) {
     audio_client_->Stop();
-    audio_client_->Release();
-    audio_client_ = nullptr;
   }
   if (capture_client_) {
     capture_client_->Release();
     capture_client_ = nullptr;
+  }
+  if (audio_client_) {
+    audio_client_->Release();
+    audio_client_ = nullptr;
   }
   if (mix_format_) {
     CoTaskMemFree(mix_format_);
@@ -234,208 +322,167 @@ void ApplicationLoopbackCapturer::Stop() {
     CloseHandle(buffer_ready_event_);
     buffer_ready_event_ = nullptr;
   }
-  source_ = nullptr;
-  // std::cout << "[LoopbackCapturer] Capture stopped.\n";
 }
 
 // ---------------------------------------------------------------------------
 // TryInitApplicationLoopback
+// Fogata: runs on the calling thread, which Open() has put in the multithreaded
+// apartment. The package ran it on a worker thread of its own that the platform thread
+// waited for (7 s, then for as long as the worker took).
 // ---------------------------------------------------------------------------
 IAudioClient* ApplicationLoopbackCapturer::TryInitApplicationLoopback() {
-  struct Result {
-    IAudioClient* client = nullptr;
-    WAVEFORMATEX* fmt    = nullptr;
-  };
-  Result result;
-  HANDLE done_event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-
-  std::thread worker([&result, done_event, this]() {
-    // RoInitialize(MTA) — the real requirement is that the completion handler
-    // supports IAgileObject (see QueryInterface above).  Without that,
-    // ActivateAudioInterfaceAsync returns RO_E_WRONG_THREAD regardless of
-    // the apartment type.
-    HRESULT init_hr = RoInitialize(RO_INIT_MULTITHREADED);
-    if (FAILED(init_hr)) {
-      std::cerr << "[LoopbackCapturer] RoInitialize failed: 0x"
-                << std::hex << init_hr << "\n";
-      SetEvent(done_event);
-      return;
-    }
-
-    auto* handler = new ActivationCompletionHandler();
-
-    AUDIOCLIENT_ACTIVATION_PARAMS ap = {};
-    ap.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
-    if (target_pid_ != 0) {
-      // Isolate audio from a specific application.
-      ap.ProcessLoopbackParams.TargetProcessId   = target_pid_;
-      ap.ProcessLoopbackParams.ProcessLoopbackMode =
-          PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
-    } else {
-      // Capture all system audio (exclude only our own process).
-      // TargetProcessId=0 returns E_INVALIDARG; use self PID instead.
-      ap.ProcessLoopbackParams.TargetProcessId   = GetCurrentProcessId();
-      ap.ProcessLoopbackParams.ProcessLoopbackMode =
-          PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
-    }
-
-    PROPVARIANT pv;
-    PropVariantInit(&pv);
-    pv.vt             = VT_BLOB;
-    pv.blob.cbSize    = sizeof(ap);
-    pv.blob.pBlobData = reinterpret_cast<BYTE*>(&ap);
-
-    IActivateAudioInterfaceAsyncOperation* async_op = nullptr;
-    HRESULT hr = ActivateAudioInterfaceAsync(
-        VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
-        __uuidof(IAudioClient), 
-        &pv, 
-        handler,
-        &async_op
-      );
-
-    if (FAILED(hr)) {
-      std::cerr << "[LoopbackCapturer] ActivateAudioInterfaceAsync failed: 0x"
-                << std::hex << hr << "\n";
-      handler->Release();
-      RoUninitialize();
-      SetEvent(done_event);
-      return;
-    }
-
-
-    // Failed to create the event in the handler — can't continue.
-    // Abort the activation attempt and clean up, which will cause the callback to never fire.
-    if (!handler->event_) {
-      std::cerr << "[LoopbackCapturer] CreateEvent failed for activation handler.\n";
-      handler->Release();
-      RoUninitialize();
-      SetEvent(done_event);
-      return;
-    }
-    // MTA: the callback fires on a threadpool thread — no message pump needed.
-    // wait for the callback to signal completion (or timeout after 5 seconds, which
-    // should never happen under normal circumstances).
-    WaitForSingleObject(handler->event_.get(), 5000);
-    if (async_op) async_op->Release();
-
-    if (FAILED(handler->activation_result_) || !handler->client_) {
-      std::cerr << "[LoopbackCapturer] Activation completed with error: 0x"
-                << std::hex << handler->activation_result_ << "\n";
-      handler->Release();
-      RoUninitialize();
-      SetEvent(done_event);
-      return;
-    }
-
-    IAudioClient* client = handler->client_;
+  auto* handler = new ActivationCompletionHandler();
+  if (!handler->event_) {
+    std::cerr << "[LoopbackCapturer] CreateEvent failed for activation handler.\n";
     handler->Release();
+    return nullptr;
+  }
 
-    // GetMixFormat is not supported on the loopback IAudioClient (E_NOTIMPL).
-    // Instead, get the system mix format from the default render endpoint.
-    WAVEFORMATEX* fmt = nullptr;
-    {
-      IMMDeviceEnumerator* enumerator = nullptr;
-      IMMDevice*           device     = nullptr;
-      IAudioClient*        rc         = nullptr;
-      HRESULT fmt_hr = CoCreateInstance(
-          __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
-          IID_PPV_ARGS(&enumerator));
-      if (SUCCEEDED(fmt_hr))
-        fmt_hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-      if (SUCCEEDED(fmt_hr))
-        fmt_hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
-                                  nullptr, reinterpret_cast<void**>(&rc));
-      if (SUCCEEDED(fmt_hr))
-        fmt_hr = rc->GetMixFormat(&fmt);
-      if (rc)        rc->Release();
-      if (device)    device->Release();
-      if (enumerator) enumerator->Release();
-      if (FAILED(fmt_hr) || !fmt) {
-        std::cerr << "[LoopbackCapturer] GetMixFormat (render endpoint) failed: 0x"
-                  << std::hex << fmt_hr << "\n";
-        client->Release();
-        RoUninitialize();
-        SetEvent(done_event);
-        return;
-      }
-    }
+  AUDIOCLIENT_ACTIVATION_PARAMS ap = {};
+  ap.ActivationType = AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK;
+  if (target_pid_ != 0) {
+    // Isolate audio from a specific application.
+    ap.ProcessLoopbackParams.TargetProcessId   = target_pid_;
+    ap.ProcessLoopbackParams.ProcessLoopbackMode =
+        PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE;
+  } else {
+    // Capture all system audio (exclude only our own process).
+    // TargetProcessId=0 returns E_INVALIDARG; use self PID instead.
+    ap.ProcessLoopbackParams.TargetProcessId   = GetCurrentProcessId();
+    ap.ProcessLoopbackParams.ProcessLoopbackMode =
+        PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE;
+  }
 
-    // Fogata: one process's sound (a shared window's) comes only in plain 16-bit PCM;
-    // asked for in the render endpoint's own (floating-point) format, the capture
-    // starts but never gets a packet.
-    if (target_pid_ != 0) {
-      auto* pcm = static_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(WAVEFORMATEX)));
-      if (pcm != nullptr) {
-        *pcm = {};
-        pcm->wFormatTag = WAVE_FORMAT_PCM;
-        pcm->nChannels = 2;
-        pcm->nSamplesPerSec = 48000;
-        pcm->wBitsPerSample = 16;
-        pcm->nBlockAlign = pcm->nChannels * pcm->wBitsPerSample / 8;
-        pcm->nAvgBytesPerSec = pcm->nSamplesPerSec * pcm->nBlockAlign;
-        CoTaskMemFree(fmt);
-        fmt = pcm;
-      }
-    }
+  PROPVARIANT pv;
+  PropVariantInit(&pv);
+  pv.vt             = VT_BLOB;
+  pv.blob.cbSize    = sizeof(ap);
+  pv.blob.pBlobData = reinterpret_cast<BYTE*>(&ap);
 
-    // Try IAudioClient3 to query the minimum engine period and use it as the
-    // buffer-duration hint.  This reduces capture latency without the risk of
-    // InitializeSharedAudioStream (which does not support loopback flags).
-    // Falls back gracefully to hnsBufferDuration=0 if IAudioClient3 is
-    // unavailable or the query fails.
-    REFERENCE_TIME buffer_duration = 0;
-    {
-      IAudioClient3* client3 = nullptr;
-      if (SUCCEEDED(client->QueryInterface(IID_PPV_ARGS(&client3)))) {
-        UINT32 default_period = 0, fundamental_period = 0,
-               min_period = 0,     max_period = 0;
-        if (SUCCEEDED(client3->GetSharedModeEnginePeriod(
-                fmt, &default_period, &fundamental_period,
-                &min_period, &max_period))) {
-          // Convert frames -> 100-ns units.
-          buffer_duration = static_cast<REFERENCE_TIME>(
-              10000000LL * min_period / fmt->nSamplesPerSec);
-          // std::cout << "[LoopbackCapturer] IAudioClient3 min period: "
-          //           << min_period << " frames ("
-          //           << buffer_duration / 10000 << " ms).\n";
-        }
-        client3->Release();
-      }
-    }
+  IActivateAudioInterfaceAsyncOperation* async_op = nullptr;
+  HRESULT hr = ActivateAudioInterfaceAsync(
+      VIRTUAL_AUDIO_DEVICE_PROCESS_LOOPBACK,
+      __uuidof(IAudioClient),
+      &pv,
+      handler,
+      &async_op);
 
-    hr = client->Initialize(
-        AUDCLNT_SHAREMODE_SHARED,
-        AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
-        buffer_duration, 0, fmt, nullptr);
-    if (FAILED(hr)) {
-      std::cerr << "[LoopbackCapturer] IAudioClient::Initialize failed: 0x"
-                << std::hex << hr << "\n";
-      CoTaskMemFree(fmt);
+  if (FAILED(hr)) {
+    std::cerr << "[LoopbackCapturer] ActivateAudioInterfaceAsync failed: 0x"
+              << std::hex << hr << "\n";
+    if (async_op) async_op->Release();
+    handler->Release();
+    return nullptr;
+  }
+
+  // MTA: the callback fires on a threadpool thread — no message pump needed.
+  // Wait for it 5 seconds at most, which should never happen under normal
+  // circumstances.
+  if (!handler->Answered(5000)) {
+    // Fogata: given up on; the handler and the operation are kept, never released
+    // (see ActivationCompletionHandler).
+    std::cerr << "[LoopbackCapturer] Activation did not complete in 5 s.\n";
+    return nullptr;
+  }
+  if (async_op) async_op->Release();
+
+  const HRESULT activation_result = handler->activation_result_;
+  IAudioClient* client = handler->client_;
+  handler->client_ = nullptr;
+  handler->Release();
+  if (FAILED(activation_result) || !client) {
+    std::cerr << "[LoopbackCapturer] Activation completed with error: 0x"
+              << std::hex << activation_result << "\n";
+    if (client) client->Release();
+    return nullptr;
+  }
+
+  // GetMixFormat is not supported on the loopback IAudioClient (E_NOTIMPL).
+  // Instead, get the system mix format from the default render endpoint.
+  WAVEFORMATEX* fmt = nullptr;
+  {
+    IMMDeviceEnumerator* enumerator = nullptr;
+    IMMDevice*           device     = nullptr;
+    IAudioClient*        rc         = nullptr;
+    HRESULT fmt_hr = CoCreateInstance(
+        __uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+        IID_PPV_ARGS(&enumerator));
+    if (SUCCEEDED(fmt_hr))
+      fmt_hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+    if (SUCCEEDED(fmt_hr))
+      fmt_hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL,
+                                nullptr, reinterpret_cast<void**>(&rc));
+    if (SUCCEEDED(fmt_hr))
+      fmt_hr = rc->GetMixFormat(&fmt);
+    if (rc)        rc->Release();
+    if (device)    device->Release();
+    if (enumerator) enumerator->Release();
+    if (FAILED(fmt_hr) || !fmt) {
+      std::cerr << "[LoopbackCapturer] GetMixFormat (render endpoint) failed: 0x"
+                << std::hex << fmt_hr << "\n";
       client->Release();
-      RoUninitialize();
-      SetEvent(done_event);
-      return;
+      return nullptr;
     }
+  }
 
-    result.client = client;
-    result.fmt    = fmt;
-    // std::cout << "[LoopbackCapturer] ApplicationLoopback active.\n";
-    RoUninitialize();
-    SetEvent(done_event);
-  });
+  // Fogata: one process's sound (a shared window's) comes only in plain 16-bit PCM;
+  // asked for in the render endpoint's own (floating-point) format, the capture
+  // starts but never gets a packet.
+  if (target_pid_ != 0) {
+    auto* pcm = static_cast<WAVEFORMATEX*>(CoTaskMemAlloc(sizeof(WAVEFORMATEX)));
+    if (pcm != nullptr) {
+      *pcm = {};
+      pcm->wFormatTag = WAVE_FORMAT_PCM;
+      pcm->nChannels = 2;
+      pcm->nSamplesPerSec = 48000;
+      pcm->wBitsPerSample = 16;
+      pcm->nBlockAlign = pcm->nChannels * pcm->wBitsPerSample / 8;
+      pcm->nAvgBytesPerSec = pcm->nSamplesPerSec * pcm->nBlockAlign;
+      CoTaskMemFree(fmt);
+      fmt = pcm;
+    }
+  }
 
-  WaitForSingleObject(done_event, 7000);
-  // Fogata: the worker is waited for before its event is closed. Closed first, a worker
-  // still going after 7 s (the audio service slow to answer) set an event by a handle
-  // value Windows may have given to another object of the process meanwhile. join()
-  // waits for it however long it takes, as it did before.
-  worker.join();
-  if (done_event != nullptr) CloseHandle(done_event);
+  // Try IAudioClient3 to query the minimum engine period and use it as the
+  // buffer-duration hint.  This reduces capture latency without the risk of
+  // InitializeSharedAudioStream (which does not support loopback flags).
+  // Falls back gracefully to hnsBufferDuration=0 if IAudioClient3 is
+  // unavailable or the query fails.
+  REFERENCE_TIME buffer_duration = 0;
+  {
+    IAudioClient3* client3 = nullptr;
+    if (SUCCEEDED(client->QueryInterface(IID_PPV_ARGS(&client3)))) {
+      UINT32 default_period = 0, fundamental_period = 0,
+             min_period = 0,     max_period = 0;
+      if (SUCCEEDED(client3->GetSharedModeEnginePeriod(
+              fmt, &default_period, &fundamental_period,
+              &min_period, &max_period))) {
+        // Convert frames -> 100-ns units.
+        buffer_duration = static_cast<REFERENCE_TIME>(
+            10000000LL * min_period / fmt->nSamplesPerSec);
+        // std::cout << "[LoopbackCapturer] IAudioClient3 min period: "
+        //           << min_period << " frames ("
+        //           << buffer_duration / 10000 << " ms).\n";
+      }
+      client3->Release();
+    }
+  }
 
-  if (!result.client) return nullptr;
-  mix_format_ = result.fmt;
-  return result.client;
+  hr = client->Initialize(
+      AUDCLNT_SHAREMODE_SHARED,
+      AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK,
+      buffer_duration, 0, fmt, nullptr);
+  if (FAILED(hr)) {
+    std::cerr << "[LoopbackCapturer] IAudioClient::Initialize failed: 0x"
+              << std::hex << hr << "\n";
+    CoTaskMemFree(fmt);
+    client->Release();
+    return nullptr;
+  }
+
+  // std::cout << "[LoopbackCapturer] ApplicationLoopback active.\n";
+  mix_format_ = fmt;
+  return client;
 }
 
 // ---------------------------------------------------------------------------
