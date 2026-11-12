@@ -945,6 +945,13 @@ fn apart_as_decided(log: &GroupLog, corpus: &[Entry], i: usize) -> Option<&'stat
 /// all at once makes the same, checked here), and where the level before judges them
 /// apart.
 fn judged(worlds: &[World]) -> String {
+    judged_with(worlds, true)
+}
+
+/// [`judged`], and where the level before judges apart only with `apart_from_level_one`:
+/// a later level's corpus holds entries level one knows nothing of, which it is not
+/// compared with.
+fn judged_with(worlds: &[World], apart_from_level_one: bool) -> String {
     let mut out = String::new();
     for (w, world) in worlds.iter().enumerate() {
         let corpus = &world.with_variants();
@@ -971,7 +978,7 @@ fn judged(worlds: &[World]) -> String {
             world.run
         ));
         // The level before knows no other room for a run.
-        if world.run == RUN_ROOM.entries {
+        if apart_from_level_one && world.run == RUN_ROOM.entries {
             let log = given(corpus, &as_written, world.run);
             for (what, at) in judged_apart_at_level_one(corpus) {
                 let mut line = what.to_string();
@@ -1033,6 +1040,237 @@ fn write_the_level_two_corpus() {
     let dir = std::path::Path::new(&dir);
     std::fs::write(dir.join("level-two.bin"), bytes).unwrap();
     std::fs::write(dir.join("level-two.txt"), as_level_two(|| judged(&worlds))).unwrap();
+}
+
+/// `f` run as a copy of the version that brought level three judges: one that knows no
+/// level after it.
+fn as_level_three<T>(f: impl FnOnce() -> T) -> T {
+    crate::state::HIGHEST.with(|h| h.set(Level::Three));
+    let out = f();
+    crate::state::HIGHEST.with(|h| h.set(Level::CURRENT));
+    out
+}
+
+/// The corpus the judgment of level three is pinned on, made by
+/// [`write_the_level_three_corpus`] with the version that brought level three, before any
+/// later level, and never made again: the saved logs of the levels after two (see the
+/// architecture document, 5.1). A later version judges it as level three did, as a copy of
+/// level three ([`as_level_three`]).
+const CORPUS_THREE: &[u8] = include_bytes!("level-three.bin");
+
+/// What level three makes of [`CORPUS_THREE`], as [`judged_with`] writes it.
+const JUDGED_THREE: &str = include_str!("level-three.txt");
+
+/// The entries a manager of copy 0 writes to raise the group to `level`, handed to every
+/// copy; none when no member manages there.
+fn raise_written(h: &mut Hostile, level: Level) -> Option<Entry> {
+    let time = h.world.time;
+    let state = h.world.logs[0].state();
+    let manager = (h.world.devices.iter()).find(|d| state.is_manager(&d.key()))?;
+    let entry = h.world.logs[0]
+        .raise_level(&manager.id, level, time)
+        .ok()?;
+    for log in &mut h.world.logs {
+        let _ = log.insert(entry.clone());
+    }
+    h.written.push(entry.clone());
+    Some(entry)
+}
+
+/// Rotations and removals that give their new key to their author alone, by every member
+/// of copy 0, each on copy 0's heads and on `stale` (entries from before the group went up a
+/// level), handed to copy 0 and another: what level three keeps of them where their
+/// authors saw it, and applies at level two where they did not; and a level after it holds
+/// to every member its author saw.
+fn for_a_few_written(h: &mut Hostile, stale: &[EntryHash]) {
+    h.world.time += 1;
+    let time = h.world.time;
+    let log = &h.world.logs[0];
+    let (state, group, heads) = (log.state(), log.group_id(), log.heads());
+    let n = h.world.devices.len();
+    let mut written = Vec::new();
+    for (i, d) in h.world.devices.iter().enumerate() {
+        if !state.is_member(&d.key()) {
+            continue;
+        }
+        let alone = || Rotation::new(&group, [d.key()]).unwrap().0;
+        let below = state.below(&d.key()).first().copied();
+        for parents in [heads.clone(), stale.to_vec()] {
+            written.push((
+                i,
+                Entry::sign(&d.id, group, parents.clone(), time, Body::Rotate { rotation: alone() }),
+            ));
+            if let Some(member) = below {
+                let rotation = alone();
+                written.push((
+                    i,
+                    Entry::sign(&d.id, group, parents, time, Body::Remove { member, rotation }),
+                ));
+            }
+        }
+    }
+    for (i, entry) in written {
+        for to in [0, 1 + i % (n - 1)] {
+            let _ = h.world.logs[to].insert(entry.clone());
+        }
+        h.written.push(entry);
+    }
+}
+
+/// A world of random histories raised to level three first, with invites that name who
+/// lets their device in, rotations and removals for a few on entries from before the
+/// raise and after it, and `Level` entries naming the level after three, by a manager and
+/// by a member that does not manage, every entry written noted, kept or not.
+fn level_three_world(seed: u64) -> World {
+    let mut h = Hostile::new(seed);
+    let noted = |h: &mut Hostile, step: &dyn Fn(&mut LadderWorld)| {
+        let had: Vec<BTreeSet<EntryHash>> = h
+            .world
+            .logs
+            .iter()
+            .map(|l| l.hashes().copied().collect())
+            .collect();
+        step(&mut h.world);
+        for (log, had) in h.world.logs.iter().zip(&had) {
+            for entry in log.entries() {
+                if !had.contains(&entry.hash()) && !h.written.contains(entry) {
+                    h.written.push(entry.clone());
+                }
+            }
+        }
+    };
+    // Raised before anything else is written, so that no loss of its author outranks it.
+    let stale = h.world.logs[0].heads();
+    raise_written(&mut h, Level::Three).expect("a manager on copy 0");
+    for i in 0..150 {
+        match i % 6 {
+            0 | 3 => h.hostile_step(1 + i % 2),
+            4 => noted(&mut h, &LadderWorld::race_step),
+            _ => h.honest_step(),
+        }
+        if i % 30 == 29 {
+            for_a_few_written(&mut h, &stale);
+        }
+        if i == 100 {
+            let next = Level::Three.number() + 1;
+            let log = &h.world.logs[0];
+            let (state, group, heads) = (log.state(), log.group_id(), log.heads());
+            for d in &h.world.devices {
+                if state.is_member(&d.key()) {
+                    let level = Body::Level { level: next };
+                    h.written
+                        .push(Entry::sign(&d.id, group, heads.clone(), h.world.time, level));
+                }
+            }
+        }
+    }
+    for (to, entry) in std::mem::take(&mut h.late) {
+        let _ = h.world.logs[to].insert(entry);
+    }
+    if seed % 2 == 1 {
+        h.go_past_a_run();
+    }
+    World {
+        run: h.world.logs[0].run_room.entries,
+        entries: h.written,
+        devices: (h.world.devices.iter())
+            .map(|d| DeviceIdentity::from_secret_bytes(&d.id.secret_bytes()))
+            .collect(),
+    }
+}
+
+/// Whether `Rotate` or `Remove` entry `hash` of `log` leaves out of its new epoch a member of
+/// the group its author saw (but the one removed, and keys nothing can be sealed to).
+fn leaves_out_its_view(log: &GroupLog, hash: &EntryHash) -> bool {
+    let view = log.state_before(hash);
+    let reached = |rotation: &Rotation, but: Option<&DevicePublicKey>| {
+        view.members
+            .keys()
+            .filter(|k| !k.is_weak() && Some(*k) != but)
+            .all(|k| rotation.sealed.iter().any(|(to, _)| to == k))
+    };
+    match &log.entries[hash].body {
+        Body::Rotate { rotation } => !reached(rotation, None),
+        Body::Remove { member, rotation } => !reached(rotation, Some(member)),
+        _ => false,
+    }
+}
+
+/// What level three keeps and applies of its corpus is what it kept and applied when the
+/// corpus was made (see [`JUDGED_THREE`]), judged as a copy of level three: a change to it
+/// comes as a new level, as for level two.
+#[test]
+fn the_judgment_of_level_three_never_changes() {
+    let worlds = corpus_of(CORPUS_THREE);
+    assert!(!worlds.is_empty());
+    let now = as_level_three(|| judged_with(&worlds, false));
+    let then = JUDGED_THREE.replace("\r\n", "\n");
+    if now != then {
+        let path = std::env::temp_dir().join("level-three-now.txt");
+        let _ = std::fs::write(&path, &now);
+        let line = now
+            .lines()
+            .zip(then.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or(now.lines().count().min(then.lines().count()));
+        panic!(
+            "level three judges its corpus otherwise than when it was made, from line {} of \
+             level-three.txt on (what it makes of it now is in {}). A change to what is kept \
+             or applied comes as a new level, never as a change to level three.",
+            line + 1,
+            path.display()
+        );
+    }
+}
+
+/// Makes the corpus of level three and what it judges of it, into the folder
+/// `FOGATA_LEVEL_THREE_CORPUS` names: by the version that brought level three only, before
+/// any later level, and never while level three judges the corpus there otherwise than
+/// [`JUDGED_THREE`] says. Its worlds hold what level three was made for and what it left
+/// open: rotations and removals for a few that it keeps and applies.
+#[test]
+#[ignore]
+fn write_the_level_three_corpus() {
+    let dir = std::env::var_os("FOGATA_LEVEL_THREE_CORPUS").expect("FOGATA_LEVEL_THREE_CORPUS");
+    assert_eq!(Level::CURRENT, Level::Three, "made by the version of level three only");
+    if !CORPUS_THREE.is_empty() {
+        let worlds = corpus_of(CORPUS_THREE);
+        assert_eq!(as_level_three(|| judged_with(&worlds, false)), JUDGED_THREE);
+    }
+    // Even seeds: a run of the usual room, where the raise is not past its author's run
+    // (the corpus of level two holds those).
+    let worlds: Vec<World> = [2, 4, 6].map(level_three_world).into();
+    // Each kind it holds: a group raised to three, named invites, and rotations and
+    // removals for a few that apply there.
+    let (mut rotations, mut removals) = (0, 0);
+    for world in &worlds {
+        let corpus = world.with_variants();
+        let mut log = GroupLog::empty(corpus[0].group_id);
+        log.set_run_room(world.run, RUN_ROOM.bytes);
+        log.insert_all(corpus.iter().cloned());
+        let state = log.state();
+        assert_eq!(state.level, Level::Three);
+        assert!(log.entries().any(|e| NamedInvite::of(&e.body).is_some()));
+        for hash in &state.applied {
+            if leaves_out_its_view(&log, hash) {
+                match log.entries[hash].body {
+                    Body::Rotate { .. } => rotations += 1,
+                    Body::Remove { .. } => removals += 1,
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert!(rotations > 0 && removals > 0, "{rotations} {removals}");
+    let bytes = corpus_bytes(&worlds);
+    assert_eq!(corpus_of(&bytes).len(), worlds.len());
+    let dir = std::path::Path::new(&dir);
+    std::fs::write(dir.join("level-three.bin"), bytes).unwrap();
+    std::fs::write(
+        dir.join("level-three.txt"),
+        as_level_three(|| judged_with(&worlds, false)),
+    )
+    .unwrap();
 }
 
 /// Ana's group with Bea managing too and Carlos a member (see `two_managers`), raised to
