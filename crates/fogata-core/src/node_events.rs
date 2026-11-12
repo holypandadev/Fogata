@@ -362,23 +362,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             device,
             path,
             ..
-        } => {
-            if direct::on_member_connected(inner, group, device).await {
-                return;
-            }
-            inner
-                .lock()
-                .online
-                .entry(group)
-                .or_default()
-                .insert(device, path.clone());
-            inner.emit(CoreEvent::MemberConnected {
-                group,
-                device,
-                path,
-            });
-            inner.emit(CoreEvent::GroupsChanged);
-        }
+        } => handle_member_connected(inner, group, device, path).await,
         NodeEvent::MemberDisconnected { group, device, .. } => {
             if direct::on_member_disconnected(inner, group, device) {
                 return;
@@ -867,6 +851,30 @@ fn handle_level_seen(inner: &Arc<Inner>, device: DevicePublicKey, level: u32) {
             tracing::warn!("cannot keep a capability level: {e:#}");
         }
     });
+}
+
+/// A member of a group connected, or its path changed.
+async fn handle_member_connected(
+    inner: &Arc<Inner>,
+    group: GroupId,
+    device: DevicePublicKey,
+    path: Path,
+) {
+    if direct::on_member_connected(inner, group, device).await {
+        return;
+    }
+    inner
+        .lock()
+        .online
+        .entry(group)
+        .or_default()
+        .insert(device, path.clone());
+    inner.emit(CoreEvent::MemberConnected {
+        group,
+        device,
+        path,
+    });
+    inner.emit(CoreEvent::GroupsChanged);
 }
 
 #[cfg(test)]
