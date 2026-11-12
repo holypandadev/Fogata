@@ -275,21 +275,7 @@ impl Node {
             MemberRequest::OtherSession => self.on_other_session(peer),
             MemberRequest::FriendAsk { sealed } => self.on_member_friend_ask(peer, &sealed),
             MemberRequest::KeyProblem { group_id, epoch } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if !self.is_member_of(&group, &peer) {
-                    return MemberResponse::Refused;
-                }
-                let Some(device) = self.members.get(&peer).map(|m| m.device) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                let new = slot.ctx.mend_reported_key(&device, epoch, now_ms());
-                self.after_group_change(group, new, None);
-                MemberResponse::Ack
+                self.on_key_problem_request(peer, group_id, epoch)
             }
             MemberRequest::Presence { hidden, away } => {
                 let Some(member) = self.members.get(&peer) else {
@@ -993,6 +979,30 @@ impl Node {
             return MemberResponse::Refused;
         }
         self.emit(NodeEvent::JoinDeclined { group });
+        MemberResponse::Ack
+    }
+
+    /// Takes a member's word that the box of the current key the log gave it does not open.
+    fn on_key_problem_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        epoch: u32,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        if !self.is_member_of(&group, &peer) {
+            return MemberResponse::Refused;
+        }
+        let Some(device) = self.members.get(&peer).map(|m| m.device) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        let new = slot.ctx.mend_reported_key(&device, epoch, now_ms());
+        self.after_group_change(group, new, None);
         MemberResponse::Ack
     }
 
