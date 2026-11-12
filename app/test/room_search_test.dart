@@ -1,9 +1,11 @@
 // Looking for words in a room's chat: only the messages with them, the words marked.
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/app_state.dart';
+import 'package:fogata/src/l10n.dart';
 import 'package:fogata/src/rust/api/types.dart';
 import 'package:fogata/src/screens/shell.dart';
 import 'package:fogata/src/theme.dart';
@@ -222,4 +224,115 @@ void main() {
       await tester.pump(const Duration(seconds: 10));
     },
   );
+
+  testWidgets('a match past a long message\'s cut opens it and shows its line, '
+      'until the search ends', (tester) async {
+    final state = fakeRoom(people: 2);
+    final room = state.roomState.room!;
+    String rows(int from, int to) =>
+        [for (var i = from; i < to; i++) 'row $i'].join('\n');
+    state.roomState.room = UiRoom(
+      startedMs: room.startedMs,
+      joined: true,
+      participants: room.participants,
+      chat: [
+        // Found in its first lines: stays cut.
+        _line('early', 'needle first\n${rows(0, 60)}'),
+        // Found far past the cut: opened, and the chat goes to that line.
+        _line('late', '${rows(0, 250)}\nthe needle here\n${rows(250, 400)}'),
+        _line('after', 'Nothing here'),
+      ],
+      files: const [],
+    );
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(
+      AppScope(
+        state: state,
+        child: MaterialApp(
+          theme: Fg.darkTokens.themeData,
+          home: const Material(child: Shell()),
+        ),
+      ),
+    );
+    await _settle(tester);
+    // Both cut at first.
+    expect(find.text(l10n.widgetsShowMore), findsNWidgets(2));
+    final search = find.descendant(
+      of: find.byWidgetPredicate(
+        (w) =>
+            w.runtimeType.toString() == 'FgField' &&
+            (w as dynamic).label == 'Search messages',
+      ),
+      matching: find.byType(EditableText),
+    );
+    await tester.enterText(search, 'needle');
+    await _settle(tester);
+    expect(tester.takeException(), isNull);
+    // The late one shows whole, its match's line inside the chat's view.
+    final marked = find.byWidgetPredicate((w) {
+      if (w is! RichText) return false;
+      var found = false;
+      w.text.visitChildren((span) {
+        if (span is TextSpan &&
+            span.style?.backgroundColor != null &&
+            span.text == 'needle') {
+          found = true;
+        }
+        return !found;
+      });
+      return found && w.text.toPlainText().contains('the needle here');
+    });
+    expect(marked, findsOneWidget);
+    expect(tester.widget<RichText>(marked).maxLines, isNull);
+    final paragraph = tester.renderObject<RenderParagraph>(marked);
+    final at = paragraph.text.toPlainText().indexOf('the needle here') + 4;
+    final line = paragraph.localToGlobal(
+      paragraph.getOffsetForCaret(TextPosition(offset: at), Rect.zero),
+    );
+    final view = tester.getRect(
+      find.ancestor(of: marked, matching: find.byType(Scrollable)).first,
+    );
+    expect(line.dy, greaterThanOrEqualTo(view.top));
+    expect(
+      line.dy + paragraph.getFullHeightForCaret(TextPosition(offset: at)),
+      lessThanOrEqualTo(view.bottom),
+    );
+    expect(find.text(l10n.widgetsShowLess), findsOneWidget);
+    // Both messages count, the one with its match past the cut too.
+    tester
+        .state<ScrollableState>(
+          find.ancestor(of: marked, matching: find.byType(Scrollable)).first,
+        )
+        .position
+        .jumpTo(0);
+    await _settle(tester);
+    expect(find.text(l10n.roomMatches(2)), findsOneWidget);
+    expect(_marks(tester), ['needle', 'needle']);
+    // The early one stays cut: its match shows already.
+    expect(find.text(l10n.widgetsShowMore), findsOneWidget);
+
+    // Cut again by hand, it stays cut.
+    await tester.ensureVisible(find.text(l10n.widgetsShowLess));
+    await _settle(tester);
+    await tester.tap(find.text(l10n.widgetsShowLess));
+    await _settle(tester);
+    expect(find.text(l10n.widgetsShowLess), findsNothing);
+    expect(find.text(l10n.widgetsShowMore), findsNWidgets(2));
+    await tester.ensureVisible(find.text(l10n.widgetsShowMore).last);
+    await _settle(tester);
+    await tester.tap(find.text(l10n.widgetsShowMore).last);
+    await _settle(tester);
+    expect(find.text(l10n.widgetsShowLess), findsOneWidget);
+
+    // The search ended: cut again, as before it.
+    await tester.enterText(search, '');
+    await _settle(tester);
+    expect(find.text(l10n.widgetsShowLess), findsNothing);
+    expect(find.text(l10n.widgetsShowMore), findsNWidgets(2));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump(const Duration(seconds: 10));
+  });
 }

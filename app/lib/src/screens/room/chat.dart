@@ -127,14 +127,24 @@ class _ChatState extends State<_Chat> {
 
   /// [written] as it is drawn ([shownText]), with the parts that match [query] marked.
   /// The matches are found in the text itself, never in a lowercased copy, whose letters
-  /// can be longer (`İ` is two there) and would put the marks elsewhere.
-  Widget _marked(String written, RegExp? query, Fg c, {Key? key}) {
+  /// can be longer (`İ` is two there) and would put the marks elsewhere. A long message
+  /// whose first match is past its cut shows whole while searching, and with [bring] the
+  /// chat scrolls to that match's line.
+  Widget _marked(
+    String written,
+    RegExp? query,
+    Fg c, {
+    Key? key,
+    bool bring = false,
+  }) {
     final text = shownText(written);
     if (query == null) return LongText(emojiText(text, tx(c.fg)), key: key);
     final spans = <TextSpan>[];
     var at = 0;
+    int? first;
     for (final m in query.allMatches(text)) {
       if (m.end == m.start) continue;
+      first ??= m.start;
       if (m.start > at) spans.add(TextSpan(text: text.substring(at, m.start)));
       spans.add(
         TextSpan(
@@ -153,6 +163,8 @@ class _ChatState extends State<_Chat> {
       TextSpan(children: spans),
       style: tx(c.fg),
       key: key,
+      reveal: first,
+      bringIntoView: bring,
     );
   }
 
@@ -203,10 +215,22 @@ class _ChatState extends State<_Chat> {
       if (atEnd || mine) _toEnd();
     }
 
+    // The newest message found, where a search shows its results: the chat goes to its
+    // match when that is past the message's cut.
+    final newestFound = pattern == null
+        ? null
+        : entries.reversed.where((e) => e.line != null).firstOrNull;
+
     /// What entry [e] shows: the message, the file's card or the note.
     Widget content(_Entry e) {
       if (e.line case final line?) {
-        return _marked(line.text, pattern, c, key: ValueKey(e.id));
+        return _marked(
+          line.text,
+          pattern,
+          c,
+          key: ValueKey(e.id),
+          bring: identical(e, newestFound),
+        );
       }
       if (e.file case final seen?) {
         return isPicture(seen.name)

@@ -5,6 +5,7 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderParagraph;
 import 'package:flutter/services.dart';
 
 import 'icons.dart';
@@ -1955,12 +1956,30 @@ class RoundedPicture extends StatelessWidget {
 /// whole with "Show less" once opened. A message may be 2000 line breaks and nothing else:
 /// whole, it would be one bubble tens of thousands of pixels tall for everyone who reads
 /// the chat. Only how it is drawn: what is sent, kept and copied is the whole text.
+///
+/// A search's match past the cut ([reveal]) opens it while that search lasts, as "Show
+/// more" would; opened by hand or not, it is cut again as the search ends, the way it is
+/// whenever it is built again.
 class LongText extends StatefulWidget {
-  const LongText(this.text, {super.key, this.style});
+  const LongText(
+    this.text, {
+    super.key,
+    this.style,
+    this.reveal,
+    this.bringIntoView = false,
+  });
 
   /// What it says, drawn as [Text.rich] draws it.
   final InlineSpan text;
   final TextStyle? style;
+
+  /// Where in [text] (its characters, as [TextPosition] counts them) a search found what
+  /// it looks for.
+  final int? reveal;
+
+  /// With [reveal] past the cut: also scrolls what holds it so that the line with
+  /// [reveal] is in view, once for each place.
+  final bool bringIntoView;
 
   /// The most lines it shows until "Show more".
   static const shownLines = 20;
@@ -1972,10 +1991,47 @@ class LongText extends StatefulWidget {
 class _LongTextState extends State<LongText> {
   bool _open = false;
 
+  /// Cut again by hand while [LongText.reveal] keeps it open.
+  bool _cutByHand = false;
+
+  /// [LongText.reveal] has been scrolled into view.
+  bool _brought = false;
+  final _whole = GlobalKey();
+
+  @override
+  void didUpdateWidget(LongText old) {
+    super.didUpdateWidget(old);
+    if (old.reveal != widget.reveal) {
+      _cutByHand = false;
+      _brought = false;
+    }
+  }
+
+  /// Scrolls what holds the text so that the line with [at] shows.
+  void _bring(int at) {
+    RenderParagraph? paragraph(RenderObject? o) {
+      if (o == null || o is RenderParagraph) return o as RenderParagraph?;
+      RenderParagraph? found;
+      o.visitChildren((child) => found ??= paragraph(child));
+      return found;
+    }
+
+    final text = paragraph(_whole.currentContext?.findRenderObject());
+    if (text == null || !text.attached) return;
+    final position = TextPosition(offset: at);
+    final top = text.getOffsetForCaret(position, Rect.zero).dy;
+    final height = text.getFullHeightForCaret(position);
+    text.showOnScreen(
+      rect: Rect.fromLTWH(0, top, text.size.width, height),
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOutCubic,
+    );
+  }
+
   @override
   Widget build(BuildContext context) => LayoutBuilder(
     builder: (context, box) {
-      final whole = Text.rich(widget.text, style: widget.style);
+      final whole = Text.rich(widget.text, key: _whole, style: widget.style);
       if (!box.hasBoundedWidth) return whole;
       final painter = TextPainter(
         text: TextSpan(
@@ -1987,15 +2043,35 @@ class _LongTextState extends State<LongText> {
         maxLines: LongText.shownLines,
       )..layout(maxWidth: box.maxWidth);
       final long = painter.didExceedMaxLines;
+      // Whether what was found lies after the last line shown cut.
+      var past = false;
+      final at = widget.reveal;
+      if (long && at != null) {
+        final last = painter.computeLineMetrics().last;
+        final shownEnd = painter
+            .getLineBoundary(
+              painter.getPositionForOffset(Offset(0, last.baseline)),
+            )
+            .end;
+        past = at >= shownEnd;
+      }
       painter.dispose();
       if (!long) return whole;
+      final open = past ? !_cutByHand : _open;
+      if (open && past && widget.bringIntoView && !_brought) {
+        _brought = true;
+        final where = at!;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _bring(where);
+        });
+      }
       final c = context.fg;
-      final words = _open ? l10n.widgetsShowLess : l10n.widgetsShowMore;
+      final words = open ? l10n.widgetsShowLess : l10n.widgetsShowMore;
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          _open
+          open
               ? whole
               : Text.rich(
                   widget.text,
@@ -2005,8 +2081,14 @@ class _LongTextState extends State<LongText> {
                 ),
           const SizedBox(height: 4),
           Pressable(
-            onTap: () => setState(() => _open = !_open),
-            expanded: _open,
+            onTap: () => setState(() {
+              if (past) {
+                _cutByHand = !_cutByHand;
+              } else {
+                _open = !_open;
+              }
+            }),
+            expanded: open,
             label: words,
             builder: (context, hovered) => Text(
               words,
