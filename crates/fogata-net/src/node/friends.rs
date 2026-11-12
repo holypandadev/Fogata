@@ -1129,17 +1129,7 @@ impl Node {
                 self.on_friend_mutual_request(peer, local, remote, sealed)
             }
             FriendRequest::Direct { entries } => self.on_friend_direct_request(peer, entries),
-            FriendRequest::Heartbeat => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                if f.online.contains_key(&peer) {
-                    FriendResponse::Ack
-                } else {
-                    FriendResponse::Refused
-                }
-            }
+            FriendRequest::Heartbeat => self.on_friend_heartbeat_request(peer),
         }
     }
 
@@ -1753,6 +1743,19 @@ impl Node {
             return FriendResponse::Refused;
         }
         self.on_direct_offer(peer, by, entries)
+    }
+
+    /// Answers a friend's heartbeat: whether it is online here.
+    fn on_friend_heartbeat_request(&mut self, peer: PeerId) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        if f.online.contains_key(&peer) {
+            FriendResponse::Ack
+        } else {
+            FriendResponse::Refused
+        }
     }
 
     /// Records a checked friend request that came from `peer`.
