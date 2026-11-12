@@ -245,11 +245,13 @@ pub use self::{
 use alloc::{borrow::ToOwned, vec::Vec};
 use core::{fmt, ops::Deref, str};
 use curve25519_dalek::{edwards::EdwardsPoint as c2_Element, scalar::Scalar as c2_Scalar};
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+// Fogata: rand_core 0.10 has no `OsRng`; getrandom's `SysRng` is the same system generator,
+// and `UnwrapErr` panics when it fails, as `OsRng` did.
 #[cfg(feature = "getrandom")]
-use rand_core::OsRng;
+use {getrandom::SysRng, rand_core::UnwrapErr};
 
 /// Password type.
 // TODO(tarcieri): avoid allocation?
@@ -324,7 +326,7 @@ impl<G: Group> Spake2<G> {
     /// Uses the system RNG.
     #[cfg(feature = "getrandom")]
     pub fn start_a(password: &Password, id_a: &Identity, id_b: &Identity) -> (Spake2<G>, Vec<u8>) {
-        Self::start_a_with_rng(password, id_a, id_b, OsRng)
+        Self::start_a_with_rng(password, id_a, id_b, UnwrapErr(SysRng))
     }
 
     /// Start with identity `idB`.
@@ -332,7 +334,7 @@ impl<G: Group> Spake2<G> {
     /// Uses the system RNG.
     #[cfg(feature = "getrandom")]
     pub fn start_b(password: &Password, id_a: &Identity, id_b: &Identity) -> (Spake2<G>, Vec<u8>) {
-        Self::start_b_with_rng(password, id_a, id_b, OsRng)
+        Self::start_b_with_rng(password, id_a, id_b, UnwrapErr(SysRng))
     }
 
     /// Start with symmetric identity.
@@ -340,7 +342,7 @@ impl<G: Group> Spake2<G> {
     /// Uses the system RNG.
     #[cfg(feature = "getrandom")]
     pub fn start_symmetric(password: &Password, id_s: &Identity) -> (Spake2<G>, Vec<u8>) {
-        Self::start_symmetric_with_rng(password, id_s, OsRng)
+        Self::start_symmetric_with_rng(password, id_s, UnwrapErr(SysRng))
     }
 
     /// Start with identity `idA` and the provided cryptographically secure RNG.
@@ -348,7 +350,7 @@ impl<G: Group> Spake2<G> {
         password: &Password,
         id_a: &Identity,
         id_b: &Identity,
-        mut csrng: impl CryptoRng + RngCore,
+        mut csrng: impl CryptoRng,
     ) -> (Spake2<G>, Vec<u8>) {
         let xy_scalar: G::Scalar = G::random_scalar(&mut csrng);
         Self::start_a_internal(password, id_a, id_b, xy_scalar)
@@ -359,7 +361,7 @@ impl<G: Group> Spake2<G> {
         password: &Password,
         id_a: &Identity,
         id_b: &Identity,
-        mut csrng: impl CryptoRng + RngCore,
+        mut csrng: impl CryptoRng,
     ) -> (Spake2<G>, Vec<u8>) {
         let xy_scalar: G::Scalar = G::random_scalar(&mut csrng);
         Self::start_b_internal(password, id_a, id_b, xy_scalar)
@@ -369,7 +371,7 @@ impl<G: Group> Spake2<G> {
     pub fn start_symmetric_with_rng(
         password: &Password,
         id_s: &Identity,
-        mut csrng: impl CryptoRng + RngCore,
+        mut csrng: impl CryptoRng,
     ) -> (Spake2<G>, Vec<u8>) {
         let xy_scalar: G::Scalar = G::random_scalar(&mut csrng);
         Self::start_symmetric_internal(password, id_s, xy_scalar)

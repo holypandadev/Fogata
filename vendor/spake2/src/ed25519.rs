@@ -4,7 +4,7 @@ use crate::{c2_Element, c2_Scalar, Group};
 use alloc::vec::Vec;
 use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT, edwards::CompressedEdwardsY};
 use hkdf::Hkdf;
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
 
@@ -63,9 +63,16 @@ impl Group for Ed25519Group {
 
     fn random_scalar<T>(cspring: &mut T) -> c2_Scalar
     where
-        T: RngCore + CryptoRng,
+        T: CryptoRng,
     {
-        c2_Scalar::random(cspring)
+        // Fogata: what `Scalar::random` does (64 bytes drawn, reduced modulo the group's
+        // order), without turning on curve25519-dalek's rand_core feature for it; the bytes
+        // are wiped once used.
+        let mut wide = [0u8; 64];
+        cspring.fill_bytes(&mut wide);
+        let scalar = c2_Scalar::from_bytes_mod_order_wide(&wide);
+        wide.zeroize();
+        scalar
     }
 
     fn scalar_neg(s: &c2_Scalar) -> c2_Scalar {

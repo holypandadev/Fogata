@@ -30,26 +30,24 @@ impl Stream {
     }
 }
 
-impl RngCore for Stream {
-    fn next_u32(&mut self) -> u32 {
-        self.word() as u32
+impl rand_core::TryRng for Stream {
+    type Error = core::convert::Infallible;
+
+    fn try_next_u32(&mut self) -> core::result::Result<u32, Self::Error> {
+        Ok(self.word() as u32)
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.word()
+    fn try_next_u64(&mut self) -> core::result::Result<u64, Self::Error> {
+        Ok(self.word())
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        self.fill(dest)
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), rand_core::Error> {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> core::result::Result<(), Self::Error> {
         self.fill(dest);
         Ok(())
     }
 }
 
-impl CryptoRng for Stream {}
+impl rand_core::TryCryptoRng for Stream {}
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()

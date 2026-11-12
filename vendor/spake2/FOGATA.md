@@ -3,8 +3,8 @@
 This is spake2 0.4.0 from crates.io (MIT or Apache-2.0, see LICENSE-MIT and LICENSE-APACHE),
 the password-authenticated key exchange that friend codes and move codes run
 (`crates/fogata-friends`), put in place of the published crate by `[patch.crates-io]` in the
-workspace's Cargo.toml, without its benchmark and its `tests/` folder. Every change from the
-published crate is listed here.
+workspace's Cargo.toml, without its benchmark and its `tests/` folder, its README.md a short
+note pointing here. Every change from the published crate is listed here.
 
 ## Secrets wiped from memory
 
@@ -23,6 +23,25 @@ the `zeroize` crate (already in the workspace) and curve25519-dalek's `zeroize` 
 Copies the compiler makes on the stack or in registers are not reached; nor is what the
 callers hand in (Fogata passes the password from a `Zeroizing` buffer and wipes the key the
 run returns).
+
+## On the crates the rest of Fogata uses
+
+The published crate is built on curve25519-dalek 4, sha2 0.10, hkdf 0.12 and rand_core 0.6,
+the generation before the one the rest of Fogata uses; it alone kept that generation in the
+programs Fogata ships (snow, libp2p's other user of it, takes it only for WebAssembly). It is
+moved to curve25519-dalek 5, sha2 0.11, hkdf 0.13, rand_core 0.10 and getrandom 0.4, computing
+the same: `src/vectors.rs` (below), recorded before the move, passes unchanged after it.
+
+- `Cargo.toml`: the new versions; `getrandom` (the `getrandom` feature, on by default) is now
+  getrandom 0.4 with `sys_rng`, as rand_core 0.10 has no `OsRng`; `rust-version` is the one
+  those crates need.
+- `src/lib.rs`: the `*_with_rng` constructors take a rand_core 0.10 `CryptoRng`; `start_a`,
+  `start_b` and `start_symmetric` draw from `UnwrapErr(SysRng)`, the same system generator,
+  panicking when it fails as `OsRng` did.
+- `src/group.rs`: `random_scalar` takes a `CryptoRng`.
+- `src/ed25519.rs`: `random_scalar` draws 64 bytes and reduces them modulo the group's order
+  itself, which is all `Scalar::random` does, so curve25519-dalek's `rand_core` feature stays
+  off; the bytes are wiped once used.
 
 ## Tests
 

@@ -10,11 +10,12 @@
 # See Cargo.toml.orig for the original contents.
 #
 # Fogata: vendored from crates.io spake2 0.4.0 without its benchmark and its tests folder,
-# with zeroize; see FOGATA.md.
+# with zeroize, on the RustCrypto and dalek crates the rest of Fogata uses
+# (curve25519-dalek 5, sha2 0.11, hkdf 0.13, rand_core 0.10, getrandom 0.4); see FOGATA.md.
 
 [package]
 edition = "2021"
-rust-version = "1.60"
+rust-version = "1.88"
 name = "spake2"
 version = "0.4.0"
 authors = ["Brian Warner <warner@lothar.com>"]
@@ -43,23 +44,26 @@ rustdoc-args = [
 ]
 
 [dependencies.curve25519-dalek]
-version = "4"
-features = [
-    "rand_core",
-    "zeroize",
-]
+version = "5"
+features = ["zeroize"]
+default-features = false
+
+[dependencies.getrandom]
+version = "0.4"
+features = ["sys_rng"]
+optional = true
 default-features = false
 
 [dependencies.hkdf]
-version = "0.12"
+version = "0.13"
 default-features = false
 
 [dependencies.rand_core]
-version = "0.6"
+version = "0.10"
 default-features = false
 
 [dependencies.sha2]
-version = "0.10"
+version = "0.11"
 default-features = false
 
 [dependencies.zeroize]
@@ -68,5 +72,5 @@ default-features = false
 
 [features]
 default = ["getrandom"]
-getrandom = ["rand_core/getrandom"]
+getrandom = ["dep:getrandom"]
 std = []
