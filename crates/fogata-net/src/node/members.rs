@@ -239,83 +239,7 @@ impl Node {
                 heads,
                 banner,
                 picture,
-            } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                if !slot.members.contains(&peer) {
-                    return MemberResponse::Refused;
-                }
-                let Some(device) = self.may_serve(peer) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                // It counts this device in now: an ask of this device's it refused before
-                // goes again.
-                if slot.roster_refused.remove(&peer) {
-                    self.ask_roster(group, peer);
-                } else {
-                    slot.roster_heard.insert(peer);
-                }
-                // Banners only to versions that say they keep them. Each costs this device
-                // up to a few hundred KiB of upload: charged to the member, and sent once
-                // per record however often it asks (see `RecordSent`).
-                let mut served = 0;
-                if let Some(banner) = banner
-                    && let Some(slot) = self.groups.get_mut(&group)
-                {
-                    slot.banner_peers.insert(peer);
-                    if banner.as_slice() != slot.ctx.banner_digest() {
-                        served += self.send_banner_to(group, &[peer]);
-                    }
-                }
-                // Picture records the same way.
-                if let Some(picture) = picture
-                    && let Some(slot) = self.groups.get_mut(&group)
-                {
-                    slot.picture_peers.insert(peer);
-                    if picture.as_slice() != slot.ctx.picture_digest() {
-                        served += self.send_picture_to(group, &[peer]);
-                    }
-                }
-                let Some(slot) = self.groups.get(&group) else {
-                    return MemberResponse::Refused;
-                };
-                let heads_digest = slot.ctx.heads_digest();
-                // The same log as here: it has this device's leave.
-                if slot.leaving.is_some()
-                    && heads.as_ref().is_some_and(|h| h.as_slice() == heads_digest)
-                {
-                    self.leave_taken(group);
-                    return MemberResponse::Refused;
-                }
-                // One sync at a time with each member: the answer asks for the next.
-                if heads.is_some_and(|h| h.as_slice() != heads_digest) {
-                    served += self.request_sync(peer, group);
-                }
-                let Some(slot) = self.groups.get(&group) else {
-                    return MemberResponse::Refused;
-                };
-                let peers = slot
-                    .members
-                    .iter()
-                    .filter(|p| **p != peer)
-                    .filter(|p| {
-                        self.members
-                            .get(p)
-                            .is_some_and(|m| !matches!(m.path, Path::ThroughMember { .. }))
-                    })
-                    .map(|p| serde_bytes::ByteBuf::from(p.to_bytes()))
-                    .collect::<Vec<_>>();
-                served += peers.iter().map(|p| p.len()).sum::<usize>();
-                self.charge_served(device, served);
-                MemberResponse::Roster { peers }
-            }
+            } => self.on_roster_request(peer, group_id, heads, banner, picture),
             MemberRequest::Sync { group_id, have } => {
                 let Some(slot) = group_of(&group_id).and_then(|g| self.groups.get(&g)) else {
                     return MemberResponse::Refused;
@@ -894,6 +818,90 @@ impl Node {
             messages,
             more: None,
         }
+    }
+
+    /// Answers a member's ask for a group's roster.
+    fn on_roster_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        heads: Option<serde_bytes::ByteBuf>,
+        banner: Option<serde_bytes::ByteBuf>,
+        picture: Option<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        if !slot.members.contains(&peer) {
+            return MemberResponse::Refused;
+        }
+        let Some(device) = self.may_serve(peer) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        // It counts this device in now: an ask of this device's it refused before
+        // goes again.
+        if slot.roster_refused.remove(&peer) {
+            self.ask_roster(group, peer);
+        } else {
+            slot.roster_heard.insert(peer);
+        }
+        // Banners only to versions that say they keep them. Each costs this device
+        // up to a few hundred KiB of upload: charged to the member, and sent once
+        // per record however often it asks (see `RecordSent`).
+        let mut served = 0;
+        if let Some(banner) = banner
+            && let Some(slot) = self.groups.get_mut(&group)
+        {
+            slot.banner_peers.insert(peer);
+            if banner.as_slice() != slot.ctx.banner_digest() {
+                served += self.send_banner_to(group, &[peer]);
+            }
+        }
+        // Picture records the same way.
+        if let Some(picture) = picture
+            && let Some(slot) = self.groups.get_mut(&group)
+        {
+            slot.picture_peers.insert(peer);
+            if picture.as_slice() != slot.ctx.picture_digest() {
+                served += self.send_picture_to(group, &[peer]);
+            }
+        }
+        let Some(slot) = self.groups.get(&group) else {
+            return MemberResponse::Refused;
+        };
+        let heads_digest = slot.ctx.heads_digest();
+        // The same log as here: it has this device's leave.
+        if slot.leaving.is_some() && heads.as_ref().is_some_and(|h| h.as_slice() == heads_digest) {
+            self.leave_taken(group);
+            return MemberResponse::Refused;
+        }
+        // One sync at a time with each member: the answer asks for the next.
+        if heads.is_some_and(|h| h.as_slice() != heads_digest) {
+            served += self.request_sync(peer, group);
+        }
+        let Some(slot) = self.groups.get(&group) else {
+            return MemberResponse::Refused;
+        };
+        let peers = slot
+            .members
+            .iter()
+            .filter(|p| **p != peer)
+            .filter(|p| {
+                self.members
+                    .get(p)
+                    .is_some_and(|m| !matches!(m.path, Path::ThroughMember { .. }))
+            })
+            .map(|p| serde_bytes::ByteBuf::from(p.to_bytes()))
+            .collect::<Vec<_>>();
+        served += peers.iter().map(|p| p.len()).sum::<usize>();
+        self.charge_served(device, served);
+        MemberResponse::Roster { peers }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
