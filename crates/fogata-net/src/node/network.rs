@@ -26,8 +26,8 @@ const MAX_REPORTERS: usize = 64;
 /// A confirmed address nobody has reported for this long is dropped.
 const CONFIRMED_FOR: Duration = Duration::from_secs(15 * 60);
 /// Networks ([`Network`]) whose peers must agree on an address of this device before it is
-/// taken: with a member or friend among them, and with strangers only, one of them a
-/// stranger this device dialled (see `Report`). Anyone can connect and say anything; two strangers'
+/// taken: with a member or friend among them, and with strangers only, strangers this
+/// device dialled itself (see `Report`). Anyone can connect and say anything; two strangers'
 /// providers are easy to come by, and the address taken is announced to everyone who looks
 /// this device up.
 const NETWORKS_WITH_CONTACT: usize = 2;
@@ -64,15 +64,14 @@ pub(super) fn v6_net(address: &Multiaddr) -> Option<[u16; 4]> {
 const NETWORK_SETTLE: Duration = Duration::from_secs(2);
 
 /// What one peer reported of this device's address: the address it reported from, and
-/// whether this device dialled it itself. Strangers on [`NETWORKS_OF_STRANGERS`] networks
-/// make an address taken, whoever connected, as before, but only once one of them is a
-/// stranger this device dialled (see [`Node::confirm_if_agreed`]): anyone can connect
-/// from wherever it likes, and three cheap machines at one cloud provider's three /16s that
-/// connect by themselves would otherwise have this device announce an address of their
-/// choice, which its members and friends then dial first. The peers it dials (the bootstrap
-/// nodes, those its own lookups lead to) tell it its real address as soon as it starts; a
-/// device that hears only from strangers that came in counts their networks as before
-/// once one it dialled says the same.
+/// whether this device dialled it itself. Without a member or friend among them, only
+/// strangers this device dialled count, on [`NETWORKS_OF_STRANGERS`] networks (see
+/// [`Node::confirm_if_agreed`]): anyone can connect from wherever it likes, and three cheap
+/// machines at one cloud provider's three /16s that connect by themselves, with one more
+/// this device dialled agreeing, would otherwise have this device announce an address of
+/// their choice, which its members and friends then dial first. The peers it dials (the
+/// bootstrap nodes, the DHT nodes its own lookups lead to, on many networks) tell it its
+/// real address as soon as it starts, each over a connection it chose.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Report {
     from: Option<std::net::IpAddr>,
@@ -442,27 +441,32 @@ impl Node {
                 .iter()
                 .flat_map(|r| r.values().filter_map(|r| r.from))
                 .collect();
-            // A member, a friend or a stranger this device dialled among them (see `Report`).
-            let vouched = same_ip
+            // With a member or friend among them every network counts, without one only
+            // those of strangers this device dialled (see `Report`).
+            let contact = same_ip
                 .iter()
-                .flat_map(|r| r.iter())
-                .any(|(p, r)| r.dialled || self.members.contains_key(p) || self.is_friend_peer(p));
+                .flat_map(|r| r.keys())
+                .any(|p| self.members.contains_key(p) || self.is_friend_peer(p));
+            let counted: HashSet<std::net::IpAddr> = same_ip
+                .iter()
+                .flat_map(|r| r.values().filter(|r| contact || r.dialled))
+                .filter_map(|r| r.from)
+                .collect();
             let all_different = all_ips.len() >= 3 && same_ip.iter().all(|r| r.len() == 1);
             if confirmed_ports >= 2 || all_different {
                 self.port_change_reported = true;
                 self.emit(NodeEvent::PortChangesPerDestination);
                 // No port is right for everyone, but announcing the public IP still lets
                 // members whose router filters by address only open it for us: once peers
-                // on three networks said so, one of them dialled by this device, as for any
-                // address taken by strangers (see `Report`).
+                // on three networks said so, strangers among them only if this device
+                // dialled them, as for any address taken by strangers (see `Report`).
                 if self.confirmed.is_empty()
-                    && vouched
-                    && distinct_networks(&all_ips) >= NETWORKS_OF_STRANGERS
+                    && distinct_networks(&counted) >= NETWORKS_OF_STRANGERS
                     && self.confirmed.insert(observed.clone())
                 {
                     tracing::info!(
                         %observed,
-                        networks = distinct_networks(&all_ips),
+                        networks = distinct_networks(&counted),
                         "this device's public address taken, its port changing per destination"
                     );
                     self.confirmed_seen.insert(observed.clone(), Instant::now());
@@ -488,26 +492,32 @@ impl Node {
         let contact = reporters
             .keys()
             .any(|p| self.members.contains_key(p) || self.is_friend_peer(p));
-        // Every reporter's network counts, as before; strangers only alone once one of them
-        // is one this device dialled (see `Report`).
-        let networks = distinct_networks(reporters.values().filter_map(|r| r.from.as_ref()));
+        // With a member or friend among them every reporter's network counts; strangers
+        // alone, only those this device dialled (see `Report`).
+        let all = distinct_networks(reporters.values().filter_map(|r| r.from.as_ref()));
+        let dialled_networks = distinct_networks(
+            reporters
+                .values()
+                .filter(|r| r.dialled)
+                .filter_map(|r| r.from.as_ref()),
+        );
         let dialled = reporters.values().filter(|r| r.dialled).count();
-        let needed = if contact {
-            NETWORKS_WITH_CONTACT
+        let (networks, needed) = if contact {
+            (all, NETWORKS_WITH_CONTACT)
         } else {
-            NETWORKS_OF_STRANGERS
+            (dialled_networks, NETWORKS_OF_STRANGERS)
         };
         if networks < needed {
-            return;
-        }
-        if !contact && dialled == 0 {
-            tracing::debug!(
-                %observed,
-                reporters = reporters.len(),
-                networks,
-                "strangers that came in by themselves agree on an address of this device; \
-                 not taken until one it dialled says so too"
-            );
+            if !contact && all >= NETWORKS_OF_STRANGERS {
+                tracing::debug!(
+                    %observed,
+                    reporters = reporters.len(),
+                    networks = all,
+                    dialled_networks,
+                    "strangers that came in by themselves agree on an address of this device; \
+                     not taken until strangers it dialled, on as many networks, say so too"
+                );
+            }
             return;
         }
         tracing::info!(
@@ -613,10 +623,11 @@ mod tests {
 
     /// Strangers that connected by themselves, from three networks, cannot have this device
     /// take and announce an address of their choice, nor take one for a port that changes
-    /// per destination. Once one stranger this device dialled says the same, the networks
-    /// of all count as before: a bootstrap node dialled by its name counts as dialled, and
-    /// two DHT nodes dialled and a device that came in through its router, on three
-    /// networks, confirm its address (the network lab's case).
+    /// per destination, not even once a stranger it dialled (a bootstrap node dialled by its
+    /// name) says the same: only strangers it dialled count. Two DHT nodes dialled on two
+    /// networks and a device that came in from a third do not confirm its address either; a
+    /// third DHT node dialled on a third network does (the network lab's case, and the
+    /// internet's, where its lookups dial many).
     #[tokio::test(flavor = "multi_thread")]
     async fn strangers_that_came_in_by_themselves_do_not_confirm_an_address() {
         let (node, _group) = lone_member();
@@ -645,7 +656,8 @@ mod tests {
                 n.on_observed_address(peer, says.parse().unwrap());
             }
             let port_changes = (n.port_change_reported, n.confirmed.is_empty());
-            // A bootstrap node dialled by its name says the same: now it counts.
+            // A bootstrap node dialled by its name says the same: the strangers that came in
+            // still do not count.
             let boot = PeerId::random();
             connect(
                 n,
@@ -659,9 +671,9 @@ mod tests {
                 },
             );
             n.on_observed_address(boot, made_up.clone());
-            let vouched = n.confirmed.contains(&made_up);
-            // The lab's case: two DHT nodes dialled on two networks, the other device come
-            // in from a third.
+            let with_one_dialled = n.confirmed.contains(&made_up);
+            // Two DHT nodes dialled on two networks, another device come in from a third:
+            // not yet. A third DHT node dialled on a third network: taken.
             let real: Multiaddr = "/ip4/198.51.100.50/udp/4001/quic-v1".parse().unwrap();
             for how in [
                 dialled_at("203.0.113.30"),
@@ -672,10 +684,20 @@ mod tests {
                 connect(n, peer, how);
                 n.on_observed_address(peer, real.clone());
             }
-            (came_in, port_changes, vouched, n.confirmed.contains(&real))
+            let two_dialled = n.confirmed.contains(&real);
+            let third = PeerId::random();
+            connect(n, third, dialled_at("192.0.2.32"));
+            n.on_observed_address(third, real.clone());
+            (
+                came_in,
+                port_changes,
+                with_one_dialled,
+                two_dialled,
+                n.confirmed.contains(&real),
+            )
         })
         .await;
-        assert_eq!(found, (false, (true, true), true, true));
+        assert_eq!(found, (false, (true, true), false, false, true));
         node.shutdown().await.unwrap();
     }
 
