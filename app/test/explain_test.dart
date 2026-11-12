@@ -87,10 +87,15 @@ void main() {
         expect(notLetIn(core), said);
       }
       expect(notLetIn('a new member joined with an invite (Ab12Cd)'), isNull);
-      expect(
-        explain(AnyhowException('not enough free space for this file')),
-        'There isn’t enough free space for this file. Free some space and try again.',
-      );
+      for (final core in [
+        'not enough free space for this file',
+        'not enough free space to share this file',
+      ]) {
+        expect(
+          explain(AnyhowException(core)),
+          'There isn’t enough free space for this file. Free some space and try again.',
+        );
+      }
     },
   );
 

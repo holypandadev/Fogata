@@ -264,6 +264,7 @@ String explain(Object error) {
     'wrote too much that no other member signed on yet': () =>
         l10n.errTooManyChanges,
     'not enough free space for this file': () => l10n.errNoSpaceForFile,
+    'not enough free space to share this file': () => l10n.errNoSpaceForFile,
     ..._notLetIn,
   };
   final full = RegExp(r'voice room is full: (\d+)').firstMatch(text);

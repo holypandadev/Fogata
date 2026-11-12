@@ -251,12 +251,32 @@ impl Core {
                 tokio::task::spawn_blocking(move || {
                     let _room = room;
                     match here {
-                        Some(here) => inner.direct.store.link_copy(&friend, &here, &kept),
+                        Some(here) => inner.direct.store.link_copy_holding(
+                            &friend,
+                            &here,
+                            &kept,
+                            |bytes, dir| {
+                                crate::shares::hold_disk(
+                                    &inner,
+                                    bytes,
+                                    dir,
+                                    "not enough free space for this file",
+                                )
+                            },
+                        ),
                         None => inner.direct.store.keep_copy(&friend, &kept, &from),
                     }
                 })
                 .await?
-                .with_context(|| format!("cannot keep a copy of {}", file.name))?;
+                .map_err(|e| {
+                    // Refused for want of room on the disk: said as it is, which the screens
+                    // read as such.
+                    if e.to_string().contains("not enough free space") {
+                        e
+                    } else {
+                        e.context(format!("cannot keep a copy of {}", file.name))
+                    }
+                })?;
                 copies.made.push(file.clone());
             }
             files.push(file);

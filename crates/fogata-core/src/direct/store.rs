@@ -1270,6 +1270,18 @@ impl DirectStore {
         kept: &Attachment,
         copy: &Attachment,
     ) -> Result<()> {
+        self.link_copy_holding(friend, kept, copy, |_, _| Ok(()))
+    }
+
+    /// [`Self::link_copy`], `hold` asked first for room on the disk for a copy of so many
+    /// bytes in the chat's folder when one is made (a link takes none).
+    pub fn link_copy_holding<R>(
+        &self,
+        friend: &DevicePublicKey,
+        kept: &Attachment,
+        copy: &Attachment,
+        hold: impl FnOnce(u64, &Path) -> Result<R>,
+    ) -> Result<()> {
         let (from, to) = (self.file_path(friend, kept), self.file_path(friend, copy));
         if kept.id != copy.id || from == to || fs::symlink_metadata(&to).is_ok() {
             return Ok(());
@@ -1277,6 +1289,10 @@ impl DirectStore {
         if fs::hard_link(&from, &to).is_ok() {
             return Ok(());
         }
+        let _room = hold(
+            fs::metadata(&from).map_or(kept.size, |m| m.len()),
+            to.parent().unwrap_or(&to),
+        )?;
         let tmp = temp_next_to(&to);
         let copied = (|| {
             let mut out = new_private(&tmp)?;

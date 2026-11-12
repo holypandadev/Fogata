@@ -520,7 +520,21 @@ async fn serve_again(
         let (inner, kept) = (inner.clone(), kept.clone());
         tokio::task::spawn_blocking(move || {
             for copy in &again {
-                if let Err(e) = inner.direct.store.link_copy(&friend, &kept, copy) {
+                // A copy where the disk has no links leaves the room the core's own files
+                // need, as the file's first copy did.
+                let linked =
+                    inner
+                        .direct
+                        .store
+                        .link_copy_holding(&friend, &kept, copy, |bytes, dir| {
+                            crate::shares::hold_disk(
+                                &inner,
+                                bytes,
+                                dir,
+                                "not enough free space for this file",
+                            )
+                        });
+                if let Err(e) = linked {
                     tracing::warn!("a file kept here does not show under another name: {e:#}");
                 }
             }
