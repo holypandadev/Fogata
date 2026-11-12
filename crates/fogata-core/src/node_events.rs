@@ -370,41 +370,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             group,
             voice,
             change,
-        } => {
-            let call = inner.is_call(group);
-            if call {
-                match &change {
-                    RoomChange::Left { device, .. } => calls::on_left(inner, group, *device).await,
-                    RoomChange::Joined { device, .. } => {
-                        calls::on_joined(inner, group, *device).await
-                    }
-                    _ => {}
-                }
-            }
-            if !call && matches!(change, RoomChange::Opened { .. } | RoomChange::Closed) {
-                inner
-                    .lock()
-                    .meta
-                    .last_room
-                    .insert(hex::encode(group.as_bytes()), now);
-                inner.save_meta();
-            }
-            let home = matches!(
-                change,
-                RoomChange::Opened { .. }
-                    | RoomChange::Closed
-                    | RoomChange::Joined { .. }
-                    | RoomChange::Left { .. }
-            );
-            inner.emit(CoreEvent::Room {
-                group,
-                voice,
-                change,
-            });
-            if home {
-                inner.emit(CoreEvent::GroupsChanged);
-            }
-        }
+        } => handle_room(inner, now, group, voice, change).await,
         // A call's group is never saved, and a chat's is kept with its chat.
         NodeEvent::GroupChanged(group) => {
             if direct::on_group_changed(inner, group).await {
@@ -880,6 +846,47 @@ fn handle_member_disconnected(inner: &Arc<Inner>, group: GroupId, device: Device
     }
     inner.emit(CoreEvent::MemberDisconnected { group, device });
     inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// A change in one of a group's voice rooms.
+async fn handle_room(
+    inner: &Arc<Inner>,
+    now: u64,
+    group: GroupId,
+    voice: fogata_net::VoiceRoomId,
+    change: RoomChange,
+) {
+    let call = inner.is_call(group);
+    if call {
+        match &change {
+            RoomChange::Left { device, .. } => calls::on_left(inner, group, *device).await,
+            RoomChange::Joined { device, .. } => calls::on_joined(inner, group, *device).await,
+            _ => {}
+        }
+    }
+    if !call && matches!(change, RoomChange::Opened { .. } | RoomChange::Closed) {
+        inner
+            .lock()
+            .meta
+            .last_room
+            .insert(hex::encode(group.as_bytes()), now);
+        inner.save_meta();
+    }
+    let home = matches!(
+        change,
+        RoomChange::Opened { .. }
+            | RoomChange::Closed
+            | RoomChange::Joined { .. }
+            | RoomChange::Left { .. }
+    );
+    inner.emit(CoreEvent::Room {
+        group,
+        voice,
+        change,
+    });
+    if home {
+        inner.emit(CoreEvent::GroupsChanged);
+    }
 }
 
 #[cfg(test)]
