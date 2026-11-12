@@ -48,7 +48,10 @@ use super::friend_contact::Contact;
 use super::friend_offers::{OfferIn, OfferPart, Offering};
 use super::friend_profile::MutualReply;
 use super::{Node, is_loopback, limits::FriendUpdate, now_ms};
-use crate::{Command, NodeEvent, Path, addr};
+use crate::{
+    Command, NodeEvent, Path, addr,
+    addr::{OwnNetworks, Reach},
+};
 
 /// After starting, look for friends often for a while: friends that started at about the
 /// same time cannot find each other before both have announced themselves.
@@ -504,6 +507,20 @@ impl FriendContext {
     }
 }
 
+/// The addresses in a friend link that this device dials. Plain addresses only: a name in
+/// a link would have this device ask DNS for a host whoever made the link chose. And only
+/// those `own` may dial: the maker chose them too, and may have put any local address in
+/// (see [`OwnNetworks::may_dial`]); its own local ones serve a friend at the same place,
+/// behind another router too.
+fn link_dial_addresses(addrs: &[Vec<u8>], own: &OwnNetworks) -> Vec<Multiaddr> {
+    addrs
+        .iter()
+        .filter_map(|bytes| Multiaddr::try_from(bytes.clone()).ok())
+        .filter(|a| addr::is_dialable(a) && !addr::is_named(a) && own.may_dial(a, Reach::SamePlace))
+        .map(|a| addr::without_peer(&a))
+        .collect()
+}
+
 impl Node {
     pub(super) fn changed(&self) {
         self.emit(NodeEvent::FriendsChanged);
@@ -903,6 +920,7 @@ impl Node {
     }
 
     fn use_link(&mut self, mut link: FriendLink, now: u64) {
+        let own = self.own_networks();
         let f = self.friends.as_mut().expect("checked by the caller");
         let problem = if link.device == f.book.profile.device {
             Some("this link was made on this device")
@@ -917,15 +935,7 @@ impl Node {
             self.emit(NodeEvent::FriendRequestFailed(problem.to_string()));
             return;
         }
-        // Plain addresses only: a name in a link would have this device ask DNS for a host
-        // whoever made the link chose.
-        let addrs: Vec<Multiaddr> = link
-            .addrs
-            .iter()
-            .filter_map(|bytes| Multiaddr::try_from(bytes.clone()).ok())
-            .filter(|a| addr::is_dialable(a) && !addr::is_named(a))
-            .map(|a| addr::without_peer(&a))
-            .collect();
+        let addrs = link_dial_addresses(&link.addrs, &own);
         let peer = PeerId::from_bytes(&link.peer).ok();
         // Sought for a link's lifetime by this device's clock, which may differ from the
         // maker's; the maker refuses it once it expired there.
@@ -1824,6 +1834,48 @@ mod tests {
         NodeConfig,
         node::{start, tests::inspect},
     };
+
+    /// A friend link's maker chose its addresses: those of this computer, of this device
+    /// itself, names, and local ones of a carrier's or a VPN's network this device is not on
+    /// are left out; its public ones and its private IPv4 ones (at the same place, behind
+    /// another router maybe) are dialled.
+    #[test]
+    fn a_link_is_dialled_only_at_addresses_this_device_may_dial() {
+        let own = OwnNetworks::of(&[
+            "/ip4/192.168.1.20/udp/31000/quic-v1".parse().unwrap(),
+            "/ip4/203.0.113.20/udp/31000/quic-v1".parse().unwrap(),
+        ]);
+        let peer = PeerId::random();
+        let link: Vec<Vec<u8>> = [
+            "/ip4/198.51.100.7/udp/31000/quic-v1",
+            "/ip4/192.168.2.123/udp/31000/quic-v1",
+            "/ip4/127.0.0.1/udp/22/quic-v1",
+            "/ip6/::1/udp/22/quic-v1",
+            "/ip4/100.70.8.9/udp/80/quic-v1",
+            "/ip6/fd99:1:2:1::1/udp/443/quic-v1",
+            "/ip6/fe80::1/udp/31000/quic-v1",
+            "/ip4/192.168.1.20/udp/31000/quic-v1",
+            "/dns4/router.example/udp/31000/quic-v1",
+        ]
+        .iter()
+        .map(|a| {
+            let a: Multiaddr = a.parse().unwrap();
+            a.with(Protocol::P2p(peer)).to_vec()
+        })
+        .chain([vec![0xff, 0x01]])
+        .collect();
+        let dialled: Vec<String> = link_dial_addresses(&link, &own)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(
+            dialled,
+            [
+                "/ip4/198.51.100.7/udp/31000/quic-v1",
+                "/ip4/192.168.2.123/udp/31000/quic-v1"
+            ]
+        );
+    }
 
     /// A friend that stays away is looked up less and less often, up to once an hour; one
     /// that just went at every slot for a while; a change here starts over; and a friend

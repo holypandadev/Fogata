@@ -10,7 +10,7 @@ use fogata_proto::{
     FRIEND_PROTOCOL, FriendRequest, FriendResponse, MEMBER_PROTOCOL, MemberRequest, MemberResponse,
 };
 use libp2p::{
-    Multiaddr, PeerId, StreamProtocol, dcutr, identify,
+    Multiaddr, PeerId, StreamProtocol, identify,
     identity::Keypair,
     kad, mdns, ping, relay,
     request_response::{self, ProtocolSupport},
@@ -22,6 +22,7 @@ use libp2p::{
 
 use crate::{
     codec::Guarded,
+    punches::Punches,
     rendezvous::AMINO_PROTOCOL,
     strangers::{KeepWanted, Wanted},
 };
@@ -48,7 +49,7 @@ const MDNS_QUERY_INTERVAL: Duration = Duration::from_secs(30);
 pub(crate) struct Behaviour {
     pub(crate) relay_client: relay::client::Behaviour,
     pub(crate) relay: relay::Behaviour,
-    pub(crate) dcutr: dcutr::Behaviour,
+    pub(crate) dcutr: Punches,
     pub(crate) identify: identify::Behaviour,
     pub(crate) ping: ping::Behaviour,
     pub(crate) kad: Toggle<kad::Behaviour<kad::store::MemoryStore>>,
@@ -136,7 +137,8 @@ impl Behaviour {
         Ok(Self {
             relay_client,
             relay,
-            dcutr: dcutr::Behaviour::new(peer_id),
+            // Never at an address this device may not dial (see punches.rs).
+            dcutr: Punches::new(peer_id, options.wanted.clone()),
             identify: identify::Behaviour::new(
                 // The protocol version most libp2p peers say (go-libp2p's default), so that
                 // this field does not tell DHT nodes the device runs Fogata either.

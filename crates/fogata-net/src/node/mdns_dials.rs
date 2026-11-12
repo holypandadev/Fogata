@@ -15,11 +15,11 @@ use libp2p::{
     },
 };
 
-use super::{
-    Node, PUNCH_ATTEMPT,
-    dial::{LocalBlock, may_route_to},
+use super::{Node, PUNCH_ATTEMPT};
+use crate::{
+    addr,
+    addr::{OwnNetworks, Reach},
 };
-use crate::addr;
 
 /// Addresses of one peer dialled at once for what mDNS told of it, over every dial still
 /// going; those it tells of past that wait for the dials to end. mDNS keeps 8 of a peer's
@@ -59,18 +59,19 @@ enum Teller {
 }
 
 /// Whether `address`, which a response from `by` told of, may be dialled from a device on
-/// the networks of `own` (see [`Node::own_blocks`]): one at `by` itself, or on a local
+/// the networks of `own` (see [`Node::own_networks`]): one at `by` itself, or on a local
 /// network (see [`addr::is_lan`]); a carrier-grade NAT or unique-local IPv6 one only when
-/// this device is on that network too (see [`may_route_to`]). Loopback only from this very
-/// computer, never a public address another one names: a response's addresses are
-/// whatever its sender likes, and would otherwise make this device send packets to any
-/// host on the internet, to services on this computer, or into a VPN it is on. A private
-/// IPv4 one in another /24 is still dialled: the response came over this network, and one
-/// such as 10.0.0.0/16 has its devices in many /24s.
-fn mdns_address_ok(address: &Multiaddr, by: std::net::IpAddr, own: &HashSet<LocalBlock>) -> bool {
+/// this device is on that network too (see [`OwnNetworks::may_dial`]). Loopback only from
+/// this very computer, never a public address another one names, nor one of this device's
+/// own: a response's addresses are whatever its sender likes, and would otherwise make this
+/// device send packets to any host on the internet, to services on this computer, or into a
+/// VPN it is on. A private IPv4 one in another /24 is still dialled: the response came over
+/// this network, and one such as 10.0.0.0/16 has its devices in many /24s.
+fn mdns_address_ok(address: &Multiaddr, by: std::net::IpAddr, own: &OwnNetworks) -> bool {
     match addr::ip(address) {
-        Some(ip) if ip == by => true,
-        Some(_) => addr::is_lan(address) && may_route_to(address, own),
+        // A copy on this computer answers from this computer's address, at another port.
+        Some(ip) if ip == by => !own.is_own(address),
+        Some(_) => addr::is_lan(address) && own.may_dial(address, Reach::SamePlace),
         None => false,
     }
 }
@@ -130,14 +131,14 @@ impl Node {
         found: Vec<(PeerId, Multiaddr, Option<std::net::IpAddr>)>,
     ) {
         let mut by_peer: HashMap<PeerId, MdnsTold> = HashMap::new();
-        let own_blocks = self.own_blocks();
+        let own = self.own_networks();
         for (peer, address, by) in found {
             // One whose response is no longer known (it made room for others at once) is
             // not dialled at what it told, nor one from an address not heard for a while.
             let Some(by) = by.filter(|by| !self.teller_muted(by)) else {
                 continue;
             };
-            if peer == self.local_peer() || !mdns_address_ok(&address, by, &own_blocks) {
+            if peer == self.local_peer() || !mdns_address_ok(&address, by, &own) {
                 continue;
             }
             let tellers = by_peer.entry(peer).or_default();
@@ -302,7 +303,7 @@ impl Node {
             return;
         }
         let now = Instant::now();
-        let own_blocks = self.own_blocks();
+        let own = self.own_networks();
         // Those this computer or an address where a member or friend was reached told of go
         // first, each in the order told of: they do not wait behind the crowd.
         let (first, rest): (Vec<_>, Vec<_>) = std::mem::take(&mut self.mdns_waiting)
@@ -322,7 +323,7 @@ impl Node {
                         None => Some(by),
                     };
                     let Some(by) = by.filter(|by| {
-                        !self.teller_muted(by) && mdns_address_ok(&address, *by, &own_blocks)
+                        !self.teller_muted(by) && mdns_address_ok(&address, *by, &own)
                     }) else {
                         continue;
                     };
@@ -569,11 +570,13 @@ mod tests {
     };
 
     /// A response names a peer at its own address, at local ones, and at public and loopback
-    /// ones of other hosts: only the first two are dialled.
+    /// ones of other hosts, and at this device's own address: only the first two are
+    /// dialled.
     #[tokio::test(flavor = "multi_thread")]
     async fn mdns_dials_no_public_or_loopback_address_a_neighbour_names() {
         let (node, _group) = lone_member();
         let dialled = inspect(&node, |n| {
+            n.listen_addrs = vec!["/ip4/192.168.1.20/udp/4001/quic-v1".parse().unwrap()];
             let neighbour = std::net::IpAddr::from([192, 168, 1, 66]);
             let peer = PeerId::random();
             let told = [
@@ -583,6 +586,7 @@ mod tests {
                 "/ip4/127.0.0.1/udp/22/quic-v1",
                 "/ip6/::1/udp/22/quic-v1",
                 "/ip6/2001:db8::80/udp/443/quic-v1",
+                "/ip4/192.168.1.20/udp/4001/quic-v1",
             ];
             n.dial_mdns_found(
                 told.iter()

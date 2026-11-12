@@ -21,6 +21,7 @@ mod group;
 mod lab;
 mod lan;
 mod node;
+mod punches;
 mod rendezvous;
 mod strangers;
 pub mod updates;
@@ -534,6 +535,9 @@ enum Command {
     Dial {
         addrs: Vec<Multiaddr>,
         group: Option<GroupId>,
+        /// Whether someone else chose them (an invite's): only those this device may dial
+        /// are (see `addr::OwnNetworks::may_dial`).
+        named: bool,
     },
     SetProfile {
         name: Option<String>,
@@ -925,14 +929,32 @@ impl NodeHandle {
         .map_err(NetError::Refused)
     }
 
-    /// Dials addresses, for example those in an invite. With `group`, the peers there are
-    /// only asked about that group.
+    /// Dials addresses this device's user chose (a peer given by hand, a test's). With
+    /// `group`, the peers there are only asked about that group.
     pub async fn dial(
         &self,
         addrs: Vec<Multiaddr>,
         group: Option<GroupId>,
     ) -> Result<(), NetError> {
-        self.tell(Command::Dial { addrs, group }).await
+        self.tell(Command::Dial {
+            addrs,
+            group,
+            named: false,
+        })
+        .await
+    }
+
+    /// Dials the addresses in an invite to `group`, whose peers are only asked about that
+    /// group. Whoever made the invite chose them: this computer, this device's own, or a
+    /// local address of a network this device is on nothing of (a carrier's, a VPN's) are
+    /// left out, as for any address someone else names.
+    pub async fn dial_invite(&self, addrs: Vec<Multiaddr>, group: GroupId) -> Result<(), NetError> {
+        self.tell(Command::Dial {
+            addrs,
+            group: Some(group),
+            named: true,
+        })
+        .await
     }
 
     /// Changes this device's name or avatar and sends it to the friends and members

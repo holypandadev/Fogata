@@ -11,14 +11,10 @@ use fogata_crypto::GroupId;
 use libp2p::{Multiaddr, PeerId};
 
 use super::{
-    Node, PUNCH_SLOT,
-    candidates::RESTING_EVERY,
-    dial::{PUNCHED_WITHIN, may_route_to},
-    friends::Target,
-    links::THROUGH_DIAL_WAIT,
-    now_ms,
+    Node, PUNCH_SLOT, candidates::RESTING_EVERY, dial::PUNCHED_WITHIN, friends::Target,
+    links::THROUGH_DIAL_WAIT, now_ms,
 };
-use crate::{NodeEvent, addr, rendezvous};
+use crate::{NodeEvent, addr, addr::Reach, rendezvous};
 
 /// Peers kept at most in each list of peers that may be members or friends; past it, those
 /// not connected now are forgotten. Anyone on a local network can name any number of
@@ -118,7 +114,7 @@ impl Node {
         let own_ips = self.own_public_ips();
         let slot = now_ms() / PUNCH_SLOT.as_millis() as u64;
         let resting_too = slot.is_multiple_of(RESTING_EVERY);
-        let own_blocks = self.own_blocks();
+        let own = self.own_networks();
         let targets: Vec<(PeerId, Vec<Multiaddr>)> = self
             .candidates
             .iter()
@@ -140,14 +136,7 @@ impl Node {
                 // in any /24, but a carrier-grade NAT or unique-local IPv6 one only of a
                 // network this device is on, never one of a VPN it is not on.
                 if self.only_relayed(peer) {
-                    addrs.extend(
-                        self.member_lan
-                            .get(peer)
-                            .into_iter()
-                            .flatten()
-                            .filter(|a| may_route_to(a, &own_blocks))
-                            .cloned(),
-                    );
+                    addrs.extend(self.member_lan_for(peer, &own, Reach::SamePlace).cloned());
                 }
                 (*peer, addrs)
             })

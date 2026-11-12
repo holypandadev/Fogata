@@ -17,11 +17,11 @@ use libp2p::{
 use super::{
     ConnectionInfo, Node, STARTUP,
     candidates::{Budget, MAX_FAILURES, MAX_RESTS},
-    dial::{PUNCHED_WITHIN, local_block},
+    dial::PUNCHED_WITHIN,
     is_loopback,
     network::{probe_lost_udp, v6_net},
 };
-use crate::{NodeEvent, Path, addr, behaviour::BehaviourEvent, short_peer};
+use crate::{NodeEvent, Path, addr, addr::local_block, behaviour::BehaviourEvent, short_peer};
 
 /// At most this many of a peer's protocols are kept (see `Node::advertised`).
 const ADVERTISED_MAX: usize = 64;
@@ -64,6 +64,7 @@ impl Node {
                         self.listen_addrs.iter().any(|a| v6_net(a) == Some(net))
                     });
                     self.listen_addrs.push(address.clone());
+                    self.publish_own_networks();
                     self.answer_waiting_addresses();
                     // A network joined while running (another Wi-Fi, a cable plugged in).
                     if self.started.elapsed() > STARTUP && addr::ip(&address).is_some() && !same_v6
@@ -79,6 +80,7 @@ impl Node {
             }
             SwarmEvent::ExpiredListenAddr { address, .. } => {
                 self.listen_addrs.retain(|a| *a != address);
+                self.publish_own_networks();
                 self.swarm.behaviour_mut().relay_address(&address, false);
                 // A temporary IPv6 address that expired while another of its /64 stays: the
                 // same network, and only what was seen at that address goes.

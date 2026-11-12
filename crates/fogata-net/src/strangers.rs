@@ -19,6 +19,9 @@
 //!   another node. A stranger known only by TCP is also tried over QUIC on the same port at
 //!   the same time, as many DHT nodes listen on both. Local network addresses of strangers
 //!   are skipped when they have public ones. Networks that block UDP keep using TCP.
+//! - Whoever a dial is for, an address the behaviours supply (DHT records and routing, mDNS,
+//!   identify, sealed local names) is one someone else named, and is dropped unless
+//!   [`OwnNetworks::may_dial`] lets this device dial it.
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -41,7 +44,7 @@ use libp2p::{
 };
 
 use crate::{
-    addr,
+    addr::{self, OwnNetworks, Reach},
     lan::{self, LanKeys},
 };
 
@@ -149,6 +152,8 @@ struct State {
     /// Incoming TCP connections being set up from strangers on the internet, and from the
     /// local network (see [`Pending::stranger`] and [`Pending::lan`]).
     tcp_setting_up: (usize, usize),
+    /// The networks this device is on and its own addresses (see [`Wanted::set_own`]).
+    own: OwnNetworks,
 }
 
 /// Connections being set up at once over one transport: in all, from public addresses
@@ -225,6 +230,17 @@ impl Wanted {
         crate::locked(&self.0)
             .quic_at
             .is_some_and(|at| at.elapsed() < QUIC_PROOF)
+    }
+
+    /// The networks this device is on and its own addresses, from its listen addresses as
+    /// they change: what the addresses behaviours supply for a dial are checked against (see
+    /// [`OwnNetworks::may_dial`]).
+    pub(crate) fn set_own(&self, own: OwnNetworks) {
+        crate::locked(&self.0).own = own;
+    }
+
+    pub(crate) fn own(&self) -> OwnNetworks {
+        crate::locked(&self.0).own.clone()
     }
 
     /// The addresses members and friends were reached at, or are connected from: incoming
@@ -772,9 +788,14 @@ impl<B: NetworkBehaviour> NetworkBehaviour for StrangerDials<B> {
         )?;
         // Sealed local addresses are opened for peers this device wants to reach, first,
         // since they are the ones that work when both are at the same place. A name is never
-        // left for DNS to look up.
+        // left for DNS to look up. Every address here is one someone else named: none this
+        // device may not dial is (a sealed one too: whoever knows the key seals what it
+        // likes), whoever the dial is for.
+        let own = self.wanted.own();
+        let may_dial = |a: &Multiaddr| own.may_dial(a, Reach::SamePlace);
         let (names, found): (Vec<_>, Vec<_>) = found.into_iter().partition(lan::is_name);
-        let found = without_lookups(found);
+        let mut found = without_lookups(found);
+        found.retain(may_dial);
         Ok(match maybe_peer {
             Some(peer) if !self.wanted.is_wanted(&peer) => {
                 let now = Situation {
@@ -788,7 +809,8 @@ impl<B: NetworkBehaviour> NetworkBehaviour for StrangerDials<B> {
                 for_stranger(found, now)
             }
             _ => {
-                let opened = self.lan.open_all(&names);
+                let mut opened = self.lan.open_all(&names);
+                opened.retain(may_dial);
                 if !names.is_empty() {
                     tracing::debug!(
                         peer = ?maybe_peer,
@@ -809,7 +831,15 @@ impl<B: NetworkBehaviour> NetworkBehaviour for StrangerDials<B> {
                         self.lan_opened.insert(peer, opened.clone());
                         opened
                     }
-                    Some(peer) => self.lan_opened.get(&peer).cloned().unwrap_or_default(),
+                    // Checked again: this device may have left the network since.
+                    Some(peer) => self
+                        .lan_opened
+                        .get(&peer)
+                        .into_iter()
+                        .flatten()
+                        .filter(|a| may_dial(a))
+                        .cloned()
+                        .collect(),
                     None => opened,
                 };
                 out.extend(found);
@@ -1754,6 +1784,142 @@ mod tests {
         assert!(wanted.only_from_dht(&peer));
         wanted.found_nearby(&peer);
         assert!(!wanted.only_from_dht(&peer));
+    }
+
+    /// Behaviours that supply the same addresses for every dial, as the DHT, mDNS and
+    /// identify do for the peers they heard of.
+    struct Supplies(Vec<Multiaddr>);
+
+    impl NetworkBehaviour for Supplies {
+        type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
+        type ToSwarm = Infallible;
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(libp2p::swarm::dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: Endpoint,
+            _: PortUse,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(libp2p::swarm::dummy::ConnectionHandler)
+        }
+
+        fn handle_pending_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: Option<PeerId>,
+            _: &[Multiaddr],
+            _: Endpoint,
+        ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+            Ok(self.0.clone())
+        }
+
+        fn on_swarm_event(&mut self, _: FromSwarm) {}
+
+        fn on_connection_handler_event(
+            &mut self,
+            _: PeerId,
+            _: ConnectionId,
+            event: THandlerOutEvent<Self>,
+        ) {
+            match event {}
+        }
+
+        fn poll(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<ToSwarm<Infallible, THandlerInEvent<Self>>> {
+            Poll::Pending
+        }
+    }
+
+    /// What the behaviours supply for a dial, and what a sealed name opens to, is dialled
+    /// only where this device may dial an address someone else named: a member's sealed
+    /// name opens to a private address of another /24 (the same place behind another
+    /// router), never to a VPN's of a network this device is not on; neither a member nor
+    /// a stranger is dialled at this computer, this device's own address, or such a VPN's.
+    #[test]
+    fn supplied_and_sealed_addresses_are_dialled_only_where_this_device_may() {
+        let wanted = Wanted::default();
+        wanted.set_own(OwnNetworks::of(&[
+            a("/ip4/192.168.1.20/udp/31000/quic-v1"),
+            a("/ip6/fd12:3456:789a:1::20/udp/31000/quic-v1"),
+        ]));
+        let lan = LanKeys::default();
+        let key = lan::key_of(&[7u8; 32]);
+        lan.set(vec![key]);
+        let sealed = lan::seal(
+            &key,
+            31234,
+            &[
+                std::net::Ipv4Addr::new(192, 168, 7, 5),
+                std::net::Ipv4Addr::new(100, 70, 8, 9),
+            ],
+        )
+        .unwrap();
+        let public = a("/ip4/203.0.113.5/udp/4001/quic-v1");
+        let supplied = vec![
+            sealed,
+            public.clone(),
+            a("/ip4/127.0.0.1/udp/4001/quic-v1"),
+            a("/ip4/100.70.1.1/udp/4001/quic-v1"),
+            a("/ip6/fd99:1:2:1::1/udp/4001/quic-v1"),
+            a("/ip4/192.168.1.20/udp/31000/quic-v1"),
+            a("/ip4/192.168.1.30/udp/31000/quic-v1"),
+        ];
+        let mut dials = StrangerDials::new(Supplies(supplied), wanted.clone(), lan);
+        let mut dial = |peer: PeerId| {
+            dials
+                .handle_pending_outbound_connection(
+                    ConnectionId::new_unchecked(1),
+                    Some(peer),
+                    &[],
+                    Endpoint::Dialer,
+                )
+                .unwrap()
+        };
+        let member = PeerId::random();
+        wanted.want(member);
+        assert_eq!(
+            dial(member),
+            [
+                a("/ip4/192.168.7.5/udp/31234/quic-v1"),
+                public.clone(),
+                a("/ip4/192.168.1.30/udp/31000/quic-v1"),
+            ]
+        );
+        // A stranger with a public address is dialled there only; one with local ones
+        // alone, at those this device may dial.
+        assert_eq!(dial(PeerId::random()), [public]);
+        let mut dials = StrangerDials::new(
+            Supplies(vec![
+                a("/ip4/127.0.0.1/udp/4001/quic-v1"),
+                a("/ip4/100.70.1.1/udp/4001/quic-v1"),
+                a("/ip4/10.0.0.9/udp/4001/quic-v1"),
+            ]),
+            wanted,
+            LanKeys::default(),
+        );
+        let dialled = dials
+            .handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(2),
+                Some(PeerId::random()),
+                &[],
+                Endpoint::Dialer,
+            )
+            .unwrap();
+        assert_eq!(dialled, [a("/ip4/10.0.0.9/udp/4001/quic-v1")]);
     }
 
     #[test]

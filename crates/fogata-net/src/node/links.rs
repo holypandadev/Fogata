@@ -17,7 +17,7 @@ use libp2p::{
 };
 
 use super::{ConnectionInfo, Member, Node};
-use crate::{NodeEvent, Path, addr};
+use crate::{NodeEvent, Path, addr, addr::Reach};
 
 /// How often the direct connections to members are checked for silence, and how long one
 /// may hear nothing before the member is reached through another member instead. QUIC
@@ -124,8 +124,8 @@ impl Node {
             .filter(|c| c.peer == *peer && !matches!(c.path, Path::ThroughMember { .. }))
             .filter_map(|c| addr::ip(&c.address))
             .collect();
-        let own_blocks = self.own_blocks();
-        let lan = self.member_lan_for(peer, &own_blocks);
+        let own = self.own_networks();
+        let lan = self.member_lan_for(peer, &own, Reach::OwnNetwork);
         let listening = self
             .peer_listening
             .get(peer)
@@ -440,7 +440,7 @@ mod tests {
     /// when it is lost) on every network this device shares with it: the same home /24, the
     /// same unique-local IPv6 site, carrier-grade NAT or a VPN such as Tailscale when this
     /// device is on one too. Those of networks this device is not on are never dialled,
-    /// whatever block they are in.
+    /// whatever block they are in, nor this device's own address.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_member_s_local_addresses_are_dialled_only_on_networks_this_device_is_on() {
         let (node, group) = lone_member();
@@ -462,15 +462,17 @@ mod tests {
                 "192.168.7.30",
                 "10.0.0.1",
                 "fd99:1:2:1::1",
+                // This device's own.
+                "192.168.1.20",
             ]
             .iter()
             .map(|a| quic(a))
             .collect();
             n.member_lan.insert(bea, sent);
             let chosen = |n: &Node| {
-                let own = n.own_blocks();
+                let own = n.own_networks();
                 let lan: Vec<String> = n
-                    .member_lan_for(&bea, &own)
+                    .member_lan_for(&bea, &own, Reach::OwnNetwork)
                     .map(|a| a.to_string())
                     .collect();
                 let quic: Vec<String> = n

@@ -18,8 +18,8 @@ use libp2p::{
     },
 };
 
-use super::{ConnectionInfo, Node, Pending, dial::on_own_network, links::THROUGH_DIAL_WAIT};
-use crate::{Path, addr};
+use super::{ConnectionInfo, Node, Pending, links::THROUGH_DIAL_WAIT};
+use crate::{Path, addr, addr::Reach};
 
 /// Most local addresses kept for a member.
 const MAX_LAN_ADDRS: usize = 8;
@@ -43,7 +43,9 @@ const MAX_LOST: usize = 32;
 /// ([`Node::redial_lost`]).
 pub(super) struct Lost {
     device: DevicePublicKey,
-    addresses: Vec<Multiaddr>,
+    /// Where to dial it, each with whether the member sent it (rather than being reached
+    /// there).
+    addresses: Vec<(Multiaddr, bool)>,
     since: Instant,
     next: Instant,
     wait: Duration,
@@ -168,15 +170,16 @@ impl Node {
             Some((&member.path, &member.address)),
             closed.map(|c| (&c.path, &c.address)),
         ];
-        let mut addresses: Vec<Multiaddr> = Vec::new();
+        let mut addresses: Vec<(Multiaddr, bool)> = Vec::new();
         let reached = reached
             .into_iter()
             .flatten()
             .filter(|(path, a)| **path == Path::Lan && addr::is_quic(a) && !addr::is_relayed(a))
-            .map(|(_, a)| addr::without_peer(a));
-        for address in reached.chain(self.member_lan.get(&peer).into_iter().flatten().cloned()) {
-            if !addresses.contains(&address) && addresses.len() < MAX_LAN_ADDRS {
-                addresses.push(address);
+            .map(|(_, a)| (addr::without_peer(a), false));
+        let sent = self.member_lan.get(&peer).into_iter().flatten();
+        for (address, sent) in reached.chain(sent.map(|a| (a.clone(), true))) {
+            if !addresses.iter().any(|(a, _)| *a == address) && addresses.len() < MAX_LAN_ADDRS {
+                addresses.push((address, sent));
             }
         }
         if addresses.is_empty() {
@@ -200,7 +203,8 @@ impl Node {
     /// it has a direct or local QUIC connection again, is no longer a member or is back as
     /// another session, or after [`REDIAL_FOR`]; the punch slots and discovery go on as for
     /// anyone. A local address is dialled only while this device is on a network of the
-    /// same block (see `dial::LocalBlock`), since elsewhere it names some other computer.
+    /// same block (see [`addr::OwnNetworks::may_dial`]), since elsewhere it names some other
+    /// computer.
     pub(super) fn redial_lost(&mut self) {
         if self.lost.is_empty() {
             return;
@@ -223,7 +227,7 @@ impl Node {
                     .values()
                     .any(|s| s.ctx.is_member_device(&lost.device))
         });
-        let own_blocks = self.own_blocks();
+        let own = self.own_networks();
         let due: Vec<(PeerId, Vec<Multiaddr>)> = self
             .lost
             .iter_mut()
@@ -231,11 +235,19 @@ impl Node {
             .map(|(peer, lost)| {
                 lost.wait = (lost.wait * 2).min(REDIAL_MAX);
                 lost.next = now + lost.wait;
+                // Where it was reached is one of its own connections' addresses (this
+                // computer's, for a copy here); what it sent is checked as anything named.
                 let addresses: Vec<Multiaddr> = lost
                     .addresses
                     .iter()
-                    .filter(|a| on_own_network(a, &own_blocks))
-                    .cloned()
+                    .filter(|(a, sent)| {
+                        if *sent {
+                            own.may_dial(a, Reach::OwnNetwork)
+                        } else {
+                            addr::on_own_network(a, own.blocks())
+                        }
+                    })
+                    .map(|(a, _)| a.clone())
                     .collect();
                 (*peer, addresses)
             })

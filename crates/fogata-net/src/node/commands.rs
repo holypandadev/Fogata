@@ -9,7 +9,7 @@ use fogata_proto::MemberRequest;
 use libp2p::{PeerId, multiaddr::Protocol};
 
 use super::{GroupSlot, Node, Pending, group_changes, now_ms};
-use crate::{Command, group::GroupSetup};
+use crate::{Command, addr::Reach, group::GroupSetup};
 
 /// Whether friends and members see a device as away (see [`Node::shown_away`]).
 fn shown_away(away: bool, hidden: bool, in_room: bool) -> bool {
@@ -114,7 +114,15 @@ impl Node {
                 device,
                 accept,
             } => self.answer_join(group, device, accept),
-            Command::Dial { addrs, group } => {
+            Command::Dial {
+                mut addrs,
+                group,
+                named,
+            } => {
+                if named {
+                    let own = self.own_networks();
+                    addrs.retain(|a| own.may_dial(a, Reach::SamePlace));
+                }
                 if let Some(group) = group {
                     let mut peers: Vec<PeerId> = Vec::new();
                     for address in &addrs {
@@ -352,6 +360,7 @@ mod tests {
 
     use fogata_crypto::DeviceIdentity;
     use fogata_state::GroupLog;
+    use libp2p::Multiaddr;
 
     use super::*;
     use crate::{
@@ -361,6 +370,49 @@ mod tests {
             tests::{add_member, inspect, lone_member},
         },
     };
+
+    /// An invite's maker chose its addresses: those of this computer, of this device itself
+    /// and local ones of a VPN this device is not on are left out, and their peers are not
+    /// asked about the group; the others are dialled. Addresses given by hand (a test's, a
+    /// peer on this computer) are dialled as they are.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_invite_is_dialled_only_at_addresses_this_device_may_dial() {
+        let (node, group) = lone_member();
+        let (invited, by_hand) = inspect(&node, move |n| {
+            n.listen_addrs = vec!["/ip4/192.168.1.20/udp/31000/quic-v1".parse().unwrap()];
+            let named = |n: &mut Node, named: bool| {
+                let at: Vec<(PeerId, Multiaddr)> = [
+                    "/ip4/198.51.100.7/udp/31000/quic-v1",
+                    "/ip4/192.168.2.123/udp/31000/quic-v1",
+                    "/ip4/127.0.0.1/udp/22/quic-v1",
+                    "/ip4/100.70.8.9/udp/80/quic-v1",
+                    "/ip4/192.168.1.20/udp/31000/quic-v1",
+                ]
+                .iter()
+                .map(|a| {
+                    let peer = PeerId::random();
+                    let a: Multiaddr = a.parse().unwrap();
+                    (peer, a.with(Protocol::P2p(peer)))
+                })
+                .collect();
+                n.on_command(Command::Dial {
+                    addrs: at.iter().map(|(_, a)| a.clone()).collect(),
+                    group: Some(group),
+                    named,
+                });
+                at.iter()
+                    .map(|(peer, _)| {
+                        n.hinted.contains_key(peer) && n.explicit_peers.contains_key(peer)
+                    })
+                    .collect::<Vec<bool>>()
+            };
+            (named(n, true), named(n, false))
+        })
+        .await;
+        assert_eq!(invited, [true, true, false, false, false]);
+        assert_eq!(by_hand, [true; 5]);
+        node.shutdown().await.unwrap();
+    }
 
     #[test]
     fn away_shows_only_outside_rooms_and_while_visible() {

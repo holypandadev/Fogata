@@ -1084,7 +1084,7 @@ impl Core {
         *inner.pump.lock().unwrap_or_else(|e| e.into_inner()) = Some(events);
         for (group, addrs) in invite_addrs {
             let node = inner.node.clone();
-            tokio::spawn(async move { node.dial(addrs, Some(group)).await });
+            tokio::spawn(async move { node.dial_invite(addrs, group).await });
         }
         direct::start(&inner);
         if let Some(port) = inner.lock().meta.port {

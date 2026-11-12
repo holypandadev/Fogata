@@ -549,7 +549,7 @@ impl Core {
             .await?;
         self.inner
             .node
-            .dial(invite.addrs.clone(), Some(group))
+            .dial_invite(invite.addrs.clone(), group)
             .await?;
         Ok((group, invite.name))
     }
