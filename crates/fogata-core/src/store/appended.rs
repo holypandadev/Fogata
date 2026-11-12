@@ -140,6 +140,13 @@ impl Store {
         self.kept.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Forgets what this store knows of the files, as a start does: each is written whole
+    /// at its next change.
+    #[cfg(test)]
+    pub(super) fn forget_files(&self) {
+        *self.kept() = Kept::default();
+    }
+
     /// Notes what group `id`'s log file holds, read whole as `log`: `read` entries, found as
     /// `stamp` before it was read and still so. Only when the log holds every one of them
     /// and nothing else (as entries come only from the file, it does when it holds as many):

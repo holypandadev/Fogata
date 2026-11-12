@@ -483,6 +483,34 @@ pub(crate) mod tests {
             let back = store.load_log_of(&id).unwrap();
             assert_same(&back, &log);
             let after = fs::metadata(store.log_path(&id)).unwrap().len();
+            // One change at a time: the log file added to, or written whole, and what was
+            // judged of it; the middle of 21 of each.
+            let key = store.known_key().unwrap();
+            let (judged, context) = (store.judged_path(&id), judged_context(&id));
+            let mut each = |whole: bool| {
+                let mut times = (Vec::new(), Vec::new());
+                for i in 0..21 {
+                    let body = Body::Rename {
+                        name: format!("o{i}"),
+                    };
+                    log.append(&ana, body, 2_000_000 + i).unwrap();
+                    if whole {
+                        store.forget_files();
+                    }
+                    times.0.push(timed(|| store.store_log(&log).unwrap()).1);
+                    times.1.push(timed(|| write_judged(key, &judged, &context, &log)).1);
+                }
+                times.0.sort();
+                times.1.sort();
+                (times.0[10], times.1[10])
+            };
+            let (added, verdicts) = each(false);
+            let (written, _) = each(true);
+            println!(
+                "{}: one change, the log file added to in {added:?} or written whole in \
+                 {written:?}; what was judged of it written in {verdicts:?}",
+                if sealed { "sealed" } else { "plain" },
+            );
             println!(
                 "{}: a log of {} entries, {size} bytes on disk, saved whole in {whole:?}; a \
                  burst of 200 changes in {took:?}, {node:?} of it on the node's side \
