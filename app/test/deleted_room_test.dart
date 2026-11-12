@@ -16,6 +16,7 @@ UiGroup group(List<UiVoiceRoom> rooms) => UiGroup(
   maxInRoom: 8,
   voiceRooms: rooms,
   openInvites: 0,
+  needsUpdate: false,
 );
 
 void main() {

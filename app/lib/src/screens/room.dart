@@ -28,6 +28,7 @@ import '../shown.dart';
 import '../shown_text.dart';
 import '../theme.dart';
 import '../typing.dart';
+import '../update.dart' show GroupUpdateNote;
 import '../volume.dart';
 import '../widgets.dart';
 import '../window.dart';
@@ -459,6 +460,15 @@ class RoomPage extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  if (state.contacts.group(state.roomState.roomGroup)
+                      case UiGroup(needsUpdate: true)) ...[
+                    GroupUpdateNote(
+                      updates: state.updates,
+                      say: state.say,
+                      short: true,
+                    ),
+                    const SizedBox(height: 12),
+                  ],
                   if (phase == Phase.alone) ...[
                     _AloneBanner(state: state),
                     const SizedBox(height: 12),

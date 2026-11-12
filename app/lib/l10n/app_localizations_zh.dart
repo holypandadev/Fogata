@@ -6144,4 +6144,19 @@ class L10nZh extends L10n {
   String groupSettingsLevelWaiting(String names) {
     return '这个群组正在等待开启更强的保护。所有人都更新Fogata后会自动开启。尚未更新：$names';
   }
+
+  @override
+  String get groupUpdateTitle => '这个群组需要更新版本的Fogata';
+
+  @override
+  String get groupUpdateText =>
+      '管理这个群组的人开启了更强的保护，而这个版本的Fogata没有这项保护。在你更新之前，群组会保持当时的样子：你看不到之后的变化。Fogata会从你的好友和群组获取更新，准备好后会在顶部提示你。';
+
+  @override
+  String bellGroupUpdate(String group) {
+    return '“$group”需要更新版本的Fogata';
+  }
+
+  @override
+  String get bellGroupUpdateText => '在你更新之前，你看不到群组的变化。';
 }

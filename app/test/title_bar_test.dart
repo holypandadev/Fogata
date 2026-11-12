@@ -134,6 +134,7 @@ void main() {
         ],
         room: g.room,
         openInvites: 0,
+        needsUpdate: false,
       ),
     ];
     for (final (voice, name) in [

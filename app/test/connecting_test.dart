@@ -60,6 +60,7 @@ void main() {
             ],
             room: summary,
             openInvites: 0,
+            needsUpdate: false,
           ),
         ]
         ..roomState.room = UiRoom(

@@ -102,6 +102,7 @@ AppState _state(Screen page) {
                 UiVoiceRoom(id: 'quiet', name: 'Quiet corner'),
               ],
               openInvites: 0,
+              needsUpdate: false,
             ),
           ]
           ..nav.page = page);

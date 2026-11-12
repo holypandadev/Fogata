@@ -241,6 +241,8 @@ AppState _members() {
       voiceRooms: g.voiceRooms,
       room: g.room,
       openInvites: g.openInvites,
+      // And gone past this version: the note every member sees comes first.
+      needsUpdate: true,
       levelBehind: [for (var i = 1; i < 4; i++) other(i)],
     ),
   ];
@@ -327,6 +329,37 @@ AppState _update({required bool required}) {
   return state;
 }
 
+/// [state] with its one group gone past this version (see [UiGroup.needsUpdate]).
+AppState _needingUpdate(AppState state) {
+  final g = state.contacts.groups.single;
+  state.contacts.groups = [
+    UiGroup(
+      id: g.id,
+      name: g.name,
+      localName: g.localName,
+      icon: g.icon,
+      members: g.members,
+      online: g.online,
+      manager: g.manager,
+      rank: g.rank,
+      managers: g.managers,
+      picture: g.picture,
+      banner: g.banner,
+      maxMembers: g.maxMembers,
+      maxInRoom: g.maxInRoom,
+      voiceRooms: g.voiceRooms,
+      room: g.room,
+      lastRoomMs: g.lastRoomMs,
+      openInvites: g.openInvites,
+      outranks: g.outranks,
+      keptOut: g.keptOut,
+      levelBehind: g.levelBehind,
+      needsUpdate: true,
+    ),
+  ];
+  return state;
+}
+
 final _pages = <String, (AppState Function(), Widget)>{
   'room': (() => fakeRoom(people: 4, cameras: 1), const Shell()),
   'room, many': (() => fakeRoom(people: 8, cameras: 2), const Shell()),
@@ -353,6 +386,16 @@ final _pages = <String, (AppState Function(), Widget)>{
   ),
   'the bell': (
     () => _home()..toggleBell(const Rect.fromLTWH(900, 4, 28, 28)),
+    const Shell(),
+  ),
+  'room, its group needing a newer Fogata': (
+    () => _needingUpdate(fakeRoom(people: 4, cameras: 1)),
+    const Shell(),
+  ),
+  'the bell, a group needing a newer Fogata': (
+    () =>
+        _needingUpdate(fakeRoom(people: 2))
+          ..toggleBell(const Rect.fromLTWH(900, 4, 28, 28)),
     const Shell(),
   ),
   for (final section in SettingsSection.values)

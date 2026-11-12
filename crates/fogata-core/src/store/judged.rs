@@ -57,7 +57,7 @@ pub(crate) fn read_judged(
 /// Keeps what was judged of `log`, about to be written whole, at `path` (see
 /// [`read_judged`]). One not kept only costs judging the log again when it is read.
 pub(crate) fn write_judged(key: Option<&DataKey>, path: &Path, context: &str, log: &GroupLog) {
-    let verdicts = log.verdicts(log.hashes().copied());
+    let verdicts = log.verdicts(log.hashes_to_store());
     if let Err(e) = keep_verdicts(key, path, context, &verdicts) {
         tracing::debug!("cannot keep what was judged of {}: {e:#}", path.display());
     }
@@ -209,6 +209,35 @@ pub(crate) mod tests {
         let (back, took) = read(&again);
         assert_same(&back, &log);
         assert!(cheaper(took, judging), "{took:?} against {judging:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A group a manager raised past the levels this version judges at says so after a
+    /// restart too: the raise this version refused is stored with the log and refused again
+    /// when it is read, whether what was judged of the log is kept or not.
+    #[test]
+    fn a_group_gone_past_this_version_says_so_after_a_restart() {
+        let dir = folder("ahead");
+        let store = Store::open_with(dir.clone(), Keychain::Off).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let mut log = GroupLog::create(&me, "Home", 1).unwrap();
+        let id = log.group_id();
+        let next = fogata_state::Level::CURRENT.number() + 1;
+        let raise = Entry::sign(&me, id, log.heads(), 2, Body::Level { level: next });
+        assert!(log.insert(raise).is_err());
+        assert_eq!(log.level_ahead(), Some(next));
+        store.save_log("Home", &log).unwrap();
+        for _ in 0..2 {
+            let again = Store::open_with(dir.clone(), Keychain::Off).unwrap();
+            again.identity().unwrap();
+            let back = again.load_log_of(&id).unwrap();
+            assert_eq!(back.level_ahead(), Some(next));
+            assert_same(&back, &log);
+            again.save_log("Home", &back).unwrap();
+        }
+        // Without what was judged of it, as a folder of an earlier version.
+        fs::remove_file(store.judged_path(&id)).unwrap();
+        assert_eq!(store.load_log_of(&id).unwrap().level_ahead(), Some(next));
         fs::remove_dir_all(&dir).unwrap();
     }
 

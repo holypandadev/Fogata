@@ -262,6 +262,7 @@ impl GroupContext {
         let new = self
             .log
             .insert_all(other.entries_in_order().into_iter().cloned());
+        self.log.keep_ahead_of(other);
         if !new.is_empty() {
             self.refresh();
         }
@@ -1191,6 +1192,9 @@ impl GroupContext {
             .filter(|h| self.log.get(h).is_none())
             .copied()
             .collect();
+        let mut judged = judged;
+        // What tells the person that the group went up past this version stays.
+        judged.keep_ahead_of(&self.log);
         self.log = judged;
         if !new.is_empty() {
             self.refresh();
@@ -2071,6 +2075,44 @@ mod tests {
         // Another manager writes none for it: only the issuer's note counts.
         let mut bea_ctx = ctx(&bea, &at_bea);
         assert!(bea_ctx.name_unnamed_invites(8).is_empty());
+    }
+
+    /// A member's copy sent a raise past the levels this version judges at says so once,
+    /// keeps saying so (in what the application is shown of the group) and keeps it when a
+    /// copy judged elsewhere or another copy of the log is taken in.
+    #[test]
+    fn a_group_gone_past_this_version_is_told_and_stays_told() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let luis = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, luis.public_key(), "luis", 2).unwrap();
+        let next = fogata_state::Level::CURRENT.number() + 1;
+        let raise = Entry::sign(
+            &ana,
+            log.group_id(),
+            log.heads(),
+            3,
+            fogata_state::Body::Level { level: next },
+        );
+        let mut at_luis = ctx(&luis, &log);
+        let taken = at_luis.insert_encoded(&[raise.encode()]);
+        assert!(taken.ahead && taken.new.is_empty() && taken.refused.is_empty());
+        assert!(!at_luis.insert_encoded(&[raise.encode()]).ahead);
+        assert_eq!(
+            crate::GroupSummary::of(at_luis.log()).level_ahead,
+            Some(next)
+        );
+        // A copy judged away from the loop, with something new, takes its place: still told.
+        let mut judged = log.clone();
+        judged
+            .append(&ana, fogata_state::Body::SetIcon { icon: 2 }, 4)
+            .unwrap();
+        assert_eq!(at_luis.take_judged(judged).map(|n| n.len()), Some(1));
+        assert_eq!(at_luis.log().level_ahead(), Some(next));
+        let mut other = ctx(&luis, &log);
+        other.merge(at_luis.log());
+        assert_eq!(other.log().level_ahead(), Some(next));
+        assert_eq!(crate::GroupSummary::of(&log).level_ahead, None);
     }
 
     /// A manager raises the group to this version's level of judgment once every other

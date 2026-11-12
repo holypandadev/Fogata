@@ -62,6 +62,7 @@ UiGroup _group(String id, String name, List<UiVoiceRoom> rooms) => UiGroup(
   maxInRoom: 8,
   voiceRooms: rooms,
   openInvites: 0,
+  needsUpdate: false,
 );
 
 AppState _state() {

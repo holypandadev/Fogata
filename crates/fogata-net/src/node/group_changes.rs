@@ -399,6 +399,24 @@ impl Node {
         let taken = slot.ctx.insert_encoded(entries);
         self.refused_entries(&taken.refused);
         self.after_group_change(group, taken.new, Some(peer));
+        if taken.ahead {
+            self.group_went_past_this_version(group);
+        }
+    }
+
+    /// `group` went up to a level of judgment this version does not know (see
+    /// [`GroupLog::level_ahead`]): its log here stops there until Fogata is updated. Saved
+    /// like any change, so the person is told, now and after a restart.
+    pub(super) fn group_went_past_this_version(&mut self, group: GroupId) {
+        let Some(slot) = self.groups.get(&group) else {
+            return;
+        };
+        tracing::warn!(
+            "a manager raised a group to level {}, which this version of Fogata does not know: \
+             it waits there until Fogata is updated",
+            slot.ctx.log().level_ahead().unwrap_or_default()
+        );
+        self.emit(NodeEvent::GroupChanged(group));
     }
 
     /// A removal of this device `peer` showed, judged: `log` is the group's log with it,

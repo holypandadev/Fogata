@@ -56,6 +56,7 @@ void main() {
           maxInRoom: 8,
           voiceRooms: [UiVoiceRoom(id: AppState.firstRoom, name: 'General')],
           openInvites: 0,
+          needsUpdate: false,
           outranks: ['bea'],
         ),
       ]

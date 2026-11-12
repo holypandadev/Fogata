@@ -47,6 +47,7 @@ void main() {
               UiVoiceRoom(id: 'v2', name: 'A voice room called ' * 4),
             ],
             openInvites: 0,
+            needsUpdate: false,
           ),
         ]
         ..roomState.roomGroup = 'g'
@@ -131,6 +132,7 @@ void main() {
               UiVoiceRoom(id: 'v2', name: 'Games'),
             ],
             openInvites: 0,
+            needsUpdate: false,
           ),
         ]
         ..roomState.roomGroup = 'g'

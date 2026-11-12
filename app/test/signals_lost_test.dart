@@ -71,6 +71,7 @@ AppState _inCall() {
         ],
         room: summary,
         openInvites: 0,
+        needsUpdate: false,
       ),
     ]
     ..callState.call = call;

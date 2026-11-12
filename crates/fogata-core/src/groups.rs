@@ -176,6 +176,7 @@ impl Core {
                 outranks: state.below(&me).to_vec(),
                 kept_out,
                 level_behind,
+                level_ahead: group.level_ahead,
             });
         }
         out.sort_by(|a, b| {

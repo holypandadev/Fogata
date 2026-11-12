@@ -429,6 +429,7 @@ void main() {
               ),
             ],
             openInvites: 0,
+            needsUpdate: false,
             room: UiRoomSummary(
               startedMs: 0,
               participants: [me, leo, sofia],

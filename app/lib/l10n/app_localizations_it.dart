@@ -6594,4 +6594,21 @@ class L10nIt extends L10n {
   String groupSettingsLevelWaiting(String names) {
     return 'Questo gruppo aspetta di attivare una protezione più forte. Si attiva da sola quando tutti hanno aggiornato Fogata. Ancora da aggiornare: $names';
   }
+
+  @override
+  String get groupUpdateTitle =>
+      'Questo gruppo ha bisogno di un Fogata più recente';
+
+  @override
+  String get groupUpdateText =>
+      'Qualcuno che lo gestisce ha attivato una protezione più forte, che questa versione di Fogata non ha. Finché non aggiorni, il gruppo resta com’era allora: non vedi cosa è cambiato da allora. Fogata riceve gli aggiornamenti dai tuoi amici e gruppi, e te ne propone uno in alto appena è pronto.';
+
+  @override
+  String bellGroupUpdate(String group) {
+    return '“$group” ha bisogno di un Fogata più recente';
+  }
+
+  @override
+  String get bellGroupUpdateText =>
+      'Finché non aggiorni, non vedi cosa è cambiato nel gruppo.';
 }

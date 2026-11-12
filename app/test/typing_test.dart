@@ -263,6 +263,7 @@ void main() {
             ),
           ],
           openInvites: 0,
+          needsUpdate: false,
           outranks: const [],
         ),
       ];

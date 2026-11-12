@@ -6235,4 +6235,19 @@ class L10nJa extends L10n {
   String groupSettingsLevelWaiting(String names) {
     return 'このグループは、より強い保護をオンにするのを待っています。全員がFogataをアップデートすると自動でオンになります。まだアップデートしていない人：$names';
   }
+
+  @override
+  String get groupUpdateTitle => 'このグループには新しいFogataが必要です';
+
+  @override
+  String get groupUpdateText =>
+      'グループを管理している人が、このバージョンのFogataにはない、より強い保護をオンにしました。アップデートするまで、グループはその時のままで、それ以降の変更は表示されません。Fogataはフレンドやグループからアップデートを受け取り、準備ができると上部に表示します。';
+
+  @override
+  String bellGroupUpdate(String group) {
+    return '「$group」には新しいFogataが必要です';
+  }
+
+  @override
+  String get bellGroupUpdateText => 'アップデートするまで、グループの変更は表示されません。';
 }

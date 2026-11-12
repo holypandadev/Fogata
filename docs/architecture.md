@@ -2630,7 +2630,17 @@ level, and is answered as before; a joining device shows its protocols to every 
 shows its invite to; its person is told, once per invite or friend, that that person must
 update Fogata first (`NodeEvent::MustUpdateToJoin`). A joining device sent a log with a
 signed `Level` entry above every level it knows tells its person to update
-(`NodeEvent::UpdateToJoin`). A manager that wrote an `Invite` before it saw the group go up
+(`NodeEvent::UpdateToJoin`). A member's copy given such an entry (a manager raised the group
+past it, see 5.1's raise "anyway" below) refuses it and waits on what is signed after it, as
+above: the group stays there as it was (members, keys, rooms), and what changed since never
+reaches it. It keeps the refused entry aside (`GroupLog::level_ahead`): never sent, never
+signed on, stored after the log's entries and refused again when the log is read, so the
+person is told after a restart too, and an updated version reads it as the raise it is, and
+tells nothing. Only a manager's entry counts, as only a manager's `Level` entry is refused
+for its level rather than for its author. The group then says, in its room page and its
+settings, that it needs a newer Fogata, with the way to get it (updates come from friends and
+members, 5f; a button restarts into one once it is ready), and the bell holds a notice of it
+until the person dismisses it or Fogata is updated. A manager that wrote an `Invite` before it saw the group go up
 to three, which then does not apply, writes it again as a `NamedInvite` with the same ticket
 and token (`name_unnamed_invites`), so the link given out works.
 

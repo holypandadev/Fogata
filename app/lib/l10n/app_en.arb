@@ -8950,5 +8950,26 @@
         "type": "String"
       }
     }
+  },
+  "groupUpdateTitle": "This group needs a newer Fogata",
+  "@groupUpdateTitle": {
+    "description": "Title of a note in a group (its room page and its settings) when someone who manages the group turned on stronger protection that this version of Fogata does not have: this device cannot follow the group until Fogata is updated."
+  },
+  "groupUpdateText": "Someone who manages it turned on stronger protection, which this version of Fogata doesn’t have. Until you update, the group stays as it was then: you won’t see what changed in it since. Fogata gets updates from your friends and groups, and offers one at the top once it’s ready.",
+  "@groupUpdateText": {
+    "description": "Text of the note titled groupUpdateTitle. Fogata updates itself from friends and groups: once an update is ready, a button at the top of the window offers it."
+  },
+  "bellGroupUpdate": "“{group}” needs a newer Fogata",
+  "@bellGroupUpdate": {
+    "description": "Notifications (the bell): a group this device is in went up to stronger protection that this version of Fogata does not have. {group} is the group's name.",
+    "placeholders": {
+      "group": {
+        "type": "String"
+      }
+    }
+  },
+  "bellGroupUpdateText": "Until you update, you won’t see what changed in the group.",
+  "@bellGroupUpdateText": {
+    "description": "Notifications (the bell), under bellGroupUpdate: what not updating means."
   }
 }

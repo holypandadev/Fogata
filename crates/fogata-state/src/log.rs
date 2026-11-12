@@ -98,6 +98,9 @@ struct Work {
     judged: HashSet<EntryHash>,
     /// Whether the signatures of those were checked too, in this process.
     signed: bool,
+    /// A manager's `Level` entry refused for naming a level this version does not judge at
+    /// (see [`GroupLog::level_ahead`]), the highest of them.
+    ahead: Option<Entry>,
 }
 
 impl Work {
@@ -112,19 +115,31 @@ impl Work {
             left_out: 0,
             judged: Default::default(),
             signed: false,
+            ahead: None,
         }
     }
 
     /// Counts `entry`, judged, as refused for `why`, against its author; but not a manager's
     /// `Level` entry raising the group above every level this version judges at: that comes
     /// from a copy newer than this one (see [`Level`]), and it is this copy that is behind.
+    /// That one is kept aside instead, to tell the person (see [`GroupLog::level_ahead`]).
     fn refuse(&mut self, entry: &Entry, why: &str) {
-        if why == LEVEL_UNKNOWN
-            && matches!(entry.body, Body::Level { level } if level > Level::highest().number())
-        {
+        if why == LEVEL_UNKNOWN && level_ahead_of(entry).is_some() {
+            if level_ahead_of(entry) > self.ahead.as_ref().and_then(level_ahead_of) {
+                self.ahead = Some(entry.clone());
+            }
             return;
         }
         *self.refused.entry(entry.author).or_default() += 1;
+    }
+}
+
+/// The level `entry` raises its group to, when it is a `Level` entry naming one above every
+/// level this version judges at.
+fn level_ahead_of(entry: &Entry) -> Option<u32> {
+    match entry.body {
+        Body::Level { level } if level > Level::highest().number() => Some(level),
+        _ => None,
     }
 }
 
@@ -145,6 +160,10 @@ pub struct Taken {
     /// How many new entries were left out, past what judging a batch may cost: they come
     /// again with the next sync or offer.
     pub left_out: usize,
+    /// Whether the batch told the log of a level above those it knew of that the group went
+    /// up to, which this version does not judge at ([`GroupLog::level_ahead`]): nothing new
+    /// is kept for it, but the log changed, and its person is to be told.
+    pub ahead: bool,
 }
 
 impl Taken {
@@ -244,6 +263,12 @@ pub struct GroupLog {
     /// The order and state worked out from the entries, the rotations judged and the boxes
     /// of this device opened (see [`crate::cache`]).
     pub(crate) cache: Box<Cache>,
+    /// A manager's `Level` entry that raises the group above every level this version judges
+    /// at, refused as every copy of this version refuses it (see [`Self::level_ahead`]):
+    /// kept apart from the entries, never sent nor signed on, only to tell the person that
+    /// the group needs a newer Fogata, and stored with the log so that it is still told
+    /// after a restart ([`Self::entries_to_store`]).
+    ahead: Option<Entry>,
     /// How many entries were checked for insertion, and how many signatures, for tests of
     /// the work a batch costs.
     #[cfg(test)]
@@ -292,6 +317,7 @@ impl GroupLog {
             run_room: RUN_ROOM,
             unjudged: BTreeSet::new(),
             cache: Box::default(),
+            ahead: None,
             #[cfg(test)]
             tries: 0,
             #[cfg(test)]
@@ -497,11 +523,13 @@ impl GroupLog {
     /// passed on: a member cannot make every device keep entries it could never make.
     pub fn insert(&mut self, entry: Entry) -> Result<bool, StateError> {
         let mut work = Work::unbounded();
-        let new = self.insert_only(entry, &mut work)?;
-        if new.is_some() {
+        let new = self.insert_only(entry, &mut work);
+        if matches!(new, Ok(Some(_))) {
             self.judge_waited(&mut work);
             self.forget_old_waiting();
         }
+        self.note_ahead(work.ahead);
+        let new = new?;
         Ok(new.is_some_and(|hash| self.entries.contains_key(&hash)))
     }
 
@@ -569,7 +597,59 @@ impl GroupLog {
             new,
             refused: work.refused,
             left_out: work.left_out,
+            ahead: self.note_ahead(work.ahead),
         }
+    }
+
+    /// Keeps `entry`, a `Level` entry refused for naming a level this version does not judge
+    /// at, as the one to tell the person of when it names a level above the one kept so far
+    /// (see [`Self::level_ahead`]); returns whether it did.
+    fn note_ahead(&mut self, entry: Option<Entry>) -> bool {
+        let Some(entry) = entry else {
+            return false;
+        };
+        let higher = level_ahead_of(&entry) > self.ahead.as_ref().and_then(level_ahead_of);
+        if higher {
+            self.ahead = Some(entry);
+        }
+        higher
+    }
+
+    /// The level above every one this version judges at that a manager raised the group to,
+    /// as far as this log knows: this version refuses that `Level` entry, as every copy of
+    /// it does, and waits on everything signed after it, so the group goes on here as it was
+    /// before (its members, keys and rooms as they were then), and nothing changed since
+    /// reaches this device until Fogata is updated. `None` while the group is at a level
+    /// this version judges at.
+    ///
+    /// Only a manager's entry counts (a member that does not manage is refused for that
+    /// first), so nobody else can have the person told to update. It is kept with the log
+    /// ([`Self::entries_to_store`]) and found again when the log is read: a version that
+    /// judges at that level reads it as the entry it is, and is not told.
+    pub fn level_ahead(&self) -> Option<u32> {
+        self.ahead.as_ref().and_then(level_ahead_of)
+    }
+
+    /// Takes the `Level` entry [`Self::level_ahead`] tells of from `other`, a log of the same
+    /// group, when it names a higher level than this log's: for a copy of the log put in its
+    /// place. Returns whether it did.
+    pub fn keep_ahead_of(&mut self, other: &GroupLog) -> bool {
+        other.group_id == self.group_id && self.note_ahead(other.ahead.clone())
+    }
+
+    /// What a device stores of this log: [`Self::entries_in_order`], then the `Level` entry
+    /// [`Self::level_ahead`] tells of, if any, which reading the log finds again, as it is
+    /// refused again (or, by a version that judges at its level, kept as any entry).
+    pub fn entries_to_store(&self) -> Vec<&Entry> {
+        let mut out = self.entries_in_order();
+        out.extend(self.ahead.as_ref());
+        out
+    }
+
+    /// The hashes of [`Self::entries_to_store`], in no particular order: what judging a log
+    /// read back from them is checked against ([`Self::verdicts`]).
+    pub fn hashes_to_store(&self) -> impl Iterator<Item = EntryHash> + '_ {
+        (self.entries.keys().copied()).chain(self.ahead.as_ref().map(Entry::hash))
     }
 
     /// Checks one entry and keeps it; returns its hash, made once here, when it was new.

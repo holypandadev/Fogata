@@ -6703,8 +6703,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   UiGroup dco_decode_ui_group(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 20)
-      throw Exception('unexpected arr length: expect 20 but see ${arr.length}');
+    if (arr.length != 21)
+      throw Exception('unexpected arr length: expect 21 but see ${arr.length}');
     return UiGroup(
       id: dco_decode_String(arr[0]),
       name: dco_decode_String(arr[1]),
@@ -6726,6 +6726,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       outranks: dco_decode_list_String(arr[17]),
       keptOut: dco_decode_opt_list_ui_kept_out(arr[18]),
       levelBehind: dco_decode_opt_list_ui_person(arr[19]),
+      needsUpdate: dco_decode_bool(arr[20]),
     );
   }
 
@@ -8963,6 +8964,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_outranks = sse_decode_list_String(deserializer);
     var var_keptOut = sse_decode_opt_list_ui_kept_out(deserializer);
     var var_levelBehind = sse_decode_opt_list_ui_person(deserializer);
+    var var_needsUpdate = sse_decode_bool(deserializer);
     return UiGroup(
       id: var_id,
       name: var_name,
@@ -8984,6 +8986,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       outranks: var_outranks,
       keptOut: var_keptOut,
       levelBehind: var_levelBehind,
+      needsUpdate: var_needsUpdate,
     );
   }
 
@@ -11163,6 +11166,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_String(self.outranks, serializer);
     sse_encode_opt_list_ui_kept_out(self.keptOut, serializer);
     sse_encode_opt_list_ui_person(self.levelBehind, serializer);
+    sse_encode_bool(self.needsUpdate, serializer);
   }
 
   @protected

@@ -21,7 +21,7 @@ use fogata_crypto::{
 };
 use sha2::{Digest, Sha256};
 
-use super::{GroupLog, Taken, Work};
+use super::{GroupLog, Taken, Work, level_ahead_of};
 use crate::{entry::Entry, entry::EntryHash, state::Level};
 
 /// How judging goes, apart from the levels: raised whenever what any level keeps of the same
@@ -161,9 +161,12 @@ impl GroupLog {
             .filter(|h| !verdicts.refused.contains(*h) && !verdicts.waiting.contains(*h))
             .copied()
             .collect();
+        // A `Level` entry above this version's levels is judged again, though it was
+        // refused: refused again, it is what tells the person to update
+        // ([`GroupLog::level_ahead`]). One entry, judged once.
         let entries = entries
             .into_iter()
-            .filter(|e| !verdicts.refused.contains(&e.hash()));
+            .filter(|e| !verdicts.refused.contains(&e.hash()) || level_ahead_of(e).is_some());
         log.insert_batch(
             entries,
             Work {

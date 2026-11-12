@@ -1053,9 +1053,11 @@ impl Store {
     }
 }
 
-/// A log as its file holds it: each entry in the common order, after its length.
+/// A log as its file holds it: each entry in the common order, after its length, and then
+/// the entry that tells of a level of the group above this version's, if any
+/// ([`GroupLog::entries_to_store`]).
 pub(crate) fn encode_log(log: &GroupLog) -> Vec<u8> {
-    encode_entries(log.entries_in_order())
+    encode_entries(log.entries_to_store())
 }
 
 /// Entries one after another, each after its length.

@@ -79,6 +79,7 @@ AppState state({required bool first, int? until}) {
           const UiVoiceRoom(id: 'gaming', name: 'Gaming', only: ['bea']),
         ],
         openInvites: 0,
+        needsUpdate: false,
         outranks: first ? const ['bea', 'leo'] : const [],
         keptOut: first
             ? [

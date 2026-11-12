@@ -41,6 +41,7 @@ UiGroup _group(String name) => UiGroup(
     UiVoiceRoom(id: 'v2', name: name),
   ],
   openInvites: 0,
+  needsUpdate: false,
 );
 
 void main() {

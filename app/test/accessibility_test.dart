@@ -183,6 +183,7 @@ AppState _ringing({bool ringing = true}) {
         maxInRoom: g.maxInRoom,
         voiceRooms: const [],
         openInvites: g.openInvites,
+        needsUpdate: false,
       ),
   ];
   state.contacts.friends = [

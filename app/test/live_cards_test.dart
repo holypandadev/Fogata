@@ -31,6 +31,7 @@ UiGroup _live(String id, int people) {
     voiceRooms: [UiVoiceRoom(id: AppState.firstRoom, name: '', room: room)],
     room: room,
     openInvites: 0,
+    needsUpdate: false,
   );
 }
 

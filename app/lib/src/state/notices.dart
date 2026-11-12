@@ -22,6 +22,7 @@ enum NoticeKind {
   otherSession,
   invitationDeclined,
   warning,
+  groupUpdate,
 }
 
 class Notice {
@@ -36,6 +37,7 @@ class Notice {
     this.chat,
     this.declined,
     this.warning,
+    this.group,
   });
   final NoticeKind kind;
 
@@ -51,6 +53,9 @@ class Notice {
   final dm.UiDirectChat? chat;
   final DeclinedInvitation? declined;
   final Warning? warning;
+
+  /// The group that needs a newer Fogata ([NoticeKind.groupUpdate]).
+  final UiGroup? group;
 }
 
 /// Something about this computer the person should know, said at start: settings that
@@ -85,6 +90,7 @@ abstract interface class NoticeSources {
   UiRequests get requests;
   List<UiJoinAsk> get joinAsks;
   List<UiGroupInvite> get invitations;
+  List<UiGroup> get groups;
 }
 
 /// The bell and what it tells: missed calls (also in Friends and in a corner note),
@@ -140,6 +146,9 @@ class Notices extends Piece {
   /// When each group invitation was first seen, for the bell's order.
   final Map<String, int> invitationSeen = {};
 
+  /// When this run first saw each group that needs a newer Fogata, for the bell's order.
+  final Map<String, int> updateSeen = {};
+
   /// The bounds of the bell while its list is open, to open it under it.
   Rect? bellFrom;
 
@@ -151,7 +160,8 @@ class Notices extends Piece {
   bool known = false;
 
   /// The bell's notices, newest first: missed calls, friend requests, people asking to
-  /// join a group, groups a friend added this device to and invitations declined.
+  /// join a group, groups a friend added this device to, invitations declined and groups
+  /// that need a newer Fogata.
   List<Notice> get list {
     final all = _all()
       ..removeWhere((n) => _prefs.dismissedNotices.contains(n.key));
@@ -213,6 +223,16 @@ class Notices extends Piece {
           invitationSeen[i.id] ?? 0,
           invite: i,
         ),
+      // From the group's own state: there while it needs a newer Fogata, after a restart
+      // too, and gone once Fogata is updated.
+      for (final g in _from.groups)
+        if (g.needsUpdate)
+          Notice(
+            NoticeKind.groupUpdate,
+            'update:${g.id}',
+            updateSeen[g.id] ?? 0,
+            group: g,
+          ),
       for (final c in direct.chats)
         if (c.unread > 0 && c.endedMs == null && !direct.reading(c.friend.id))
           Notice(

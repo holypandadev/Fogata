@@ -89,6 +89,10 @@ pub struct UiGroup {
     /// For a manager, while the group waits to go up to the protection this version gives:
     /// the members whose Fogata must be updated first. None otherwise.
     pub level_behind: Option<Vec<UiPerson>>,
+    /// A manager raised the group to rules this version of Fogata does not know: until it
+    /// is updated, this device stays with the group as it was then and sees none of its
+    /// changes since. Said again after a restart, until Fogata is updated.
+    pub needs_update: bool,
 }
 
 /// A voice room of a group: its own people, chat and files.
@@ -1025,6 +1029,7 @@ pub(crate) fn group(g: GroupView) -> UiGroup {
         }),
         level_behind: (!g.level_behind.is_empty())
             .then(|| g.level_behind.iter().map(person).collect()),
+        needs_update: g.level_ahead.is_some(),
     }
 }
 

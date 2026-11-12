@@ -21,6 +21,7 @@ UiGroup _group(String id, String name) => UiGroup(
   maxInRoom: 8,
   voiceRooms: const [],
   openInvites: 0,
+  needsUpdate: false,
 );
 
 UiMember _member(int i) => UiMember(

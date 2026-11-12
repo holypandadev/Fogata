@@ -43,6 +43,7 @@ class _Core implements RustLibApi {
           ),
         ],
         openInvites: 0,
+        needsUpdate: false,
         outranks: const [],
       ),
     ];

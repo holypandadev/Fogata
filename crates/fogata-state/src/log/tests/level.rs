@@ -1342,3 +1342,103 @@ fn at_level_three_a_rotation_gives_the_new_key_to_every_member() {
         );
     }
 }
+
+/// A member's copy given a group that a manager raised past the levels it judges at: it
+/// refuses the `Level` entry, as every copy of its version does, and waits on what is signed
+/// after it, so the group stays here as it was (its members, keys and rooms) and nothing
+/// later reaches it. It says so (`level_ahead`), from the log itself: told once by the batch
+/// that brought it, kept with the log when it is stored and found again when it is read
+/// (judged once more, verdicts or not), and gone for a version that judges at that level,
+/// which reads the entry as the raise it is. Only a manager's raise counts: a member that
+/// does not manage cannot have anyone told to update.
+#[test]
+fn a_member_s_copy_behind_its_group_s_level_says_so_until_it_judges_at_it() {
+    let (mut log, ana, bea, carlos) = two_managers();
+    let group = log.group_id();
+    let next = Level::CURRENT.number() + 1;
+    // A member that does not manage: refused for that, and nobody is told anything.
+    let by_carlos = Entry::sign(
+        &carlos.id,
+        group,
+        log.heads(),
+        5,
+        Body::Level { level: next },
+    );
+    let taken = log.insert_some([by_carlos]);
+    assert_eq!(taken.refused_count(), 1);
+    assert!(!taken.ahead);
+    assert_eq!(log.level_ahead(), None);
+    // A manager's raise: refused, not counted against Ana, and told once.
+    let ahead = Entry::sign(&ana.id, group, log.heads(), 6, Body::Level { level: next });
+    let on_it = Entry::sign(
+        &bea.id,
+        group,
+        vec![ahead.hash()],
+        7,
+        Body::Rename {
+            name: "later".into(),
+        },
+    );
+    let taken = log.insert_some([ahead.clone(), on_it.clone()]);
+    assert!(taken.new.contains(&on_it.hash()));
+    assert!(taken.refused.is_empty());
+    assert!(taken.ahead);
+    assert_eq!(log.level_ahead(), Some(next));
+    assert!(log.get(&ahead.hash()).is_none());
+    assert!(log.waiting().contains(&on_it.hash()));
+    assert_eq!(log.state().name, "g");
+    assert!(log.state().is_member(&carlos.key()));
+    // Sent again, it tells nothing new; the log sends it to nobody nor signs on it.
+    assert!(!log.insert_some([ahead.clone()]).ahead);
+    assert!(log.hashes_to_send().iter().all(|h| *h != ahead.hash()));
+    assert!(!log.heads().contains(&ahead.hash()));
+    // Stored and read back, with what was judged of it or without: still told.
+    let stored: Vec<Entry> = log.entries_to_store().into_iter().cloned().collect();
+    assert!(stored.contains(&ahead));
+    let (read, verdicts) = GroupLog::read_judged(group, stored.clone(), None, false);
+    assert_eq!(read.level_ahead(), Some(next));
+    let verdicts = verdicts.unwrap();
+    assert_eq!(verdicts, log.verdicts(log.hashes_to_store()));
+    let (read, anew) = GroupLog::read_judged(group, stored.clone(), Some(&verdicts), true);
+    assert!(anew.is_none(), "taken as judged");
+    assert_eq!(read.level_ahead(), Some(next));
+    assert!(read.waiting().contains(&on_it.hash()));
+    // A copy put in its place keeps it.
+    let mut copy = GroupLog::empty(group);
+    copy.insert_all(log.entries().cloned());
+    assert_eq!(copy.level_ahead(), None);
+    assert!(copy.keep_ahead_of(&log));
+    assert_eq!(copy.level_ahead(), Some(next));
+    assert!(!copy.keep_ahead_of(&log));
+}
+
+/// What a copy of the version before stores of a group raised past it is read by a version
+/// that judges at that level as the group it is: the raise applies, what waited on it
+/// follows, and nobody is told to update.
+#[test]
+fn an_updated_copy_reads_the_raise_its_older_version_stored_and_is_told_nothing() {
+    let (mut log, ana, bea, _carlos) = two_managers();
+    let group = log.group_id();
+    let raise = log.raise_level(&ana.id, Level::Three, 5).unwrap();
+    log.append(
+        &bea.id,
+        Body::Rename {
+            name: "later".into(),
+        },
+        6,
+    )
+    .unwrap();
+    let stored: Vec<Entry> = as_level_two(|| {
+        let mut old = GroupLog::empty(group);
+        old.insert_all(log.entries().cloned());
+        assert_eq!(old.level_ahead(), Some(3));
+        assert_eq!(old.state().name, "g");
+        old.entries_to_store().into_iter().cloned().collect()
+    });
+    assert!(stored.contains(&raise));
+    let mut new = GroupLog::empty(group);
+    new.insert_all(stored);
+    assert_eq!(new.level_ahead(), None);
+    assert_eq!(new.level(), Level::Three);
+    assert_eq!(new.state().name, "later");
+}

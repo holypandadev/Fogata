@@ -918,6 +918,7 @@ impl Node {
                     return;
                 };
                 let taken = slot.ctx.insert_encoded(&entries);
+                let ahead = taken.ahead;
                 let (new, refused) = (taken.new, taken.refused);
                 // An answer holds a part of what this device lacks: while one brings new
                 // entries, all of them within the member's budget and none refused, the next
@@ -933,6 +934,9 @@ impl Node {
                     .collect();
                 self.refused_entries(&refused);
                 self.after_group_change(group, new, Some(peer));
+                if ahead {
+                    self.group_went_past_this_version(group);
+                }
                 if !wanted.is_empty() {
                     self.request(
                         peer,

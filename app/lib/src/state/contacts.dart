@@ -17,6 +17,7 @@ class Contacts extends Piece implements NoticeSources {
   /// The bio friends see on this device's card: none until the person writes one, and the
   /// cards then show `defaultBio`.
   String? bio;
+  @override
   List<UiGroup> groups = [];
 
   /// Groups friends added this device to, waiting for an answer.

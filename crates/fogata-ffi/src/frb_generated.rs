@@ -7485,6 +7485,7 @@ impl SseDecode for crate::api::types::UiGroup {
         let mut var_keptOut = <Option<Vec<crate::api::types::UiKeptOut>>>::sse_decode(deserializer);
         let mut var_levelBehind =
             <Option<Vec<crate::api::types::UiPerson>>>::sse_decode(deserializer);
+        let mut var_needsUpdate = <bool>::sse_decode(deserializer);
         return crate::api::types::UiGroup {
             id: var_id,
             name: var_name,
@@ -7506,6 +7507,7 @@ impl SseDecode for crate::api::types::UiGroup {
             outranks: var_outranks,
             kept_out: var_keptOut,
             level_behind: var_levelBehind,
+            needs_update: var_needsUpdate,
         };
     }
 }
@@ -9513,6 +9515,7 @@ impl flutter_rust_bridge::IntoDart for crate::api::types::UiGroup {
             self.outranks.into_into_dart().into_dart(),
             self.kept_out.into_into_dart().into_dart(),
             self.level_behind.into_into_dart().into_dart(),
+            self.needs_update.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -11900,6 +11903,7 @@ impl SseEncode for crate::api::types::UiGroup {
         <Vec<String>>::sse_encode(self.outranks, serializer);
         <Option<Vec<crate::api::types::UiKeptOut>>>::sse_encode(self.kept_out, serializer);
         <Option<Vec<crate::api::types::UiPerson>>>::sse_encode(self.level_behind, serializer);
+        <bool>::sse_encode(self.needs_update, serializer);
     }
 }
 

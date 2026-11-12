@@ -394,6 +394,22 @@ class _NoticeRow extends StatelessWidget {
         null,
         () => state.dismissNotice(n),
       ),
+      // Restarts into the newer version once one is ready, as the title bar's word does.
+      NoticeKind.groupUpdate => (
+        l10n.bellGroupUpdate(n.group!.name),
+        l10n.bellGroupUpdateText,
+        state.updates.ready ? l10n.updateRestart : null,
+        l10n.bellDismiss,
+        state.updates.ready
+            ? () async {
+                final failed = await state.updates.install();
+                if (failed != null) {
+                  state.say(l10n.updateFailed(failed), error: true);
+                }
+              }
+            : null,
+        () => state.dismissNotice(n),
+      ),
     };
     final (badge, badgeColor, badgeBack) = switch (n.kind) {
       NoticeKind.missedCall => (Ic.missedCall, c.red, c.redSoft),
@@ -405,8 +421,11 @@ class _NoticeRow extends StatelessWidget {
       NoticeKind.otherSession => (Ic.warning, c.amber, c.amberSoft),
       NoticeKind.invitationDeclined => (Ic.userMinus, c.amber, c.amberSoft),
       NoticeKind.warning => (Ic.warning, c.amber, c.amberSoft),
+      NoticeKind.groupUpdate => (Ic.download, c.amber, c.amberSoft),
     };
-    final group = n.ask == null ? null : state.contacts.group(n.ask!.groupId);
+    final group =
+        n.group ??
+        (n.ask == null ? null : state.contacts.group(n.ask!.groupId));
     final Widget picture = switch (n.kind) {
       NoticeKind.missedCall ||
       NoticeKind.friendRequest ||
@@ -415,7 +434,7 @@ class _NoticeRow extends StatelessWidget {
         avatar: n.person!.avatar,
         size: 36,
       ),
-      NoticeKind.joinAsk => GroupBadge(
+      NoticeKind.joinAsk || NoticeKind.groupUpdate => GroupBadge(
         icon: group?.icon ?? 0,
         picture: group?.picture,
         size: 36,

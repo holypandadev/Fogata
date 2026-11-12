@@ -1369,6 +1369,9 @@ class AppState extends ChangeNotifier {
       for (final i in contacts.invitations) {
         notices.invitationSeen.putIfAbsent(i.id, () => now);
       }
+      for (final g in contacts.groups) {
+        if (g.needsUpdate) notices.updateSeen.putIfAbsent(g.id, () => now);
+      }
       for (final (i, g) in contacts.groups.indexed) {
         final roster = rosters[i];
         if (roster != null) contacts.members[g.id] = roster;

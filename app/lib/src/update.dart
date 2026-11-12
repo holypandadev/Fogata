@@ -150,3 +150,82 @@ class UpdatePill extends StatelessWidget {
     },
   );
 }
+
+/// What a group says, in its room page and its settings, when someone who manages it
+/// raised it to rules this version does not know: the group stays here as it was then until
+/// Fogata is updated. Kept with the group, it shows again after a restart, until then; with
+/// a button that restarts into the newer version once one is ready.
+class GroupUpdateNote extends StatelessWidget {
+  const GroupUpdateNote({
+    super.key,
+    required this.updates,
+    required this.say,
+    this.short = false,
+  });
+  final Updates updates;
+  final void Function(String, {bool error}) say;
+
+  /// Only what not updating means, as above a call, which needs the room: the whole of it
+  /// is in the group's settings.
+  final bool short;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+    listenable: updates,
+    builder: (context, _) {
+      final c = context.fg;
+      return Container(
+        key: const ValueKey('group-update-note'),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: c.amberSoft,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: c.amberLine),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(top: 2),
+              child: FgIcon(Ic.download, size: 16, color: c.amber),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    l10n.groupUpdateTitle,
+                    style: tx(c.amber, size: 13, weight: w600),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    short ? l10n.bellGroupUpdateText : l10n.groupUpdateText,
+                    style: tx(c.amber, size: 13),
+                  ),
+                ],
+              ),
+            ),
+            if (updates.ready) ...[
+              const SizedBox(width: 10),
+              FgButton(
+                key: const ValueKey('group-update-restart'),
+                text: l10n.updateRestart,
+                kind: Kind.primary,
+                height: 28,
+                fontSize: 12,
+                busy: updates.installing,
+                onTap: () async {
+                  final failed = await updates.install();
+                  if (failed != null) {
+                    say(l10n.updateFailed(failed), error: true);
+                  }
+                },
+              ),
+            ],
+          ],
+        ),
+      );
+    },
+  );
+}

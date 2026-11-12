@@ -874,6 +874,11 @@ class UiGroup {
   /// the members whose Fogata must be updated first. None otherwise.
   final List<UiPerson>? levelBehind;
 
+  /// A manager raised the group to rules this version of Fogata does not know: until it
+  /// is updated, this device stays with the group as it was then and sees none of its
+  /// changes since. Said again after a restart, until Fogata is updated.
+  final bool needsUpdate;
+
   const UiGroup({
     required this.id,
     required this.name,
@@ -895,6 +900,7 @@ class UiGroup {
     required this.outranks,
     this.keptOut,
     this.levelBehind,
+    required this.needsUpdate,
   });
 
   @override
@@ -918,7 +924,8 @@ class UiGroup {
       openInvites.hashCode ^
       outranks.hashCode ^
       keptOut.hashCode ^
-      levelBehind.hashCode;
+      levelBehind.hashCode ^
+      needsUpdate.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -944,7 +951,8 @@ class UiGroup {
           openInvites == other.openInvites &&
           outranks == other.outranks &&
           keptOut == other.keptOut &&
-          levelBehind == other.levelBehind;
+          levelBehind == other.levelBehind &&
+          needsUpdate == other.needsUpdate;
 }
 
 /// A group a friend added this device to, waiting for the person to join or decline.

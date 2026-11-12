@@ -1516,5 +1516,9 @@
   "appMustUpdateToJoin": "{name} doit mettre à jour Fogata avant de pouvoir rejoindre « {group} ». Ensuite, ça marchera comme avant.",
   "appUpdateToJoin": "« {group} » demande une version plus récente de Fogata. Mets Fogata à jour pour le rejoindre.",
   "errMustUpdateToJoin": "Ton ami doit mettre à jour Fogata avant de pouvoir rejoindre ce groupe.",
-  "groupSettingsLevelWaiting": "Ce groupe attend pour activer une protection plus forte. Elle s’active toute seule dès que tout le monde a mis Fogata à jour. Pas encore à jour : {names}"
+  "groupSettingsLevelWaiting": "Ce groupe attend pour activer une protection plus forte. Elle s’active toute seule dès que tout le monde a mis Fogata à jour. Pas encore à jour : {names}",
+  "groupUpdateTitle": "Ce groupe a besoin d’un Fogata plus récent",
+  "groupUpdateText": "Quelqu’un qui le gère a activé une protection plus forte, que cette version de Fogata n’a pas. Tant que tu n’as pas mis à jour, le groupe reste tel qu’il était : tu ne vois pas ce qui y a changé depuis. Fogata reçoit les mises à jour de tes amis et de tes groupes, et t’en propose une en haut dès qu’elle est prête.",
+  "bellGroupUpdate": "« {group} » a besoin d’un Fogata plus récent",
+  "bellGroupUpdateText": "Tant que tu n’as pas mis à jour, tu ne vois pas ce qui a changé dans le groupe."
 }

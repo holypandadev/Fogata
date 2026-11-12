@@ -9264,6 +9264,30 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'This group is waiting to turn on stronger protection. It turns on by itself once everyone has updated Fogata. Still to update: {names}'**
   String groupSettingsLevelWaiting(String names);
+
+  /// Title of a note in a group (its room page and its settings) when someone who manages the group turned on stronger protection that this version of Fogata does not have: this device cannot follow the group until Fogata is updated.
+  ///
+  /// In en, this message translates to:
+  /// **'This group needs a newer Fogata'**
+  String get groupUpdateTitle;
+
+  /// Text of the note titled groupUpdateTitle. Fogata updates itself from friends and groups: once an update is ready, a button at the top of the window offers it.
+  ///
+  /// In en, this message translates to:
+  /// **'Someone who manages it turned on stronger protection, which this version of Fogata doesn’t have. Until you update, the group stays as it was then: you won’t see what changed in it since. Fogata gets updates from your friends and groups, and offers one at the top once it’s ready.'**
+  String get groupUpdateText;
+
+  /// Notifications (the bell): a group this device is in went up to stronger protection that this version of Fogata does not have. {group} is the group's name.
+  ///
+  /// In en, this message translates to:
+  /// **'“{group}” needs a newer Fogata'**
+  String bellGroupUpdate(String group);
+
+  /// Notifications (the bell), under bellGroupUpdate: what not updating means.
+  ///
+  /// In en, this message translates to:
+  /// **'Until you update, you won’t see what changed in the group.'**
+  String get bellGroupUpdateText;
 }
 
 class _L10nDelegate extends LocalizationsDelegate<L10n> {

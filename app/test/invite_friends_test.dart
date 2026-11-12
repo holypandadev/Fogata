@@ -45,6 +45,7 @@ void main() {
       maxInRoom: 8,
       voiceRooms: [],
       openInvites: 0,
+      needsUpdate: false,
       outranks: [],
     );
     final state = AppState('/nonexistent/fogata-invite-friends-test')

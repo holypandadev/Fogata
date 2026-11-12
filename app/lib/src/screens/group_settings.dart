@@ -11,6 +11,7 @@ import '../room_count.dart';
 import '../rust/api/app.dart' as api;
 import '../rust/api/types.dart';
 import '../theme.dart';
+import '../update.dart' show GroupUpdateNote;
 import '../widgets.dart';
 import 'activity.dart';
 import 'group_banner.dart';
@@ -909,6 +910,10 @@ class _Members extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (group.needsUpdate) ...[
+          GroupUpdateNote(updates: state.updates, say: state.say),
+          const SizedBox(height: 12),
+        ],
         if (!group.manager) ...[
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),

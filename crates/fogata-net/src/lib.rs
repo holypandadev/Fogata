@@ -493,6 +493,9 @@ pub struct GroupSummary {
     pub picture: Option<Vec<u8>>,
     /// The digest of the banner to show, if any.
     pub banner: Option<[u8; 16]>,
+    /// A level above every one this version judges at that a manager raised the group to
+    /// (see [`GroupLog::level_ahead`]): this device needs a newer Fogata to follow it.
+    pub level_ahead: Option<u32>,
 }
 
 impl GroupSummary {
@@ -505,6 +508,7 @@ impl GroupSummary {
             group_id: log.group_id(),
             picture: log.picture_in(&state, now_ms).map(<[u8]>::to_vec),
             banner: log.banner().map(fogata_state::GroupBanner::digest),
+            level_ahead: log.level_ahead(),
             state,
         }
     }

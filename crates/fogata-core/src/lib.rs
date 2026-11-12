@@ -184,6 +184,10 @@ pub struct GroupView {
     /// (see [`fogata_state::Level`]): the members whose Fogata was not seen to be new
     /// enough for it, who hold it back until they update. Empty otherwise.
     pub level_behind: Vec<Person>,
+    /// A level above every one this version judges at that a manager raised the group to
+    /// (see [`fogata_state::GroupLog::level_ahead`]): this device follows the group only once Fogata is
+    /// updated. Kept with the log, so it is told again after a restart, until then.
+    pub level_ahead: Option<u32>,
 }
 
 /// A voice room of a group: its own people, chat and files.
