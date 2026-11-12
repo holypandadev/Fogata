@@ -19,7 +19,8 @@ use zeroize::Zeroizing;
 
 use crate::{
     direct::store::{
-        CHAT_CHAINS, CHAT_OPEN, CHAT_PROFILE, CHAT_TAILS, plain_records, sealed_records,
+        CHAT_CHAINS, CHAT_OPEN, CHAT_PROFILE, CHAT_SUMMARY, CHAT_TAILS, plain_records,
+        sealed_records,
     },
     store::{DAMAGED, SEALING_FILE, SET_ASIDE_FILE, is_temp_name, mls_context, write_private},
     vault::SEALED_FILE,
@@ -135,7 +136,7 @@ pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
                 })
             } else if *file == CHAT_PROFILE {
                 Some(Kind::Whole(CHAT_PROFILE.into()))
-            } else if *file == CHAT_TAILS {
+            } else if *file == CHAT_TAILS || *file == CHAT_SUMMARY {
                 // Made again from the files as written here.
                 None
             } else if let Some(chain) = CHAT_CHAINS

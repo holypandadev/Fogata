@@ -50,8 +50,8 @@ use fogata_state::GroupLog;
 use serde::{Deserialize, Serialize};
 
 use super::model::{
-    Attachment, Charge, Chat, DAY_MS, FileId, Item, ItemId, Local, Pool, hex_array, hex_list,
-    hex_option,
+    Attachment, Charge, Chat, DAY_MS, FileId, Item, ItemId, Local, Pool, Summary, hex_array,
+    hex_list, hex_option,
 };
 use crate::active_files::active_ending;
 use crate::store::{
@@ -476,6 +476,99 @@ impl DirectStore {
 
     fn tails_path(&self, friend: &DevicePublicKey) -> PathBuf {
         self.chat_dir(friend).join(TAILS)
+    }
+
+    fn summary_path(&self, friend: &DevicePublicKey) -> PathBuf {
+        self.chat_dir(friend).join(SUMMARY)
+    }
+
+    /// Keeps `summary`, the summary of the chat as its journal and pins hold it now (just
+    /// written), with how the two end, so it is only taken while they still end so. Sealed
+    /// in a folder with a key. Nothing is kept while the two lag behind the chat.
+    pub fn write_summary(&self, friend: &DevicePublicKey, summary: &Summary) -> Result<()> {
+        let records = self
+            .records
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(friend)
+            .copied();
+        let Some(records) = records.filter(|&n| n != LAGGING) else {
+            return Ok(());
+        };
+        let kept = KeptSummary {
+            summary: summary.clone(),
+            journal: end_of(&self.journal_path(friend))?,
+            pins: end_of(&self.pins_path(friend))?,
+            records,
+        };
+        let json = zeroize::Zeroizing::new(serde_json::to_vec(&kept)?);
+        let bytes = match &self.key {
+            Some(key) => key.seal_whole(&summary_context(&chat_name(friend)), &json)?,
+            None => json.to_vec(),
+        };
+        write_private(&self.summary_path(friend), &bytes)
+    }
+
+    /// The summary kept for a chat, if it was written for its journal and pins as they are
+    /// now; otherwise (none, from another chat, damaged, older or newer than the two, the
+    /// two not as their tails say, or in a form that is read whole to be written again)
+    /// `None`, and the chat is to be read whole.
+    pub fn summary(&self, friend: &DevicePublicKey) -> Option<Summary> {
+        self.kept_summary(friend).map(|(kept, _)| kept.summary)
+    }
+
+    /// [`Self::summary`], taken in place of reading the chat: the journal and pins are then
+    /// added to as if they had been read.
+    pub fn resume(&self, friend: &DevicePublicKey) -> Option<Summary> {
+        let (kept, tails) = self.kept_summary(friend)?;
+        if let Some(tails) = tails {
+            self.tails
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(*friend, tails);
+        }
+        self.count(friend, kept.records);
+        self.drop_damaged(friend, Some(DAMAGED_KEPT));
+        Some(kept.summary)
+    }
+
+    /// The summary kept for a chat when it stands for the chat as it is on the disk, with the
+    /// tails the two end with when sealed.
+    fn kept_summary(&self, friend: &DevicePublicKey) -> Option<(KeptSummary, Option<Tails>)> {
+        let bytes = fs::read(self.summary_path(friend)).ok()?;
+        let plain = match &self.key {
+            Some(key) => key
+                .open_whole(&summary_context(&chat_name(friend)), &bytes)
+                .ok()?,
+            None if sealed_form(&bytes).is_some() => return None,
+            None => zeroize::Zeroizing::new(bytes),
+        };
+        let kept: KeptSummary = serde_json::from_slice(&plain).ok()?;
+        let (journal, pins) = (self.journal_path(friend), self.pins_path(friend));
+        if end_of(&journal).ok()? != kept.journal || end_of(&pins).ok()? != kept.pins {
+            return None;
+        }
+        if self.key.is_none() {
+            return Some((kept, None));
+        }
+        // Sealed, both are chains ending as their tails say, no rewrite cut short.
+        for (path, end) in [(&journal, &kept.journal), (&pins, &kept.pins)] {
+            if end.len > 0 && chain_form(path) != Some(Form::Chain) {
+                return None;
+            }
+        }
+        let tails = self.read_tails(friend).ok()??;
+        let ends = |tail: Option<Tail>, end: &End| match tail {
+            Some(t) => t.records > 0 && t.tag == end.last,
+            None => end.len <= HEADER_LEN as u64,
+        };
+        if tails.next.is_some()
+            || !ends(tails.journal, &kept.journal)
+            || !ends(tails.pins, &kept.pins)
+        {
+            return None;
+        }
+        Some((kept, Some(tails)))
     }
 
     /// The tails kept for a chat: `Ok(None)` when there are none (a folder from before
@@ -1536,6 +1629,57 @@ const JOURNAL: &str = "journal";
 const PINS: &str = "pins";
 const PROFILE: &str = "profile";
 const TAILS: &str = "tails";
+const SUMMARY: &str = "summary";
+
+/// What a chat's summary is sealed for: the chat, so it cannot be moved to another one.
+fn summary_context(chat: &str) -> String {
+    format!("{SUMMARY}/{chat}")
+}
+
+/// How a journal or pins file ended when a summary was written: its length and its last
+/// bytes (a sealed one's last tag), none when it is not there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct End {
+    len: u64,
+    #[serde(with = "hex_array")]
+    last: [u8; TAG_LEN],
+}
+
+fn end_of(path: &Path) -> io::Result<End> {
+    let mut file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            return Ok(End {
+                len: 0,
+                last: [0; TAG_LEN],
+            });
+        }
+        Err(e) => return Err(e),
+    };
+    let len = file.metadata()?.len();
+    let mut last = [0u8; TAG_LEN];
+    let take = len.min(TAG_LEN as u64) as usize;
+    file.seek(SeekFrom::Start(len - take as u64))?;
+    file.read_exact(&mut last[TAG_LEN - take..])?;
+    Ok(End { len, last })
+}
+
+/// The sealed form a journal or pins file starts with, if any.
+fn chain_form(path: &Path) -> Option<Form> {
+    let mut header = [0u8; HEADER_LEN];
+    fs::File::open(path).ok()?.read_exact(&mut header).ok()?;
+    sealed_form(&header)
+}
+
+/// A chat's summary as kept, with how its journal and pins ended then and the records the
+/// two held.
+#[derive(Serialize, Deserialize)]
+struct KeptSummary {
+    summary: Summary,
+    journal: End,
+    pins: End,
+    records: usize,
+}
 
 /// What a chat's tails are sealed for: the chat, so they cannot be moved to another one.
 fn tails_context(chat: &str) -> String {
@@ -1599,6 +1743,7 @@ pub(crate) fn sealed_records(
 pub(crate) const CHAT_CHAINS: [&str; 2] = [JOURNAL, PINS];
 pub(crate) const CHAT_PROFILE: &str = PROFILE;
 pub(crate) const CHAT_TAILS: &str = TAILS;
+pub(crate) const CHAT_SUMMARY: &str = SUMMARY;
 pub(crate) const CHAT_OPEN: &str = OPEN_DIR;
 
 /// Records written one after the other for a journal or pins: each after its length, sealed
@@ -1746,6 +1891,12 @@ pub(crate) fn seal_plain(
             continue;
         }
         let chat = chat.file_name().to_string_lossy().into_owned();
+        // A plain summary holds the chat's last line: it goes, and is made again sealed.
+        let summary = dir.join(SUMMARY);
+        if read_plain(&summary)?.is_some() {
+            fs::remove_file(&summary)
+                .with_context(|| format!("cannot remove {}", summary.display()))?;
+        }
         for name in [JOURNAL, PINS] {
             let path = dir.join(name);
             let Some(plain) = read_plain(&path)? else {
@@ -1879,6 +2030,323 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("fogata-direct-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// A small random number source, the same every run for a seed.
+    struct Dice(u64);
+
+    impl Dice {
+        fn next(&mut self, below: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % below.max(1)
+        }
+
+        fn chance(&mut self, in_ten: u64) -> bool {
+            self.next(10) < in_ten
+        }
+    }
+
+    /// A chat changed as the core changes it, its records written as the core writes them
+    /// (added, or the two written whole when they grew or something went), and its summary
+    /// kept after them.
+    struct Written<'a> {
+        store: &'a DirectStore,
+        friend: DevicePublicKey,
+        chat: Chat,
+        ended: Option<u64>,
+    }
+
+    impl Written<'_> {
+        fn add(&mut self, records: &[Record]) {
+            for record in records {
+                record.apply(&mut self.chat, &mut self.ended);
+            }
+            let whole = self
+                .store
+                .append(&self.friend, records, &self.chat)
+                .unwrap()
+                || records.iter().any(|r| matches!(r, Record::Gone { .. }));
+            if whole {
+                self.store
+                    .rewrite(&self.friend, &self.chat, self.ended)
+                    .unwrap();
+            }
+            self.store
+                .write_summary(&self.friend, &Summary::of(&self.chat, self.ended))
+                .unwrap();
+        }
+
+        /// The summary of the chat read whole from the disk.
+        fn read_whole(&self, dir: &Path, key: Option<&DataKey>) -> Summary {
+            let loaded = DirectStore::open_sealed(dir, key.cloned())
+                .load(&self.friend)
+                .unwrap();
+            Summary::of(&loaded.chat, loaded.ended_ms)
+        }
+    }
+
+    /// Random changes of a chat, as the core makes them: messages both ways with files,
+    /// deliveries, reads, files that come or go, played voice messages, files that were not
+    /// what they said, charges, pins and unpins, deletions, the two no longer friends and
+    /// again. After each, the summary kept is the one the chat read whole gives, plain and
+    /// sealed.
+    #[test]
+    fn the_summary_kept_is_always_the_chat_s_read_whole() {
+        let now = crate::now_ms();
+        for (seed, key) in [
+            (7, None),
+            (11, Some(DataKey::generate().unwrap())),
+            (23, Some(DataKey::generate().unwrap())),
+        ] {
+            let dir = folder(&format!("summary-{seed}"));
+            let store = DirectStore::open_sealed(&dir, key.clone());
+            let mut chat = Written {
+                store: &store,
+                friend: DeviceIdentity::generate().unwrap().public_key(),
+                chat: Chat::default(),
+                ended: None,
+            };
+            let mut dice = Dice(seed);
+            let mut ids: Vec<ItemId> = Vec::new();
+            let mut files: Vec<FileId> = Vec::new();
+            for step in 0..300u64 {
+                let pick = |dice: &mut Dice, list: &[[u8; 16]]| {
+                    (!list.is_empty()).then(|| list[dice.next(list.len() as u64) as usize])
+                };
+                let records = match dice.next(12) {
+                    0..=3 => {
+                        let mut id = [0u8; 16];
+                        id[..8].copy_from_slice(&step.to_be_bytes());
+                        id[8] = 1;
+                        let mine = dice.chance(5);
+                        let attached: Vec<Attachment> = (0..dice.next(3))
+                            .map(|n| {
+                                let file = if !files.is_empty() && dice.chance(3) {
+                                    files[dice.next(files.len() as u64) as usize]
+                                } else {
+                                    let mut f = [0u8; 32];
+                                    f[..8].copy_from_slice(&step.to_be_bytes());
+                                    f[8] = n as u8;
+                                    files.push(f);
+                                    f
+                                };
+                                Attachment {
+                                    id: file,
+                                    name: format!(
+                                        "f{}.{}",
+                                        dice.next(3),
+                                        ["jpg", "ogg", "pdf"][n as usize % 3]
+                                    ),
+                                    size: 1 + dice.next(20 << 20),
+                                    kind: [FileKind::Picture, FileKind::File, FileKind::Video]
+                                        [dice.next(3) as usize],
+                                    video: None,
+                                    local: [Local::Missing, Local::Here, Local::Removed]
+                                        [dice.next(3) as usize],
+                                    voice: dice.chance(2).then(|| super::super::model::VoiceInfo {
+                                        duration_ms: 1000,
+                                        bars: vec![1; 40],
+                                        played: false,
+                                    }),
+                                }
+                            })
+                            .collect();
+                        ids.push(id);
+                        vec![Record::Item {
+                            item: Item {
+                                id,
+                                mine,
+                                sent_ms: now - 1000 + step,
+                                got_ms: now - 1000 + step,
+                                seq: chat.chat.next_seq(),
+                                at_ms: now - 1000 + step,
+                                body: Body::Message {
+                                    text: format!("message {step}"),
+                                    files: attached,
+                                },
+                                ttl_ms: if dice.chance(3) { model_day() } else { 0 },
+                                delivered: !mine,
+                            },
+                        }]
+                    }
+                    4 => pick(&mut dice, &ids)
+                        .map(|id| vec![Record::Delivered { ids: vec![id] }])
+                        .unwrap_or_default(),
+                    5 => vec![Record::Read {
+                        seq: dice.next(chat.chat.next_seq()),
+                    }],
+                    6 if !files.is_empty() => vec![Record::File {
+                        file: files[dice.next(files.len() as u64) as usize],
+                        local: [Local::Missing, Local::Here, Local::Removed][dice.next(3) as usize],
+                    }],
+                    7 if !files.is_empty() => {
+                        let file = files[dice.next(files.len() as u64) as usize];
+                        vec![
+                            [
+                                Record::Played { file },
+                                Record::NotVoice { file },
+                                Record::NotPicture { file },
+                            ][dice.next(3) as usize]
+                                .clone(),
+                        ]
+                    }
+                    8 => vec![Record::FileCharge {
+                        at_ms: now - dice.next(1000),
+                        bytes: dice.next(1 << 20),
+                        file: [step as u8; 32],
+                    }],
+                    9 => pick(&mut dice, &ids)
+                        .map(|target| {
+                            let mut id = [0u8; 16];
+                            id[..8].copy_from_slice(&step.to_be_bytes());
+                            id[8] = 2;
+                            vec![Record::Item {
+                                item: Item {
+                                    id,
+                                    mine: dice.chance(5),
+                                    sent_ms: now + step,
+                                    got_ms: now,
+                                    seq: chat.chat.next_seq(),
+                                    at_ms: now,
+                                    body: Body::Pin {
+                                        target,
+                                        pinned: dice.chance(7),
+                                    },
+                                    ttl_ms: 0,
+                                    delivered: dice.chance(5),
+                                },
+                            }]
+                        })
+                        .unwrap_or_default(),
+                    10 => pick(&mut dice, &ids)
+                        .map(|id| {
+                            ids.retain(|i| *i != id);
+                            vec![Record::Gone { ids: vec![id] }]
+                        })
+                        .unwrap_or_default(),
+                    _ => vec![Record::Ended {
+                        ms: dice.chance(5).then_some(now),
+                    }],
+                };
+                if records.is_empty() {
+                    continue;
+                }
+                chat.add(&records);
+                assert_eq!(
+                    store.summary(&chat.friend),
+                    Some(chat.read_whole(&dir, key.as_ref())),
+                    "seed {seed}, step {step}: {records:?}"
+                );
+            }
+            assert!(chat.chat.items().len() > 20);
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    fn model_day() -> u64 {
+        DAY_MS
+    }
+
+    /// A summary that does not stand for the journal and pins as they are is not taken, and
+    /// the chat is read whole: records added after it (a stop between the two writes), the
+    /// journal cut short or put back older, the summary of an earlier state or another
+    /// chat's, a damaged one, the tails not as the summary says.
+    #[test]
+    fn a_summary_that_does_not_fit_the_journal_is_not_taken() {
+        for key in [None, Some(DataKey::generate().unwrap())] {
+            let dir = folder(&format!("summary-stale-{}", key.is_some()));
+            let store = DirectStore::open_sealed(&dir, key.clone());
+            let friend = DeviceIdentity::generate().unwrap().public_key();
+            let other = DeviceIdentity::generate().unwrap().public_key();
+            let mut chat = Written {
+                store: &store,
+                friend,
+                chat: Chat::default(),
+                ended: None,
+            };
+            let mut other_chat = Written {
+                store: &store,
+                friend: other,
+                chat: Chat::default(),
+                ended: None,
+            };
+            for n in 1..=3 {
+                chat.add(&[Record::Item {
+                    item: item(n, false, vec![]),
+                }]);
+                other_chat.add(&[Record::Item {
+                    item: item(n, false, vec![]),
+                }]);
+            }
+            let summary_path = store.summary_path(&friend);
+            let journal_path = store.journal_path(&friend);
+            let kept = fs::read(&summary_path).unwrap();
+            let journal = fs::read(&journal_path).unwrap();
+            assert!(store.summary(&friend).is_some());
+            // Records added, the stop before the summary.
+            let record = Record::Item {
+                item: item(4, false, vec![]),
+            };
+            record.apply(&mut chat.chat, &mut None);
+            store.append(&friend, &[record], &chat.chat).unwrap();
+            assert_eq!(
+                store.summary(&friend),
+                None,
+                "a summary older than the journal"
+            );
+            // The journal cut short, or put back as an older copy, under a newer summary.
+            store
+                .write_summary(&friend, &Summary::of(&chat.chat, None))
+                .unwrap();
+            assert!(store.summary(&friend).is_some());
+            let whole = fs::read(&journal_path).unwrap();
+            fs::write(&journal_path, &whole[..whole.len() - 3]).unwrap();
+            assert_eq!(store.summary(&friend), None, "a journal cut short");
+            fs::write(&journal_path, &journal).unwrap();
+            assert_eq!(store.summary(&friend), None, "an older journal");
+            fs::write(&journal_path, &whole).unwrap();
+            assert!(store.summary(&friend).is_some());
+            // An older summary, another chat's, a damaged one, none.
+            fs::write(&summary_path, &kept).unwrap();
+            assert_eq!(store.summary(&friend), None, "an older summary");
+            fs::copy(store.summary_path(&other), &summary_path).unwrap();
+            assert_eq!(store.summary(&friend), None, "another chat's summary");
+            fs::write(&summary_path, b"{").unwrap();
+            assert_eq!(store.summary(&friend), None, "a damaged summary");
+            fs::remove_file(&summary_path).unwrap();
+            assert_eq!(store.summary(&friend), None, "no summary");
+            // Written again from the chat read whole, as a start does, it is taken.
+            let opened = DirectStore::open_sealed(&dir, key.clone());
+            let loaded = opened.load(&friend).unwrap();
+            assert_eq!(loaded.chat.items().len(), 4);
+            opened
+                .write_summary(&friend, &Summary::of(&loaded.chat, None))
+                .unwrap();
+            assert_eq!(
+                DirectStore::open_sealed(&dir, key.clone()).resume(&friend),
+                Some(Summary::of(&loaded.chat, None))
+            );
+            if key.is_some() {
+                // Sealed: tails that say otherwise (another end kept) are not passed over.
+                let tails = store.tails_path(&friend);
+                let kept_tails = fs::read(&tails).unwrap();
+                fs::copy(store.tails_path(&other), &tails).unwrap();
+                assert_eq!(store.summary(&friend), None, "tails of another chat");
+                fs::write(&tails, &kept_tails).unwrap();
+                assert!(store.summary(&friend).is_some());
+            } else {
+                // Plain, a summary sealed is no summary.
+                fs::write(
+                    &summary_path,
+                    DataKey::generate().unwrap().seal_whole("x", b"{}").unwrap(),
+                )
+                .unwrap();
+                assert_eq!(store.summary(&friend), None);
+            }
+            fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     /// What a failed write leaves is cut off the journal with the handle that wrote it, which

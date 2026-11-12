@@ -263,7 +263,7 @@ const ITEM_WEIGHT: u64 = 256;
 pub const MAX_FORGOTTEN: usize = 4096;
 
 /// Bytes kept on this device for a chat, by kind.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub messages: u64,
     pub pictures: u64,
@@ -383,6 +383,114 @@ fn stamp() -> u64 {
 /// chats held, as they are changed.
 pub fn version() -> u64 {
     STAMPS.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// What is known of a chat without its items: what the list of chats and the figures of
+/// what chats take show, and what tells when a chat has to be read for the checks that run
+/// over every chat (what ran out, what waits for a receipt, what comes by itself, room to
+/// free, old charges). Worked out whole from the chat ([`Summary::of`]) every time it
+/// changes, and kept beside its journal, so a start reads it in place of the journal. It
+/// only ever says whether to read a chat: what is then done is decided on the chat read.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    /// How many items the chat holds.
+    pub items: usize,
+    /// The last line of the list: the last item that is not a pin or a deletion.
+    pub last: Option<Item>,
+    pub unread: usize,
+    pub timer_ms: u64,
+    /// The two stopped being friends then.
+    pub ended_ms: Option<u64>,
+    /// What its attachments take here.
+    pub usage: Usage,
+    /// The earliest time something in it goes ([`Chat::due_ms`]).
+    pub due_ms: Option<u64>,
+    /// This device's own items the friend has not got yet.
+    pub waiting: usize,
+    /// The oldest charge of an attachment that came by itself.
+    pub oldest_charge: Option<u64>,
+    /// The attachments kept here, each file once under each name: what the chat's group
+    /// serves the friend.
+    pub here: Vec<Named>,
+    /// The friend's attachments not here, each file once, at most [`MAX_MISSING`]: those
+    /// that may come by themselves. `more_missing` when there are more.
+    pub missing: Vec<Missing>,
+    #[serde(default)]
+    pub more_missing: bool,
+}
+
+/// Most of the friend's attachments not here a [`Summary`] lists; past them the chat is
+/// read to tell which come by themselves.
+pub const MAX_MISSING: usize = 64;
+
+/// A file by its id and one name it goes by in the chat.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Named {
+    #[serde(with = "hex_array")]
+    pub id: FileId,
+    pub name: String,
+}
+
+/// One of the friend's attachments not here, as far as whether it may come by itself
+/// goes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Missing {
+    #[serde(with = "hex_array")]
+    pub id: FileId,
+    pub kind: FileKind,
+    pub size: u64,
+    pub voice: bool,
+}
+
+impl Summary {
+    /// The summary of `chat`, which ended at `ended_ms`.
+    pub fn of(chat: &Chat, ended_ms: Option<u64>) -> Self {
+        let mut here = Vec::new();
+        let mut named = HashSet::new();
+        let mut missing = Vec::new();
+        let mut absent = HashSet::new();
+        let mut more_missing = false;
+        for item in &chat.items {
+            for f in item.files() {
+                if f.local == Local::Here && named.insert((f.id, f.name.as_str())) {
+                    here.push(Named {
+                        id: f.id,
+                        name: f.name.clone(),
+                    });
+                }
+                if !item.mine && f.local == Local::Missing && absent.insert(f.id) {
+                    if missing.len() < MAX_MISSING {
+                        missing.push(Missing {
+                            id: f.id,
+                            kind: f.kind,
+                            size: f.size,
+                            voice: f.voice.is_some(),
+                        });
+                    } else {
+                        more_missing = true;
+                    }
+                }
+            }
+        }
+        Summary {
+            items: chat.items.len(),
+            last: chat.items.iter().rev().find(|i| !i.is_aside()).cloned(),
+            unread: chat.unread(),
+            timer_ms: chat.timer(),
+            ended_ms,
+            usage: chat.usage(),
+            due_ms: chat.due_ms(),
+            waiting: chat.waiting().count(),
+            oldest_charge: chat.oldest_charge(),
+            here,
+            missing,
+            more_missing,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items == 0
+    }
 }
 
 /// An attachment of the friend's that started to come by itself: when, what it counts
@@ -756,6 +864,19 @@ impl Chat {
             })
             .map(|i| i.id)
             .collect()
+    }
+
+    /// The earliest time [`Self::expired`] gives something: when the first item not pinned
+    /// runs out, or at once (0) for a pin whose message is gone that may go.
+    pub fn due_ms(&self) -> Option<u64> {
+        let orphan = self
+            .items
+            .iter()
+            .any(|i| i.pin_target().is_some_and(|t| !self.contains(t)) && (!i.mine || i.delivered));
+        if orphan {
+            return Some(0);
+        }
+        self.next_expiry()
     }
 
     /// The earliest time an item here disappears; a pinned message does not.

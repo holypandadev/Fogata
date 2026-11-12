@@ -63,7 +63,7 @@ use self::sending::{fair_voice, payload};
 use self::{
     model::{
         Attachment, Body, Chat, FileId, FileKind, Item, ItemId, Local, MAX_FILE_BYTES,
-        MAX_FILE_NAME_BYTES, MAX_FILES, Usage, VideoInfo, VoiceInfo, valid_timer,
+        MAX_FILE_NAME_BYTES, MAX_FILES, Summary, Usage, VideoInfo, VoiceInfo, valid_timer,
     },
     store::{DirectStore, LIMITS, Record, Settings, Split},
 };
@@ -390,6 +390,11 @@ impl Chats {
             ..Default::default()
         };
         for (friend, loaded) in store.chats() {
+            // Kept for what was read, unless the one kept says the same.
+            let summary = Summary::of(&loaded.chat, loaded.ended_ms);
+            if store.summary(&friend).as_ref() != Some(&summary) {
+                keep_summary(&store, &friend, &summary);
+            }
             let entry = Entry {
                 chat: loaded.chat,
                 ended_ms: loaded.ended_ms,
@@ -522,6 +527,8 @@ impl Chats {
     ) -> tokio::sync::oneshot::Receiver<bool> {
         let (done, kept) = tokio::sync::oneshot::channel();
         let split = Split::of(records, &entry.chat);
+        // The chat as the journal and pins will hold it once these are added.
+        let summary = Summary::of(&entry.chat, entry.ended_ms);
         let (store, state, friend) = (self.store.clone(), self.state.clone(), *friend);
         let counted = self.count();
         self.writer.after(move || {
@@ -532,7 +539,10 @@ impl Chats {
                     let whole = rewrite(&store, &state, &friend);
                     !lagging || whole
                 }
-                Ok(false) => true,
+                Ok(false) => {
+                    keep_summary(&store, &friend, &summary);
+                    true
+                }
                 Err(e) => {
                     tracing::warn!("cannot save a chat: {e:#}");
                     false
@@ -636,10 +646,22 @@ fn rewrite(store: &DirectStore, state: &Mutex<ChatsState>, friend: &DevicePublic
     else {
         return true;
     };
-    store
+    let written = store
         .rewrite(friend, &chat, ended_ms)
         .inspect_err(|e| tracing::warn!("cannot save a chat: {e:#}"))
-        .is_ok()
+        .is_ok();
+    if written {
+        keep_summary(store, friend, &Summary::of(&chat, ended_ms));
+    }
+    written
+}
+
+/// Keeps a chat's summary beside its journal, just written as `summary` says. One that
+/// cannot be kept is no loss: the chat is read whole at the next start.
+fn keep_summary(store: &DirectStore, friend: &DevicePublicKey, summary: &Summary) {
+    if let Err(e) = store.write_summary(friend, summary) {
+        tracing::warn!("a chat's summary not kept: {e:#}");
+    }
 }
 
 /// Whether `log` can be the group of a chat between this device and `friend`: the two of
