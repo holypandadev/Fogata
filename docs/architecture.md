@@ -290,9 +290,26 @@ therefore treats DHT nodes as strangers:
   next 30 minutes, as lookups of the same key keep reaching the same nodes. A stranger's
   LAN addresses are skipped when it has public ones. Before UDP is known to work, and on
   networks that block it, dials are unchanged.
-- Addresses the node passes to a dial itself (punch slots, invites, friend links, mDNS,
-  relayed paths) are never filtered, and wanted peers get every address the DHT returned
-  but candidates known only from it, as above.
+- **Addresses someone else named** are dialled only where this device may send them a
+  packet (`addr::OwnNetworks::may_dial`, the one rule every such path takes): never this
+  computer (loopback), no address or many (unspecified, multicast, broadcast), an IPv6
+  link-local one or IPv4 written as IPv6, nor one of this device's own addresses; a local one
+  only on a network this device is on (the same private IPv4 /24, unique-local IPv6 /48, or
+  carrier-grade NAT's 100.64/10 while this device has an address there too, a VPN such as
+  Tailscale shared by friends), or, where it may be a device at the same place behind another
+  router, a private IPv4 one in any /24. Each dial of a local address sends a QUIC handshake
+  into this device's own networks (a router's admin page, a VPN peer) at someone else's
+  choice. The paths: what the DHT, mDNS and identify supply for a dial, and the sealed local
+  names opened for one (checked in `StrangerDials`, also those of an earlier dial kept for
+  the next); friend links and invites (the maker chose them: `NodeHandle::dial_invite`); the
+  local addresses a member sends (media and lost members only on a network this device is
+  on, the punch slots the same place too); mDNS answers (`mdns_address_ok`); and hole
+  punches through a member's relay (DCUtR dials every address the other end names: a punch
+  that names one this device may not dial is dialled again at its others alone, `punches.rs`).
+  Addresses given by hand (`--peer`, tests) and those this device reached a friend or member
+  at itself (remembered, lost members, a relay's) are its own choice, and keep their
+  loopback ones for copies on one computer. Wanted peers get every other address the DHT
+  returned but candidates known only from it, as above.
 - **Incoming connections** are bounded: 512 open at once, 32 from one public address (an
   IPv6 /64 counts as one) and 64 from one IPv6 /48, and still in their handshake (closed
   after ten seconds, the connection timeout the node puts around every transport, which
@@ -529,14 +546,15 @@ previous one). The provider record carries the transport `PeerId` and the addres
 device has observed for itself (seen identically by peers on different networks, /16 for
 IPv4 and /48 for IPv6, so one machine posing as several peers, or a few at one provider,
 cannot choose it: two networks with a member or friend among them, three of strangers
-otherwise, one of them a stranger this device dialled itself (a bootstrap node, at its
-name too, or a DHT node its own lookups led to), since anyone can connect from three cheap
-machines at one cloud provider and say anything; the same for the address announced when
-the device's network changes the port for each destination). Strangers that came in by
-themselves still count towards the three networks once one it dialled says the same, as
-before: a device is never kept from its address by where its reports came from. The log
-says when an address is taken (`this device's public address confirmed`, with how many
-peers, networks and dialled ones), and when strangers that came in agree on one not taken. Only an address a member or friend
+otherwise, all of them strangers this device dialled itself (the bootstrap nodes, the DHT
+nodes its own lookups lead to), since anyone can connect from three cheap machines at one
+cloud provider and say anything, and a stranger that came in by itself counts for nothing
+even beside one this device dialled; the same for the address announced when the device's
+network changes the port for each destination). The DHT nodes a device dials as it starts
+are on many networks, and tell it its address within seconds (every confirmation logged in
+the lab and on the internet had all its reporters dialled). The log says when an address is
+taken (`this device's public address confirmed`, with how many peers, networks and dialled
+ones), and when strangers that came in agree on one not taken. Only an address a member or friend
 reported too counts as this device's own when a candidate behind it is taken for one of
 its old sessions (rested at once, not punched): strangers on two networks could otherwise
 make it give up on another member.
@@ -730,7 +748,7 @@ default program does not know any of them).
 | two routers at home, one public address without hairpin, no firewall on the devices | The device behind the inner router opens the other's sealed name and connects to its local address. |
 | the same, the outer device's firewall letting its port in | Connected the same way. |
 | the same, the outer device's firewall letting nothing in | No contact (known limit; the app shows the firewall command). |
-| a public device told false addresses of its own: by three peers behind one public address (two agreeing), by two more at addresses of their own in one /16, agreeing, and by three on three networks that connect by themselves, agreeing (`fake-observed`) | It takes and announces only its real address, which the three DHT nodes it dialled report from three networks: strangers' reports count from three different networks (/16, /48), one of them a stranger it dialled. |
+| a public device told false addresses of its own: by three peers behind one public address (two agreeing), by two more at addresses of their own in one /16, agreeing, and by three on three networks that connect by themselves, agreeing (`fake-observed`) | It takes and announces only its real address, which the three DHT nodes it dialled report from three networks: strangers' reports count from three different networks (/16, /48), and only those of strangers it dialled. |
 | a public device flooded with 512 incoming connections from 16 addresses (64 peers, as one peer gets 8 in) that ask it something cheap every half minute, and a member behind a symmetric NAT (`inbound-flood`) | The member comes in, one of the stranger's connections closing for it, and its message arrives. |
 | a public device sent silent TCP connections from 8 addresses, and a device behind a router sent them from one local address, each as fast as they close, each device limited to 2048 open files (`silent-flood`) | Each holds at most a few dozen sockets more than usual (the local one used up all 2048, and could no longer write its files, when the local network had no limit), and its member's message arrives. |
 | two members on one local network, mDNS only, and a neighbour answering every query with made-up peers and sending unasked answers (`mdns-flood`) | They find each other and talk; a bounded number of the made-up peers is taken, and few are dialled. |
@@ -1237,7 +1255,19 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   most of a home's upload to calls and to the others. A file going at that pace gives its
   place among the 32 files sent at once back, for one of 8 places kept for those (one per
   member), so members asking again never keep the others' downloads waiting. Members are
-  counted by the device they proved to be, under whatever connection they come. A device is
+  counted by the device they proved to be, under whatever connection they come (4 files sent
+  at once to one device, 1 at the pace). A request waits 20 s at most for a place, less than
+  the asker waits for an answer: then it is told to ask again in 10 s, as when its day is
+  over, and its download waits rather than fails. A device whose files are taken at less
+  than 4 KiB/s together over two minutes of waiting for it (one block every half minute
+  holds a place for the whole of a large file otherwise) gives each place up while another
+  device waited for one in the last two minutes; nobody else waiting, a slow line keeps its
+  places. 4 KiB/s (32 kbit/s) is a third of the slowest honest lines seen (a satellite dish
+  at 0.1 Mbit/s, mobile data far from a mast), shared by four files at once, and a stall of
+  most of a minute in a window does not count. The device goes on from what came: a
+  download that stops after a block or more came (`FileError::Cut`) is asked again from
+  there, a room's without using up one of its three tries, a direct message's file the
+  person asked for until it comes. A device is
   sent at most 32 GiB a day of everything (at the pace alone it could take 84 GiB): a file
   that starts within its day goes whole; after it, it is told when its next day begins, and
   its download waits until then and goes on (a room's download, a direct message's file
@@ -4634,9 +4664,10 @@ not started: the device is told to ask later and goes on from where it stopped);
 seconds, and so are its words that it has a build and its fetches of a package that is not
 there. A friend or member has at most 4 requests answered at once, and all together 32; a
 stream past that is closed unread, and a request that has not arrived whole 10 s after its
-stream came is closed too. An upload that has gone on for a minute at less than 64 KiB/s on
-average ends while a device turned away for want of a place in the last two minutes may be
-waiting (the device cut off goes on from its last whole chunk when it asks again, 45 s
+stream came is closed too. An upload whose reader took less than 64 KiB/s over a minute of
+waiting for it (time spent on the disk or the 4 MB/s pace not counted, as for files above:
+`slow.rs`) ends while another device turned away for want of a place in the last two minutes
+may be waiting (the device cut off goes on from its last whole chunk when it asks again, 45 s
 later); a slow line keeps its place while nobody waits. An ask, a word that a device has a
 build, or a fetch whose stream ends or is reset before any answer is made again, after 0.1,
 0.3 and 1 s, as a file request is: friends that hear of a release at once all ask its
