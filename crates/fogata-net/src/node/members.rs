@@ -73,12 +73,33 @@ pub(super) fn group_of(bytes: &[u8]) -> Option<GroupId> {
 /// the application is far behind (see events.rs): group and direct messages. Everything
 /// else keeps the group and its members going. A call signal is not refused: its sender
 /// would not send it again, and the call would wait for it; few and small as they are,
-/// they give way on the application's side, which then has the call agree anew.
+/// they give way on the application's side, which then has the call agree anew. Every kind
+/// is named, with no wildcard: a kind added to `MemberRequest` is placed here on purpose.
 fn adds_events(request: &MemberRequest) -> bool {
-    matches!(
-        request,
-        MemberRequest::Deliver(_) | MemberRequest::Spread { .. } | MemberRequest::Direct { .. }
-    )
+    match request {
+        MemberRequest::Deliver(_) | MemberRequest::Spread { .. } | MemberRequest::Direct { .. } => {
+            true
+        }
+        MemberRequest::Challenge { .. }
+        | MemberRequest::Roster { .. }
+        | MemberRequest::Sync { .. }
+        | MemberRequest::Push { .. }
+        | MemberRequest::JoinRequest { .. }
+        | MemberRequest::JoinCommit { .. }
+        | MemberRequest::Profile { .. }
+        | MemberRequest::RoomSync { .. }
+        | MemberRequest::Addresses { .. }
+        | MemberRequest::Signal { .. }
+        | MemberRequest::Presence { .. }
+        | MemberRequest::Admitted { .. }
+        | MemberRequest::JoinDeclined { .. }
+        | MemberRequest::OtherSession
+        | MemberRequest::GroupBanner { .. }
+        | MemberRequest::GroupPicture { .. }
+        | MemberRequest::RoomEvents { .. }
+        | MemberRequest::KeyProblem { .. }
+        | MemberRequest::FriendAsk { .. } => false,
+    }
 }
 
 impl Node {
@@ -199,12 +220,33 @@ impl Node {
     pub(super) fn on_request(&mut self, peer: PeerId, request: MemberRequest) -> MemberResponse {
         // A stranger past its address's budget gets an answer that costs nothing: a challenge
         // the same decoy as one that names no group of this device, anything else a refusal.
+        // Every kind is named: a kind added to `MemberRequest` is placed here on purpose.
         if self.stranger_over_budget(&peer) {
             return match request {
                 MemberRequest::Challenge { .. } => SealedProof::decoy(0)
                     .map(|d| MemberResponse::Proof(WireProof::from(&d)))
                     .unwrap_or(MemberResponse::Refused),
-                _ => MemberResponse::Refused,
+                MemberRequest::Deliver(_)
+                | MemberRequest::Spread { .. }
+                | MemberRequest::Roster { .. }
+                | MemberRequest::Sync { .. }
+                | MemberRequest::Push { .. }
+                | MemberRequest::JoinRequest { .. }
+                | MemberRequest::JoinCommit { .. }
+                | MemberRequest::Profile { .. }
+                | MemberRequest::RoomSync { .. }
+                | MemberRequest::Addresses { .. }
+                | MemberRequest::Signal { .. }
+                | MemberRequest::Presence { .. }
+                | MemberRequest::Admitted { .. }
+                | MemberRequest::JoinDeclined { .. }
+                | MemberRequest::OtherSession
+                | MemberRequest::Direct { .. }
+                | MemberRequest::GroupBanner { .. }
+                | MemberRequest::GroupPicture { .. }
+                | MemberRequest::RoomEvents { .. }
+                | MemberRequest::KeyProblem { .. }
+                | MemberRequest::FriendAsk { .. } => MemberResponse::Refused,
             };
         }
         // The application is far behind (see events.rs): what would only add to its events
