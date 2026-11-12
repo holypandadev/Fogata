@@ -48,7 +48,7 @@
 @interface VideoEncoderFactorySimulcast : RTCVideoEncoderFactorySimulcast
 @end
 
-// Fogata: calls use VP8 only (docs/architecture.md); every other codec would be one more
+// Fogata: calls use VP8 only (docs/architecture.md, 4.3); every other codec would be one more
 // decoder for what others send, and is neither offered nor taken.
 NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>* onlyVp8(
     NSArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *>* codecs) {

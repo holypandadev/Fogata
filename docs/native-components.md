@@ -16,7 +16,7 @@ browser or system security update is announced.
 | AVFoundation and system codecs (macOS) | macOS | macOS' own | Apple security releases; people update it with macOS. |
 
 What the app does to keep this code's exposure small is described in
-`docs/architecture.md` (for example, a picture is decoded only if its header promises a
+`docs/architecture.md`, 3.10 (for example, a picture is decoded only if its header promises a
 bounded size, and an animation only up to 2048 by 2048).
 
 ## Screen capture on Windows

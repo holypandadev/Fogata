@@ -6,7 +6,7 @@ integration tests (`tests/smoke.rs`, `tests/stream_compliance.rs`) and dev-depen
 left out; the unit tests in `src/` stay and run in `tools/check.sh` (`cargo test -p
 libp2p-quic --lib`). `tools/vendor_diff.py libp2p-quic` shows every difference from the
 published crate. Only these changes (docs/architecture.md, the measurements of media over
-QUIC and the bounds of incoming connections, says why):
+QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
 
 1. Unreliable datagrams (RFC 9221) for real-time media. rust-libp2p's muxer carries reliable
    streams only and the published crate turns datagrams off; media needs packets that may be

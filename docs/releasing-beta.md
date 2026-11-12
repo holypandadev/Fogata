@@ -385,7 +385,7 @@ it was not tried for real.
    what `MITIGATIONS` in the script says a file cannot have), which a variable such as
    `RUSTFLAGS`, `CL` or `LINK` in the build's environment could drop, and that `fogata.exe`
    is not CET shadow stack compatible (off on purpose until Fogata is tried on a processor
-   with shadow stacks; see docs/architecture.md), checks that every program and library of
+   with shadow stacks; see docs/architecture.md, 5d), checks that every program and library of
    the Linux bundle carries RELRO and BIND_NOW (ours the stack protector too) and looks for
    libraries only beside it (`$ORIGIN`), and that the WebRTC plugin links PipeWire and
    PulseAudio (without `libpipewire-0.3-dev` where it is built, the plugin still builds, but
