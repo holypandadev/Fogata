@@ -1205,9 +1205,13 @@ class AttestedBuilds(unittest.TestCase):
                  "lib/libflutter.so": "->libapp.so", "data/icudtl.dat": b"icu"}
         attested = self.folder("attested", files)
         release.check_same_build(attested, self.folder("same", files), "Linux bundle")
-        for change in [{"lib/extra.so": b"more"}, {"lib/libapp.so": b"other"},
-                       {"fogata": b"program"},  # no longer executable
-                       {"lib/libflutter.so": "->../elsewhere.so"}]:
+        changes = [{"lib/extra.so": b"more"}, {"lib/libapp.so": b"other"},
+                   {"lib/libflutter.so": "->../elsewhere.so"}]
+        if os.name != "nt":
+            # No longer executable. Windows, where these tests run too, keeps no such bit;
+            # the release is made on Linux.
+            changes.append({"fogata": b"program"})
+        for change in changes:
             with self.subTest(change=change):
                 given = self.folder(f"given{len(list(self.tmp.iterdir()))}", {**files, **change})
                 with self.assertRaises(SystemExit) as stop:

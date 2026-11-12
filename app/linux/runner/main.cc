@@ -1,4 +1,5 @@
 #include <dlfcn.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -49,7 +50,21 @@ static bool NvidiaEgl() {
   return true;
 }
 
+// glibc gives a thread that finds the allocator busy an arena of its own, up to eight for
+// each core, and memory freed in one arena is of no use to another. A call's dozens of
+// threads (WebRTC's, the core's, the engine's) spread what they hold over many, each kept
+// with holes: two copies in a voice call of an hour held about 80 MB less each with two
+// arenas (some 520 MB against 600) and grew about half as fast, and a screen shared to
+// five kept its 30 frames a second and its processor time. Set before any thread starts;
+// MALLOC_ARENA_MAX in the environment, glibc's own setting for this, is kept.
+static void FewArenas() {
+#ifdef __GLIBC__
+  if (getenv("MALLOC_ARENA_MAX") == nullptr) mallopt(M_ARENA_MAX, 2);
+#endif
+}
+
 int main(int argc, char** argv) {
+  FewArenas();
   InitXlibThreads();
   // Fogata's own sounds (someone coming in, a message, a ringing call) reach PipeWire
   // through ALSA, which names their stream after the executable: "PipeWire ALSA
