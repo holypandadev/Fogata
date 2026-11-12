@@ -19,8 +19,10 @@
 //! folder from then on (theirs reads the friends file as written by a later version) rather
 //! than change it.
 //!
-//! Every file is replaced whole through a temporary file, and a change that reads a file and
-//! writes it back holds the folder's lock, so two changes at once never undo one another. A
+//! Every file is replaced whole through a temporary file, but for group logs, which grow by
+//! what is new at their end and are written whole now and then (see appended.rs); and a
+//! change that reads a file and writes it back holds the folder's lock, so two changes at
+//! once never undo one another. A
 //! file found damaged is put aside as `.damaged`, never deleted, and what it held is taken
 //! from what can still be read: the start of a log, the logs for the list of groups, the copy
 //! of the friends file made before its last change.
@@ -28,6 +30,7 @@
 //! Sealing the folder and the files set aside are in sealing.rs, the groups and their logs
 //! in groups.rs, and what was judged of each log in judged.rs.
 
+mod appended;
 mod groups;
 mod judged;
 mod sealing;
@@ -210,6 +213,9 @@ pub struct Store {
     /// Why the keychain kept no key for this folder, which holds nothing yet and whose
     /// person did not choose to keep it unencrypted ([`vault::NoKeychain`]).
     refused: Mutex<Option<String>>,
+    /// What the group log files and records beside them hold, as this store last read or
+    /// wrote them (see appended.rs).
+    kept: Mutex<appended::Kept>,
 }
 
 /// A join with an invite that waits for a manager to let this device in.
@@ -380,6 +386,7 @@ impl Store {
             phase: Mutex::new(None),
             done_before: Default::default(),
             refused: Mutex::new(None),
+            kept: Default::default(),
         };
         store.remove_stale_temps();
         Ok(store)

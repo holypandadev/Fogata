@@ -707,6 +707,12 @@ impl GroupLog {
         out
     }
 
+    /// The `Level` entry [`Self::level_ahead`] tells of, which [`Self::entries_to_store`]
+    /// stores after the log's entries.
+    pub fn ahead_entry(&self) -> Option<&Entry> {
+        self.ahead.as_ref()
+    }
+
     /// The hashes of [`Self::entries_to_store`], in no particular order: what judging a log
     /// read back from them is checked against ([`Self::verdicts`]).
     pub fn hashes_to_store(&self) -> impl Iterator<Item = EntryHash> + '_ {

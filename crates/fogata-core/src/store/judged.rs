@@ -452,22 +452,22 @@ pub(crate) mod tests {
             store.identity().unwrap();
             let mut log = large.clone();
             let id = log.group_id();
-            store.save_group_log(&log, "Home").unwrap();
-            let size = fs::metadata(store.log_path(&id)).unwrap().len();
             let (_, whole) = timed(|| store.save_group_log(&log, "Home").unwrap());
+            let size = fs::metadata(store.log_path(&id)).unwrap().len();
             let writer = crate::writer::Writer::start().unwrap();
             let saves = Arc::new(std::sync::Mutex::new((0, Duration::ZERO)));
             let started = Instant::now();
-            let mut node = Duration::ZERO;
+            let (mut node, mut copying) = (Duration::ZERO, Duration::ZERO);
             for i in 0..200 {
-                let (snapshot, took) = timed(|| {
+                let ((), took) = timed(|| {
                     let body = Body::Rename {
                         name: format!("b{i}"),
                     };
                     log.append(&ana, body, 1_000_000 + i).unwrap();
-                    log.clone()
                 });
-                node += took;
+                let (snapshot, copied) = timed(|| log.clone());
+                node += took + copied;
+                copying += copied;
                 let (store, saves) = (store.clone(), saves.clone());
                 writer.soon(crate::writer::File::Group(id), move || {
                     let (_, took) = timed(|| store.save_group_log(&snapshot, "Home").unwrap());
@@ -482,12 +482,15 @@ pub(crate) mod tests {
             let (saves, saving) = *saves.lock().unwrap();
             let back = store.load_log_of(&id).unwrap();
             assert_same(&back, &log);
+            let after = fs::metadata(store.log_path(&id)).unwrap().len();
             println!(
                 "{}: a log of {} entries, {size} bytes on disk, saved whole in {whole:?}; a \
-                 burst of 200 changes in {took:?}, {node:?} of it on the node's side; \
-                 {saves} saves made, in {saving:?}",
+                 burst of 200 changes in {took:?}, {node:?} of it on the node's side \
+                 ({copying:?} copying the log); {saves} saves made, in {saving:?}; the file \
+                 grew by {} bytes",
                 if sealed { "sealed" } else { "plain" },
                 log.len(),
+                after - size,
             );
             fs::remove_dir_all(&dir).unwrap();
         }

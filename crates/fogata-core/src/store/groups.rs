@@ -10,7 +10,9 @@ use fogata_state::{Body, Entry, EntryHash, GroupBanner, GroupLog, GroupPicture};
 use serde::{Deserialize, Serialize};
 
 use super::{
-    Held, Store, aside_path, copy_aside, decode_entries, encode_log, free_name,
+    Held, Store,
+    appended::{LogFile, Stamp, read_log_file},
+    aside_path, copy_aside, decode_entries, encode_log, free_name,
     judged::{judged_context, read_judged, write_judged},
     with_suffix, write_private,
 };
@@ -295,12 +297,27 @@ impl Store {
         self.read_log(*id)
     }
 
-    /// A group's log. When the file is damaged (cut short by a crash, or changed on the
-    /// disk), the entries that still read are kept and a copy of the file is put aside.
+    /// A group's log. When the file is damaged (changed on the disk), the entries that still
+    /// read are kept and a copy of the file is put aside; one that ends with part of an
+    /// entry, as a computer that stopped while one was added leaves it, keeps those before.
     fn read_log(&self, id: GroupId) -> Result<GroupLog> {
         let path = self.log_path(&id);
+        let stamp = Stamp::at(&path);
         let bytes = fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let (entries, damaged) = decode_entries(&bytes);
+        let LogFile {
+            entries,
+            damaged,
+            cut_short,
+        } = read_log_file(&bytes);
+        let read = entries.len();
+        if cut_short {
+            // An entry being added when the computer stopped: nothing of it is lost, as it was
+            // never all there, and the file is written whole at the next change.
+            tracing::info!(
+                "{} ends with part of an entry: the {read} entries before it are kept",
+                path.display()
+            );
+        }
         if damaged {
             let aside = with_suffix(&path, ".damaged");
             // Not even a link there: it is never written through.
@@ -332,9 +349,15 @@ impl Store {
         };
         // Room rules an earlier version kept apart, if any; a damaged end of that file loses
         // only rules.
-        if let Ok(bytes) = fs::read(self.rules_path(&id)) {
-            let (rules, _) = decode_entries(&bytes);
+        let rules = fs::read(self.rules_path(&id));
+        if let Ok(bytes) = &rules {
+            let (rules, _) = decode_entries(bytes);
             log.insert_all(rules.into_iter().filter(|e| e.body.is_room_rule()));
+        }
+        // What the file holds, to add to it: not when part of it did not read, nor with rules
+        // that are not in it yet.
+        if !damaged && !cut_short && rules.is_err() {
+            self.note_read(id, stamp, read, &log);
         }
         // The banner, checked again against the log and the clock: one dated more than a
         // day ahead would show over every banner chosen until then.
@@ -590,7 +613,8 @@ impl Store {
     }
 
     fn write_log(&self, log: &GroupLog) -> Result<()> {
-        write_private(&self.log_path(&log.group_id()), &encode_log(log))?;
+        // On the disk before what was judged of it (see appended.rs).
+        self.store_log(log)?;
         if let Some(key) = self.known_key() {
             let id = log.group_id();
             write_judged(key, &self.judged_path(&id), &judged_context(&id), log);
@@ -603,10 +627,12 @@ impl Store {
             _ => {}
         }
         if let Some(banner) = log.banner_record() {
-            write_private(&self.banner_path(&log.group_id()), &banner.encode())?;
+            let path = self.banner_path(&log.group_id());
+            self.write_record(&path, banner.signature, || banner.encode())?;
         }
         if let Some(picture) = log.picture_record() {
-            write_private(&self.picture_path(&log.group_id()), &picture.encode())?;
+            let path = self.picture_path(&log.group_id());
+            self.write_record(&path, picture.signature, || picture.encode())?;
         }
         self.note_records(log)
     }
