@@ -64,8 +64,45 @@ pub const INVITE_NAMES_NOBODY: &str = "an invite names who may let its device in
 pub const WELCOME_NOT_NAMED: &str =
     "only the issuer or a manager its invite names lets a device in";
 
-/// Why, from level three, a `Rotate` that leaves out a member it saw is not kept.
+/// Why, from level three, a `Rotate` that leaves out a member it saw is not kept; and, from
+/// level four, does not apply.
 pub const ROTATE_LEAVES_OUT: &str = "a rotation gives the new key to every member";
+
+/// Why, from level four, a `Remove` whose new epoch leaves out a member its author saw is
+/// not kept, nor applies.
+pub const REMOVE_LEAVES_OUT: &str = "a removal gives the new key to every member left";
+
+/// What the author of a `Rotate` or a `Remove` saw, in the log as it was when it wrote the
+/// entry (the group the entries before it make): fixed by the entry's hash, so worked out
+/// once per entry, and the same on every copy, whatever order its entries came in; and
+/// whether level four holds it to that view where it is judged.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Seen {
+    /// Whether its author had a reason to rotate there: it managed the group, or a device
+    /// that is no longer a member held the current secret (see
+    /// [`GroupState::leaked_as_judged`]). Read only for a `Rotate` of a member that does
+    /// not manage the group where it applies.
+    pub(crate) needed: bool,
+    /// Whether its new epoch goes to every member it saw (but the one a `Remove` removes,
+    /// and keys nothing can be sealed to).
+    pub(crate) for_all: bool,
+    /// Whether level four holds it to `for_all` where it is judged: kept, where its author
+    /// saw the group at level four; applied, where the log holds a raise to level four
+    /// that it is not before (that raise's author did not see it), wherever it is in the
+    /// order (see [`Level::Four`]). Not part of what its author saw: set where it is used.
+    pub(crate) bound: bool,
+}
+
+impl Seen {
+    /// What judging an entry as one its author could make takes for granted: tried on a
+    /// copy of the group, an entry that a loss of its author outranks is told as it would
+    /// have applied.
+    pub(crate) const ALLOWED: Seen = Seen {
+        needed: true,
+        for_all: true,
+        bound: false,
+    };
+}
 
 /// A level of judgment: the rules that decide what a log keeps and applies once a
 /// [`Body::Level`] entry naming it applied. The rules of a level never
@@ -93,12 +130,24 @@ pub enum Level {
     ///   level, so only of a `Rotate` whose author saw the group at level three: one signed
     ///   on entries from before the raise is judged, and applies, as at level two.
     Three,
+    /// Level three, and (see the architecture document, 5.1): a `Rotate` gives the new
+    /// key to every member its author saw, and a `Remove` its new epoch to every member its
+    /// author saw but the one removed (keys nothing can be sealed to aside). One that leaves
+    /// some out is not kept where its author saw the group at level four; and, in a log that
+    /// holds a raise to level four, one that raise did not see (written apart from it, or
+    /// after it) does not apply, wherever it goes in the order: one signed on entries from
+    /// before the raise may go before it, and would otherwise apply by the rules before.
+    ///
+    /// Judged on the group its author saw ([`Seen`]), once per entry, and on which entries
+    /// the raise is signed on: every copy comes to the same answer whatever order the
+    /// entries came in.
+    Four,
 }
 
 impl Level {
     /// The highest level this version judges at, and the one the groups it creates start
     /// at.
-    pub const CURRENT: Level = Level::Three;
+    pub const CURRENT: Level = Level::Four;
 
     /// The number this level has in a `Level` entry and among the network's capability
     /// levels: a level of judgment comes with the capability level of its number, so a
@@ -107,6 +156,7 @@ impl Level {
         match self {
             Level::Two => 2,
             Level::Three => 3,
+            Level::Four => 4,
         }
     }
 
@@ -115,6 +165,7 @@ impl Level {
         let level = match number {
             2 => Level::Two,
             3 => Level::Three,
+            4 => Level::Four,
             _ => return None,
         };
         (level <= Level::highest()).then_some(level)
@@ -134,11 +185,11 @@ impl Level {
     }
 
     /// The limits judging at this level reads. Judging reads them as the constants they are
-    /// at level two, and level three keeps them; a level with other limits has judging
-    /// read them from here instead.
+    /// at level two, and levels three and four keep them; a level with other limits has
+    /// judging read them from here instead.
     pub fn caps(self) -> Caps {
         match self {
-            Level::Two | Level::Three => Caps {
+            Level::Two | Level::Three | Level::Four => Caps {
                 members: MAX_MEMBERS,
                 in_room: MAX_IN_ROOM,
                 rooms: MAX_ROOMS,
@@ -679,10 +730,9 @@ impl GroupState {
         self.rejected.push((hash, reason));
     }
 
-    /// Applies `entry`, or notes why not. `rotation_needed` says, for a `Rotate` by a
-    /// member that does not manage the group here, whether its author managed it or saw someone who
-    /// is no longer a member hold the current secret, in the log as it was when it wrote it
-    /// (`None` for any other entry).
+    /// Applies `entry`, or notes why not. `seen` is what the author of a `Rotate` or a
+    /// `Remove` saw ([`Seen`]), for those [`Self::rotation_to_judge`] says need it (`None`
+    /// for any other entry).
     ///
     /// `before` tells whether an entry of the log is before this one (an ancestor): a
     /// `Welcome` lets a device in only with a `Join` it is signed on.
@@ -690,12 +740,12 @@ impl GroupState {
         &mut self,
         hash: EntryHash,
         entry: &Entry,
-        rotation_needed: Option<bool>,
+        seen: Option<Seen>,
         before: &dyn Fn(&EntryHash) -> bool,
     ) {
         #[cfg(any(test, feature = "counts"))]
         crate::work::applied();
-        match self.check_and_apply(hash, entry, rotation_needed, before) {
+        match self.check_and_apply(hash, entry, seen, before) {
             Ok(Applied::Yes) => self.applied.push(hash),
             Ok(Applied::Waits) => {}
             Ok(Applied::LetIn(join)) => {
@@ -745,7 +795,7 @@ impl GroupState {
     /// [`Level`]), and what it changes if so.
     fn check_rule(&mut self, entry: &Entry, stand: RuleStand) -> Result<(), &'static str> {
         match self.level {
-            Level::Two | Level::Three => self.check_rule_at_two(entry, stand),
+            Level::Two | Level::Three | Level::Four => self.check_rule_at_two(entry, stand),
         }
     }
 
@@ -836,7 +886,7 @@ impl GroupState {
 
     /// Whether `entry` would apply on top of this group, as the last entry of a log whose
     /// group this is: what its author could make in its own view of the log (see
-    /// [`crate::GroupLog::insert`]). `rotation_needed` as for [`Self::apply`]. Changes
+    /// [`crate::GroupLog::insert`]). `seen` as for [`Self::apply`]. Changes
     /// nothing here.
     ///
     /// A `Join` that would wait for a manager's `Welcome` is one its author could make;
@@ -844,7 +894,7 @@ impl GroupState {
     pub(crate) fn allows(
         &self,
         entry: &Entry,
-        rotation_needed: Option<bool>,
+        seen: Option<Seen>,
         before: &dyn Fn(&EntryHash) -> bool,
     ) -> Result<(), &'static str> {
         let mut trial = self.for_judging(false, entry.body.is_room_rule());
@@ -853,7 +903,7 @@ impl GroupState {
             trial.check_rule(entry, RuleStand::default())
         } else {
             trial
-                .check_and_apply(entry.hash(), entry, rotation_needed, before)
+                .check_and_apply(entry.hash(), entry, seen, before)
                 .map(drop)
         }
     }
@@ -872,13 +922,17 @@ impl GroupState {
             .all(|(k, _)| self.is_member(k) && k != removed)
     }
 
-    /// Whether `rotation` gives its key to every member here, but those whose key nothing
-    /// can be sealed to ([`DevicePublicKey::is_weak`]): what a `Rotate` written here holds
-    /// from level three.
-    pub(crate) fn rotation_for_all(&self, rotation: &Rotation) -> bool {
+    /// Whether `rotation` gives its key to every member here but `removed`, and but those
+    /// whose key nothing can be sealed to ([`DevicePublicKey::is_weak`]): what a `Rotate`
+    /// written here holds from level three, and a `Remove` from level four.
+    pub(crate) fn rotation_for_all(
+        &self,
+        rotation: &Rotation,
+        removed: Option<&DevicePublicKey>,
+    ) -> bool {
         self.members
             .keys()
-            .filter(|k| !k.is_weak())
+            .filter(|k| !k.is_weak() && Some(*k) != removed)
             .all(|k| rotation.sealed.iter().any(|(to, _)| to == k))
     }
 
@@ -967,11 +1021,26 @@ impl GroupState {
 
     /// Whether `entry` is a `Rotate` whose author is a member that does not manage the group
     /// at this point: the one kind of entry that needs its author's view of the log to be
-    /// judged.
+    /// judged before level four (see [`Seen::bound`] for those of level four).
     pub(crate) fn rotation_to_judge(&self, entry: &Entry) -> bool {
         matches!(entry.body, Body::Rotate { .. })
             && self.is_member(&entry.author)
             && !self.is_manager(&entry.author)
+    }
+
+    /// What the author of `entry`, a `Rotate` or a `Remove`, saw, this being the group as it
+    /// saw it ([`Seen`], not yet `bound`).
+    pub(crate) fn seen_by(&self, entry: &Entry) -> Seen {
+        let author = &entry.author;
+        Seen {
+            needed: self.is_manager(author) || !self.leaked_as_judged().is_empty(),
+            for_all: match &entry.body {
+                Body::Rotate { rotation } => self.rotation_for_all(rotation, None),
+                Body::Remove { member, rotation } => self.rotation_for_all(rotation, Some(member)),
+                _ => true,
+            },
+            bound: false,
+        }
     }
 
     /// Whether `entry` applies here, at the level the group judges at (see [`Level`]),
@@ -980,12 +1049,25 @@ impl GroupState {
         &mut self,
         hash: EntryHash,
         entry: &Entry,
-        rotation_needed: Option<bool>,
+        seen: Option<Seen>,
         before: &dyn Fn(&EntryHash) -> bool,
     ) -> Result<Applied, &'static str> {
+        // Level four, in a log raised to it, for the entries the raise did not see, at
+        // whatever level the group is where they go (`seen` says which: see
+        // [`Seen::bound`]). Copies of an earlier level never keep the raise, so their
+        // judgment stays as it was.
+        if self.creator.is_some() && seen.is_some_and(|s| s.bound && !s.for_all) {
+            match &entry.body {
+                Body::Rotate { .. } => return Err(ROTATE_LEAVES_OUT),
+                Body::Remove { .. } => return Err(REMOVE_LEAVES_OUT),
+                _ => {}
+            }
+        }
         match self.level {
-            Level::Two => self.check_and_apply_at_two(hash, entry, rotation_needed, before),
-            Level::Three => self.check_and_apply_at_three(hash, entry, rotation_needed, before),
+            Level::Two => self.check_and_apply_at_two(hash, entry, seen, before),
+            Level::Three => self.check_and_apply_at_three(hash, entry, seen, before),
+            // What level four changes is held above, for the whole log raised to it.
+            Level::Four => self.check_and_apply_at_three(hash, entry, seen, before),
         }
     }
 
@@ -997,7 +1079,7 @@ impl GroupState {
         &mut self,
         hash: EntryHash,
         entry: &Entry,
-        rotation_needed: Option<bool>,
+        seen: Option<Seen>,
         before: &dyn Fn(&EntryHash) -> bool,
     ) -> Result<Applied, &'static str> {
         if self.creator.is_some() {
@@ -1022,7 +1104,7 @@ impl GroupState {
                 _ => {}
             }
         }
-        self.check_and_apply_at_two(hash, entry, rotation_needed, before)
+        self.check_and_apply_at_two(hash, entry, seen, before)
     }
 
     /// Notes a [`NamedInvite`] as level two notes a [`Body::Invite`], with the managers it
@@ -1114,7 +1196,7 @@ impl GroupState {
         &mut self,
         hash: EntryHash,
         entry: &Entry,
-        rotation_needed: Option<bool>,
+        seen: Option<Seen>,
         before: &dyn Fn(&EntryHash) -> bool,
     ) -> Result<Applied, &'static str> {
         let author = entry.author;
@@ -1374,7 +1456,7 @@ impl GroupState {
                 // someone who is no longer a member hold the current secret, which is when
                 // every version rotates by itself. Judged by what its author saw, not by the
                 // common order: two members that rotate at once both apply.
-                if !self.is_manager(&author) && rotation_needed == Some(false) {
+                if !self.is_manager(&author) && seen.is_some_and(|s| !s.needed) {
                     return Err(ROTATE_NOT_NEEDED);
                 }
                 self.start_epoch(rotation, entry.time_ms)

@@ -305,6 +305,8 @@ fn bodies() -> Vec<(&'static str, u8, Body)> {
             },
         ),
         ("", 2, Body::Level { level: 2 }),
+        // The raise to level four, in the encoding every level reads.
+        ("-four", 2, Body::Level { level: 4 }),
         // An invite that names who lets its device in (level three): a kind level two does
         // not know, so read as one.
         (

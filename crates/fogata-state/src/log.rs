@@ -22,7 +22,9 @@ use crate::{
     },
     picture::{GroupPicture, is_group_picture},
     record::{MAX_RECORD_AHEAD_MS, RecordStamp},
-    state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, ROTATE_LEAVES_OUT, fair_name},
+    state::{
+        GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, ROTATE_LEAVES_OUT, Seen, fair_name,
+    },
 };
 
 /// Why an entry from a device the log never named is refused.
@@ -129,6 +131,12 @@ impl Work {
         }
         *self.refused.entry(entry.author).or_default() += 1;
     }
+}
+
+/// Whether `entry` raises its group to level four or a later one this version judges at (one
+/// it keeps: see [`GroupLog::held_to_four`]).
+pub(crate) fn raises_to_four(entry: &Entry) -> bool {
+    matches!(entry.body, Body::Level { level } if level >= Level::Four.number())
 }
 
 /// The level `entry` raises its group to, when it is a `Level` entry naming one above every
@@ -867,10 +875,10 @@ impl GroupLog {
             let state = self.settled_cache().state.clone();
             // That the entries left out change nothing is a rule of the level: one where
             // they do judges on the view before the entry, as below.
-            // Level three changes none of that: the entries left out still change no member,
-            // and its invites are part of their runs.
+            // Levels three and four change none of that: the entries left out still change
+            // no member, and the invites of level three are part of their runs.
             match state.level {
-                Level::Two | Level::Three => {
+                Level::Two | Level::Three | Level::Four => {
                     return Some(self.judge_on(entry, &state, &self.full().budget));
                 }
             }
@@ -895,6 +903,7 @@ impl GroupLog {
         match view.level {
             Level::Two => self.judge_at_two(entry, view, budget),
             Level::Three => self.judge_at_three(entry, view, budget),
+            Level::Four => self.judge_at_four(entry, view, budget),
         }
     }
 
@@ -918,9 +927,23 @@ impl GroupLog {
         }
         self.judge_at_two(entry, view, budget)?;
         match &entry.body {
-            Body::Rotate { rotation } if !view.rotation_for_all(rotation) => Err(ROTATE_LEAVES_OUT),
+            Body::Rotate { rotation } if !view.rotation_for_all(rotation, None) => {
+                Err(ROTATE_LEAVES_OUT)
+            }
             _ => Ok(()),
         }
+    }
+
+    /// [`Self::judge_on`] as [`Level::Four`] judges it: as level three, and a `Remove` whose
+    /// new epoch leaves out a member its author saw is refused too, by applying it on that
+    /// view held to it ([`Self::seen_to_keep`]).
+    fn judge_at_four(
+        &self,
+        entry: &Entry,
+        view: &GroupState,
+        budget: &crate::budget::Budget,
+    ) -> Result<(), &'static str> {
+        self.judge_at_three(entry, view, budget)
     }
 
     /// [`Self::judge_on`] as [`Level::Two`] judges it.
@@ -965,19 +988,14 @@ impl GroupLog {
                 self.commit_allowed_in(entry, &view)
             }
             Body::Remove { member, rotation } => {
-                view.allows(entry, None, &before)?;
+                view.allows(entry, self.seen_to_keep(entry, view), &before)?;
                 if view.rotation_for_members(rotation, member) {
                     Ok(())
                 } else {
                     Err("a removal's new epoch is not for the members left")
                 }
             }
-            _ => {
-                let needed = view
-                    .rotation_to_judge(entry)
-                    .then(|| !view.leaked_as_judged().is_empty());
-                view.allows(entry, needed, &before)
-            }
+            _ => view.allows(entry, self.seen_to_keep(entry, view), &before),
         }
     }
 
@@ -1391,35 +1409,103 @@ impl GroupLog {
         (&settled.state, &settled.outranked)
     }
 
-    /// Whether the author of `Rotate` entry `hash` had a reason to rotate in the log as it
-    /// was when it wrote the entry (everything before it): it managed the group, or a device that
-    /// is no longer a member held the current secret. Worked out once per entry.
-    pub(crate) fn rotation_needed(&self, hash: &EntryHash) -> bool {
-        let lock = |judged: &Mutex<BTreeMap<EntryHash, bool>>| {
+    /// What the author of `Rotate` or `Remove` entry `hash` saw in the log as it was when it
+    /// wrote the entry (everything before it, see [`Seen`]): whether it had a reason to
+    /// rotate (it managed the group, or a device that is no longer a member held the
+    /// current secret), and whether its new epoch goes to every member it saw. Worked out
+    /// once per entry, and kept with what was judged of the log ([`Self::verdicts`]).
+    pub(crate) fn rotation_needed(&self, hash: &EntryHash) -> Seen {
+        let lock = |judged: &Mutex<BTreeMap<EntryHash, Seen>>| {
             judged
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .get(hash)
                 .copied()
         };
-        if let Some(needed) = lock(&self.cache.judged) {
-            return needed;
+        if let Some(seen) = lock(&self.cache.judged) {
+            return seen;
         }
         self.rotation_needed_on(hash, &self.state_before(hash))
     }
 
-    /// [`Self::rotation_needed`] with `view` the group as the entry saw it, unless it was
-    /// judged already.
-    pub(crate) fn rotation_needed_on(&self, hash: &EntryHash, view: &GroupState) -> bool {
+    /// What judging whether `entry` may be kept needs of what its author saw, `view` being
+    /// the group it saw ([`Seen`]): for a `Rotate` of a member that does not manage there,
+    /// and, where its author saw the group at level four, for a `Rotate` or a `Remove` held
+    /// to it. What its author saw is noted for where it applies either way.
+    fn seen_to_keep(&self, entry: &Entry, view: &GroupState) -> Option<Seen> {
+        let seen = self.note_seen(entry, view)?;
+        let bound = view.level >= Level::Four;
+        (bound || view.rotation_to_judge(entry)).then_some(Seen { bound, ..seen })
+    }
+
+    /// What applying `entry` (`hash`) on `state` needs of what its author saw ([`Seen`]): for
+    /// a `Rotate` of a member that does not manage there, and for a `Rotate` or a `Remove`
+    /// in `held`, those a raise to level four among the entries applied did not see
+    /// ([`Self::held_to_four`]). Worked out once per entry.
+    pub(crate) fn seen_to_apply(
+        &self,
+        state: &GroupState,
+        hash: &EntryHash,
+        entry: &Entry,
+        held: &BTreeSet<EntryHash>,
+    ) -> Option<Seen> {
+        let bound = held.contains(hash);
+        (bound || state.rotation_to_judge(entry)).then(|| Seen {
+            bound,
+            ..self.rotation_needed(hash)
+        })
+    }
+
+    /// The `Rotate` and `Remove` entries of `hashes` (entries of the log, with every entry
+    /// before each) that a raise to level four or a later level among them is not signed on,
+    /// directly or not: those its author did not see, written apart from it or after it.
+    /// Level four holds them to every member their authors saw wherever they go in the
+    /// order, before the raise too (see [`Level::Four`]). Which entries a raise is signed on
+    /// is fixed by its hash, so every copy with the same entries holds the same.
+    pub(crate) fn held_to_four(&self, hashes: &[EntryHash]) -> BTreeSet<EntryHash> {
+        let mut held = BTreeSet::new();
+        for raise in hashes.iter().filter(|h| raises_to_four(&self.entries[*h])) {
+            let seen = self.ancestors(raise);
+            held.extend(hashes.iter().filter(|h| {
+                matches!(
+                    self.entries[*h].body,
+                    Body::Rotate { .. } | Body::Remove { .. }
+                ) && !seen.contains(*h)
+            }));
+        }
+        held
+    }
+
+    /// For a `Rotate` or a `Remove`, what its author saw, `view` being the group it saw
+    /// (what it is judged on): kept for where the entry applies ([`Self::rotation_needed`]),
+    /// which then works no group out for it. `None` for any other entry.
+    fn note_seen(&self, entry: &Entry, view: &GroupState) -> Option<Seen> {
+        if !matches!(entry.body, Body::Rotate { .. } | Body::Remove { .. }) {
+            return None;
+        }
         let mut judged = self
             .cache
             .judged
             .lock()
             .unwrap_or_else(PoisonError::into_inner);
-        let author = self.entries[hash].author;
+        Some(
+            *judged
+                .entry(entry.hash())
+                .or_insert_with(|| view.seen_by(entry)),
+        )
+    }
+
+    /// [`Self::rotation_needed`] with `view` the group as the entry saw it, unless it was
+    /// judged already.
+    pub(crate) fn rotation_needed_on(&self, hash: &EntryHash, view: &GroupState) -> Seen {
+        let mut judged = self
+            .cache
+            .judged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         *judged
             .entry(*hash)
-            .or_insert_with(|| view.is_manager(&author) || !view.leaked_as_judged().is_empty())
+            .or_insert_with(|| view.seen_by(&self.entries[hash]))
     }
 
     /// The group as entry `hash` saw it: the state of the log made of everything before it
@@ -1799,17 +1885,34 @@ impl GroupLog {
     }
 
     /// Removes a device below this one on the ladder and starts a new epoch for everyone
-    /// else.
+    /// else: every member of the group the entry is signed on but `member`, as
+    /// [`Self::rotate`] gives its key, which is what applies from level four (a removal's
+    /// epoch is sealed to members only at every level).
     pub fn remove(
         &mut self,
         identity: &DeviceIdentity,
         member: DevicePublicKey,
         now_ms: u64,
     ) -> Result<Entry, StateError> {
-        let state = self.state();
-        let remaining = state.members.keys().filter(|k| **k != member).copied();
+        let parents = self.heads();
+        let remaining: Vec<DevicePublicKey> = self
+            .members_seen_on(&parents)
+            .into_iter()
+            .filter(|k| *k != member)
+            .collect();
         let (rotation, _) = Rotation::new(&self.group_id, remaining)?;
-        self.append(identity, Body::Remove { member, rotation }, now_ms)
+        self.append_on(identity, parents, Body::Remove { member, rotation }, now_ms)
+    }
+
+    /// The members of the group as an entry signed on `parents`, the heads, sees it: the
+    /// group as the log has it, unless there are more heads than an entry names.
+    fn members_seen_on(&self, parents: &[EntryHash]) -> Vec<DevicePublicKey> {
+        if self.heads_cache().len() > parents.len() {
+            let seen = self.state_of(self.ancestors_of(parents).into_iter().collect());
+            seen.members.keys().copied().collect()
+        } else {
+            self.state().members.keys().copied().collect()
+        }
     }
 
     /// The level the group is judged at after everything here (see [`Level`]).
@@ -1839,13 +1942,11 @@ impl GroupLog {
     /// than an entry names.
     pub fn rotate(&mut self, identity: &DeviceIdentity, now_ms: u64) -> Result<Entry, StateError> {
         let parents = self.heads();
-        let members: Vec<DevicePublicKey> =
-            if self.level() >= Level::Three && self.heads_cache().len() > parents.len() {
-                let seen = self.state_of(self.ancestors_of(&parents).into_iter().collect());
-                seen.members.keys().copied().collect()
-            } else {
-                self.state().members.keys().copied().collect()
-            };
+        let members = if self.level() >= Level::Three {
+            self.members_seen_on(&parents)
+        } else {
+            self.state().members.keys().copied().collect()
+        };
         let (rotation, _) = Rotation::new(&self.group_id, members)?;
         self.append_on(identity, parents, Body::Rotate { rotation }, now_ms)
     }
@@ -6234,6 +6335,7 @@ mod tests {
             .map(|(h, _)| *h)
             .collect();
         let over = &log.full().budget.over;
+        let held = log.held_to_four(&log.ordered());
         let mut state = GroupState::default();
         for hash in log.ordered() {
             let entry = &log.entries[&hash];
@@ -6249,9 +6351,7 @@ mod tests {
                 state.refuse_kept(hash, entry, OUTRANKED);
                 continue;
             }
-            let needed = state
-                .rotation_to_judge(entry)
-                .then(|| log.rotation_needed(&hash));
+            let needed = log.seen_to_apply(&state, &hash, entry, &held);
             let place = &log.full().order.place;
             let seen = |h: &EntryHash| log.is_before(place, &entry.parents, h);
             state.apply(hash, entry, needed, &seen);

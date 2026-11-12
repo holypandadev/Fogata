@@ -1628,7 +1628,7 @@ kept, never part of a group's log or a room's events, and nothing forwards it.
 ### 3.15 Capability levels
 
 Each version of Fogata's protocols has a level: every version before levels is 1, the one
-that brought them 2, this one 3 (level three of the group log, 5.1). A device lists `/fogata/caps/<level>` among its protocols (identify); a stream opened on
+that brought them 2, the one of level three of the group log 3, this one 4 (level four of the group log, 5.1). A device lists `/fogata/caps/<level>` among its protocols (identify); a stream opened on
 it is closed at once, so nothing new goes on the wire and earlier versions only see one more
 protocol name. A peer that lists none is level 1; the highest level named counts. Like every
 Fogata protocol, it is listed only to members and friends: a peer that dialled this device
@@ -2673,51 +2673,76 @@ that has it sends it to the members that lack it (`welcome_lacking`). Level four
 
 **Level four** (capability level 4) changes two rules, and nothing else:
 
-- a `Rotate` that applies at level four, whoever wrote it and whatever its author saw, gives
-  the new key to every member of the group as its author saw it (but keys nothing can be
-  sealed to); one that leaves some out does not apply;
-- a `Remove` that applies at level four gives its new epoch to every member its author saw
-  but the one removed (the same keys aside); one that leaves some out does not apply: the
-  member is not removed by it, and its epoch does not start.
+- a `Rotate` gives the new key to every member of the group as its author saw it (but keys
+  nothing can be sealed to);
+- a `Remove` gives its new epoch to every member its author saw but the one removed (the
+  same keys aside).
 
-*What is judged, and on which view.* The rule is judged once per entry, on the group its
-author saw: the state of the log made of the entry's ancestors (its parents, theirs and so
-on), which its hash fixes (`GroupLog::state_before`). That is the view a `Rotate` of a
-member that does not manage is already judged on for its reason to rotate (level two), and
-the answer is kept with that one, by the entry's hash (`Seen`: whether its author had a
-reason to rotate, whether its rotation reaches every member it saw). Where it is checked:
+One that leaves some out is not kept where its author saw the group at level four; and, in a
+log that holds a raise to four, one that the raise did not see does not apply (a `Remove`
+then removes nobody, and its epoch does not start), wherever it goes in the order.
+
+*What is judged, and on which view.* Whether the new epoch reaches every member is judged
+once per entry, on the group its author saw: the state of the log made of the entry's
+ancestors (its parents, theirs and so on), which its hash fixes (`GroupLog::state_before`).
+That is the view a `Rotate` of a member that does not manage is already judged on for its
+reason to rotate (level two), and the answer is kept with that one, by the entry's hash
+(`Seen`), and with what was judged of the log (`Verdicts`), so a log read back at a start
+does not work the views out again. Where it holds:
 
 - *kept*: an entry is judged, as every entry, on its author's view at that view's level; at
-  level four a `Remove` that leaves out a member it saw is refused (a `Rotate` already is
+  four a `Remove` that leaves out a member its author saw is refused (a `Rotate` already is
   from level three), so neither is kept nor passed on, and what is signed on it waits;
-- *applied*: an entry placed in the common order where the group is at level four is held
-  to the rule on its author's view, whatever that view's level. This is what level three
-  lacks: a `Rotate` or `Remove` signed on entries from before the raise was judged at the
-  level its author saw, and kept, and now does not apply where the group is at four.
+- *applied*: the `Rotate` and `Remove` entries that a raise to four kept in the log is not
+  signed on, directly or not (`GroupLog::held_to_four`: those its author did not see,
+  written apart from it or after it), are held to the rule where they apply, whatever level
+  the group is at there. Holding only those placed after the raise would not do: an entry
+  signed on entries from before the raise is placed among them, and goes before the raise
+  when its author came in after the authors of the entries it is placed among (5.1's
+  order), so a member could still sign a rotation for a few on old entries at any time and
+  have it apply by the rules before. Entries the raise is signed on, the raiser saw, as
+  history kept and applied by the rules of their time, are not judged again.
 
-*Why every copy agrees.* What applies at level four depends on two things only: where the
-entry is in the common order (after the `Level` entry that raised the group to four, which
-applied), which every copy with the same entries works out alike; and the entry's view,
-which depends on nothing but its ancestors. Neither depends on the order the entries came in,
-nor on what else a copy has: two copies given the same entries in any order keep and apply
-the same (a property test checks it, with members writing rotations and removals for a few
-on parents from before and after the raise, sent in different orders). Where the view is
-the group as the log has it (an entry signed on every head) it is not worked out again; else
-it is worked out once per entry and kept, and what was judged is kept with the log
-(`Verdicts`), so a log read back at a start does not work views out again.
+The raise holds them whether or not it applies (it may lose to a loss of its author written
+apart from it): that a manager raised the group on a view where it managed is enough, and
+it keeps the rule from depending on what it changes (a removal of the raiser that the rule
+refuses would otherwise decide whether the rule holds). It only ever refuses entries that
+leave out members their authors saw, which honest devices never write: `rotate` and
+`remove` give the key to every member of the group they are signed on.
+
+*Why every copy agrees.* What applies depends on three things only: the entry's view, fixed
+by its ancestors; the raises to four the log keeps, which every copy with the same entries
+keeps alike (what is kept depends on nothing but an entry and those before it); and which
+entries each raise is signed on, fixed by its hash. None depends on the order the entries came
+in, nor on what else a copy has: two copies given the same entries in any order keep and
+apply the same. A property test checks it with random histories raised to three and then to
+four, members writing rotations and removals for a few on entries from before each raise and
+after them, given to fresh copies as written, the other way round and shuffled, one at a time
+or all at once; and checks that every rotation or removal applying after the raise reaches
+every member its author saw, that some kept were held back, and that the group worked out
+entry by entry is the one worked out again from nothing. The probes of level three's gap
+(a member's rotation for itself on entries from before the raise, with and without a
+manager's rotation between the leave and the raise) are kept as checks of level four. A raise
+signed on every entry goes on top of the group worked out so far (every entry before it is
+one it saw); one signed on fewer has the group worked out again.
 
 *What an older copy sees.* A copy of level three refuses the `Level` entry naming four, and
 waits on everything signed after it, as for any level it does not judge at: the group stays
-there as it was. Copies up to 0.1.0-beta.9 say nothing of it; this version and later ones
-tell their person that the group needs a newer Fogata (`GroupLog::level_ahead`, above). A
-release that brings level four therefore sets its `min_build` (5f) to its own build, so that
-every older copy is told it must update, from its updates, whatever group it is in.
+there as it was. Entries written apart from the raise and not signed on it it applies by the
+rules of three, where copies of four may hold some back, as copies of two and three already
+judge apart the entries written apart from a raise to three; it is behind either way, and
+told so. Copies up to 0.1.0-beta.9 say nothing of it; this version and later ones tell their
+person that the group needs a newer Fogata (`GroupLog::level_ahead`, above). A release that
+brings level four therefore sets its `min_build` (5f) to its own build, so that every older
+copy is told it must update, from its updates, whatever group it is in. What level three
+kept and applied is pinned as level two's is (`level-three.bin` and `level-three.txt`, saved
+by the version that brought level three and judged as a copy of level three), and this
+version judges that corpus alike until a raise to four in it changes it.
 
 *How a group gets there.* As level three did: a manager's device raises its group by itself
 once every other member was seen at capability level four (`raise_level_when_all_judge`), or,
 once the group has waited a week, its manager raises it anyway, naming who will have to
-update (above). A group created by this version starts at the level the creator raises it to
-by itself, as before.
+update (above).
 
 *The managers' repair.* A member can still lack the current key at level four: one let in
 (added or joined) while a rotation that did not see it was written, one whose box opens to
@@ -2725,9 +2750,10 @@ nothing (a box is checked for being there and of the right length, not for what 
 to), a key nothing can be sealed to. `welcome_lacking` and `mend_key` stay for those, and are
 needed less: a rotation that leaves out a member its author saw no longer applies, so it
 leaves nobody without a key, and the epoch before it stays current until a rotation that
-applies. The device whose rotation did not apply (an honest one only does that with stale
-parents, signing on a view that left a member out) is told nothing; at its next heartbeat it
-sees the epoch it wrote did not start, and rotates again if it still has a reason to.
+applies. The device whose rotation did not apply (an honest one only writes such a rotation
+when it signs on a view that leaves out members it did not know of, which the rule does not
+count against it) is told nothing; while someone gone still holds the key, it rotates again
+at its next heartbeat, on what it has then.
 
 The order of the entries, the shortcut that judges an entry signed on every head on the
 group as the log has it, and the limits judging reads (members, rooms, names, picture,

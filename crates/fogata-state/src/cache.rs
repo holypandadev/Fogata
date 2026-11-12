@@ -16,7 +16,7 @@ use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupSecret};
 use crate::{
     budget::{Budget, Entries, PAST_RUN},
     entry::{Body, EntryHash, NamedInvite, secret_context},
-    log::GroupLog,
+    log::{GroupLog, raises_to_four},
     state::{GroupState, Level, OUTRANKED, RuleStand},
 };
 
@@ -121,10 +121,10 @@ pub(crate) struct Cache {
     pub(crate) heads: OnceLock<Vec<EntryHash>>,
     /// The entries of the common order that are not spare (see [`GroupLog::spare`]).
     needed: OnceLock<Arc<Needed>>,
-    /// Whether each `Rotate` judged so far was needed in its author's view (see
+    /// What the author of each `Rotate` and `Remove` judged so far saw (see
     /// [`GroupLog::rotation_needed`]). That depends only on the entry and what came before
     /// it, which its hash fixes, so it is kept when the log changes, and shared with copies.
-    pub(crate) judged: Arc<Mutex<BTreeMap<EntryHash, bool>>>,
+    pub(crate) judged: Arc<Mutex<BTreeMap<EntryHash, crate::state::Seen>>>,
     /// The group as entries signed on each set of parents saw it, and the runs (see
     /// [`GroupLog::insert`]): they depend only on those parents, which their hashes fix.
     pub(crate) views: Arc<Mutex<HashMap<Vec<EntryHash>, Arc<View>>>>,
@@ -428,8 +428,11 @@ impl GroupLog {
         // Applied on top of the group as it settled, when it goes last and no loss before it
         // outranks it nor does it, if a loss, outrank any of them: then every round of the
         // losses comes out as before, with it applied last.
+        // A raise to level four goes on top only signed on every entry: otherwise entries
+        // before it that it did not see are held to it, whatever applied of them.
         if last
             && (on_top || self.outranks_nothing_new(&f.order, &hash))
+            && (on_top || !raises_to_four(entry))
             && let Some(mut settled) = settled.filter(|s| s.still)
         {
             let s = Arc::make_mut(&mut settled);
@@ -443,13 +446,21 @@ impl GroupLog {
             if budget.over.contains(&hash) {
                 state.refuse(hash, PAST_RUN);
             } else {
-                let needed = state.rotation_to_judge(entry).then(|| {
-                    if on_top {
+                // Placed last, it is before nothing: a raise to level four in the log did
+                // not see it (see `held_to_four`).
+                let bound = matches!(entry.body, Body::Rotate { .. } | Body::Remove { .. })
+                    && f.order
+                        .hashes
+                        .iter()
+                        .any(|h| raises_to_four(&self.entries[h]));
+                let needed = (bound || state.rotation_to_judge(entry)).then(|| {
+                    let seen = if on_top {
                         // The group as it saw it is the group now.
                         self.rotation_needed_on(&hash, state)
                     } else {
                         self.rotation_needed(&hash)
-                    }
+                    };
+                    crate::state::Seen { bound, ..seen }
                 });
                 let before = |h: &EntryHash| self.is_before(&f.order.place, &entry.parents, h);
                 state.apply(hash, entry, needed, &before);
@@ -634,7 +645,9 @@ impl GroupLog {
         let mut budget = Budget::new(self.run_room, level);
         let mut ready: BTreeSet<(Reverse<u64>, EntryHash)> = BTreeSet::new();
         let key = |hash: &EntryHash, budget: &Budget| match level {
-            Level::Two | Level::Three => budget.key(&self.entries[hash].author, *hash),
+            Level::Two | Level::Three | Level::Four => {
+                budget.key(&self.entries[hash].author, *hash)
+            }
         };
         ready.extend(ready_first.iter().map(|h| key(h, &budget)));
         for (i, hash) in before.iter().enumerate() {
@@ -702,7 +715,8 @@ impl GroupLog {
         let hashes = &order.hashes;
         let graph = OnceCell::new();
         let mut outranked = BTreeMap::new();
-        let mut state = self.apply_in_order(order, &outranked, over);
+        let held = self.held_to_four(hashes);
+        let mut state = self.apply_in_order(order, &outranked, over, &held);
         // Losses come from what applied, and what applies depends on what was refused: go on
         // until nothing changes. A loss is only ever signed by someone above, so that comes
         // within a round for each loss; past that, the last round stands, the same everywhere.
@@ -724,7 +738,7 @@ impl GroupLog {
                 break;
             }
             outranked = next;
-            state = self.apply_in_order(order, &outranked, over);
+            state = self.apply_in_order(order, &outranked, over, &held);
         }
         Settled {
             state: Arc::new(state),
@@ -738,6 +752,7 @@ impl GroupLog {
         order: &Order,
         outranked: &BTreeMap<EntryHash, EntryHash>,
         over: &Entries,
+        held: &BTreeSet<EntryHash>,
     ) -> GroupState {
         let mut state = GroupState::default();
         for hash in &order.hashes {
@@ -750,9 +765,7 @@ impl GroupLog {
             } else if outranked.contains_key(hash) {
                 state.refuse_kept(*hash, entry, OUTRANKED);
             } else {
-                let needed = state
-                    .rotation_to_judge(entry)
-                    .then(|| self.rotation_needed(hash));
+                let needed = self.seen_to_apply(&state, hash, entry, held);
                 let before = |h: &EntryHash| self.is_before(&order.place, &entry.parents, h);
                 state.apply(*hash, entry, needed, &before);
             }

@@ -5,7 +5,8 @@
 //! may bring a group there a few entries at a time. A device reads its logs back at every
 //! start; judging them again there would cost as much each time. So what it judged of a log
 //! is kept with it ([`Verdicts`]): which of the entries read were refused and which still wait
-//! for parents. Read back with the same entries, by a version that judges as the one that
+//! for parents, and what the authors of the rotations and removals among them saw (`Seen`),
+//! which judging them where they apply would otherwise work out again, a group for each. Read back with the same entries, by a version that judges as the one that
 //! wrote it, the others are taken as judged, and none is judged again. With any other entries
 //! (a log changed, cut short or written by another version), or another way of judging, the
 //! verdicts count for nothing and the entries are judged as they come.
@@ -13,7 +14,7 @@
 //! The verdicts say what is kept: whoever may write them may make this device keep entries
 //! their authors could not make. Their keeper seals them (see `fogata-core`'s store).
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use fogata_crypto::{
     GroupId,
@@ -22,7 +23,11 @@ use fogata_crypto::{
 use sha2::{Digest, Sha256};
 
 use super::{GroupLog, Taken, Work, level_ahead_of};
-use crate::{entry::Entry, entry::EntryHash, state::Level};
+use crate::{
+    entry::Entry,
+    entry::EntryHash,
+    state::{Level, Seen},
+};
 
 /// How judging goes, apart from the levels: raised whenever what any level keeps of the same
 /// entries changes, so that verdicts written before count for nothing.
@@ -30,7 +35,8 @@ const JUDGING: u32 = 1;
 
 /// What [`Verdicts`] start with, and their format.
 const MAGIC: &[u8; 8] = b"fgjudged";
-const FORMAT: u8 = 1;
+/// 2: with what the authors of rotations and removals saw.
+const FORMAT: u8 = 2;
 
 /// What a log judged of the entries it was read from or written with
 /// ([`GroupLog::verdicts`]), to read them back without judging them again
@@ -47,6 +53,9 @@ pub struct Verdicts {
     refused: BTreeSet<EntryHash>,
     /// Entries read that the log kept without judging them: their parents never came.
     waiting: BTreeSet<EntryHash>,
+    /// What the authors of the `Rotate` and `Remove` entries kept saw, of those it was
+    /// worked out for (see [`GroupLog::rotation_needed`]).
+    seen: BTreeMap<EntryHash, Seen>,
 }
 
 impl Verdicts {
@@ -63,6 +72,11 @@ impl Verdicts {
             for hash in set {
                 w.raw(hash);
             }
+        }
+        w.u32(self.seen.len() as u32);
+        for (hash, seen) in &self.seen {
+            w.raw(hash)
+                .u8(u8::from(seen.needed) | u8::from(seen.for_all) << 1);
         }
         w.into_bytes()
     }
@@ -82,6 +96,20 @@ impl Verdicts {
         };
         let refused = set()?;
         let waiting = set()?;
+        let mut seen = BTreeMap::new();
+        for _ in 0..r.count(33)? {
+            let hash = r.array()?;
+            let flags = r.u8()?;
+            if flags > 3 {
+                return Err(DecodeError);
+            }
+            let saw = Seen {
+                needed: flags & 1 != 0,
+                for_all: flags & 2 != 0,
+                bound: false,
+            };
+            seen.insert(hash, saw);
+        }
         r.finish()?;
         Ok(Self {
             level,
@@ -90,6 +118,7 @@ impl Verdicts {
             read,
             refused,
             waiting,
+            seen,
         })
     }
 
@@ -135,6 +164,15 @@ impl GroupLog {
                 .filter(|h| self.unjudged.contains(*h))
                 .copied()
                 .collect(),
+            seen: self
+                .cache
+                .judged
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .iter()
+                .filter(|(h, _)| read.contains(*h) && self.entries.contains_key(*h))
+                .map(|(h, s)| (*h, *s))
+                .collect(),
         }
     }
 
@@ -161,6 +199,11 @@ impl GroupLog {
             .filter(|h| !verdicts.refused.contains(*h) && !verdicts.waiting.contains(*h))
             .copied()
             .collect();
+        log.cache
+            .judged
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(verdicts.seen.iter().map(|(h, s)| (*h, *s)));
         // A `Level` entry above this version's levels is judged again, though it was
         // refused: refused again, it is what tells the person to update
         // ([`GroupLog::level_ahead`]). One entry, judged once.

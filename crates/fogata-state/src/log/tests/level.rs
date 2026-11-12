@@ -1067,9 +1067,7 @@ fn raise_written(h: &mut Hostile, level: Level) -> Option<Entry> {
     let time = h.world.time;
     let state = h.world.logs[0].state();
     let manager = (h.world.devices.iter()).find(|d| state.is_manager(&d.key()))?;
-    let entry = h.world.logs[0]
-        .raise_level(&manager.id, level, time)
-        .ok()?;
+    let entry = h.world.logs[0].raise_level(&manager.id, level, time).ok()?;
     for log in &mut h.world.logs {
         let _ = log.insert(entry.clone());
     }
@@ -1098,13 +1096,25 @@ fn for_a_few_written(h: &mut Hostile, stale: &[EntryHash]) {
         for parents in [heads.clone(), stale.to_vec()] {
             written.push((
                 i,
-                Entry::sign(&d.id, group, parents.clone(), time, Body::Rotate { rotation: alone() }),
+                Entry::sign(
+                    &d.id,
+                    group,
+                    parents.clone(),
+                    time,
+                    Body::Rotate { rotation: alone() },
+                ),
             ));
             if let Some(member) = below {
                 let rotation = alone();
                 written.push((
                     i,
-                    Entry::sign(&d.id, group, parents, time, Body::Remove { member, rotation }),
+                    Entry::sign(
+                        &d.id,
+                        group,
+                        parents,
+                        time,
+                        Body::Remove { member, rotation },
+                    ),
                 ));
             }
         }
@@ -1158,8 +1168,13 @@ fn level_three_world(seed: u64) -> World {
             for d in &h.world.devices {
                 if state.is_member(&d.key()) {
                     let level = Body::Level { level: next };
-                    h.written
-                        .push(Entry::sign(&d.id, group, heads.clone(), h.world.time, level));
+                    h.written.push(Entry::sign(
+                        &d.id,
+                        group,
+                        heads.clone(),
+                        h.world.time,
+                        level,
+                    ));
                 }
             }
         }
@@ -1232,7 +1247,11 @@ fn the_judgment_of_level_three_never_changes() {
 #[ignore]
 fn write_the_level_three_corpus() {
     let dir = std::env::var_os("FOGATA_LEVEL_THREE_CORPUS").expect("FOGATA_LEVEL_THREE_CORPUS");
-    assert_eq!(Level::CURRENT, Level::Three, "made by the version of level three only");
+    assert_eq!(
+        Level::CURRENT,
+        Level::Three,
+        "made by the version of level three only"
+    );
     if !CORPUS_THREE.is_empty() {
         let worlds = corpus_of(CORPUS_THREE);
         assert_eq!(as_level_three(|| judged_with(&worlds, false)), JUDGED_THREE);
@@ -1679,4 +1698,368 @@ fn an_updated_copy_reads_the_raise_its_older_version_stored_and_is_told_nothing(
     assert_eq!(new.level_ahead(), None);
     assert_eq!(new.level(), Level::Three);
     assert_eq!(new.state().name, "later");
+}
+
+/// Ana's group with Bea managing too and Carlos a member, and Dani, who left holding the
+/// current key (so a member may rotate); `then` is written on top, and the heads before it
+/// are returned with the log.
+fn dani_left(then: impl FnOnce(&mut GroupLog, &Device)) -> (GroupLog, Vec<EntryHash>, [Device; 3]) {
+    let dani = Device::new();
+    let (mut log, ana, bea, carlos) = two_managers();
+    log.add(&ana.id, dani.key(), "dani", 5).unwrap();
+    log.append(&dani.id, Body::Leave, 6).unwrap();
+    let stale = log.heads();
+    then(&mut log, &ana);
+    (log, stale, [ana, bea, carlos])
+}
+
+/// A rotation by `by` on `parents` that gives the new key to `by` alone.
+fn rotation_alone(log: &GroupLog, by: &Device, parents: Vec<EntryHash>, time: u64) -> Entry {
+    let (rotation, _) = Rotation::new(&log.group_id(), [by.key()]).unwrap();
+    Entry::sign(
+        &by.id,
+        log.group_id(),
+        parents,
+        time,
+        Body::Rotate { rotation },
+    )
+}
+
+/// The probe of level three's gap, kept as a check of level four: a member signs a
+/// rotation for itself alone on entries from before the group went up (it saw someone gone
+/// hold the key, at level two). Level three keeps it, judged at the level its author saw,
+/// and applies it: the others are left without the current key. Level four keeps it too,
+/// as every copy does, but it does not apply where the group is at four.
+#[test]
+fn stale_parent_rotate_skips_level_three_rule() {
+    for level in [Level::Three, Level::Four] {
+        let (mut log, stale, [ana, _bea, carlos]) = dani_left(|log, ana| {
+            log.raise_level(&ana.id, level, 8).unwrap();
+        });
+        let rotate = rotation_alone(&log, &carlos, stale, 9);
+        assert_eq!(log.insert(rotate.clone()), Ok(true), "{level:?}");
+        let state = log.state();
+        if level == Level::Three {
+            assert!(state.applied.contains(&rotate.hash()));
+            assert!(log.current_keys(&ana.id).is_none());
+        } else {
+            assert!(!state.applied.contains(&rotate.hash()));
+            assert!(
+                state
+                    .rejected
+                    .contains(&(rotate.hash(), crate::state::ROTATE_LEAVES_OUT))
+            );
+            assert!(log.current_keys(&ana.id).is_some());
+            assert!(log.current_keys(&carlos.id).is_some());
+        }
+        // The same on what the group has now, where Dani still holds the key at level
+        // four: never kept, from level three.
+        if level == Level::Four {
+            let fresh = rotation_alone(&log, &carlos, log.heads(), 10);
+            assert_eq!(
+                log.insert(fresh),
+                Err(StateError::NotAllowed(crate::state::ROTATE_LEAVES_OUT))
+            );
+        }
+    }
+}
+
+/// [`stale_parent_rotate_skips_level_three_rule`] where a manager rotated for everyone
+/// between the leave and the raise: level three applies the stale rotation all the same
+/// (it is not the newest epoch, so the members keep the manager's); level four does not
+/// apply it at all.
+#[test]
+fn stale_parent_rotate_skips_level_three_rule_after_honest_rotation() {
+    for level in [Level::Three, Level::Four] {
+        let (mut log, stale, [ana, bea, carlos]) = dani_left(|log, ana| {
+            log.rotate(&ana.id, 7).unwrap();
+            log.raise_level(&ana.id, level, 8).unwrap();
+        });
+        let honest = log.state().current_epoch().unwrap().id;
+        let rotate = rotation_alone(&log, &carlos, stale, 9);
+        assert_eq!(log.insert(rotate.clone()), Ok(true), "{level:?}");
+        let state = log.state();
+        assert_eq!(
+            state.applied.contains(&rotate.hash()),
+            level == Level::Three,
+            "{level:?}"
+        );
+        for device in [&ana, &bea, &carlos] {
+            assert!(log.current_keys(&device.id).is_some(), "{level:?}");
+        }
+        if level == Level::Four {
+            assert_eq!(state.current_epoch().unwrap().id, honest);
+            assert_eq!(state.epochs.len(), log.state().epochs.len());
+        }
+    }
+}
+
+/// A removal whose new epoch reaches its author alone: no level checks that before four,
+/// so level three keeps and applies it, and the others lack the key; at level four one its
+/// author wrote seeing the group at four is not kept, and one it wrote on entries from
+/// before the raise is kept but does not apply (the member is not removed by it). An honest
+/// removal applies.
+#[test]
+fn at_level_four_a_removal_gives_the_new_key_to_every_member_left() {
+    let removal_alone = |log: &GroupLog, by: &Device, member: &Device, parents, time| {
+        let (rotation, _) = Rotation::new(&log.group_id(), [by.key()]).unwrap();
+        let body = Body::Remove {
+            member: member.key(),
+            rotation,
+        };
+        Entry::sign(&by.id, log.group_id(), parents, time, body)
+    };
+    for level in [Level::Three, Level::Four] {
+        let (mut log, stale, [ana, bea, carlos]) = dani_left(|log, ana| {
+            log.raise_level(&ana.id, Level::Three, 7).unwrap();
+        });
+        let stale = if level == Level::Four {
+            let stale = log.heads();
+            log.raise_level(&ana.id, Level::Four, 8).unwrap();
+            stale
+        } else {
+            stale
+        };
+        let remove = removal_alone(&log, &bea, &carlos, stale, 9);
+        assert_eq!(log.insert(remove.clone()), Ok(true), "{level:?}");
+        let state = log.state();
+        if level == Level::Three {
+            assert!(!state.is_member(&carlos.key()));
+            assert!(log.current_keys(&ana.id).is_none());
+        } else {
+            assert!(state.is_member(&carlos.key()));
+            assert!(
+                state
+                    .rejected
+                    .contains(&(remove.hash(), crate::state::REMOVE_LEAVES_OUT))
+            );
+            assert!(log.current_keys(&ana.id).is_some());
+            let now = removal_alone(&log, &bea, &carlos, log.heads(), 10);
+            assert_eq!(
+                log.insert(now),
+                Err(StateError::NotAllowed(crate::state::REMOVE_LEAVES_OUT))
+            );
+            log.remove(&bea.id, carlos.key(), 11).unwrap();
+            assert!(!log.state().is_member(&carlos.key()));
+            for device in [&ana, &bea] {
+                assert!(log.current_keys(&device.id).is_some());
+            }
+        }
+    }
+}
+
+/// A world of random histories raised to level three first and to level four midway, with
+/// rotations and removals for a few on entries from before each raise and after them.
+fn level_four_world(seed: u64) -> Hostile {
+    let mut h = Hostile::new(seed);
+    let noted = |h: &mut Hostile, step: &dyn Fn(&mut LadderWorld)| {
+        let had: Vec<BTreeSet<EntryHash>> = h
+            .world
+            .logs
+            .iter()
+            .map(|l| l.hashes().copied().collect())
+            .collect();
+        step(&mut h.world);
+        for (log, had) in h.world.logs.iter().zip(&had) {
+            for entry in log.entries() {
+                if !had.contains(&entry.hash()) && !h.written.contains(entry) {
+                    h.written.push(entry.clone());
+                }
+            }
+        }
+    };
+    let mut stale = vec![h.world.logs[0].heads()];
+    raise_written(&mut h, Level::Three).expect("a manager on copy 0");
+    for i in 0..120 {
+        match i % 6 {
+            0 | 3 => h.hostile_step(1 + i % 2),
+            4 => noted(&mut h, &LadderWorld::race_step),
+            _ => h.honest_step(),
+        }
+        if i == 40 {
+            stale.push(h.world.logs[0].heads());
+            if raise_written(&mut h, Level::Four).is_none() {
+                // Nobody manages on copy 0 any more: the world stays at three.
+                stale.pop();
+            }
+        }
+        if i % 20 == 19 {
+            for parents in stale.clone() {
+                for_a_few_written(&mut h, &parents);
+            }
+        }
+    }
+    for (to, entry) in std::mem::take(&mut h.late) {
+        let _ = h.world.logs[to].insert(entry);
+    }
+    h
+}
+
+/// Level four judges the same on every copy whatever order its entries come in: copies
+/// that took a world's entries in their own order, and fresh copies given every entry ever
+/// written as written, the other way round and shuffled, one at a time or all at once, keep
+/// the same entries, order them alike and apply the same; worked out again from nothing,
+/// or entry by entry as they came, the group is the same. Every rotation and removal that
+/// applies at level four reaches every member its author saw, and some that do not were
+/// kept (signed on entries from before the raise) and do not apply.
+/// `FOGATA_LADDER_SEEDS` sets how many histories run (4 by default).
+#[test]
+fn at_level_four_every_copy_applies_the_same_whatever_came_first() {
+    let seeds = std::env::var("FOGATA_LADDER_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4u64);
+    let (mut at_four, mut held_back) = (0, 0);
+    for seed in 1..=seeds {
+        let mut h = level_four_world(2 * seed);
+        let n = h.world.logs.len();
+        for i in 0..n {
+            for j in i + 1..n {
+                let (a, b) = (h.world.logs[i].clone(), h.world.logs[j].clone());
+                h.world.logs[i].insert_all(b.entries().cloned());
+                h.world.logs[j].insert_all(a.entries().cloned());
+            }
+        }
+        h.world.sync_all();
+        let mut shuffled = h.written.clone();
+        for k in 0..shuffled.len() {
+            let at = h.world.below(shuffled.len());
+            shuffled.swap(k, at);
+        }
+        let log = &h.world.logs[0];
+        let kept: BTreeSet<EntryHash> = log.hashes().copied().collect();
+        let state = log.state();
+        if state.level < Level::Four {
+            continue;
+        }
+        at_four += 1;
+        for (i, other) in h.world.logs.iter().enumerate() {
+            let theirs: BTreeSet<EntryHash> = other.hashes().copied().collect();
+            assert_eq!(theirs, kept, "seed {seed}: device {i} keeps others");
+            assert_eq!(other.ordered(), log.ordered(), "seed {seed}: device {i}");
+            assert_eq!(other.state().applied, state.applied, "seed {seed}: {i}");
+        }
+        let orders = [
+            h.written.clone(),
+            h.written.iter().rev().cloned().collect(),
+            shuffled,
+        ];
+        for (o, order) in orders.into_iter().enumerate() {
+            let mut one_by_one = h.world.empty_log();
+            loop {
+                let mut more = false;
+                for entry in &order {
+                    more |= one_by_one.insert(entry.clone()).unwrap_or(false);
+                }
+                if !more {
+                    break;
+                }
+            }
+            let mut at_once = h.world.empty_log();
+            at_once.insert_all(order);
+            for again in [one_by_one, at_once] {
+                let theirs: BTreeSet<EntryHash> = again.hashes().copied().collect();
+                assert!(theirs == kept, "seed {seed}: order {o} keeps other entries");
+                assert_eq!(again.ordered(), log.ordered(), "seed {seed}: {o}");
+                assert_eq!(again.state().applied, state.applied, "seed {seed}: {o}");
+            }
+        }
+        // Where it applies at level four, a rotation or removal reaches every member its
+        // author saw; those that do not and were kept are held back there.
+        let fresh = {
+            let mut fresh = log.clone();
+            *fresh.cache = Cache::default();
+            fresh
+        };
+        let raised = (state.applied.iter())
+            .position(|h| matches!(log.entries[h].body, Body::Level { level: 4 }))
+            .unwrap();
+        for hash in &state.applied[raised..] {
+            assert!(!leaves_out_its_view(&fresh, hash), "seed {seed}");
+        }
+        held_back += (state.rejected.iter())
+            .filter(|(h, why)| {
+                [
+                    crate::state::ROTATE_LEAVES_OUT,
+                    crate::state::REMOVE_LEAVES_OUT,
+                ]
+                .contains(why)
+                    && leaves_out_its_view(&fresh, h)
+            })
+            .count();
+        check_every_step(log, &state);
+        same_as_worked_out_again(log, &h.world.devices[0].id, &format!("seed {seed}"));
+    }
+    assert!(at_four > 0, "no world went up to level four");
+    assert!(held_back > 0, "no rotation nor removal was held back");
+}
+
+/// The corpus of level three, judged by this version, which judges at level four too: the
+/// same as level three judged it, but for what a raise to four in it changes. Entries that
+/// follow no raise to four are kept alike, and what applies is the same until either a raise
+/// to four applies or a rotation or removal that a raise to four did not see does not. (Its
+/// raises to four, which copies of level three refused and nobody signed on, are each
+/// outranked by a later loss of their author: kept, they apply nowhere, and still hold to
+/// level four what they did not see.)
+#[test]
+fn the_corpus_of_level_three_is_judged_alike_until_a_raise_to_four() {
+    let mut held_back = 0;
+    for (w, world) in corpus_of(CORPUS_THREE).iter().enumerate() {
+        let corpus = world.with_variants();
+        let order: Vec<&Entry> = corpus.iter().collect();
+        let then = as_level_three(|| given(&corpus, &order, world.run));
+        let now = given(&corpus, &order, world.run);
+        let fours: Vec<EntryHash> = corpus
+            .iter()
+            .filter(|e| matches!(e.body, Body::Level { level: 4 }))
+            .map(Entry::hash)
+            .collect();
+        // The raises to four and every entry of the corpus after one of them.
+        let mut after_four: BTreeSet<EntryHash> = fours.iter().copied().collect();
+        loop {
+            let more: Vec<EntryHash> = corpus
+                .iter()
+                .filter(|e| e.parents.iter().any(|p| after_four.contains(p)))
+                .map(Entry::hash)
+                .filter(|h| !after_four.contains(h))
+                .collect();
+            if more.is_empty() {
+                break;
+            }
+            after_four.extend(more);
+        }
+        let kept = |log: &GroupLog| -> BTreeSet<EntryHash> {
+            log.hashes()
+                .filter(|h| !after_four.contains(*h))
+                .copied()
+                .collect()
+        };
+        assert_eq!(kept(&now), kept(&then), "world {w}");
+        let held = now.held_to_four(&now.ordered());
+        let (now, then) = (now.state(), then.state());
+        let apart = (now.applied.iter())
+            .zip(&then.applied)
+            .position(|(a, b)| a != b)
+            .unwrap_or(now.applied.len().min(then.applied.len()));
+        if apart < now.applied.len().max(then.applied.len()) {
+            let what = [now.applied.get(apart), then.applied.get(apart)];
+            assert!(
+                what.iter()
+                    .flatten()
+                    .any(|h| fours.contains(*h) || held.contains(*h)),
+                "world {w}: apart at {apart}"
+            );
+        }
+        held_back += (now.rejected.iter())
+            .filter(|(h, why)| {
+                held.contains(h)
+                    && [
+                        crate::state::ROTATE_LEAVES_OUT,
+                        crate::state::REMOVE_LEAVES_OUT,
+                    ]
+                    .contains(why)
+            })
+            .count();
+    }
+    assert!(held_back > 0, "nothing was held to level four");
 }

@@ -10,7 +10,7 @@ use crate::{
     budget::PAST_RUN,
     entry::{Body, EntryHash, NamedInvite, VoiceRoomId},
     log::GroupLog,
-    state::{GroupState, Managers, OUTRANKED},
+    state::{GroupState, Managers, OUTRANKED, Seen},
 };
 
 /// Something a member did in the group.
@@ -177,6 +177,7 @@ impl GroupLog {
         // taken from the group as it goes, not from a copy of it at each entry, which would
         // cost the length of the log at every entry.
         let over = &self.full().budget.over;
+        let held = self.held_to_four(&self.ordered());
         let place = &self.full().order.place;
         let mut state = GroupState::default();
         for hash in self.ordered() {
@@ -204,16 +205,14 @@ impl GroupLog {
             // on a copy of it, made only when what it is told by is in the group after it.
             let tried = (undone.is_some() && told_by_the_group_after(&entry.body)).then(|| {
                 let mut tried = state.to_try_on();
-                tried.apply(hash, entry, Some(true), &seen);
+                tried.apply(hash, entry, Some(Seen::ALLOWED), &seen);
                 tried
             });
             if undone.is_some() {
                 state.refuse_kept(hash, entry, OUTRANKED);
             } else {
                 let applied = state.applied.len();
-                let needed = state
-                    .rotation_to_judge(entry)
-                    .then(|| self.rotation_needed(&hash));
+                let needed = self.seen_to_apply(&state, &hash, entry, &held);
                 state.apply(hash, entry, needed, &seen);
                 if state.applied.last() != Some(&hash) {
                     continue;
@@ -308,6 +307,7 @@ impl GroupLog {
         // The main entries, step by step, each against the group just before it: the same
         // steps as `settled`, which they are checked against.
         let over = &self.full().budget.over;
+        let held = self.held_to_four(&self.ordered());
         let mut state = GroupState::default();
         for hash in self.ordered() {
             let entry = self.get(&hash).expect("ordered entries are in the log");
@@ -332,9 +332,7 @@ impl GroupLog {
             if undone.is_some() {
                 state.refuse_kept(hash, entry, OUTRANKED);
             } else {
-                let needed = state
-                    .rotation_to_judge(entry)
-                    .then(|| self.rotation_needed(&hash));
+                let needed = self.seen_to_apply(&state, &hash, entry, &held);
                 let place = &self.full().order.place;
                 let seen = |h: &EntryHash| self.is_before(place, &entry.parents, h);
                 state.apply(hash, entry, needed, &seen);
@@ -364,7 +362,7 @@ impl GroupLog {
                 let mut tried = before.clone();
                 let place = &self.full().order.place;
                 let seen = |h: &EntryHash| self.is_before(place, &entry.parents, h);
-                tried.apply(hash, entry, Some(true), &seen);
+                tried.apply(hash, entry, Some(Seen::ALLOWED), &seen);
                 tried
             } else {
                 state.clone()

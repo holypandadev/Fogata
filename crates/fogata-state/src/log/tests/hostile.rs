@@ -2830,9 +2830,12 @@ fn entries_called_judged_without_their_parents_still_wait() {
     assert!(log.unjudged.contains(&after.hash()));
     stored.push(after.clone());
     let bytes = log.verdicts(stored.iter().map(Entry::hash)).encode();
-    // The one refused, and none waiting.
-    let mut forged = bytes[..bytes.len() - 4 - 2 * 32].to_vec();
+    // The one refused, and none waiting; nothing seen (no rotation nor removal is there).
+    let seen = &bytes[bytes.len() - 4..];
+    assert_eq!(seen, [0; 4]);
+    let mut forged = bytes[..bytes.len() - 4 - 4 - 2 * 32].to_vec();
     forged.extend([0; 4]);
+    forged.extend(seen);
     let forged = Verdicts::decode(&forged).unwrap();
     let (back, anew) = GroupLog::read_judged(group, stored, Some(&forged), true);
     assert!(anew.is_none());
