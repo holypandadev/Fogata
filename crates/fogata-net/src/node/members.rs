@@ -232,21 +232,7 @@ impl Node {
                 self.on_spread_request(peer, message, reached)
             }
             MemberRequest::RoomEvents { group_id, ids } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if !self.is_member_of(&group, &peer) {
-                    return MemberResponse::Refused;
-                }
-                let Some(device) = self.may_serve(peer) else {
-                    return MemberResponse::Refused;
-                };
-                let messages = self.recent_events(group, &ids);
-                self.charge_served(device, messages.iter().map(wire_bytes).sum());
-                MemberResponse::RoomLog {
-                    messages,
-                    more: None,
-                }
+                self.on_room_events_request(peer, group_id, ids)
             }
             MemberRequest::Roster {
                 group_id,
@@ -884,6 +870,30 @@ impl Node {
         }
         self.receive(peer, message, Forward::Spread(reached));
         MemberResponse::Ack
+    }
+
+    /// Answers a member's ask for events of a group's rooms by id.
+    fn on_room_events_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        ids: Vec<u8>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        if !self.is_member_of(&group, &peer) {
+            return MemberResponse::Refused;
+        }
+        let Some(device) = self.may_serve(peer) else {
+            return MemberResponse::Refused;
+        };
+        let messages = self.recent_events(group, &ids);
+        self.charge_served(device, messages.iter().map(wire_bytes).sum());
+        MemberResponse::RoomLog {
+            messages,
+            more: None,
+        }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
