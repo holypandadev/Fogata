@@ -1070,12 +1070,17 @@ impl DirectStore {
     }
 
     /// Copies an attachment kept here, as its plaintext, to `dest`, where nothing may be (not
-    /// even a link). Blocking.
+    /// even a link). A copy that stops halfway (a full disk, a damaged part) is removed: a
+    /// part of it is no use to anyone, and takes the room the disk keeps free. Blocking.
     fn copy_out(&self, friend: &DevicePublicKey, file: &Attachment, dest: &Path) -> Result<()> {
         let (mut kept, _) = self.open_file(friend, file)?;
         let mut out = new_private(dest)?;
-        io::copy(&mut kept, &mut out)?;
-        out.sync_all()?;
+        let copied = io::copy(&mut kept, &mut out).and_then(|_| out.sync_all());
+        if let Err(e) = copied {
+            drop(out);
+            let _ = fs::remove_file(dest);
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -1084,11 +1089,24 @@ impl DirectStore {
     /// (another player may have the same one open), which goes with [`Self::forget_copy`].
     /// Blocking.
     pub fn open_to_play(&self, friend: &DevicePublicKey, file: &Attachment) -> Result<PathBuf> {
+        self.open_to_play_holding(friend, file, |_, _| Ok(()))
+    }
+
+    /// [`Self::open_to_play`], `hold` asked first for room on the disk for a plain copy of
+    /// `size` bytes in `dir` when one is made (see `shares::hold_disk`): what it holds is
+    /// held until the copy is made, or not.
+    pub fn open_to_play_holding<R>(
+        &self,
+        friend: &DevicePublicKey,
+        file: &Attachment,
+        hold: impl FnOnce(u64, &Path) -> Result<R>,
+    ) -> Result<PathBuf> {
         let (kept, _) = self.open_file(friend, file)?;
         if let Kept::Plain(_) = kept {
             return Ok(self.file_path(friend, file));
         }
         drop(kept);
+        let _room = hold(file.size, &self.dir)?;
         let dir = self.dir.join(OPEN_DIR);
         self.make_dir(&dir)?;
         let mut tag = [0u8; 8];
@@ -2815,6 +2833,58 @@ mod tests {
         // At the next start, those left go too.
         store.forget_copies();
         assert!(!play_b.exists() && !again.exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A plain copy to play is made only once the disk has room for it (as the core holds
+    /// it, see `shares::hold_disk`), and one that stops halfway leaves nothing behind.
+    #[test]
+    fn a_copy_to_play_needs_room_and_leaves_nothing_half_made() {
+        let dir = folder("play-room");
+        let store = DirectStore::open_sealed(&dir, Some(DataKey::generate().unwrap()));
+        let friend = DeviceIdentity::generate().unwrap().public_key();
+        fs::create_dir_all(&dir).unwrap();
+        let bytes: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let source = dir.join("trip.mp4");
+        fs::write(&source, &bytes).unwrap();
+        let file = Attachment {
+            id: *blake3::hash(&bytes).as_bytes(),
+            name: "trip.mp4".into(),
+            size: bytes.len() as u64,
+            kind: FileKind::Video,
+            video: None,
+            local: Local::Here,
+            voice: None,
+        };
+        store.files_dir(&friend).unwrap();
+        store.keep_copy(&friend, &file, &source).unwrap();
+        let copies = || {
+            fs::read_dir(dir.join(OPEN_DIR))
+                .map(|d| d.count())
+                .unwrap_or(0)
+        };
+        // No room: refused before anything is written, for the whole file.
+        let mut asked = None;
+        let refused = store.open_to_play_holding(&friend, &file, |size, _| {
+            asked = Some(size);
+            Err::<(), _>(anyhow::anyhow!("not enough free space for this file"))
+        });
+        assert!(format!("{:#}", refused.unwrap_err()).contains("not enough free space"));
+        assert_eq!(asked, Some(file.size));
+        assert_eq!(copies(), 0);
+        // A part of the kept file damaged past the first chunk: the copy stops there, and
+        // what was written of it goes.
+        let kept = store.file_path(&friend, &file);
+        let mut sealed = fs::read(&kept).unwrap();
+        let at = sealed.len() - 1000;
+        sealed[at] ^= 0x55;
+        fs::write(&kept, &sealed).unwrap();
+        assert!(
+            store
+                .open_to_play_holding(&friend, &file, |_, _| Ok(()))
+                .is_err()
+        );
+        assert_eq!(copies(), 0);
         let _ = fs::remove_dir_all(&dir);
     }
 

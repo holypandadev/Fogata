@@ -628,12 +628,26 @@ impl Store {
         &self,
         animations: impl IntoIterator<Item = &'a Animation>,
     ) -> Result<()> {
+        self.save_animations_holding(animations, |_, _| Ok(()))
+    }
+
+    /// [`Self::save_animations`], `hold` asked first for room on the disk for the new file
+    /// (of so many bytes, in the data folder) while it is written beside the old one: the
+    /// others' animations are a copy of what the network gives again, and must not take
+    /// the room the disk keeps for the group logs and journals (see `shares::hold_disk`).
+    /// When it is refused, the file stays as it was.
+    pub fn save_animations_holding<'a, R>(
+        &self,
+        animations: impl IntoIterator<Item = &'a Animation>,
+        hold: impl FnOnce(u64, &Path) -> Result<R>,
+    ) -> Result<()> {
         let mut bytes = Vec::new();
         for animation in animations {
             let record = animation.encode();
             bytes.extend_from_slice(&(record.len() as u32).to_be_bytes());
             bytes.extend_from_slice(&record);
         }
+        let _room = hold(bytes.len() as u64, &self.dir)?;
         let _held = self.lock();
         write_private(&self.animations_path(), &bytes)
     }

@@ -243,7 +243,7 @@ fn forget_gone_soon(inner: &Arc<Inner>) {
 /// How long [`forget_gone_soon`] waits.
 const FORGET_GONE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
 
-async fn forget_gone(inner: &Inner) {
+async fn forget_gone(inner: &Arc<Inner>) {
     let (Ok(Some(book)), Ok(logs)) = (inner.node.friends().await, inner.node.groups().await) else {
         return;
     };
@@ -268,7 +268,7 @@ async fn forget_gone(inner: &Inner) {
         )
     };
     if let Some(animations) = animations {
-        save_animations(inner, animations);
+        save_animations(inner, animations, false);
     }
     if profiles {
         save_profiles(inner);
@@ -310,10 +310,32 @@ fn save_profiles(inner: &Inner) {
     });
 }
 
-fn save_animations(inner: &Inner, animations: Vec<Animation>) {
+/// Writes the others' animations, kept for the next start. One more of them (up to
+/// [`MAX_ANIMATIONS`] of half a megabyte each) is written only while the disk has room for
+/// it past what it keeps free, as a download is: when it has not, the file stays as it was
+/// and the animations are shown from memory, and from the network again after a restart.
+/// Fewer (the animations of those gone) are always written: that frees room in the end, and
+/// leaves nothing of theirs behind.
+fn save_animations(inner: &Arc<Inner>, animations: Vec<Animation>, more: bool) {
     let store = inner.store.clone();
+    let weak = Arc::downgrade(inner);
     inner.writer.soon(writer::File::Animations, move || {
-        if let Err(e) = store.save_animations(&animations) {
+        let saved = if more {
+            store.save_animations_holding(&animations, |bytes, dir| {
+                let inner = weak
+                    .upgrade()
+                    .ok_or_else(|| anyhow::anyhow!("Fogata is stopping"))?;
+                crate::shares::hold_disk(
+                    &inner,
+                    bytes,
+                    dir,
+                    "not enough free space for the animations",
+                )
+            })
+        } else {
+            store.save_animations(&animations)
+        };
+        if let Err(e) = saved {
             tracing::warn!("cannot save the animations: {e:#}");
         }
     });
@@ -585,7 +607,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
                 state.animations.values().cloned().collect::<Vec<_>>()
             };
             // Kept for the next start: shown while the friend or member is away too.
-            save_animations(inner, saved);
+            save_animations(inner, saved, true);
             inner.emit(CoreEvent::Animation { device });
         }
         NodeEvent::Signal {

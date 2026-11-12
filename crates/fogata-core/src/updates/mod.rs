@@ -208,7 +208,15 @@ pub(crate) struct Updater {
     publisher: std::sync::atomic::AtomicBool,
     /// The releases page, when it is read.
     web: Option<web::Web>,
+    /// Holds room on the disk for a package while it comes: without it, packages are
+    /// fetched unchecked.
+    hold: Option<Hold>,
 }
+
+/// Holds room for so many bytes on the disk of a folder, or says why not, as the core's
+/// downloads do (`shares::hold_disk`): the room is held until what it gives back is
+/// dropped.
+pub(crate) type Hold = Box<dyn Fn(u64, &Path) -> Result<Box<dyn Send>> + Send + Sync + 'static>;
 
 impl std::fmt::Debug for Updater {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -274,12 +282,15 @@ enum Done {
 }
 
 impl Updater {
-    /// Opens what `data/updates/` holds and starts giving and fetching releases.
+    /// Opens what `data/updates/` holds and starts giving and fetching releases. With
+    /// `hold`, a package is fetched only once it held room on the disk for what of it is
+    /// still to come, the room the disk keeps free left for the group logs and journals.
     pub(crate) fn start(
         data: &Path,
         node: NodeHandle,
         options: UpdateOptions,
         events: crate::events::Sender,
+        hold: Option<Hold>,
     ) -> Result<Arc<Updater>> {
         tracing::info!(
             "build {} ({}), {} {}",
@@ -324,6 +335,7 @@ impl Updater {
             commands,
             publisher: std::sync::atomic::AtomicBool::new(false),
             web,
+            hold,
         });
         let weak = Arc::downgrade(&updater);
         tokio::spawn(async move {
@@ -1096,8 +1108,45 @@ impl Updater {
             + 'static,
         Fut: std::future::Future<Output = Result<(), FetchError>> + Send,
     {
-        book.fetching.insert(platform.to_string(), source);
         let part = store::part_path(&self.dir, platform);
+        let own = platform == self.platform();
+        // What is still to come takes its room on the disk first (a part fetched before is
+        // there already); without it the package is not fetched, and this platform's says
+        // why. It is tried again at the next step, once the disk has room.
+        let room = match &self.hold {
+            Some(hold) => {
+                let have = std::fs::metadata(&part).map_or(0, |m| m.len());
+                match hold(artifact.size.saturating_sub(have), &self.dir) {
+                    Ok(room) => Some(room),
+                    Err(e) => {
+                        let e = e.to_string();
+                        if own {
+                            let mut phase = self.lock();
+                            let new =
+                                !matches!(&phase.failed, Some((FailKind::Disk, m)) if *m == e);
+                            phase.failed = Some((FailKind::Disk, e.clone()));
+                            drop(phase);
+                            if new {
+                                self.note(format!("package {platform} not fetched: {e}"));
+                                self.changed();
+                            }
+                        } else {
+                            tracing::debug!("package {platform} not fetched: {e}");
+                        }
+                        return;
+                    }
+                }
+            }
+            None => None,
+        };
+        if own {
+            // The disk has room again: the package comes.
+            let mut phase = self.lock();
+            if matches!(phase.failed, Some((FailKind::Disk, _))) {
+                phase.failed = None;
+            }
+        }
+        book.fetching.insert(platform.to_string(), source);
         let build = held.manifest.build;
         let done = done.clone();
         let progress =
@@ -1134,6 +1183,8 @@ impl Updater {
                 }
             });
             let result = get(part, artifact, report).await;
+            // Whole or not, the part takes its room itself now.
+            drop(room);
             let _ = done.send(Done::Fetched {
                 source,
                 build,
@@ -1565,7 +1616,7 @@ mod tests {
         options.platform = Some(PLATFORM.into());
         options.web = None;
         let (events, _events) = crate::events::queue(None);
-        let updater = Updater::start(&data, node.clone(), options, events).unwrap();
+        let updater = Updater::start(&data, node.clone(), options, events, None).unwrap();
         // What is kept on disk is read first, and the status says Verifying meanwhile; the
         // reading may not even have started yet on a busy computer.
         for _ in 0..400 {
@@ -1650,7 +1701,7 @@ mod tests {
         options.platform = Some(PLATFORM.into());
         options.web = None;
         let (events, _events) = crate::events::queue(None);
-        let updater = Updater::start(&data, node.clone(), options, events).unwrap();
+        let updater = Updater::start(&data, node.clone(), options, events, None).unwrap();
         assert!(
             until(|| updater.lock().loaded).await,
             "what is kept was never read"
@@ -1921,6 +1972,17 @@ mod tests {
         base: &str,
         kept: Option<(Signed, Vec<u8>)>,
     ) -> (Arc<Updater>, NodeHandle, PathBuf) {
+        web_updater_with(name, key, base, kept, None).await
+    }
+
+    /// As [`web_updater_holding`], holding room on the disk for packages with `hold`.
+    async fn web_updater_with(
+        name: &str,
+        key: &DeviceIdentity,
+        base: &str,
+        kept: Option<(Signed, Vec<u8>)>,
+        hold: Option<Hold>,
+    ) -> (Arc<Updater>, NodeHandle, PathBuf) {
         let data = std::env::temp_dir().join(format!("fogata-web-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
         std::fs::create_dir_all(&data).unwrap();
@@ -1955,7 +2017,7 @@ mod tests {
             repo: "holypandadev/Fogata".into(),
         });
         let (events, _events) = crate::events::queue(None);
-        let updater = Updater::start(&data, node.clone(), options, events).unwrap();
+        let updater = Updater::start(&data, node.clone(), options, events, hold).unwrap();
         (updater, node, data)
     }
 
@@ -2006,6 +2068,61 @@ mod tests {
                 .any(|n| n.contains("from the releases page")),
             "{:?}",
             updater.notes()
+        );
+        node.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// A package is fetched only while the disk has room for it past what it keeps free: until
+    /// then nothing of it is written, and the status says the disk is why; once there is
+    /// room, it comes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_package_waits_for_room_on_the_disk() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+        static FULL: AtomicBool = AtomicBool::new(true);
+        static ASKED: AtomicU64 = AtomicU64::new(0);
+        let key = DeviceIdentity::generate().unwrap();
+        let size = 2 * fogata_update::manifest::CHUNK as usize + 1234;
+        let release = web_release(&key, 7, size);
+        let package = release.2.clone();
+        let base = releases_page(vec![release], false).await;
+        let hold: Hold = Box::new(|bytes, _| {
+            ASKED.store(bytes, Ordering::Relaxed);
+            anyhow::ensure!(
+                !FULL.load(Ordering::Relaxed),
+                "not enough free space for the update"
+            );
+            Ok(Box::new(()) as Box<dyn Send>)
+        });
+        let (updater, node, data) = web_updater_with("full", &key, &base, None, Some(hold)).await;
+        let refused = || {
+            matches!(
+                &updater.status().state,
+                UpdateState::Failed { kind: FailKind::Disk, message }
+                    if message.contains("not enough free space")
+            )
+        };
+        assert!(
+            until(refused).await,
+            "{:?} {:?}",
+            updater.status(),
+            updater.notes()
+        );
+        assert_eq!(ASKED.load(Ordering::Relaxed), size as u64);
+        let dir = store::dir(&data);
+        assert!(!store::part_path(&dir, PLATFORM).exists());
+        assert!(!store::package_path(&dir, PLATFORM).exists());
+        FULL.store(false, Ordering::Relaxed);
+        updater.check_now();
+        assert!(
+            until(|| updater.status().state == UpdateState::Ready).await,
+            "{:?} {:?}",
+            updater.status(),
+            updater.notes()
+        );
+        assert_eq!(
+            std::fs::read(store::package_path(&dir, PLATFORM)).unwrap(),
+            package
         );
         node.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&data);

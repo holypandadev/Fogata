@@ -1101,11 +1101,20 @@ impl Core {
         if self.inner.updates.get().is_some() {
             bail!("updates already run");
         }
+        // A package leaves the disk the room the core's own files need, as a download does.
+        let inner = Arc::downgrade(&self.inner);
+        let hold: updates::Hold = Box::new(move |bytes, dir| {
+            let inner = inner.upgrade().context("Fogata is stopping")?;
+            let room =
+                shares::hold_disk(&inner, bytes, dir, "not enough free space for the update")?;
+            Ok(Box::new(room) as Box<dyn Send>)
+        });
         let updater = updates::Updater::start(
             self.inner.store.dir(),
             self.inner.node.clone(),
             options,
             self.inner.events.clone(),
+            Some(hold),
         )?;
         let _ = self.inner.updates.set(updater);
         Ok(())

@@ -811,7 +811,7 @@ async fn pictures_come_by_themselves_and_files_when_asked() {
     std::fs::write(&document, vec![9u8; 220_000]).unwrap();
     let (options_a, options_b) = dialling();
     let (ana, mut events_a) = Core::start(dir_a, options_a.clone()).unwrap();
-    let (bea, mut events_b) = Core::start(dir_b, options_b.clone()).unwrap();
+    let (bea, mut events_b) = Core::start(dir_b.clone(), options_b.clone()).unwrap();
     let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
     wait_for(&mut events_a, "Bea online", online).await;
     wait_for(&mut events_b, "Ana online", online).await;
@@ -870,6 +870,36 @@ async fn pictures_come_by_themselves_and_files_when_asked() {
         format!("{full:#}").contains("not enough free space"),
         "{full:#}"
     );
+    // Nor of a voice message recorded here: it is not sent, and nothing of it is kept.
+    let files_here = || {
+        std::fs::read_dir(dir_b.join("direct"))
+            .unwrap()
+            .flatten()
+            .filter_map(|chat| std::fs::read_dir(chat.path().join("files")).ok())
+            .map(|files| files.count())
+            .sum::<usize>()
+    };
+    let before = (
+        files_here(),
+        bea.direct_chat(ana.me(), 100).await.unwrap().items.len(),
+    );
+    let voice = VoiceNote {
+        file: ogg(2),
+        duration_ms: 2_000,
+        bars: vec![120; 40],
+    };
+    let full = bea.send_direct_voice(ana.me(), voice).await.unwrap_err();
+    assert!(
+        format!("{full:#}").contains("not enough free space"),
+        "{full:#}"
+    );
+    assert_eq!(
+        (
+            files_here(),
+            bea.direct_chat(ana.me(), 100).await.unwrap().items.len()
+        ),
+        before
+    );
     bea.use_free_space(|_| None);
     bea.fetch_direct_file(ana.me(), pdf).await.unwrap();
     chat_until(&bea, ana.me(), "the document here", |c| {
@@ -889,9 +919,21 @@ async fn pictures_come_by_themselves_and_files_when_asked() {
         c.items.last().unwrap().files[1].file.local == Local::Here
     })
     .await;
-    // Saved elsewhere under its own name.
+    // Saved elsewhere under its own name, once the disk has room for it there: as a room
+    // download, it leaves what the disk keeps free, and nothing of it is written before.
     let downloads = base.join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
+    bea.use_free_space(|_| Some(0));
+    let full = bea
+        .save_direct_file(ana.me(), pdf, &downloads)
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{full:#}").contains("not enough free space"),
+        "{full:#}"
+    );
+    assert_eq!(std::fs::read_dir(&downloads).unwrap().count(), 0);
+    bea.use_free_space(|_| None);
     let saved = bea
         .save_direct_file(ana.me(), pdf, &downloads)
         .await

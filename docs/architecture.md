@@ -1514,7 +1514,12 @@ added) is let go too, and a new one is made when someone writes.
   (what comes by itself must fit beside every journal and the other chats' attachments). An
   attachment is fetched, as a room download is, only when the disk has room for it and
   256 MiB to spare: one asked for is refused at once, one that comes by itself waits and is
-  tried again later. A chat's files can be cleared by hand, pinned ones too; the
+  tried again later. The same holds for every other file this device writes from a chat:
+  the copy of a file it sends and of a voice message recorded here (which stays in memory,
+  at most 4 MB, until it is sent; one refused stays to send again), a copy saved elsewhere
+  (in that folder's disk), and the plain copy a sealed video plays from (removed when it
+  stops halfway, as a saved copy is). Refused, the person reads that there is not enough
+  free space for the file. A chat's files can be cleared by hand, pinned ones too; the
   friend keeps its copies. Text always stays. Only a video keeps the first picture its
   message carries. What a friend's items (messages with what describes their files, timers
   and pins) take in the chat's journal, and in memory, is bounded too: 16 MiB a day per
@@ -3517,7 +3522,9 @@ changes, and the picture's to members inside `MemberRequest::Profile` (field `an
 Earlier versions fail `FriendRequest::Animation` and do not read the field: they show the
 still picture. The core keeps the newest record of each device (at most 512, in
 `animations.bin`) and gives the application one only while the device's picture or banner
-is the still picture it names. It keeps them, and the members' profiles (`members.json`),
+is the still picture it names; one more of them is written only while the disk has room for the
+new file and 256 MiB to spare (it is a copy of what the network gives again: refused, the
+file stays as it was), fewer always. It keeps them, and the members' profiles (`members.json`),
 only of friends and members of its groups: those of a device that is neither any more go at
 the start and a moment after a friend, a member or a group goes, and so do the banner and
 picture of a group the device left or was removed from (its log stays, to tell the group if
@@ -4656,7 +4663,9 @@ that one (it then fetches it from whoever has it, one at a time), so a Windows f
 a Linux friend gets it too; it keeps one such package at most (one nobody asked for in an
 hour makes way for another), lets it go once nobody has asked for it in two days, and
 fetches it only while its own and it stay under 600 MiB together, so a friend cannot fill
-its disk with every platform's. The publisher's copy (`fogata release publish` marks it)
+its disk with every platform's. A package starts to come only once the disk has room for
+what of it is still to come and 256 MiB to spare, as a download does; until then the
+update's status says the disk is why, and it is tried again at the next step. The publisher's copy (`fogata release publish` marks it)
 keeps every platform's package. A device uploads to three devices at once at most, one stream
 per device (a friend or member may connect with several sessions, counted together), 4 MB/s
 in all, and 1 GiB to one device in a day (a package whose rest does not fit in the day is

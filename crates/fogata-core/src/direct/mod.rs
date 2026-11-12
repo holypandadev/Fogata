@@ -1128,8 +1128,17 @@ impl Core {
         dir: &Path,
     ) -> Result<PathBuf> {
         let attachment = self.kept_attachment(friend, file)?;
+        // The copy leaves the disk the room the core's own files need, as a room download
+        // into the same folder does.
+        let room = crate::shares::hold_disk(
+            &self.inner,
+            attachment.size,
+            dir,
+            "not enough free space for this file",
+        )?;
         let (inner, dir) = (self.inner.clone(), dir.to_path_buf());
         tokio::task::spawn_blocking(move || {
+            let _room = room;
             let (mut kept, _) = inner
                 .direct
                 .store
@@ -1164,7 +1173,8 @@ impl Core {
 
     /// Where an attachment kept here can be played from by the system's player: its own file,
     /// or, when it is sealed, a plain copy for this player alone, which goes with
-    /// [`Self::forget_direct_file_copy`] and at the next start.
+    /// [`Self::forget_direct_file_copy`] and at the next start. The copy leaves the disk the
+    /// room the core's own files need, as a download does.
     pub async fn direct_file_to_play(
         &self,
         friend: DevicePublicKey,
@@ -1172,8 +1182,20 @@ impl Core {
     ) -> Result<PathBuf> {
         let attachment = self.kept_attachment(friend, file)?;
         let inner = self.inner.clone();
-        tokio::task::spawn_blocking(move || inner.direct.store.open_to_play(&friend, &attachment))
-            .await?
+        tokio::task::spawn_blocking(move || {
+            inner
+                .direct
+                .store
+                .open_to_play_holding(&friend, &attachment, |size, dir| {
+                    crate::shares::hold_disk(
+                        &inner,
+                        size,
+                        dir,
+                        "not enough free space for this file",
+                    )
+                })
+        })
+        .await?
     }
 
     /// Whether an attachment of the chat with `friend` is kept here: no longer once its

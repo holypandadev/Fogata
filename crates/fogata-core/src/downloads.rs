@@ -70,7 +70,12 @@ enum Place {
 pub(crate) type Playing =
     futures::future::Shared<tokio::sync::oneshot::Receiver<std::result::Result<PathBuf, String>>>;
 
-/// Space a room file fetched here leaves free on its disk.
+/// Space every file this device takes in from others or records leaves free on its disk
+/// (room downloads and videos fetched to play, copies of files shared or sent, direct
+/// chats' attachments and voice messages, copies saved or played from, update packages,
+/// the others' animations; see `shares::hold_disk`). It is kept for what is never refused
+/// for want of it: the group logs, the chats' journals, the friend book, the MLS state and
+/// the other small files of the core's own, and the days' log.
 pub(crate) const SPACE_KEPT_FREE: u64 = 256 * 1024 * 1024;
 
 /// The memory the previews being fetched may take together, in KiB: each holds its file

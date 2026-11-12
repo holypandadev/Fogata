@@ -293,7 +293,7 @@ impl Core {
                 "the voice message is bigger than the space for direct messages; make it bigger in Settings, Storage"
             );
         }
-        self.inner.direct.store.files_dir(&friend)?;
+        let dir = self.inner.direct.store.files_dir(&friend)?;
         let file = Attachment {
             id: *blake3::hash(&voice.file).as_bytes(),
             name: VOICE_NAME.to_string(),
@@ -311,8 +311,16 @@ impl Core {
         let mut copies = Copies::new(&self.inner, friend);
         copies.using(&file.id);
         if !self.inner.direct.store.has_copy(&friend, &file) {
+            // Kept as a file sent is: leaving the disk the room the core's own files need.
+            let room = crate::shares::hold_disk(
+                &self.inner,
+                crate::shares::held_for(size),
+                &dir,
+                "not enough free space for this file",
+            )?;
             let (inner, kept, bytes) = (self.inner.clone(), file.clone(), voice.file);
             tokio::task::spawn_blocking(move || {
+                let _room = room;
                 inner.direct.store.keep_bytes(&friend, &kept, &bytes)
             })
             .await?

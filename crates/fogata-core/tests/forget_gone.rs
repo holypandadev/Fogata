@@ -207,3 +207,36 @@ async fn pictures_go_with_a_member_removed_and_a_group_left() {
     core.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// The others' animations are a copy of what the network gives again: more of them are
+/// written only once the disk has room for the new file (as the core holds it past what the
+/// disk keeps free), and when it has not, the file on the disk stays as it was.
+#[test]
+fn more_animations_are_written_only_with_room_on_the_disk() {
+    let dir = std::env::temp_dir().join(format!("fogata-animations-room-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let store = Store::open(dir.clone()).unwrap();
+    let (bea, cid) = (
+        DeviceIdentity::generate().unwrap(),
+        DeviceIdentity::generate().unwrap(),
+    );
+    let (bea_moves, _) = met(&bea, "Bea");
+    let (cid_moves, _) = met(&cid, "Cid");
+    store.save_animations([&bea_moves]).unwrap();
+    let mut asked = 0;
+    let refused = store.save_animations_holding([&bea_moves, &cid_moves], |bytes, _| {
+        asked = bytes;
+        Err::<(), _>(anyhow::anyhow!("not enough free space for the animations"))
+    });
+    assert!(refused.is_err());
+    assert!(asked > 2 * ONE_PIXEL_GIF.len() as u64, "{asked}");
+    assert_eq!(devices_animated(&store), [bea.public_key()]);
+    store
+        .save_animations_holding([&bea_moves, &cid_moves], |_, _| Ok(()))
+        .unwrap();
+    let mut both = vec![bea.public_key(), cid.public_key()];
+    both.sort();
+    assert_eq!(devices_animated(&store), both);
+    drop(store);
+    let _ = std::fs::remove_dir_all(&dir);
+}

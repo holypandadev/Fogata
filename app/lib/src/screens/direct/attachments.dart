@@ -813,7 +813,9 @@ Future<void> _showVideo(
         if (path != null && await _sealed(path)) {
           path = copy = await directFileToPlay(deviceId: friend, file: file.id);
         }
-      } catch (_) {
+      } catch (e) {
+        // No room on the disk for the copy it plays from: said as a download says it.
+        if ('$e'.contains('not enough free space')) throw VideoProblem(explain(e));
         path = null;
       }
       if (path == null) throw VideoProblem(l10n.directCannotPlay);
