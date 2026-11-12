@@ -446,19 +446,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             hidden,
             away,
         } => handle_member_presence(inner, device, hidden, away),
-        NodeEvent::FriendsChanged => {
-            // A friend may have gone.
-            forget_gone_soon(inner);
-            // The book is read once for all of these, and handed to the write, not copied
-            // (it carries every friend's picture and banner). A burst of changes is one
-            // event by then: the node's queue keeps only the latest.
-            if let Ok(Some(book)) = inner.node.friends().await {
-                direct::on_friends_changed(inner, &book).await;
-                calls::on_friends_changed(inner, &book).await;
-                save_friends_soon(inner, book);
-            }
-            inner.emit(CoreEvent::FriendsChanged);
-        }
+        NodeEvent::FriendsChanged => handle_friends_changed(inner).await,
         NodeEvent::DirectOffered { log, by } => direct::on_offered(inner, log, by).await,
         NodeEvent::Typing {
             group,
@@ -949,6 +937,21 @@ fn handle_member_presence(inner: &Arc<Inner>, device: DevicePublicKey, hidden: b
         inner.emit(CoreEvent::GroupsChanged);
         inner.emit(CoreEvent::FriendsChanged);
     }
+}
+
+/// The friend book changed.
+async fn handle_friends_changed(inner: &Arc<Inner>) {
+    // A friend may have gone.
+    forget_gone_soon(inner);
+    // The book is read once for all of these, and handed to the write, not copied
+    // (it carries every friend's picture and banner). A burst of changes is one
+    // event by then: the node's queue keeps only the latest.
+    if let Ok(Some(book)) = inner.node.friends().await {
+        direct::on_friends_changed(inner, &book).await;
+        calls::on_friends_changed(inner, &book).await;
+        save_friends_soon(inner, book);
+    }
+    inner.emit(CoreEvent::FriendsChanged);
 }
 
 #[cfg(test)]
