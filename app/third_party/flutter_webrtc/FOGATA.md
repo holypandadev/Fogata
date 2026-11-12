@@ -75,6 +75,31 @@ list (before `tools/webrtc/patches/wrapper/0007`). Instead, `getDisplayMedia` wi
 - `common/cpp/src/flutter_webrtc.cc`: the method `fogataScreenFps` (`trackId`, `fps`)
   calls it, and answers false for any other track.
 
+## The last frame of a shared screen again (Linux portal, macOS)
+
+The portal's capture (PipeWire) and ScreenCaptureKit give a frame only when what is shared
+changes. A shared screen goes to each watcher on a connection of its own, and that
+connection's encoder starts with the first frame it gets: someone who started watching a
+screen that stayed still (a slide, a page being read) got nothing, and saw a spinner until
+something on it moved. WebRTC itself asks a source for a frame again only for a screen in
+its "zero-hertz" mode, which these sources are not in (see "One thread for each video
+encoder").
+
+- `linux/portal_screen_capturer.{h,cc}`: keeps the last frame it converted (its I420
+  buffer was kept already) and `Refresh` gives it again, under PipeWire's loop lock.
+- `common/cpp/include/flutter_webrtc_base.h`, `common/cpp/src/flutter_screen_capture.cc`,
+  `common/cpp/src/flutter_media_stream.cc`: `track_refreshers_` keeps it by track,
+  dropped with the track, as `track_rates_`.
+- `macos/flutter_webrtc/Sources/flutter_webrtc/FlutterScreenCaptureKitCapturer.m` and its
+  header: keeps the last frame's pixel buffer, and `refreshFrame` gives it again, timed
+  now on the clock ScreenCaptureKit's frames are timed on.
+- `FlutterRTCDesktopCapturer.{h,m}` (both copies, identical): `refreshScreenTrack:` finds
+  the running ScreenCaptureKit capture by its track (kept from its start to its stop).
+- `common/cpp/src/flutter_webrtc.cc` and `FlutterWebRTCPlugin.m` (both copies, identical):
+  the method `fogataScreenRefresh` (`trackId`) does it, and answers false for any other
+  track (the other captures give frames all the time). `lib/src/call/media.dart` asks it
+  when someone starts watching, and again while nothing has gone out to them.
+
 ## Bandwidth estimate on lossy links (all platforms)
 
 WebRTC's newer loss-based bandwidth estimate (`WebRTC-Bwe-LossBasedBweV2`) holds the

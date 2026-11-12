@@ -243,6 +243,11 @@ extension _Measuring on Call {
       final before = quality.linkOf(peer.id);
       quality.take(peer.id, LinkSample.of(reports, voiceMid: '$_audio'), now);
       _fitScreen(peer, reports, now);
+      // Readings again of the quiet only would count faster.
+      if (only == null) {
+        _followScreenOut(peer, connection, reports);
+        _awaitPicture(peer, connection);
+      }
       // What the microphone gives and sends, on a connection agreed to send voice.
       if (mic && await _sendsVoice(connection)) {
         voiceSending = true;

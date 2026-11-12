@@ -43,6 +43,12 @@ class CallPeer {
   /// How this device's shared screen goes out to them.
   final _fit = ScreenFit();
 
+  /// The pictures of this device's shared screen encoded for them on connection `on`
+  /// by the last reading before they watched it, and whether they watch it; and the
+  /// times it was sent again since ([Call._followScreenOut]).
+  ({RTCPeerConnection on, num frames, bool watched})? _screenSent;
+  int _screenNudges = 0;
+
   /// How this device's camera goes out to them, and the connection it was judged on.
   final _cameraFit = CameraFit();
   RTCPeerConnection? _cameraFitOn;

@@ -940,6 +940,70 @@ extension _Fitting on Call {
     _tuneSoon(peer, connection);
   }
 
+  /// Follows, from [connection]'s statistics, whether this device's shared screen has gone
+  /// out to [peer] since they started watching it. A capture that gives a picture only
+  /// when the screen changes (the portal's on Linux, ScreenCaptureKit on macOS) gives
+  /// none to a new watcher's encoder while the screen stays still: their first picture
+  /// waited for something on it to move. A watcher to whom nothing has gone out by the
+  /// reading after the one that first found them watching gets the capture's last picture
+  /// again ([_refreshScreen]) and, from the second time, the screen put on their
+  /// connection again, as their closing and opening it does; [screenNudges] times at most
+  /// each time they start watching, or on a new connection.
+  void _followScreenOut(
+    CallPeer peer,
+    RTCPeerConnection connection,
+    List<StatsReport> reports,
+  ) {
+    num frames = 0;
+    for (final report in reports) {
+      final v = report.values;
+      if (report.type == 'outbound-rtp' && '${v['mid']}' == '$_screen') {
+        frames = v['framesEncoded'] as num? ?? 0;
+      }
+    }
+    final before = peer._screenSent;
+    if (!sharing || peer.watches != me) {
+      peer._screenSent = (on: connection, frames: frames, watched: false);
+      peer._screenNudges = 0;
+      return;
+    }
+    if (before == null || before.on != connection || !before.watched) {
+      // Judged from the next reading, against what had gone out before they watched (a
+      // new connection's counts start at nothing).
+      final had = before != null && before.on == connection ? before.frames : 0;
+      peer._screenSent = (on: connection, frames: had, watched: true);
+      peer._screenNudges = 0;
+      return;
+    }
+    if (frames > before.frames || peer._screenNudges >= Call.screenNudges) {
+      return;
+    }
+    final nudge = ++peer._screenNudges;
+    _trace(
+      'screen to ${peer.id.substring(0, 8)}: nothing sent yet; '
+      '${nudge > 1 ? 'put on again, and ' : ''}its last picture again',
+    );
+    peer
+        ._inTurn(() async {
+          if (_closed ||
+              peer.connection != connection ||
+              !sharing ||
+              peer.watches != me) {
+            return;
+          }
+          if (nudge > 1) {
+            final channels = await _channels(connection);
+            if (channels.length > _screen) {
+              final sender = channels[_screen].sender;
+              await sender.replaceTrack(null);
+              await sender.replaceTrack(_track(_screen, peer));
+            }
+          }
+          await _refreshScreen();
+        })
+        .catchError((Object e) => _trace('screen to ${peer.id}: $e'));
+  }
+
   /// Follows what [peer]'s connection can send for this device's camera, from its
   /// statistics, and makes the camera smaller or larger for them as [CameraFit] says. A
   /// camera turned off, or a new connection, starts over.

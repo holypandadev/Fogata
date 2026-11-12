@@ -229,6 +229,8 @@ class Call extends ChangeNotifier {
     if (id == _watching) return;
     final before = _watching;
     _watching = id;
+    // A screen watched anew waits for its first picture from the start.
+    _pictureWait = null;
     for (final changed in [before, id].nonNulls) {
       unawaited(
         applyScreenVolume(changed).catchError((Object e) => _trace('$e')),
@@ -237,6 +239,16 @@ class Call extends ChangeNotifier {
   }
 
   String? _watching;
+
+  /// The screen watched while it shows no picture yet, on the connection it is to come
+  /// on, and the readings of the statistics since it was watched there ([_awaitPicture]).
+  ({String id, RTCPeerConnection on, int readings})? _pictureWait;
+
+  /// The readings after which a watched screen that shows no picture yet is shown again
+  /// and its sharer told again ([_awaitPicture]): 2 to 4, 6 to 8 and 14 to 16 s after it
+  /// was watched (the first reading comes within 2 s of it, and the others 2 s apart), and
+  /// never after.
+  static const pictureReadings = {2, 4, 8};
 
   /// How loud the sound of [id]'s shared screen plays here: as [screenGainOf] says while
   /// this device watches that screen, not at all otherwise, whoever sends it.
@@ -1644,9 +1656,21 @@ class Call extends ChangeNotifier {
     }
     if (event.track.kind != 'video') return;
     final mid = int.tryParse(event.transceiver?.mid ?? '');
+    await _show(peer, connection, mid, event.track, event.streams.firstOrNull);
+  }
+
+  /// Shows [track], the camera or the screen [connection] receives on channel [mid], in
+  /// that channel's renderer: in [given], the stream it came in, if any.
+  Future<void> _show(
+    CallPeer peer,
+    RTCPeerConnection connection,
+    int? mid,
+    MediaStreamTrack track,
+    MediaStream? given,
+  ) async {
     final MediaStream stream;
-    if (event.streams.isNotEmpty) {
-      stream = event.streams.first;
+    if (given != null) {
+      stream = given;
     } else {
       // A stream of this device's own to show it in, which the video library keeps until
       // it is let go of: it goes with the connection the track came on ([CallPeer._close]),
@@ -1659,7 +1683,7 @@ class Call extends ChangeNotifier {
       }
       peer._shown.add(stream);
       try {
-        await stream.addTrack(event.track);
+        await stream.addTrack(track);
       } catch (e) {
         // Let go of meanwhile, with its connection.
         _trace('a stream of ${peer.id}: $e');
@@ -1686,6 +1710,71 @@ class Call extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Follows, at each reading of the statistics, whether the screen this device watches
+  /// shows a picture: one that shows none at the readings [pictureReadings] counts since
+  /// it was watched on [connection] is shown again ([_showScreenAgain]), and its sharer is
+  /// told again that this device watches it, as closing and opening it would. That is
+  /// told every [stateAgainEvery] all the same, so a telling lost on its way is not lost
+  /// for good, and changes nothing there if it had arrived; the sharer itself follows
+  /// whether its screen goes out to whoever watches it ([_followScreenOut]).
+  void _awaitPicture(CallPeer peer, RTCPeerConnection connection) {
+    final wait = _pictureWait;
+    final picture = peer.screen.value;
+    if (watching != peer.id ||
+        !peer.sharing ||
+        !peer.rendering ||
+        (picture.width > 0 && picture.height > 0)) {
+      if (wait?.id == peer.id) _pictureWait = null;
+      return;
+    }
+    final readings =
+        (wait != null && wait.id == peer.id && wait.on == connection
+            ? wait.readings
+            : 0) +
+        1;
+    _pictureWait = (id: peer.id, on: connection, readings: readings);
+    if (!pictureReadings.contains(readings)) return;
+    _trace(
+      'no picture of ${peer.id.substring(0, 8)}\'s screen yet: shown again, '
+      'and told again',
+    );
+    _signal(peer.id, _state);
+    unawaited(
+      _showScreenAgain(peer, connection).catchError(
+        (Object e) => _trace('${peer.id.substring(0, 8)}\'s screen again: $e'),
+      ),
+    );
+  }
+
+  /// Shows [peer]'s screen again from what [connection] receives on its channel now: the
+  /// renderer starts over, and tells the size of the next picture it gets, as for a
+  /// connection made anew.
+  Future<void> _showScreenAgain(
+    CallPeer peer,
+    RTCPeerConnection connection,
+  ) async {
+    final channels = await _channels(connection);
+    if (channels.length <= _screen) return;
+    final track = channels[_screen].receiver.track;
+    if (track == null || track.kind != 'video') return;
+    if (_closed ||
+        peers[peer.id] != peer ||
+        !peer.rendering ||
+        peer.connection != connection) {
+      return;
+    }
+    final renderer = peer.screen;
+    final shown = renderer.srcObject;
+    if (shown != null && shown.getVideoTracks().any((t) => t.id == track.id)) {
+      // Given nothing first: given the stream it shows, the video library would change
+      // nothing.
+      renderer.srcObject = null;
+      _attach(peer, _screen, renderer, shown);
+      return;
+    }
+    await _show(peer, connection, _screen, track, null);
+  }
+
   /// Gives [renderer] the pictures of [stream]. Every picture of the track reaches its
   /// renderer, drawn or not: one larger than a participant sends is seen at once, not
   /// only if a reading of the statistics falls on it.
@@ -1706,6 +1795,10 @@ class Call extends ChangeNotifier {
   /// How many times a participant's renderer is made again after its channel failed
   /// (one that failed shows nothing more and only waits to be let go of).
   static const maxRenewals = 3;
+
+  /// How many times this device's shared screen is sent again to someone who watches it
+  /// and to whom nothing has gone out ([_followScreenOut]).
+  static const screenNudges = 3;
 
   /// Puts a new renderer, with the same pictures, in the place of one that failed; after
   /// [maxRenewals] it is given up: what shows it is left, and the person is not kept

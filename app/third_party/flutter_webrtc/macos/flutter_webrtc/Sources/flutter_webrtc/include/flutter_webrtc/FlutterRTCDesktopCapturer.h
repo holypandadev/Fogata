@@ -19,4 +19,9 @@
 - (void)getDesktopSourceThumbnail:(nonnull NSDictionary*)argsMap
                            result:(nonnull FlutterResult)result;
 
+// Fogata: gives the encoders of the screen or window shared as track [trackId] its last
+// frame again (ScreenCaptureKit gives none while it stays still); NO for any other track,
+// whose capture gives frames all the time.
+- (BOOL)refreshScreenTrack:(nonnull NSString*)trackId;
+
 @end

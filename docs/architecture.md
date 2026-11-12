@@ -2157,6 +2157,16 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   a screen and a camera, and one screen is watched at a time. Alone in the room, its own
   shared screen and camera show on its page as they will with others; nothing is sent
   until someone comes in.
+  Watching only puts the screen on the watcher's connection (`replaceTrack`; the channel
+  was agreed with the connection), and the watcher's tile waits for the first picture's
+  size. The portal's capture on Linux and ScreenCaptureKit on macOS give a picture only
+  when the screen changes, so the sharer has the capture give its last picture again when
+  someone starts watching (the fork's `fogataScreenRefresh`). Both sides also follow it at
+  each reading of the statistics: the sharer sends the screen again (its last picture, then
+  the track put on again, as closing and opening it does) to a watcher whose encoder made
+  nothing since they started watching, three times at most; the watcher shows a screen
+  that has no picture yet again (its renderer starts over) and tells the sharer again that
+  it watches it, at the second, fourth and eighth readings, and never after.
   Its controls (who, how many watch, the connection's quality, sound, full screen and the
   way back) show while the pointer moves over it and hide after 2.5 s. The quality comes from
   the WebRTC statistics every 2 s: round-trip time and packets lost since the last reading

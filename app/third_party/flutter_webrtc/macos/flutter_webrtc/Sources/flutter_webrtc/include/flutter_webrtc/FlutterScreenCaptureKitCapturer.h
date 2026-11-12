@@ -24,6 +24,11 @@ NS_ASSUME_NONNULL_BEGIN
 
 - (void)stopCaptureWithCompletion:(void (^ _Nonnull)(void))completion;
 
+// Fogata: gives the delegate the last frame again, now: ScreenCaptureKit gives a frame
+// only when what is shared changes, and an encoder that starts while it stays still would
+// get none. NO when there is none yet, or the capture is not running. Any queue.
+- (BOOL)refreshFrame;
+
 @end
 
 NS_ASSUME_NONNULL_END

@@ -197,6 +197,9 @@ class FlutterWebRTCBase {
   // Fogata: sets how many frames a second a screen captured through the portal sends,
   // by its track.
   std::map<std::string, std::function<void(int)>> track_rates_;
+  // Fogata: gives the encoders of a screen captured through the portal its last frame
+  // again, by its track; false when there is none.
+  std::map<std::string, std::function<bool()>> track_refreshers_;
   // Fogata: the input chosen, by id ("" for the system's default), and its place in
   // the list when last selected.
   std::mutex recording_device_mutex_;

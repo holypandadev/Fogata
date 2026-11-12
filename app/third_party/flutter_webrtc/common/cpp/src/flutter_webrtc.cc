@@ -262,6 +262,15 @@ void FlutterWebRTC::HandleMethodCall(
       rate->second(fps);
       result->Success(EncodableValue(true));
     }
+  } else if (method_call.method_name().compare("fogataScreenRefresh") == 0) {
+    // Fogata: gives the encoders of a screen captured through the portal its last frame
+    // again (one that stays still gives no new one); false for any other track, whose
+    // capture gives frames all the time.
+    const EncodableMap params =
+        GetValue<EncodableMap>(*method_call.arguments());
+    auto refresh = track_refreshers_.find(findString(params, "trackId"));
+    result->Success(EncodableValue(refresh != track_refreshers_.end() &&
+                                   refresh->second()));
   } else if (method_call.method_name().compare("fogataNoiseSuppression") == 0) {
     // Fogata: the microphone's noise suppression on or off (`on`), with the table of
     // functions it runs (`api`, needed the first time); false if it cannot run.

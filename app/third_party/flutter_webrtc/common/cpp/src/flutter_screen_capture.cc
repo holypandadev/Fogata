@@ -538,6 +538,9 @@ void FlutterScreenCapture::GetDisplayMediaFromPortal(
         base_->track_rates_[*track_id] = [capturer](int fps) {
           capturer->SetFps(fps);
         };
+        base_->track_refreshers_[*track_id] = [capturer]() {
+          return capturer->Refresh();
+        };
 
         EncodableMap info;
         info[EncodableValue("id")] = EncodableValue(*track_id);

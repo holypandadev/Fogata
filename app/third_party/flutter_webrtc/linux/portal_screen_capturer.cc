@@ -49,6 +49,10 @@ void PortalScreenCapturer::Start(bool, int, FrameCallback, StartedCallback start
 
 void PortalScreenCapturer::SetFps(int) {}
 
+bool PortalScreenCapturer::Refresh() {
+  return false;
+}
+
 bool PortalScreenCapturer::SharesScreen() const {
   return false;
 }
@@ -89,7 +93,11 @@ struct PortalScreenCapturer::State {
   spa_video_info_raw format{};
   // When the next frame is due, on the monotonic clock.
   int64_t next_frame_ns = 0;
+  // The last frame given, as I420, and its size (0 until there is one); used under
+  // the loop's lock (PipeWire's thread holds it while it gives a frame).
   std::vector<uint8_t> i420;
+  int i420_width = 0;
+  int i420_height = 0;
 
   ~State() {
     if (bus != nullptr) g_object_unref(bus);
@@ -380,6 +388,8 @@ void OnProcess(void* data) {
     const auto pixels = static_cast<const uint8_t*>(d->data) + d->chunk->offset;
     const bool bgr = format == SPA_VIDEO_FORMAT_BGRx || format == SPA_VIDEO_FORMAT_BGRA;
     ToI420(pixels, stride, width, height, bgr, y, u, v);
+    s->i420_width = width;
+    s->i420_height = height;
     s->on_frame(width, height, y, width, u, half_w, v, half_w);
   }
   pw_stream_queue_buffer(s->stream, buffer);
@@ -654,6 +664,26 @@ void PortalScreenCapturer::Start(bool cursor,
 
 void PortalScreenCapturer::SetFps(int fps) {
   state_->fps = fps > 0 ? fps : 30;
+}
+
+bool PortalScreenCapturer::Refresh() {
+  const StatePtr s = state_;
+  // Stopping (on this thread too) destroys the loop.
+  if (s->stopped || s->loop == nullptr) return false;
+  pw_thread_loop_lock(s->loop);
+  const int width = s->i420_width;
+  const int height = s->i420_height;
+  const bool given = width > 0 && height > 0 && s->on_frame != nullptr;
+  if (given) {
+    const int half_w = (width + 1) / 2;
+    const int half_h = (height + 1) / 2;
+    const uint8_t* y = s->i420.data();
+    const uint8_t* u = y + size_t(width) * height;
+    const uint8_t* v = u + size_t(half_w) * half_h;
+    s->on_frame(width, height, y, width, u, half_w, v, half_w);
+  }
+  pw_thread_loop_unlock(s->loop);
+  return given;
 }
 
 bool PortalScreenCapturer::SharesScreen() const {

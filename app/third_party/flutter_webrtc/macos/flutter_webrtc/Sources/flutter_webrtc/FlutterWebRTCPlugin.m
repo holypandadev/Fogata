@@ -640,6 +640,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     const BOOL on = [argsMap[@"on"] boolValue];
     const int64_t api = [argsMap[@"api"] longLongValue];
     result(@([FogataDenoise suppress:on api:api]));
+  } else if ([@"fogataScreenRefresh" isEqualToString:call.method]) {
+    // Fogata: gives the encoders of a screen shared through ScreenCaptureKit its last
+    // frame again (one that stays still gives no new one); NO for any other track.
+    NSDictionary* argsMap = call.arguments;
+    NSString* trackId = argsMap[@"trackId"];
+    result(@([trackId isKindOfClass:[NSString class]] && [self refreshScreenTrack:trackId]));
   } else if ([@"fogataScreenSound" isEqualToString:call.method]) {
     // Fogata: starts or stops taking the other applications' sound for a shared screen,
     // or only the shared window's application's; answers whether it is being taken.

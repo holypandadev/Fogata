@@ -479,6 +479,24 @@ extension _LocalMedia on Call {
     }
   }
 
+  /// Has the shared screen's capture give its last picture again, now, to every encoder
+  /// it feeds: one that gives a picture only when the screen changes (the portal's on
+  /// Linux, ScreenCaptureKit on macOS) gives none to the encoder of someone who just
+  /// started watching while the screen stays still, and they would see nothing until
+  /// something on it moved. The others give pictures all the time, and the platform
+  /// answers no.
+  Future<void> _refreshScreen() async {
+    final track = _screenStream?.getVideoTracks().firstOrNull;
+    if (!sharing || track?.id == null) return;
+    try {
+      await WebRTC.invokeMethod<bool, dynamic>('fogataScreenRefresh', {
+        'trackId': track!.id,
+      });
+    } catch (e) {
+      _trace('screen picture again: $e');
+    }
+  }
+
   /// Whether [connection] has agreed to send voice: its channel's current direction (as
   /// last negotiated) sends. Not known counts as not.
   Future<bool> _sendsVoice(RTCPeerConnection connection) async {

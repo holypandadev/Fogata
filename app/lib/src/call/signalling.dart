@@ -211,6 +211,9 @@ extension _Signalling on Call {
           final connection = peer.connection;
           if (peer.watches == me && connection != null) {
             await _tune(peer, connection);
+            // Its capture's last picture again, for their encoder: a screen that stays
+            // still gives it no new one (see [_refreshScreen]).
+            await _refreshScreen();
           }
           await _soundTo(peer);
         }

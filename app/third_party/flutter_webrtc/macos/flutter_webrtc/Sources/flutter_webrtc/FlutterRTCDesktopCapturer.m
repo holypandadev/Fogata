@@ -17,6 +17,9 @@
 RTCDesktopMediaList* _screen = nil;
 RTCDesktopMediaList* _window = nil;
 NSArray<RTCDesktopSource*>* _captureSources;
+// Fogata: the ScreenCaptureKit captures running, by their track's id, to give their last
+// frame again (refreshScreenTrack:). Used on the main thread.
+NSMutableDictionary<NSString*, FlutterScreenCaptureKitCapturer*>* _refreshable = nil;
 #endif
 
 @implementation FlutterWebRTCPlugin (DesktopCapturer)
@@ -190,6 +193,7 @@ NSArray<RTCDesktopSource*>* _captureSources;
   } else {
     self.videoCapturerStopHandlers[trackUUID] = ^(CompletionHandler handler) {
       NSLog(@"stop screencapturekit capture: trackID %@", trackUUID);
+      [_refreshable removeObjectForKey:trackUUID];
       [screenCaptureKitCapturer stopCaptureWithCompletion:handler];
     };
   }
@@ -243,6 +247,12 @@ NSArray<RTCDesktopSource*>* _captureSources;
         if (error == nil) {
           NSLog(@"start screencapturekit capture: for  sourceId: %@, fps: %ld", sourceId,
                 (long)fps);
+          // Fogata: unless it was stopped meanwhile.
+          FlutterWebRTCPlugin* strongSelf = weakSelf;
+          if (strongSelf != nil && strongSelf.videoCapturerStopHandlers[trackUUID] != nil) {
+            if (_refreshable == nil) _refreshable = [NSMutableDictionary dictionary];
+            _refreshable[trackUUID] = screenCaptureKitCapturer;
+          }
           result(answer);
           return;
         }
@@ -264,6 +274,15 @@ NSArray<RTCDesktopSource*>* _captureSources;
   }
 #endif
   result(answer);
+}
+
+- (BOOL)refreshScreenTrack:(NSString*)trackId {
+#if TARGET_OS_OSX
+  FlutterScreenCaptureKitCapturer* capturer = _refreshable[trackId];
+  return capturer != nil && [capturer refreshFrame];
+#else
+  return NO;
+#endif
 }
 
 - (void)getDesktopSources:(NSDictionary*)argsMap result:(FlutterResult)result {

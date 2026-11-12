@@ -713,6 +713,7 @@ void FlutterMediaStream::MediaStreamDispose(
       base_->track_stoppers_.erase(stopper);
     }
     base_->track_rates_.erase(track->id().std_string());
+    base_->track_refreshers_.erase(track->id().std_string());
     if (base_->video_capturers_.find(track->id().std_string()) !=
         base_->video_capturers_.end()) {
       auto video_capture = base_->video_capturers_[track->id().std_string()];
@@ -789,6 +790,7 @@ void FlutterMediaStream::MediaStreamTrackDispose(
     base_->track_stoppers_.erase(stopper);
   }
   base_->track_rates_.erase(track_id);
+  base_->track_refreshers_.erase(track_id);
   base_->RemoveMediaTrackForId(track_id);
   result->Success();
 }

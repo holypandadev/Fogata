@@ -52,6 +52,12 @@ class PortalScreenCapturer {
   // rate the capture was started at, which the system was asked for.
   void SetFps(int fps);
 
+  // Gives [on_frame] the last frame again, now: the compositor gives PipeWire a
+  // frame only when the screen changes, and an encoder that starts while it stays
+  // still would get none. False when there is none yet, or the capture stopped. On
+  // the GLib main thread, as Stop.
+  bool Refresh();
+
   // Once started: what was chosen is a whole screen, as far as the portal tells.
   // A window, or a choice the portal does not tell (one older than version 3
   // that offered windows too), is not.

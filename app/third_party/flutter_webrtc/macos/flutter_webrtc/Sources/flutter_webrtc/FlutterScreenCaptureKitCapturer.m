@@ -32,7 +32,11 @@
 @property(nonatomic, assign) BOOL ended;
 @end
 
-@implementation FlutterScreenCaptureKitCapturer
+@implementation FlutterScreenCaptureKitCapturer {
+  // Fogata: the last frame's pixels (retained), given again by refreshFrame; under
+  // @synchronized(self).
+  CVPixelBufferRef _lastPixelBuffer;
+}
 
 - (instancetype)initWithDelegate:(id<RTCVideoCapturerDelegate>)delegate {
   self = [super init];
@@ -154,12 +158,38 @@
   onStarted(unavailable);
 }
 
+- (void)dealloc {
+  if (_lastPixelBuffer != NULL) CVBufferRelease(_lastPixelBuffer);
+}
+
+- (BOOL)refreshFrame {
+  CVPixelBufferRef pixelBuffer = NULL;
+  @synchronized(self) {
+    if (!self.running || _lastPixelBuffer == NULL) return NO;
+    pixelBuffer = CVBufferRetain(_lastPixelBuffer);
+  }
+  // On the clock ScreenCaptureKit's own frames are timed on, so it comes after them.
+  const int64_t timeStampNs =
+      (int64_t)(CMTimeGetSeconds(CMClockGetTime(CMClockGetHostTimeClock())) * 1000000000.0);
+  id<RTCVideoFrameBuffer> rtcBuffer = [[RTCCVPixelBuffer alloc] initWithPixelBuffer:pixelBuffer];
+  RTCVideoFrame *frame = [[RTCVideoFrame alloc] initWithBuffer:rtcBuffer
+                                                      rotation:RTCVideoRotation_0
+                                                   timeStampNs:timeStampNs];
+  [self.delegate capturer:self.capturer didCaptureVideoFrame:frame];
+  CVBufferRelease(pixelBuffer);
+  return YES;
+}
+
 - (void)stopCaptureWithCompletion:(void (^)(void))completion {
 #if __has_include(<ScreenCaptureKit/ScreenCaptureKit.h>)
   if (@available(macOS 12.3, *)) {
+    CVPixelBufferRef last = NULL;
     @synchronized(self) {
       self.running = NO;
+      last = _lastPixelBuffer;
+      _lastPixelBuffer = NULL;
     }
+    if (last != NULL) CVBufferRelease(last);
     if (self.stream == nil) {
       completion();
       return;
@@ -315,6 +345,13 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
   RTCVideoFrame *frame = [[RTCVideoFrame alloc] initWithBuffer:rtcBuffer
                                                       rotation:RTCVideoRotation_0
                                                    timeStampNs:timeStampNs];
+  // Fogata: kept to be given again (refreshFrame); the one before is let go of.
+  CVPixelBufferRef older = NULL;
+  @synchronized(self) {
+    older = _lastPixelBuffer;
+    _lastPixelBuffer = CVBufferRetain(pixelBuffer);
+  }
+  if (older != NULL) CVBufferRelease(older);
   [self.delegate capturer:self.capturer didCaptureVideoFrame:frame];
 }
 #endif
