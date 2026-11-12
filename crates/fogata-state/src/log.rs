@@ -22,10 +22,7 @@ use crate::{
     },
     picture::{GroupPicture, is_group_picture},
     record::{MAX_RECORD_AHEAD_MS, RecordStamp},
-    state::{
-        GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, Managers, ROTATE_LEAVES_OUT,
-        fair_name,
-    },
+    state::{GroupState, LEVEL_UNKNOWN, Level, MAX_GROUP_NAME_CHARS, ROTATE_LEAVES_OUT, fair_name},
 };
 
 /// Why an entry from a device the log never named is refused.
@@ -1997,9 +1994,9 @@ impl GroupLog {
     /// believes from any member of the group.
     ///
     /// A manager that leaves by itself keeps the log as well, but counts only for the
-    /// invites it could answer: those that name it ([`NamedInvite`]), and, of those that
-    /// name nobody, only where a few manage. Where everyone manages, as groups start, every
-    /// leave would cancel every invite. It changes nothing of what the log takes.
+    /// invites it could answer: those that name it ([`NamedInvite`]), and any that names
+    /// nobody (level two), which every manager may answer, where everyone manages too. It
+    /// changes nothing of what the log takes.
     pub fn invites_a_manager_left_with(
         &self,
         issuer: &DevicePublicKey,
@@ -2018,24 +2015,21 @@ impl GroupLog {
             .rposition(|h| matches!(&self.entries[h].body, Body::SetManagers { first: Some(_) }));
         let mut last = fewer_managers;
         let mut leaves = Vec::new();
-        for (device, entry, managers) in state.manager_losses() {
+        for (device, entry, _) in state.manager_losses() {
             let Some(&place) = at.get(entry).filter(|_| device != issuer) else {
                 continue;
             };
             if matches!(self.entries[entry].body, Body::Leave) {
-                leaves.push((device, place, managers));
+                leaves.push((device, place));
             } else {
                 last = last.max(Some(place));
             }
         }
-        // Whether a manager that left at `place` could let in the device invited at `noted`.
+        // Whether a manager that left at `place` could let in the device invited at `noted`:
+        // one the invite names, or any manager for an invite that names nobody.
         let left_with = |noted: usize, invite: &Option<NamedInvite>| {
-            leaves.iter().any(|(device, place, managers)| {
-                noted < *place
-                    && match invite {
-                        Some(named) => named.lets_in(device),
-                        None => matches!(managers, Managers::First(_)),
-                    }
+            leaves.iter().any(|(device, place)| {
+                noted < *place && invite.as_ref().is_none_or(|named| named.lets_in(device))
             })
         };
         state
@@ -2056,6 +2050,56 @@ impl GroupLog {
                     .get(id)
                     .is_some_and(|(_, expires)| now_ms <= *expires)
             })
+            .collect()
+    }
+
+    /// Manager: cancels (`Revoke`) the invites still open that a device which managed the
+    /// group in `before` (this log's state before a change this device just wrote) and no
+    /// longer does could answer: those it issued or that name it, and any that names
+    /// nobody. Written with the removal, demotion or change of managers itself, so they end
+    /// at once in the group: that device keeps the log as it was, the invites in it, and
+    /// could let their devices into a copy where it still manages; the issuers, once they
+    /// see these, write their own `Revoke`, the refusal an invited device believes (see
+    /// [`Self::revokes_to_confirm`]). Nothing when this device does not manage. Returns the
+    /// new entries.
+    pub fn cancel_invites_lost_since(
+        &mut self,
+        identity: &DeviceIdentity,
+        before: &GroupState,
+        now_ms: u64,
+    ) -> Result<Vec<Entry>, StateError> {
+        let state = self.shared_state();
+        if !state.is_manager(&identity.public_key()) {
+            return Ok(Vec::new());
+        }
+        let lost = state.managers_lost_since(before);
+        let tickets = state.invites_answerable_by(&lost, now_ms);
+        drop(state);
+        tickets
+            .into_iter()
+            .map(|ticket_id| self.append(identity, Body::Revoke { ticket_id }, now_ms))
+            .collect()
+    }
+
+    /// This device, about to leave the group: cancels the invites still open that it could
+    /// answer as a manager (see [`Self::cancel_invites_lost_since`]), before its `Leave`,
+    /// after which it may write nothing. Its issuers confirm them, as for a removal. Returns
+    /// the new entries.
+    pub fn cancel_invites_before_leaving(
+        &mut self,
+        identity: &DeviceIdentity,
+        now_ms: u64,
+    ) -> Result<Vec<Entry>, StateError> {
+        let me = identity.public_key();
+        let state = self.shared_state();
+        if !state.is_manager(&me) {
+            return Ok(Vec::new());
+        }
+        let tickets = state.invites_answerable_by(&BTreeSet::from([me]), now_ms);
+        drop(state);
+        tickets
+            .into_iter()
+            .map(|ticket_id| self.append(identity, Body::Revoke { ticket_id }, now_ms))
             .collect()
     }
 
@@ -3609,6 +3653,138 @@ mod tests {
         assert!(log.state().open_invites.is_empty());
         join(&mut log, &eva, ticket, 4);
         assert!(!log.state().is_member(&eva.key()));
+    }
+
+    /// The open invites, by ticket id, of `log` now.
+    fn open(log: &GroupLog) -> BTreeSet<[u8; 16]> {
+        log.state().open_invites.keys().copied().collect()
+    }
+
+    /// A removal, a demotion or fewer managers end, written with them, the open invites the
+    /// manager who stops managing could answer: those it issued or that name it (level
+    /// three), every one that names nobody (level two). The others stay, and a change that
+    /// leaves every manager managing, or one written by a member that does not manage,
+    /// cancels nothing. The issuers then confirm with their own `Revoke`.
+    #[test]
+    fn a_manager_s_loss_ends_the_invites_it_could_answer_with_it() {
+        type Change = fn(&mut GroupLog, &Device, &Device) -> Entry;
+        let changes: [(&str, Change); 3] = [
+            ("removed", |log, by, who| {
+                log.remove(&by.id, who.key(), 10).unwrap()
+            }),
+            ("demoted", |log, by, who| {
+                let demote = Body::Demote { member: who.key() };
+                log.append(&by.id, demote, 10).unwrap()
+            }),
+            ("left out", |log, by, _| {
+                let first = Body::SetManagers { first: Some(1) };
+                log.append(&by.id, first, 10).unwrap()
+            }),
+        ];
+        for (what, change) in changes {
+            // Level three: Ana's invite names nobody but her, Bea's names Ana above her.
+            let (mut log, ana, bea, carlos) = two_managers();
+            log.raise_level(&ana.id, Level::Three, 5).unwrap();
+            let (by_ana, _) = log.invite(&ana.id, 1_000, 6).unwrap();
+            let (by_bea, _) = log.invite(&bea.id, 1_000, 6).unwrap();
+            let before = log.shared_state();
+            change(&mut log, &ana, &bea);
+            let cancels = log.cancel_invites_lost_since(&ana.id, &before, 11).unwrap();
+            assert_eq!(cancels.len(), 1, "{what}");
+            assert_eq!(open(&log), BTreeSet::from([by_ana.ticket_id]), "{what}");
+            assert_eq!(log.revokes_to_confirm(&bea.key()), vec![by_bea.ticket_id]);
+            // Nothing more to end, and a member that does not manage ends nothing.
+            let before = log.shared_state();
+            assert!(
+                log.cancel_invites_lost_since(&ana.id, &before, 12)
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                log.cancel_invites_lost_since(&carlos.id, &before, 12)
+                    .unwrap()
+                    .is_empty()
+            );
+
+            // Level two: an invite names nobody, and the manager lost could answer each.
+            let (mut log, ana, bea, _carlos) = two_managers();
+            let (by_ana, _) = log.invite(&ana.id, 1_000, 6).unwrap();
+            let before = log.shared_state();
+            change(&mut log, &ana, &bea);
+            log.cancel_invites_lost_since(&ana.id, &before, 11).unwrap();
+            assert!(open(&log).is_empty(), "{what}");
+            assert!(log.issuer_revoke(&by_ana).is_some());
+        }
+        // Expired invites stay as they are, and a change that takes nobody's managing ends
+        // nothing.
+        let (mut log, ana, bea, carlos) = two_managers();
+        log.invite(&ana.id, 7, 6).unwrap();
+        let (open_one, _) = log.invite(&ana.id, 1_000, 6).unwrap();
+        let before = log.shared_state();
+        log.remove(&ana.id, carlos.key(), 10).unwrap();
+        assert!(
+            log.cancel_invites_lost_since(&ana.id, &before, 11)
+                .unwrap()
+                .is_empty()
+        );
+        let before = log.shared_state();
+        log.remove(&ana.id, bea.key(), 12).unwrap();
+        assert_eq!(
+            log.cancel_invites_lost_since(&ana.id, &before, 13)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(!open(&log).contains(&open_one.ticket_id));
+        assert_eq!(open(&log).len(), 1, "the expired one is left as it is");
+    }
+
+    /// A manager about to leave ends first the open invites it could answer, so that none
+    /// is left to the copy of the group it keeps: an invite named to several managers ends
+    /// when one of them leaves. Their issuers, seeing the leave, end them too; a member
+    /// that does not manage ends nothing.
+    #[test]
+    fn a_manager_that_leaves_ends_first_the_invites_it_could_answer() {
+        let eva = Device::new();
+        let (mut log, ana, bea, carlos) = two_managers();
+        log.add(&ana.id, eva.key(), "eva", 5).unwrap();
+        log.append(&ana.id, Body::SetManagers { first: Some(3) }, 6)
+            .unwrap();
+        log.raise_level(&ana.id, Level::Three, 7).unwrap();
+        // Carlos, third, names Ana and Bea; Ana's names nobody else.
+        let (by_carlos, _) = log.invite(&carlos.id, 1_000, 8).unwrap();
+        let (by_ana, _) = log.invite(&ana.id, 1_000, 8).unwrap();
+        let named = log
+            .entries()
+            .find_map(|e| NamedInvite::of(&e.body).filter(|i| i.ticket == by_carlos))
+            .unwrap();
+        assert_eq!(
+            named.welcomers.iter().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([ana.key(), bea.key()])
+        );
+        // Bea leaves: Carlos's invite, which names her, ends; Ana's does not.
+        let mut leaving = log.clone();
+        let cancels = leaving.cancel_invites_before_leaving(&bea.id, 9).unwrap();
+        assert_eq!(cancels.len(), 1);
+        leaving.append(&bea.id, Body::Leave, 9).unwrap();
+        assert_eq!(open(&leaving), BTreeSet::from([by_ana.ticket_id]));
+        assert_eq!(
+            leaving.revokes_to_confirm(&carlos.key()),
+            vec![by_carlos.ticket_id]
+        );
+        // Without her cancelling (a copy of hers that does not), Carlos ends it all the same.
+        log.append(&bea.id, Body::Leave, 9).unwrap();
+        assert_eq!(
+            log.invites_a_manager_left_with(&carlos.key(), 10),
+            vec![by_carlos.ticket_id]
+        );
+        assert!(log.invites_a_manager_left_with(&ana.key(), 10).is_empty());
+        // Eva does not manage: she leaves without ending anything.
+        assert!(
+            log.cancel_invites_before_leaving(&eva.id, 11)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

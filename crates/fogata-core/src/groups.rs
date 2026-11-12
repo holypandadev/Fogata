@@ -616,10 +616,13 @@ impl Core {
     }
 
     /// Removes a member below this device on the ladder and makes a new group key without
-    /// it.
+    /// it; a manager's open invites it could answer end with it (see
+    /// [`GroupLog::cancel_invites_lost_since`]).
     pub async fn remove_from_group(&self, group: GroupId, member: DevicePublicKey) -> Result<()> {
         self.change_group(group, |log, id| {
+            let before = log.shared_state();
             log.remove(id, member, now_ms())?;
+            log.cancel_invites_lost_since(id, &before, now_ms())?;
             Ok(())
         })
         .await
@@ -634,20 +637,26 @@ impl Core {
         .await
     }
 
-    /// Moves a member below this device on the ladder down to the end.
+    /// Moves a member below this device on the ladder down to the end; when that ends its
+    /// managing, the open invites it could answer end too.
     pub async fn demote(&self, group: GroupId, member: DevicePublicKey) -> Result<()> {
         self.change_group(group, |log, id| {
+            let before = log.shared_state();
             log.append(id, Body::Demote { member }, now_ms())?;
+            log.cancel_invites_lost_since(id, &before, now_ms())?;
             Ok(())
         })
         .await
     }
 
     /// Who manages the group: the first `first` on the ladder, or everyone (`None`)
-    /// (managers; never leaving out this device or those above it).
+    /// (managers; never leaving out this device or those above it). The open invites those
+    /// left out could answer end with it.
     pub async fn set_managers(&self, group: GroupId, first: Option<u8>) -> Result<()> {
         self.change_group(group, |log, id| {
+            let before = log.shared_state();
             log.append(id, Body::SetManagers { first }, now_ms())?;
+            log.cancel_invites_lost_since(id, &before, now_ms())?;
             Ok(())
         })
         .await
@@ -913,6 +922,8 @@ impl Core {
     /// time this device starts.
     pub async fn leave_group(&self, group: GroupId) -> Result<()> {
         let leave = self.change_group(group, |log, id| {
+            // A manager's invites end first: one that left keeps the log it had.
+            log.cancel_invites_before_leaving(id, now_ms())?;
             log.append(id, Body::Leave, now_ms())?;
             Ok(())
         });

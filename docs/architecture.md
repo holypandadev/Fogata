@@ -3052,9 +3052,18 @@ to it unjudged: together they could let the device in where neither does alone.
 
 The issuer also cancels (`Revoke`) its open invites when a manager is removed or demoted
 after them, or the managers are set to the first few, and when a manager that could answer
-one leaves by itself: one the invite names, or, for an invite that names nobody, any
-manager where a few manage. Where everyone manages a leave cancels nothing, or every leave
-would cancel every invite. That is only what the issuer writes: every version takes a
+one leaves by itself: one the invite names, or, for an invite that names nobody (level two),
+any manager, where everyone manages too: such a manager could let the invited device into
+the copy it keeps. The issuer may be offline then, so the change itself ends them at once:
+the manager that removes or demotes a manager, or sets the managers to fewer, cancels in the
+same go every open invite the one who stops managing could answer (those it issued or that
+name it, any that names nobody: `GroupLog::cancel_invites_lost_since`), and a manager about
+to leave cancels those it could answer before its `Leave` (`cancel_invites_before_leaving`).
+The device invited believes only its issuer's refusal, so each issuer confirms these with
+its own `Revoke` once it sees them (as for another manager's no, below); an issuer removed
+confirms nothing, and its invited device, which no manager of the group lets in any more,
+waits until the invite runs out. Moving an account to another computer changes no device
+key, so nothing ends then. That is only what managers write: every version takes a
 `Revoke`.
 
 Why those managers: whoever an invite names can still make such a copy if it loses its

@@ -1822,8 +1822,8 @@ mod tests {
 
     /// A manager removed or demoted keeps the log with the invites open then, and could
     /// let their device into a copy of the group where it still manages: the issuer
-    /// cancels them, once. Invites made after cancel nothing, and nor does a manager that
-    /// leaves by itself where everyone manages.
+    /// cancels them, once. So does one that leaves by itself, where everyone manages too,
+    /// for an invite that names nobody. Invites made after cancel nothing.
     #[test]
     fn invites_a_removed_manager_knows_are_cancelled_by_their_issuer() {
         let id = || Arc::new(DeviceIdentity::generate().unwrap());
@@ -1832,9 +1832,13 @@ mod tests {
         log.add(&ana, bea.public_key(), "bea", 2).unwrap();
         log.add(&ana, leo.public_key(), "leo", 3).unwrap();
         log.add(&ana, zoe.public_key(), "zoe", 4).unwrap();
-        let (before, _) = log.invite(&ana, 1_000, 4).unwrap();
+        let (left_with, _) = log.invite(&ana, 1_000, 4).unwrap();
         log.append(&zoe, fogata_state::Body::Leave, 5).unwrap();
-        assert!(ctx(&ana, &log).confirm_revokes(6).is_empty());
+        let mut at_ana = ctx(&ana, &log);
+        assert_eq!(at_ana.confirm_revokes(6).len(), 1);
+        assert!(at_ana.log().issuer_revoke(&left_with).is_some());
+        let mut log = at_ana.log().clone();
+        let (before, _) = log.invite(&ana, 1_000, 6).unwrap();
         log.remove(&ana, bea.public_key(), 7).unwrap();
         let (after, _) = log.invite(&ana, 1_000, 7).unwrap();
         // Only its issuer's refusal counts for the invited device.
@@ -1846,9 +1850,9 @@ mod tests {
         assert!(at_ana.confirm_revokes(9).is_empty());
     }
 
-    /// A manager that leaves by itself keeps the log too: it cancels the invites it could
-    /// answer, those that name it from level three, and those of a group where a few
-    /// manage. Not the others, nor those made after it left.
+    /// A manager that leaves by itself keeps the log too: its issuers cancel the invites it
+    /// could answer, those that name it from level three, and any that names nobody. Not
+    /// the others, nor those made after it left.
     #[test]
     fn invites_a_manager_that_left_could_answer_are_cancelled_by_their_issuer() {
         let id = || Arc::new(DeviceIdentity::generate().unwrap());

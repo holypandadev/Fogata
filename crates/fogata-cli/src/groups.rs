@@ -260,7 +260,9 @@ pub async fn run(store: Store, command: GroupCommand) -> Result<()> {
         GroupCommand::Remove { name, member } => {
             let mut log = store.load_log(&store.group(&name)?)?;
             let target = member_by_short(&log.state(), &member)?;
+            let before = log.shared_state();
             log.remove(&identity, target, now_ms())?;
+            log.cancel_invites_lost_since(&identity, &before, now_ms())?;
             store.save_log(&name, &log)?;
             println!(
                 "Removed {}. A new group key was made for the others; they get it the next time a member who knows about this connects.",
@@ -277,7 +279,9 @@ pub async fn run(store: Store, command: GroupCommand) -> Result<()> {
         GroupCommand::MoveDown { name, member } => {
             let mut log = store.load_log(&store.group(&name)?)?;
             let target = member_by_short(&log.state(), &member)?;
+            let before = log.shared_state();
             log.append(&identity, Body::Demote { member: target }, now_ms())?;
+            log.cancel_invites_lost_since(&identity, &before, now_ms())?;
             store.save_log(&name, &log)?;
             println!("Done.");
         }
@@ -287,7 +291,9 @@ pub async fn run(store: Store, command: GroupCommand) -> Result<()> {
                 n => Some(n.parse::<u8>().context("give `all` or a number")?),
             };
             let mut log = store.load_log(&store.group(&name)?)?;
+            let before = log.shared_state();
             log.append(&identity, Body::SetManagers { first }, now_ms())?;
+            log.cancel_invites_lost_since(&identity, &before, now_ms())?;
             store.save_log(&name, &log)?;
             println!("Done.");
         }
@@ -302,6 +308,7 @@ pub async fn run(store: Store, command: GroupCommand) -> Result<()> {
         }
         GroupCommand::Leave { name } => {
             let mut log = store.load_log(&store.group(&name)?)?;
+            log.cancel_invites_before_leaving(&identity, now_ms())?;
             log.append(&identity, Body::Leave, now_ms())?;
             store.save_log(&name, &log)?;
             println!(

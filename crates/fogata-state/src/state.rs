@@ -1074,6 +1074,41 @@ impl GroupState {
             .collect()
     }
 
+    /// The invites still open at `now_ms` that one of `devices` could let a device in with,
+    /// were it a manager: those it issued or that name it ([`NamedInvite`]), and any that
+    /// names nobody ([`Body::Invite`]), which every manager may answer.
+    pub fn invites_answerable_by(
+        &self,
+        devices: &BTreeSet<DevicePublicKey>,
+        now_ms: u64,
+    ) -> Vec<[u8; 16]> {
+        if devices.is_empty() {
+            return Vec::new();
+        }
+        self.open_invites
+            .iter()
+            .filter(|(_, (_, expires))| now_ms <= *expires)
+            .filter(|(id, _)| {
+                self.welcomers
+                    .get(*id)
+                    .is_none_or(|named| named.iter().any(|d| devices.contains(d)))
+            })
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
+    /// The devices that managed the group in `before`, an earlier state of it, and manage it
+    /// no more here: removed, moved down past the managers, left out when the managers were
+    /// set to the first few, or gone by themselves.
+    pub fn managers_lost_since(&self, before: &GroupState) -> BTreeSet<DevicePublicKey> {
+        before
+            .members
+            .keys()
+            .filter(|d| before.is_manager(d) && !self.is_manager(d))
+            .copied()
+            .collect()
+    }
+
     /// [`Self::check_and_apply`] as [`Level::Two`] judges it.
     fn check_and_apply_at_two(
         &mut self,

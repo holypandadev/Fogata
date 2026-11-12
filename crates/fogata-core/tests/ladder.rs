@@ -227,16 +227,18 @@ async fn the_first_leaves_alone_and_the_others_go_on() {
     assert_eq!(core_d.groups().await.unwrap()[0].name, "Sin Ana");
     // Nobody acts on the one above everyone.
     assert!(core_d.demote(group, ana.public_key()).await.is_err());
-    // The activity, the newest first, says who did what.
-    let (lines, more) = core_d.group_activity(group, 0, 3).await.unwrap();
+    // The activity, the newest first, says who did what: Leo managed (everyone does), so
+    // the invite he could answer ended with his removal.
+    let (lines, more) = core_d.group_activity(group, 0, 4).await.unwrap();
     assert!(more);
     let said: Vec<_> = lines
         .iter()
         .map(|l| (l.by.device, l.what.clone()))
         .collect();
-    assert!(matches!(&said[0], (by, ActivityWhat::Removed { member })
+    assert!(matches!(&said[0], (by, ActivityWhat::Revoked) if *by == dani.public_key()));
+    assert!(matches!(&said[1], (by, ActivityWhat::Removed { member })
         if *by == dani.public_key() && member.device == leo.public_key()));
-    assert!(matches!(&said[2], (by, ActivityWhat::Renamed { name })
+    assert!(matches!(&said[3], (by, ActivityWhat::Renamed { name })
         if *by == dani.public_key() && name == "Sin Ana"));
     let (all, more) = core_d.group_activity(group, 0, 50).await.unwrap();
     assert!(!more);
