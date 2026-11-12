@@ -4186,21 +4186,27 @@ Future<void> _rejoin(WidgetTester tester, AppState state) async {
         } else {
           direction = 'from';
           await _hearFrom(tester, state, other, 'rejoin $tag leave');
+          // What it is connected with now, before it may go: its connection here, and the
+          // call of its own it names in its signals.
+          CallPeer? peer() => state.callState.call?.peers[other.id];
+          final was = (
+            peer: peer(),
+            connection: peer()?.connection,
+            call: peer()?.theirCall,
+          );
+          bool same() =>
+              peer() == was.peer &&
+              peer()?.connection == was.connection &&
+              peer()?.theirCall == was.call;
+          var count = await _voicePacketsFrom(was.peer);
           await _say(state, 'rejoin $tag ready');
-          // Its voice stops as it leaves: the connection goes, or nothing more comes on it.
-          var peer = state.callState.call?.peers[other.id];
-          var count = await _voicePacketsFrom(peer);
+          // It goes, and maybe comes again at once: what it is connected with changes (a
+          // new connection, or a new call of its own), or nothing more comes on it.
           var still = DateTime.now();
           final end = DateTime.now().add(const Duration(seconds: 60));
-          while (true) {
+          while (same()) {
             await poll();
-            final now = state.callState.call?.peers[other.id];
-            if (now != peer) {
-              peer = now;
-              count = now == null ? 0 : await _voicePacketsFrom(now);
-              break;
-            }
-            final n = await _voicePacketsFrom(now);
+            final n = await _voicePacketsFrom(peer());
             if (n != count) {
               count = n;
               still = DateTime.now();
@@ -4212,14 +4218,15 @@ Future<void> _rejoin(WidgetTester tester, AppState state) async {
               throw StateError('rejoin $tag: ${other.name} never left');
             }
           }
-          // And comes again: on a new connection, or more on the one it stopped on.
-          final base = (peer: peer, packets: count);
+          // And its voice comes again: counted on the connection there is now, from
+          // nothing on one made since.
+          final stopped = same() ? count : 0;
+          final stoppedOn = peer()?.connection;
           while (true) {
-            final now = state.callState.call?.peers[other.id];
+            final now = peer();
             final n = await _voicePacketsFrom(now);
-            if (n - (now == base.peer ? base.packets : 0) >= _flowPackets) {
-              break;
-            }
+            final from = now?.connection == stoppedOn ? stopped : 0;
+            if (n - from >= _flowPackets) break;
             if (DateTime.now().isAfter(end)) {
               await _say(state, 'rejoin $tag took never');
               throw StateError(
