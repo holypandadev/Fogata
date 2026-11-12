@@ -2555,7 +2555,37 @@ it is kept for the next time. Whoever can write them can make the device keep wh
 so in a sealed folder they count only sealed with the folder's key, for that log (signatures
 are not checked again then; in a plain folder they are, in 0.16 s, and the folder holds the
 identity in the clear anyway). They are not moved with the account (5e), and are judged again
-on the new computer. A group a friend offers again, which the node judged away from its loop,
+on the new computer.
+
+A group's log file (`logs/<group>.log`) is its entries one after another, each after its
+length, signed and not sealed (what is secret in them is sealed to the identity), read in any
+order. Written whole, they go in the order `GroupLog::entries_to_store` gives (the common order,
+then a raise past this version's levels); at a change, the entries it does not hold yet are
+added at its end in that order among themselves (`fogata-core/src/store/appended.rs`), so a
+change costs what it adds, not the whole log. Measured on a Mac (release build, a log of 4 300
+entries, 3 MB): one change adds its entry in about 8 ms where the file written whole took 22
+ms; what is left is mostly flushing to the disk, as is writing what was judged of the log
+(about 10 ms either way). A burst of 200 changes, written in turn by the writer below, cost
+the writer 109 to 122 ms in 5 to 7 whole writes before, and 36 to 78 ms in 3 or 4 saves that
+add 34 KB in all after (`measure_a_burst_of_changes_to_a_large_log` in `store/judged.rs`). It is added to only when the store knows
+what the file holds (it read it whole or wrote it, and finds it as it left it: its length,
+when it changed and, on Unix, which file it is) and the log still holds every entry in it;
+otherwise (a file changed by something else, entries the log let go of: spare ones trimmed,
+waiting ones past their room, a raise replaced by a higher one) it is written whole, so the
+file never holds what the log does not and what was judged of it says the same of both. It
+is written whole again, in the common order, once what was added since it was last written
+whole is larger than it was then: each byte is written twice on average. Not at quitting: a
+file added to reads as well. What is added is flushed to the disk before what was judged is
+written; a write that fails is cut off again. A computer that stops while entries are added
+leaves part of one at the end: reading keeps the entries before it (that part is no damage
+to set aside: it was never all there) and writes the file whole at the next change, so
+nothing lands behind it. What was judged is bound to the very entries read, so entries that
+reached the disk without the verdicts on them are judged again from the file, once. Entries
+added together and cut short between them read as the log with those before the cut, as
+after a sync that brought only part of them. Versions before read such a file as any other.
+The banner and picture records beside the log are written only when they change.
+
+A group a friend offers again, which the node judged away from its loop,
 is taken into the copy kept here without judging again what the node judged
 (`GroupLog::insert_judged`): only entries that waited there for parents this copy has are
 judged, at most 8 needing the group worked out for their own parents per offer, as from any
@@ -3164,7 +3194,10 @@ start without its person's yes). A device whose removal was undone and that is n
 when it is added again.
 
 Group settings have an Activity tab, for every member: who did what, the newest first, 50
-lines at a time (`GroupLog::activity`, `Core::group_activity`). It is built from the log, so
+lines at a time (`GroupLog::activity`, `Core::group_activity`). Each line is told from the group
+before it, so the lines are worked out once for each change of the log, kept with it and shared
+with its copies (`GroupLog::shared_activity`), and a page is read from their end: only its
+lines are copied and made into views. It is built from the log, so
 every member with the same entries sees the same list: who started the group, added, let in,
 removed, moved up or down whom, who left, renames, rooms opened, renamed and closed, limits,
 who manages, invites made and cancelled, and the room rules. Keys handed out and rotations
@@ -3441,7 +3474,12 @@ when the application quits.
 Files the core rewrites as the network changes things (group logs, `meta.json`, the friend
 book, `members.json`, animations, capability levels) are written by one thread of their own,
 in the order they were asked for, each as before: a temporary file, synced, renamed over the
-old one (`fogata-core/src/writer.rs`). A slow disk delays the files, not the events. A write
+old one, but for group logs, which grow by what is new (5.1) (`fogata-core/src/writer.rs`).
+At each change of a group the node hands the core a copy of its log to save: copies share
+the entries, each kept once, and what was worked out of them until one changes, so a copy
+costs little whatever the log's length (a copy of a 3 MB log takes well under a microsecond;
+200 changes made on the node and copied took it 60 ms before, 17 to 25 ms after, the rest
+being the changes themselves). A slow disk delays the files, not the events. A write
 of a file that still waits for its turn is replaced by a newer one of the same file, unless
 something asked for in between must come after it. A change the person makes to a group is
 written in its turn and on disk before it is told done. Direct chats' records (journal,
