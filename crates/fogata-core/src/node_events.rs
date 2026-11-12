@@ -395,24 +395,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         }),
         NodeEvent::UpdateToJoin { group } => handle_update_to_join(inner, group),
         NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
-        NodeEvent::Joined { group, name } => {
-            if !inner.is_call(group) {
-                // The log the manager sent replaces an invitation kept under the same id:
-                // the group is joined, and runs at the next start too.
-                inner.save_group(group).await;
-                let store = inner.store.clone();
-                inner.writer.after(move || {
-                    // Kept, the invitation would be tried again at the next start.
-                    if let Err(e) = store.set_pending(&hex::encode(group.as_bytes()), None) {
-                        tracing::warn!("cannot forget the invitation of a group joined: {e:#}");
-                    }
-                });
-            }
-            inner.lock().joining.remove(&group);
-            inner.forget_join(group);
-            inner.emit(CoreEvent::Joined { group, name });
-            inner.emit(CoreEvent::GroupsChanged);
-        }
+        NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
         NodeEvent::Removed { group, log } => {
             if direct::on_removed(inner, group).await {
                 return;
@@ -911,6 +894,26 @@ async fn handle_join_expired(inner: &Arc<Inner>, group: GroupId) {
         "The invitation to “{name}” ran out before someone in the group let you in. \
          Ask for a new one."
     )));
+}
+
+/// This device was let into a group.
+async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
+    if !inner.is_call(group) {
+        // The log the manager sent replaces an invitation kept under the same id:
+        // the group is joined, and runs at the next start too.
+        inner.save_group(group).await;
+        let store = inner.store.clone();
+        inner.writer.after(move || {
+            // Kept, the invitation would be tried again at the next start.
+            if let Err(e) = store.set_pending(&hex::encode(group.as_bytes()), None) {
+                tracing::warn!("cannot forget the invitation of a group joined: {e:#}");
+            }
+        });
+    }
+    inner.lock().joining.remove(&group);
+    inner.forget_join(group);
+    inner.emit(CoreEvent::Joined { group, name });
+    inner.emit(CoreEvent::GroupsChanged);
 }
 
 #[cfg(test)]
