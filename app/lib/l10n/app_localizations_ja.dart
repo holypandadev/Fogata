@@ -254,12 +254,6 @@ class L10nJa extends L10n {
   String get errGroupInvite => 'これはグループへの招待リンクです。';
 
   @override
-  String get errDeviceNotFound => '相手のデバイスが見つかりませんでした。お互いにオンラインか確認してください。';
-
-  @override
-  String get errNotFriendCode => 'Fogataのリンクやコードではないようです。';
-
-  @override
   String get errAlreadyInGroup => 'すでにそのグループに参加しています。';
 
   @override
@@ -361,9 +355,6 @@ class L10nJa extends L10n {
 
   @override
   String get errRefused => '相手のデバイスに拒否されました。コードはすでに使われている可能性があります。';
-
-  @override
-  String get errNobodyLetIn => '誰も参加を承認しませんでした。グループの誰かがオンラインのときにもう一度お試しください。';
 
   @override
   String get errNotBelow => 'グループ内であなたより下の人にのみ実行できます。';

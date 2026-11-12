@@ -367,14 +367,6 @@
   "@errGroupInvite": {
     "description": "Error message. A group invitation link was pasted where a friend link was expected."
   },
-  "errDeviceNotFound": "The other device was not found. Check that you are both online.",
-  "@errDeviceNotFound": {
-    "description": "Error message. The friend's computer could not be reached."
-  },
-  "errNotFriendCode": "That does not look like a Fogata link or code.",
-  "@errNotFriendCode": {
-    "description": "Error message. What was pasted or typed is not a friend link or code."
-  },
   "errAlreadyInGroup": "You are already in that group.",
   "@errAlreadyInGroup": {
     "description": "Error message. Joining a group this person is already a member of."
@@ -502,10 +494,6 @@
   "errRefused": "The other device said no. The code may have been used already.",
   "@errRefused": {
     "description": "Error message. The other computer refused the friend request."
-  },
-  "errNobodyLetIn": "Nobody let you in. Try again when someone in the group is online.",
-  "@errNobodyLetIn": {
-    "description": "Error message. Joining a group with an invite, but no member answered."
   },
   "errNotBelow": "You can only do that to someone below you in the group.",
   "@errNotBelow": {

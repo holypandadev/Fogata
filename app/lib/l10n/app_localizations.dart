@@ -435,18 +435,6 @@ abstract class L10n {
   /// **'That is a group invitation.'**
   String get errGroupInvite;
 
-  /// Error message. The friend's computer could not be reached.
-  ///
-  /// In en, this message translates to:
-  /// **'The other device was not found. Check that you are both online.'**
-  String get errDeviceNotFound;
-
-  /// Error message. What was pasted or typed is not a friend link or code.
-  ///
-  /// In en, this message translates to:
-  /// **'That does not look like a Fogata link or code.'**
-  String get errNotFriendCode;
-
   /// Error message. Joining a group this person is already a member of.
   ///
   /// In en, this message translates to:
@@ -638,12 +626,6 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'The other device said no. The code may have been used already.'**
   String get errRefused;
-
-  /// Error message. Joining a group with an invite, but no member answered.
-  ///
-  /// In en, this message translates to:
-  /// **'Nobody let you in. Try again when someone in the group is online.'**
-  String get errNobodyLetIn;
 
   /// Error message. A manager acted on someone at or above their own place.
   ///

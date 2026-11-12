@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/format.dart';
@@ -103,5 +105,23 @@ void main() {
     expect(explain(AnyhowException('the disk is full')), 'The disk is full.');
     expect(explain('Already a sentence.'), 'Already a sentence.');
     expect(explain(''), 'Something went wrong.');
+  });
+
+  test('the parts of messages looked for are those the core checks', () {
+    // The core's test reads core_errors.txt too (crates/fogata-ffi/tests/
+    // error_texts.rs): `core <words>`, or `unix|windows <number> <words>`.
+    final listed = <String>{};
+    for (final line in File('test/core_errors.txt').readAsLinesSync()) {
+      if (line.trim().isEmpty || line.startsWith('#')) continue;
+      final parts = line.split(' ');
+      final words = switch (parts.first) {
+        'core' => parts.skip(1),
+        'unix' || 'windows' => parts.skip(2),
+        _ => throw StateError('$line: not core, unix or windows'),
+      };
+      final added = listed.add(words.join(' '));
+      expect(added, isTrue, reason: 'listed twice: $line');
+    }
+    expect(listed, explainedParts);
   });
 }

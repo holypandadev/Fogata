@@ -250,12 +250,6 @@ class L10nZh extends L10n {
   String get errGroupInvite => '这是群组邀请链接。';
 
   @override
-  String get errDeviceNotFound => '找不到对方的设备。请确认你们双方都在线。';
-
-  @override
-  String get errNotFriendCode => '这看起来不是Fogata链接或好友码。';
-
-  @override
   String get errAlreadyInGroup => '你已经在这个群组里了。';
 
   @override
@@ -351,9 +345,6 @@ class L10nZh extends L10n {
 
   @override
   String get errRefused => '对方设备拒绝了。这个好友码可能已被使用。';
-
-  @override
-  String get errNobodyLetIn => '没有人同意你加入。请在群组中有人在线时重试。';
 
   @override
   String get errNotBelow => '你只能对群组中排在你下面的人这样做。';

@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_rust_bridge/flutter_rust_bridge.dart';
 import 'package:intl/intl.dart';
 
@@ -213,63 +214,9 @@ String explain(Object error) {
       text.contains('an internal error stopped the work')) {
     return l10n.errSomething;
   }
-  final known = <String, String Function()>{
-    'this link has expired': () => l10n.errLinkExpired,
-    'this is a group invite': () => l10n.errGroupInvite,
-    'the other device was not found': () => l10n.errDeviceNotFound,
-    'not a friend code': () => l10n.errNotFriendCode,
-    'this device is already in that group': () => l10n.errAlreadyInGroup,
-    'join the room first': () => l10n.errJoinRoomFirst,
-    'saved by a newer version of Fogata': () => l10n.errNewerVersion,
-    'the system keychain cannot be reached': () => l10n.errKeychainUnreachable,
-    'the system keychain does not hold the key': () => l10n.errKeychainNoKey,
-    'the key in the system keychain does not open': () =>
-        l10n.errKeychainWrongKey,
-    'does not have the group key yet': () => l10n.errNoGroupKey,
-    'Fogata is already running with the data': () => l10n.errAlreadyRunning,
-    'that file is no longer in the room': () => l10n.errFileGone,
-    'nobody connected has it': () => l10n.errNobodyHasFile,
-    'Fogata is not running yet': () => l10n.errStillStarting,
-    'already known by its key': () => l10n.errIdentityExists,
-    'a name needs': () => l10n.errNameRule,
-    'a bio has at most': () => l10n.errBioRule,
-    'the picture must be': () => l10n.errPictureRule,
-    'not a Fogata friend link': () => l10n.errNotFriendLink,
-    'friend link is damaged': () => l10n.errLinkDamaged,
-    'needs a newer version': () => l10n.errLinkNeedsNewer,
-    'must update Fogata before they can join': () => l10n.errMustUpdateToJoin,
-    'a friend code looks like': () => l10n.errCodeShape,
-    'the code is wrong': () => l10n.errCodeWrong,
-    'did not prove who it is': () => l10n.errNotProven,
-    'that call no longer rings': () => l10n.errCallGone,
-    'you are already in a call': () => l10n.errAlreadyInCall,
-    'you are already friends': () => l10n.errAlreadyFriends,
-    'this member is not connected now': () => l10n.errMemberNotConnected,
-    'too old to take friend requests from a group': () => l10n.errMemberTooOld,
-    'the friend request did not reach the member': () => l10n.errMemberAskLost,
-    'this link was made on this device': () => l10n.errOwnLink,
-    'the link was already used or has expired': () => l10n.errLinkUsed,
-    'the link expired before its device could be reached': () =>
-        l10n.errLinkExpiredUnreached,
-    'no device answered the code': () => l10n.errCodeUnanswered,
-    'the other device refused the request': () => l10n.errRefused,
-    'nobody in the group accepted the invite': () => l10n.errNobodyLetIn,
-    'not someone below the author': () => l10n.errNotBelow,
-    'author does not manage the group': () => l10n.errNotManager,
-    'would leave its author out': () => l10n.errLastManager,
-    'people are in that room': () => l10n.errRoomNotEmpty,
-    'files in this room already': () => l10n.errTooManyFiles,
-    'No space left on device': () => l10n.errDiskFull,
-    'not enough space on the disk': () => l10n.errDiskFull,
-    'wrote too much that no other member signed on yet': () =>
-        l10n.errTooManyChanges,
-    'not enough free space for this file': () => l10n.errNoSpaceForFile,
-    'not enough free space to share this file': () => l10n.errNoSpaceForFile,
-    ..._notLetIn,
-  };
-  final full = RegExp(r'voice room is full: (\d+)').firstMatch(text);
+  final full = RegExp('$_roomFull: (\\d+)').firstMatch(text);
   if (full != null) return l10n.errRoomFull(int.parse(full.group(1)!));
-  for (final entry in known.entries) {
+  for (final entry in _known.entries) {
     if (text.contains(entry.key)) return entry.value();
   }
   if (text.isEmpty) return l10n.errSomething;
@@ -277,6 +224,67 @@ String explain(Object error) {
   final sentence = capitalized(text);
   return RegExp(r'[.!?…]$').hasMatch(sentence) ? sentence : '$sentence.';
 }
+
+/// The core's words for a voice room that is full, before the number of people it takes.
+const _roomFull = 'voice room is full';
+
+/// The core's known messages, found by these parts of their words (see [explain]).
+final _known = <String, String Function()>{
+  'this link has expired': () => l10n.errLinkExpired,
+  'this is a group invite': () => l10n.errGroupInvite,
+  'this device is already in that group': () => l10n.errAlreadyInGroup,
+  'join the room first': () => l10n.errJoinRoomFirst,
+  'saved by a newer version of Fogata': () => l10n.errNewerVersion,
+  'the system keychain cannot be reached': () => l10n.errKeychainUnreachable,
+  'the system keychain does not hold the key': () => l10n.errKeychainNoKey,
+  'the key in the system keychain does not open': () =>
+      l10n.errKeychainWrongKey,
+  'does not have the group key yet': () => l10n.errNoGroupKey,
+  'Fogata is already running with the data': () => l10n.errAlreadyRunning,
+  'that file is no longer in the room': () => l10n.errFileGone,
+  'nobody connected has it': () => l10n.errNobodyHasFile,
+  'Fogata is not running yet': () => l10n.errStillStarting,
+  'already known by its key': () => l10n.errIdentityExists,
+  'a name needs': () => l10n.errNameRule,
+  'a bio has at most': () => l10n.errBioRule,
+  'the picture must be': () => l10n.errPictureRule,
+  'not a Fogata friend link': () => l10n.errNotFriendLink,
+  'friend link is damaged': () => l10n.errLinkDamaged,
+  'needs a newer version': () => l10n.errLinkNeedsNewer,
+  'must update Fogata before they can join': () => l10n.errMustUpdateToJoin,
+  'a friend code looks like': () => l10n.errCodeShape,
+  'the code is wrong': () => l10n.errCodeWrong,
+  'did not prove who it is': () => l10n.errNotProven,
+  'that call no longer rings': () => l10n.errCallGone,
+  'you are already in a call': () => l10n.errAlreadyInCall,
+  'you are already friends': () => l10n.errAlreadyFriends,
+  'this member is not connected now': () => l10n.errMemberNotConnected,
+  'too old to take friend requests from a group': () => l10n.errMemberTooOld,
+  'the friend request did not reach the member': () => l10n.errMemberAskLost,
+  'this link was made on this device': () => l10n.errOwnLink,
+  'the link was already used or has expired': () => l10n.errLinkUsed,
+  'the link expired before its device could be reached': () =>
+      l10n.errLinkExpiredUnreached,
+  'no device answered the code': () => l10n.errCodeUnanswered,
+  'the other device refused the request': () => l10n.errRefused,
+  'not someone below the author': () => l10n.errNotBelow,
+  'author does not manage the group': () => l10n.errNotManager,
+  'would leave its author out': () => l10n.errLastManager,
+  'people are in that room': () => l10n.errRoomNotEmpty,
+  'files in this room already': () => l10n.errTooManyFiles,
+  'No space left on device': () => l10n.errDiskFull,
+  'not enough space on the disk': () => l10n.errDiskFull,
+  'wrote too much that no other member signed on yet': () =>
+      l10n.errTooManyChanges,
+  'not enough free space for this file': () => l10n.errNoSpaceForFile,
+  'not enough free space to share this file': () => l10n.errNoSpaceForFile,
+  ..._notLetIn,
+};
+
+/// Every part of the core's messages that [explain] finds, as app/test/core_errors.txt
+/// lists them for the core's own check that it still writes each one.
+@visibleForTesting
+Set<String> get explainedParts => {_roomFull, ..._known.keys};
 
 /// Why a manager's yes did not let someone into a group, as the core notes it.
 final _notLetIn = <String, String Function()>{

@@ -308,13 +308,6 @@ class L10nRu extends L10n {
   String get errGroupInvite => 'Это приглашение в группу.';
 
   @override
-  String get errDeviceNotFound =>
-      'Другое устройство не найдено. Убедитесь, что вы оба в сети.';
-
-  @override
-  String get errNotFriendCode => 'Это не похоже на ссылку или код Fogata.';
-
-  @override
   String get errAlreadyInGroup => 'Вы уже состоите в этой группе.';
 
   @override
@@ -430,10 +423,6 @@ class L10nRu extends L10n {
   @override
   String get errRefused =>
       'Другое устройство отказало. Возможно, код уже был использован.';
-
-  @override
-  String get errNobodyLetIn =>
-      'Никто вас не впустил. Повторите попытку, когда кто-нибудь из группы будет в сети.';
 
   @override
   String get errNotBelow =>

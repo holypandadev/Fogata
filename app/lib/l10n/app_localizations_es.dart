@@ -287,14 +287,6 @@ class L10nEs extends L10n {
   String get errGroupInvite => 'Eso es una invitación a un grupo.';
 
   @override
-  String get errDeviceNotFound =>
-      'No se encontró el otro dispositivo. Comprueba que los dos estén en línea.';
-
-  @override
-  String get errNotFriendCode =>
-      'Eso no parece un enlace ni un código de Fogata.';
-
-  @override
   String get errAlreadyInGroup => 'Ya estás en ese grupo.';
 
   @override
@@ -408,10 +400,6 @@ class L10nEs extends L10n {
   @override
   String get errRefused =>
       'El otro dispositivo dijo que no. Puede que el código ya se haya usado.';
-
-  @override
-  String get errNobodyLetIn =>
-      'Nadie te dejó entrar. Vuelve a intentarlo cuando alguien del grupo esté en línea.';
 
   @override
   String get errNotBelow =>

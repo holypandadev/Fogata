@@ -1,0 +1,60 @@
+# The parts of the core's error messages the app puts in its own words: explain() and
+# notLetIn() in app/lib/src/format.dart find each in a message as it is written here. Each
+# line is where the words come from and the words:
+#   core <words>               written by the core (a crate of crates/ the app is built from)
+#   unix <number> <words>      the system's words for that error number on Linux and macOS
+#   windows <number> <words>   Windows' words for it (in English)
+# crates/fogata-ffi/tests/error_texts.rs checks that the core still writes each one and the
+# systems still say them; app/test/explain_test.dart that format.dart looks for exactly these.
+# A message the core rewords, or one format.dart starts or stops looking for, changes here.
+
+core voice room is full
+core this link has expired
+core this is a group invite
+core this device is already in that group
+core join the room first
+core saved by a newer version of Fogata
+core the system keychain cannot be reached
+core the system keychain does not hold the key
+core the key in the system keychain does not open
+core does not have the group key yet
+core Fogata is already running with the data
+core that file is no longer in the room
+core nobody connected has it
+core Fogata is not running yet
+core already known by its key
+core a name needs
+core a bio has at most
+core the picture must be
+core not a Fogata friend link
+core friend link is damaged
+core needs a newer version
+core must update Fogata before they can join
+core a friend code looks like
+core the code is wrong
+core did not prove who it is
+core that call no longer rings
+core you are already in a call
+core you are already friends
+core this member is not connected now
+core too old to take friend requests from a group
+core the friend request did not reach the member
+core this link was made on this device
+core the link was already used or has expired
+core the link expired before its device could be reached
+core no device answered the code
+core the other device refused the request
+core not someone below the author
+core author does not manage the group
+core would leave its author out
+core people are in that room
+core files in this room already
+unix 28 No space left on device
+windows 112 not enough space on the disk
+core wrote too much that no other member signed on yet
+core not enough free space for this file
+core not enough free space to share this file
+core that invite no longer works, or the group is full
+core this device has no group key yet
+core this device wrote more than the others have seen yet
+core was not made on this group as it is
