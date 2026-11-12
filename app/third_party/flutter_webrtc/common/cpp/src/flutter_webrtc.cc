@@ -288,26 +288,13 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const EncodableValue on_value = findEncodableValue(params, "on");
     const bool on = TypeIs<bool>(on_value) && GetValue<bool>(on_value);
-    // Only touched here, on the platform thread.
-    static std::shared_future<void> silent_turn;
-    std::shared_future<void> before = silent_turn;
-    auto done = std::make_shared<std::promise<void>>();
-    silent_turn = done->get_future().share();
     std::shared_ptr<MethodResultProxy> answer(std::move(result));
     std::shared_ptr<AnswerGate> gate = answer_gate_;
-    std::thread([before, done, on, answer, gate]() {
-      if (before.valid()) before.wait();
-      bool made = true;
-      if (on) {
-        made = SilentInput::Start();
-      } else {
-        SilentInput::Stop();
-      }
-      done->set_value();
+    SilentInput::Ask(on, [answer, gate](bool made) {
       // Only while the plugin is there, as for fogataSoundServer below.
       std::lock_guard<std::mutex> guard(gate->lock);
       if (gate->open) answer->Success(EncodableValue(made));
-    }).detach();
+    });
   } else if (method_call.method_name().compare("fogataSoundServer") == 0) {
     // Fogata: whether a sound server answers ("ready"), there is none ("none"),
     // it did not answer in time ("timeout") or this cannot tell ("unknown"),

@@ -1,5 +1,9 @@
 #include "silent_input.h"
 
+#include <utility>
+
+#include "fogata_turns.h"
+
 #ifdef HAVE_PIPEWIRE
 
 #include <pipewire/pipewire.h>
@@ -203,3 +207,21 @@ void SilentInput::Stop() {}
 }  // namespace flutter_webrtc_plugin
 
 #endif  // HAVE_PIPEWIRE
+
+namespace flutter_webrtc_plugin {
+
+void SilentInput::Ask(bool on, std::function<void(bool made)> answer) {
+  // Only touched by the thread that asks.
+  static Turns turns;
+  turns.Run([on, answer = std::move(answer)]() {
+    bool made = true;
+    if (on) {
+      made = Start();
+    } else {
+      Stop();
+    }
+    answer(made);
+  });
+}
+
+}  // namespace flutter_webrtc_plugin

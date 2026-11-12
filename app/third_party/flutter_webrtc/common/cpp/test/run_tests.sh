@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
-# renderer's, a connection's received tracks' and the retired textures' with
-# ThreadSanitizer, the check of the noise suppression table, the order the system's
+# renderer's, a connection's received tracks', the retired textures', a shared screen's sound
+# and the silent input against a PipeWire server of the tests' own (no daemon is reached),
+# an event channel's, and a desktop capture's end with ThreadSanitizer, the check of the
+# noise suppression table, the order the system's
 # default microphone and speaker are listed in, which outputs a shared
 # screen's sound takes, the portal's frame conversion, and libwebrtc
 # taking a local offer with a section rejected as call.dart rejects one, its voice engine
@@ -40,6 +42,41 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/remote_tracks_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/linux/flutter" \
   "$here/retired_textures_test.cc" -lpthread -o "$out/retired_textures_test"
 TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/retired_textures_test"
+# A shared screen's sound (linux/pipewire_apps_capturer.cc) and the silent input
+# (linux/silent_input.cc), the plugin's own code against a PipeWire server the tests play
+# themselves (pipewire_fake.cc, in place of libpipewire; no daemon is reached): which outputs
+# are linked, requests carried out in the order asked, and PipeWire's thread against the
+# platform thread: ThreadSanitizer.
+pipewire=$(pkg-config --cflags libpipewire-0.3)
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -fsanitize=thread -DHAVE_PIPEWIRE \
+  -I"$root/linux" -I"$root/common/cpp/include" -I"$webrtc/include" -I"$here" $pipewire \
+  "$here/screen_sound_capture_test.cc" "$here/pipewire_fake.cc" \
+  "$root/linux/pipewire_apps_capturer.cc" -lpthread -o "$out/screen_sound_capture_test"
+env -u FOGATA_SCREEN_SOUND_FROM -u FOGATA_CALL_LOG TSAN_OPTIONS="halt_on_error=1 exitcode=66" \
+  "$out/screen_sound_capture_test"
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -fsanitize=thread -DHAVE_PIPEWIRE \
+  -I"$root/linux" -I"$root/common/cpp/include" -I"$here" $pipewire \
+  "$here/silent_input_test.cc" "$here/pipewire_fake.cc" "$root/linux/silent_input.cc" \
+  -lpthread -o "$out/silent_input_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/silent_input_test"
+# An event channel (EventChannelProxyImpl in flutter_common.cc), with Flutter's own channel
+# and codec: libwebrtc's thread sends while the platform thread listens and cancels.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -fsanitize=thread \
+  -I"$root/common/cpp/include" -I"$root/linux/flutter/include" -I"$engine" \
+  $(pkg-config --cflags gtk+-3.0) "$here/event_channel_test.cc" \
+  "$root/common/cpp/src/flutter_common.cc" "$root/linux/flutter/standard_codec.cc" \
+  -lpthread -o "$out/event_channel_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/event_channel_test"
+# A desktop capture's end (FlutterScreenCapture::OnStop, OnError) told on libwebrtc's
+# signalling thread while the platform thread shares the screen again: the screen capture's
+# own code, with libwebrtc's objects and the plugin's base reduced to the test's.
+"${CXX:-clang++}" -std=c++17 -g -O1 -fsanitize=thread -DRTC_DESKTOP_DEVICE \
+  -I"$root/common/cpp/include" -I"$root/linux" -I"$root/linux/flutter/include" \
+  -I"$webrtc/include" -I"$engine" $(pkg-config --cflags gtk+-3.0) \
+  "$here/screen_capture_end_test.cc" "$root/common/cpp/src/flutter_screen_capture.cc" \
+  "$root/common/cpp/src/flutter_utf8_sanitize.cc" "$root/linux/portal_screen_capturer.cc" \
+  -L"$lib" -Wl,-rpath,"$lib" -lwebrtc -lpthread -o "$out/screen_capture_end_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/screen_capture_end_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -I"$root/common/cpp/include" -I"$webrtc/include" \
   "$here/denoise_table_test.cc" -ldl -o "$out/denoise_table_test"
 "$out/denoise_table_test"

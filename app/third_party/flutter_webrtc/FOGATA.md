@@ -263,7 +263,16 @@ others in a call would hear their own voices back. Instead:
   (browsers, games through Wine or Proton, media players, Flatpak apps) carry none of
   these: through pipewire-pulse their program is their own, as libpulse names it. Tested
   by `common/cpp/test/screen_sound_node_test.cc`; in the call lab with
-  `CALL_LAB_LOOPBACK=1` (`tools/call-lab/lab.sh`).
+  `CALL_LAB_LOOPBACK=1` (`tools/call-lab/lab.sh`), and by `tools/call-lab/mic.sh echo`,
+  which measures whether someone who leaves the room and comes back hears their own voice
+  in a screen shared with sound.
+- `common/cpp/test/screen_sound_capture_test.cc` and `silent_input_test.cc` (in
+  `run_tests.sh`, with ThreadSanitizer): the capture's and the silent input's own code
+  against a PipeWire server the test plays itself (`pipewire_fake.cc`, linked in place of
+  libpipewire; no daemon is reached): which outputs are linked as the server tells of them
+  in any order (the call's own sound made again during a share never is), requests carried
+  out in the order asked whatever the server's delays, and PipeWire's thread against the
+  platform thread stopping the capture.
 - `linux/loopback_capturer_factory.cc`: uses it when built with PipeWire, and only for a
   whole screen: a window's sound cannot be narrowed to its application here, and every
   other one's would go with it. Without PipeWire, or where it cannot connect (PulseAudio
@@ -287,7 +296,8 @@ others in a call would hear their own voices back. Instead:
   with that one. `fogataSilentInput` answers true only once the server has made the
   node (a sync after the request, 2 s at most); a PipeWire without the null sink factory
   answers false at once. It runs on a thread of its own, one request after the other in
-  the order asked, so a stalled server does not freeze the window. A connection lost
+  the order asked and each answered before the next starts (`SilentInput::Ask`, with
+  `common/cpp/include/fogata_turns.h`), so a stalled server does not freeze the window. A connection lost
   (PipeWire restarted, as after an update) is noticed by the core's error, and the next
   `fogataSilentInput` makes the node again on a new one; it answered true at once for the
   node gone with the old connection.
@@ -366,10 +376,13 @@ and kept going when either failed.
 - A capture that fails once started (a shared window that closed) sends
   `mediaStreamTrackEnded` for its video track, as the portal's end does, so the share
   stops instead of leaving those who watch a frozen picture; it only stopped the sound
-  before. `OnStop` and `OnError` come on libwebrtc's capture thread: their work is posted
+  before. `OnStop` and `OnError` come on libwebrtc's signalling thread (the capturer's
+  `BlockingCall` from its capture thread): their work is posted
   to the platform thread, which alone touches the loopback members and the capture's
   track (`capture_tracks_`), and holds the capturer so that another made meanwhile at its
-  address is not taken for it.
+  address is not taken for it. Tested with ThreadSanitizer by
+  `common/cpp/test/screen_capture_end_test.cc` (the screen capture's own code, libwebrtc's
+  objects the test's).
 
 ## Sound of a shared window (Windows)
 
@@ -583,7 +596,9 @@ its events. Both were plain containers with no lock.
   tracks runs on a copy of the list, as it asks libwebrtc, which may wait for the
   signalling thread. Tested with ThreadSanitizer by `common/cpp/test/remote_tracks_test.cc`.
 - `common/cpp/src/flutter_common.cc`: an event channel's queue, sink and listening flag
-  are kept under a lock; events queued before Dart listened still go out first.
+  are kept under a lock; events queued before Dart listened still go out first. Tested
+  with ThreadSanitizer by `common/cpp/test/event_channel_test.cc` (Dart listening,
+  cancelling and listening again while events come).
 
 ## A renderer freed while its stream changes
 
