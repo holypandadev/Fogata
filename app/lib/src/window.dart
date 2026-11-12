@@ -98,10 +98,33 @@ Rect? _mainBounds;
   );
 }
 
-/// The screen the window is on, and its work area, in logical pixels: the display whose
-/// work area holds [point], else the main one. Without an answer from the system, the
-/// whole first display stands for both.
-Future<({Size screen, Size work})> _screenAt(Offset point) async {
+/// Where the main window opens: [size] around [center] (the splash's middle), moved as
+/// little as it takes to lie whole within [area], the work area of its screen; from the
+/// area's top left when it is larger than the area. The splash is not always in the
+/// middle of the screen (the system may place it, a person may drag it), and a window
+/// that opens around one near an edge had its bottom under the Dock or off the screen.
+Rect mainWindowBounds({
+  required Offset center,
+  required Size size,
+  required Rect area,
+}) {
+  double within(double start, double length, double from, double room) =>
+      length >= room
+      ? from
+      : start.clamp(from, from + room - length).toDouble();
+  return Rect.fromLTWH(
+    within(center.dx - size.width / 2, size.width, area.left, area.width),
+    within(center.dy - size.height / 2, size.height, area.top, area.height),
+    size.width,
+    size.height,
+  );
+}
+
+/// The screen the window is on, its work area's size and, when the system says where it
+/// is, its work area ([area]), in logical pixels: the display whose work area holds
+/// [point], else the main one. Without an answer from the system, the whole first
+/// display stands for both sizes.
+Future<({Size screen, Size work, Rect? area})> _screenAt(Offset point) async {
   try {
     final displays = await screenRetriever.getAllDisplays();
     final primary = await screenRetriever.getPrimaryDisplay();
@@ -110,11 +133,17 @@ Future<({Size screen, Size work})> _screenAt(Offset point) async {
       final size = d.visibleSize;
       return at != null && size != null && (at & size).contains(point);
     }, orElse: () => primary);
-    return (screen: display.size, work: display.visibleSize ?? display.size);
+    final at = display.visiblePosition;
+    final work = display.visibleSize;
+    return (
+      screen: display.size,
+      work: work ?? display.size,
+      area: at != null && work != null ? at & work : null,
+    );
   } catch (_) {
     final display = ui.PlatformDispatcher.instance.displays.first;
     final screen = display.size / display.devicePixelRatio;
-    return (screen: screen, work: screen);
+    return (screen: screen, work: screen, area: null);
   }
 }
 
@@ -133,7 +162,9 @@ Future<void> becomeMainWindow() async {
     }
     await windowManager.setResizable(true);
     final now = await windowManager.getBounds();
-    final (:screen, :work) = await _screenAt((_mainBounds ?? now).center);
+    final (:screen, :work, :area) = await _screenAt(
+      (_mainBounds ?? now).center,
+    );
     final sizes = mainWindowSizes(screen: screen, work: work);
     await windowManager.setMinimumSize(sizes.minimum);
     if (Platform.isMacOS) {
@@ -143,13 +174,21 @@ Future<void> becomeMainWindow() async {
       );
     }
     // Windows' runner already made it fit the work area (main.cpp).
-    final bounds =
-        _mainBounds ??
-        Rect.fromCenter(
-          center: now.center,
-          width: sizes.opening.width,
-          height: sizes.opening.height,
-        );
+    var bounds = _mainBounds;
+    if (bounds == null) {
+      final around = Rect.fromCenter(
+        center: now.center,
+        width: sizes.opening.width,
+        height: sizes.opening.height,
+      );
+      bounds = area == null
+          ? around
+          : mainWindowBounds(
+              center: now.center,
+              size: sizes.opening,
+              area: area,
+            );
+    }
     await windowManager.setBounds(bounds);
   } catch (_) {}
 }
