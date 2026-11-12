@@ -252,93 +252,7 @@ impl Node {
             }
             MemberRequest::JoinRequest { ticket } => self.on_join_request(peer, ticket),
             MemberRequest::JoinCommit { entry, binding } => {
-                let Ok(entry) = Entry::decode(&entry) else {
-                    return MemberResponse::Refused;
-                };
-                // A signed `Join` can be passed on by anyone the joining device asked: the
-                // log goes only to the peer its author bound it to, which is this one.
-                let local = self.local_peer().to_bytes();
-                if !binding.is_some_and(|b| entry.join_bound(&b, &peer.to_bytes(), &local)) {
-                    tracing::debug!(
-                        "{} handed over a join not bound to its connection",
-                        short_peer(&peer)
-                    );
-                    return MemberResponse::Refused;
-                }
-                let group = entry.group_id;
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                let Some((ticket_id, heads)) = slot.join_offers.remove(&peer) else {
-                    return MemberResponse::Refused;
-                };
-                // Let in while it was away: it only needs the log. Its join is signed now on
-                // the heads just offered, so an old one copied from the log does not count.
-                let fresh = sorted(entry.parents.clone()) == sorted(heads.clone())
-                    && slot.ctx.log().get(&entry.hash()).is_none();
-                if fresh
-                    && entry.signature_valid()
-                    && slot.ctx.joined_with(&entry.author, &ticket_id)
-                {
-                    let mut parts = slot.ctx.encoded_parts();
-                    if parts.len() <= 1 {
-                        let entries = parts
-                            .pop()
-                            .unwrap_or_default()
-                            .into_iter()
-                            .map(serde_bytes::ByteBuf::from)
-                            .collect();
-                        return MemberResponse::JoinAccepted { entries };
-                    }
-                    // Too long for one answer: it goes in parts, as to a device let in now.
-                    self.admit(group, peer);
-                    return MemberResponse::JoinWaiting;
-                }
-                let Some(name) = slot.ctx.join_valid(&entry, &ticket_id, &heads, now_ms()) else {
-                    return MemberResponse::Refused;
-                };
-                let fogata_state::Body::Join { ticket, .. } = &entry.body else {
-                    return MemberResponse::Refused;
-                };
-                // A copy that does not judge at the group's level could never get in (see
-                // `joins::judges_level`): refused, which leaves its invite good and has it
-                // ask again, and its person's manager told it must update first. One whose
-                // level is not known is answered as before.
-                let level = self.shown_level(&peer);
-                let device = entry.author;
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                if super::joins::judges_level(slot.ctx.log().level(), level) == Some(false) {
-                    let told = super::BehindTold::Invite(ticket_id);
-                    self.tell_behind(group, told, device, name);
-                    return MemberResponse::Refused;
-                }
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                // An invite does not let anyone in by itself: a manager says yes first, so a
-                // link passed on to someone else is seen for what it is.
-                let ticket = ticket.clone();
-                let Some(asked) = slot.wait_for_answer(
-                    device,
-                    WaitingJoin {
-                        peer,
-                        entry,
-                        ticket,
-                        level,
-                    },
-                ) else {
-                    return MemberResponse::Refused;
-                };
-                if asked {
-                    self.emit(NodeEvent::JoinAsked {
-                        group,
-                        device,
-                        name,
-                    });
-                }
-                MemberResponse::JoinWaiting
+                self.on_join_commit_request(peer, entry, binding)
             }
             MemberRequest::RoomSync { group_id, from } => {
                 let Some(group) = group_of(&group_id) else {
@@ -943,6 +857,99 @@ impl Node {
         MemberResponse::JoinOffer {
             heads: bytes(heads),
         }
+    }
+
+    /// Takes the signed join of a device offered the log's heads.
+    fn on_join_commit_request(
+        &mut self,
+        peer: PeerId,
+        entry: Vec<u8>,
+        binding: Option<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        let Ok(entry) = Entry::decode(&entry) else {
+            return MemberResponse::Refused;
+        };
+        // A signed `Join` can be passed on by anyone the joining device asked: the
+        // log goes only to the peer its author bound it to, which is this one.
+        let local = self.local_peer().to_bytes();
+        if !binding.is_some_and(|b| entry.join_bound(&b, &peer.to_bytes(), &local)) {
+            tracing::debug!(
+                "{} handed over a join not bound to its connection",
+                short_peer(&peer)
+            );
+            return MemberResponse::Refused;
+        }
+        let group = entry.group_id;
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        let Some((ticket_id, heads)) = slot.join_offers.remove(&peer) else {
+            return MemberResponse::Refused;
+        };
+        // Let in while it was away: it only needs the log. Its join is signed now on
+        // the heads just offered, so an old one copied from the log does not count.
+        let fresh = sorted(entry.parents.clone()) == sorted(heads.clone())
+            && slot.ctx.log().get(&entry.hash()).is_none();
+        if fresh && entry.signature_valid() && slot.ctx.joined_with(&entry.author, &ticket_id) {
+            let mut parts = slot.ctx.encoded_parts();
+            if parts.len() <= 1 {
+                let entries = parts
+                    .pop()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(serde_bytes::ByteBuf::from)
+                    .collect();
+                return MemberResponse::JoinAccepted { entries };
+            }
+            // Too long for one answer: it goes in parts, as to a device let in now.
+            self.admit(group, peer);
+            return MemberResponse::JoinWaiting;
+        }
+        let Some(name) = slot.ctx.join_valid(&entry, &ticket_id, &heads, now_ms()) else {
+            return MemberResponse::Refused;
+        };
+        let fogata_state::Body::Join { ticket, .. } = &entry.body else {
+            return MemberResponse::Refused;
+        };
+        // A copy that does not judge at the group's level could never get in (see
+        // `joins::judges_level`): refused, which leaves its invite good and has it
+        // ask again, and its person's manager told it must update first. One whose
+        // level is not known is answered as before.
+        let level = self.shown_level(&peer);
+        let device = entry.author;
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        if super::joins::judges_level(slot.ctx.log().level(), level) == Some(false) {
+            let told = super::BehindTold::Invite(ticket_id);
+            self.tell_behind(group, told, device, name);
+            return MemberResponse::Refused;
+        }
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        // An invite does not let anyone in by itself: a manager says yes first, so a
+        // link passed on to someone else is seen for what it is.
+        let ticket = ticket.clone();
+        let Some(asked) = slot.wait_for_answer(
+            device,
+            WaitingJoin {
+                peer,
+                entry,
+                ticket,
+                level,
+            },
+        ) else {
+            return MemberResponse::Refused;
+        };
+        if asked {
+            self.emit(NodeEvent::JoinAsked {
+                group,
+                device,
+                name,
+            });
+        }
+        MemberResponse::JoinWaiting
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
