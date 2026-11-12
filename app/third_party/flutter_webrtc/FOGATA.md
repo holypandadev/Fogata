@@ -12,7 +12,10 @@ compiles `Sources` alone; iOS is never built). Where a change below says "both c
 identical", each file it names is the same in both, and `tools/test_repo_checks.py` fails when
 a file present in both differs. Files Fogata added (`Fogata*`) are in the built copy only.
 `tools/vendor_diff.py` (weekly) compares this fork with the package on pub.dev and says when
-pub.dev has a newer one.
+pub.dev has a newer one, unless the line below names it.
+
+Reviewed against flutter_webrtc 1.6.3 (2026-11-12): every change it brings was read; what was
+taken and what was not, and why, is in "Upstream 1.6.3" at the end.
 
 ## Screen capture under Wayland (Linux)
 
@@ -1199,3 +1202,67 @@ someone had been made before it.
   there (over 20 tests it moved by 0.6 to 37 MB with nothing kept, as malloc's free space
   came and went, while 20 connections kept on purpose did not show in it at all). macOS
   answers "not implemented", and the check then counts nothing.
+
+## Upstream 1.6.3
+
+The fork stays on 1.6.2+hotfix.4: re-applying every change above to a new base costs far
+more than taking the few of 1.6.3 that apply. Each change of 1.6.3 (its CHANGELOG, and the
+diff of the two published packages, file by file):
+
+Taken, each with its own section above:
+
+- "run task runner tasks without holding the queue lock" (#2244): Windows, in "The Windows
+  task runner". Linux's runner is Fogata's own ("The Linux task runner"), which already
+  runs each task with the queue let go.
+- The plugin's task runner freed after `FlutterWebRTC` (`windows/flutter_webrtc_plugin.cc`):
+  Windows, in "The Windows task runner"; Linux's already was.
+- "stop VideoRendererDispose from releasing a renderer twice" (#2235): "A renderer's
+  dispose", on Linux too (its event channel).
+- "discover capture devices off the main thread in getSources" (#2229): "Devices listed
+  off the main thread (macOS)".
+
+Already here in another form:
+
+- "write encoding changes back in RtpSender setParameters" (#2211): "Sender parameters".
+
+Left out, as code Fogata replaced, does not ship or does not use:
+
+- libwebrtc m150.7871.07 and WebRTC-SDK 150.7871.04, which drop the compromised eMudhra
+  certificate authority from WebRTC's built-in roots (`third_party/libwebrtc_version.ini`,
+  the podspecs, `Package.swift`): Fogata builds its own libwebrtc and WebRTC-SDK
+  ("libwebrtc"). Those roots are read only for TURN over TLS (`turns:`), which Fogata never
+  asks for: its one TURN server is the media bridge on this computer (`turn:` over UDP,
+  `app/lib/src/call/signalling.dart`).
+- "let native plugins attach video processors to local tracks" (#2233): a new API
+  (`AddVideoProcessor`, `video_sources_`) no plugin of Fogata's uses.
+- "captureFrame frees its RGBA buffer and no longer busy-waits" (#2185): the application
+  never calls `captureFrame`.
+- "resolve the plugin instance per engine and free it on engine teardown" (#2221), with its
+  logger block holding the plugin weakly: Fogata runs one Flutter engine, for as long as
+  the process.
+- "duplicate null check for video renderer" (#2219): no change of behaviour (a message to
+  nil answers nil in Objective-C).
+- Android (#2230, #2213, Gradle), iOS, the web (#2209), eLinux and the example.
+
+Not taken, against Fogata's own changes:
+
+- "list the host app's own windows in desktop sources" (#2226, Windows): lists Fogata's own
+  windows, which Fogata leaves out on purpose ("Fogata's own windows are not shared"). It
+  also moves the listing and every capturer's last release to a thread of its own, with a
+  proxy in place of `FlutterScreenCapture` as libwebrtc's observer: the listing on the
+  platform thread skipped the application's own windows (their messages wait for that
+  thread), which Fogata leaves out anyway, and a capturer's last release could wait for a
+  capture of one of the application's own windows, which Fogata never captures. The rest
+  (libwebrtc's observers called while the plugin is torn down, at the application's end)
+  would need `flutter_screen_capture.cc`'s portal, sound and `capture_tracks_` changes
+  rebuilt around that thread. Not worth it for now.
+- "list desktop sources off the main thread" (#2228, macOS): `getDesktopSources`,
+  `updateDesktopSources`, `getDesktopSourceThumbnail` and the source lookup of
+  `getDisplayMedia` on a serial queue, as libwebrtc's listing waits for the windows'
+  thumbnails (seconds with many windows) on Flutter's UI thread. It would help Fogata's
+  screen picker, but crosses its changes of `FlutterRTCDesktopCapturer.m` (both copies):
+  its own windows left out by `NSApp.windows`, read on the main thread only, and the
+  ScreenCaptureKit path of `getDisplayMedia`, which answers once the capture runs. Worth
+  taking as a change of its own, by someone who can open the picker on a Mac with many
+  windows and share one of them afterwards: the window numbers read on the main thread
+  before the listing goes to the queue, and `getDisplayMedia`'s lookup there too.
