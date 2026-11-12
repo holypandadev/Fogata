@@ -778,6 +778,24 @@ pub fn log(data: &[u8]) {
     let _ = ctx.confirm_revokes(NOW_MS);
     let _ = ctx.mend_key(NOW_MS, false);
     let _ = ctx.until_removed(&me.public_key());
+    // What a joining device asks of the log of the group it was invited to, for each
+    // invite in it, and what an issuer asks before it cancels its invites.
+    let log = ctx.log();
+    let tickets: Vec<Ticket> = log
+        .entries()
+        .filter_map(|e| match &e.body {
+            Body::Invite { ticket, .. } => Some(ticket.clone()),
+            body => fogata_state::NamedInvite::of(body).map(|i| i.ticket),
+        })
+        .take(16)
+        .collect();
+    for ticket in &tickets {
+        let _ = log.invited_with(ticket);
+        for member in state.members.keys().take(8).chain([&me.public_key()]) {
+            let _ = log.admits_as_invited(ticket, member);
+        }
+        let _ = log.invites_a_manager_left_with(&ticket.issuer, NOW_MS);
+    }
 
     // Taken in any order, entries make the same group.
     let decoded: Vec<Entry> = pieces
@@ -937,6 +955,78 @@ pub fn sample_log() -> GroupLog {
     log.remove(&me, dan.public_key(), tick()).expect("removed");
     log.append(&cid, Body::Leave, tick()).expect("left");
     log
+}
+
+/// A group raised to level three: two managers (Ana, this device, above Bea), an invite
+/// of Bea's that names Ana and one of Ana's that names nobody, Cid let in with Bea's by
+/// Ana, a manager it names, and Dan with Ana's by Ana herself; then a rotation and a
+/// demotion. Also a `Welcome` of Bea's letting Dan in with Ana's invite, which does not
+/// name her, and which the group therefore refuses (its box is made up, which judging
+/// cannot tell).
+pub fn sample_log_at_three() -> (GroupLog, Entry) {
+    let (me, bea, cid, dan) = (device(0), device(1), device(2), device(3));
+    let mut t = NOW_MS - 100_000;
+    let mut tick = || {
+        t += 1000;
+        t
+    };
+    let mut log = GroupLog::create(&me, "level three", tick()).expect("created");
+    log.add(&me, bea.public_key(), "Bea", tick())
+        .expect("added");
+    log.raise_level(&me, fogata_state::Level::Three, tick())
+        .expect("raised");
+    let join = |log: &mut GroupLog, who: &DeviceIdentity, ticket: Ticket, time: u64| {
+        let join = Entry::sign(
+            who,
+            log.group_id(),
+            log.heads(),
+            time,
+            Body::Join {
+                ticket,
+                name: "Someone".into(),
+            },
+        );
+        log.insert(join.clone()).expect("joined");
+        join
+    };
+    let (by_bea, _) = log
+        .invite(&bea, NOW_MS + 86_400_000, tick())
+        .expect("invite");
+    let (by_ana, _) = log
+        .invite(&me, NOW_MS + 86_400_000, tick())
+        .expect("invite");
+    join(&mut log, &cid, by_bea, tick());
+    log.welcome(&me, cid.public_key(), tick())
+        .expect("welcomed by a manager the invite names");
+    let dan_join = join(&mut log, &dan, by_ana, tick());
+    let epoch = log.state().current_epoch().expect("an epoch").id;
+    let mut parents = log.heads();
+    parents.push(dan_join.hash());
+    parents.sort_unstable();
+    let unnamed = Entry::sign(
+        &bea,
+        log.group_id(),
+        parents,
+        tick(),
+        Body::Welcome {
+            member: dan.public_key(),
+            epoch,
+            secret: fogata_crypto::Sealed::seal(&dan.public_key(), b"fuzz", &[7; 32])
+                .expect("sealed"),
+        },
+    );
+    log.welcome(&me, dan.public_key(), tick())
+        .expect("welcomed by the issuer");
+    log.rotate(&bea, tick()).expect("rotated");
+    log.append(
+        &me,
+        Body::Demote {
+            member: bea.public_key(),
+        },
+        tick(),
+    )
+    .expect("demoted");
+    (log, unnamed)
 }
 
 /// The entries of `log`, encoded, in order.
@@ -1251,11 +1341,16 @@ pub fn log_seeds() -> Vec<Vec<u8>> {
         .add(&bea, device(0).public_key(), "Ana", NOW_MS + 1)
         .expect("added");
     let stranger = GroupLog::create(&device(2), "far away", NOW_MS).expect("created");
+    let (three, unnamed) = sample_log_at_three();
+    let mut at_three = encoded(&three);
+    at_three.push(unnamed.encode());
     vec![
         framed(&all),
         framed(&all.iter().rev().cloned().collect::<Vec<_>>()),
         framed(&encoded(&other)),
         framed(&encoded(&stranger)),
+        framed(&at_three),
+        framed(&at_three.iter().rev().cloned().collect::<Vec<_>>()),
     ]
 }
 

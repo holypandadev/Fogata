@@ -8,6 +8,7 @@ import 'dart:ui' show AppExitResponse;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:screen_retriever/screen_retriever.dart';
 import 'package:tray_manager/tray_manager.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -70,9 +71,56 @@ void _followCorners() {
 /// Where Windows put the main window, while the splash shows in its middle.
 Rect? _mainBounds;
 
+/// The main window's smallest size, and the size it opens at, on a screen of [screen]
+/// whose work area (the screen without the taskbar, the Dock or the menu bar) is [work]:
+/// 960 by 640 at least, 1440 by 900 (or the screen less a margin, if smaller) when it
+/// opens, and neither ever larger than the work area: a window that may not be made
+/// smaller than the screen it is on has its bottom (the message box, the call's buttons)
+/// under the taskbar, and cannot be brought back (a 1080p laptop at 175 %, 1280 by 800
+/// at 125 %).
+({Size minimum, Size opening}) mainWindowSizes({
+  required Size screen,
+  required Size work,
+}) {
+  final minimum = Size(math.min(960, work.width), math.min(640, work.height));
+  return (
+    minimum: minimum,
+    opening: Size(
+      math.min(
+        work.width,
+        math.max(minimum.width, math.min(1440, screen.width - 80)),
+      ),
+      math.min(
+        work.height,
+        math.max(minimum.height, math.min(900, screen.height - 80)),
+      ),
+    ),
+  );
+}
+
+/// The screen the window is on, and its work area, in logical pixels: the display whose
+/// work area holds [point], else the main one. Without an answer from the system, the
+/// whole first display stands for both.
+Future<({Size screen, Size work})> _screenAt(Offset point) async {
+  try {
+    final displays = await screenRetriever.getAllDisplays();
+    final primary = await screenRetriever.getPrimaryDisplay();
+    final display = displays.firstWhere((d) {
+      final at = d.visiblePosition;
+      final size = d.visibleSize;
+      return at != null && size != null && (at & size).contains(point);
+    }, orElse: () => primary);
+    return (screen: display.size, work: display.visibleSize ?? display.size);
+  } catch (_) {
+    final display = ui.PlatformDispatcher.instance.displays.first;
+    final screen = display.size / display.devicePixelRatio;
+    return (screen: screen, work: screen);
+  }
+}
+
 /// The splash window becomes the main one: its frame, window buttons, smallest size, and
 /// 1440 by 900 (or the screen, if smaller) in the middle of the screen; on Wayland, where
-/// the compositor places windows, wherever it puts it.
+/// the compositor places windows, wherever it puts it. See [mainWindowSizes].
 Future<void> becomeMainWindow() async {
   if (!ownTitleBar) return;
   try {
@@ -84,28 +132,24 @@ Future<void> becomeMainWindow() async {
       return;
     }
     await windowManager.setResizable(true);
-    await windowManager.setMinimumSize(const Size(960, 640));
+    final now = await windowManager.getBounds();
+    final (:screen, :work) = await _screenAt((_mainBounds ?? now).center);
+    final sizes = mainWindowSizes(screen: screen, work: work);
+    await windowManager.setMinimumSize(sizes.minimum);
     if (Platform.isMacOS) {
       await windowManager.setTitleBarStyle(
         TitleBarStyle.hidden,
         windowButtonVisibility: true,
       );
     }
-    var bounds = _mainBounds;
-    if (bounds == null) {
-      final display = ui.PlatformDispatcher.instance.displays.first;
-      final screen = display.size / display.devicePixelRatio;
-      final size = Size(
-        math.max(960, math.min(1440, screen.width - 80)),
-        math.max(640, math.min(900, screen.height - 80)),
-      );
-      final now = await windowManager.getBounds();
-      bounds = Rect.fromCenter(
-        center: now.center,
-        width: size.width,
-        height: size.height,
-      );
-    }
+    // Windows' runner already made it fit the work area (main.cpp).
+    final bounds =
+        _mainBounds ??
+        Rect.fromCenter(
+          center: now.center,
+          width: sizes.opening.width,
+          height: sizes.opening.height,
+        );
     await windowManager.setBounds(bounds);
   } catch (_) {}
 }

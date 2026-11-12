@@ -391,3 +391,159 @@ async fn silent_streams_of_strangers_and_extra_ones_of_members_close_at_once() {
     );
     drop(held);
 }
+
+/// An ask, a word that this device has a build, or a fetch whose stream the other device
+/// drops unread, as copies before 0.1.0-beta.9 do with all but one of a burst (friends
+/// that heard of a release at once all ask its holder at once), is made again: the answer
+/// that then comes counts. One dropped every time is given up after a few, as refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_update_request_dropped_unanswered_is_made_again() {
+    use futures::{AsyncReadExt as _, AsyncWriteExt as _};
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+    let _one = ONE_AT_A_TIME.lock().await;
+    let ana = Arc::new(DeviceIdentity::generate().unwrap());
+    let bea = Arc::new(DeviceIdentity::generate().unwrap());
+    let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+    log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+    let port_a = free_port();
+    let (node_a, _events_a) = node(
+        ana.clone(),
+        vec![GroupSetup::Member(log.clone())],
+        port_a,
+        Vec::new(),
+    );
+    let (node_b, _events_b) = node(
+        bea,
+        vec![GroupSetup::Member(log)],
+        0,
+        vec![loopback(port_a)],
+    );
+    // Ana answers every third request (with "nothing", or "not here" to a fetch) and drops
+    // the others unread; from 100 on, she drops every one.
+    let mut incoming = node_a.streams().accept(updates::UPDATE_PROTOCOL).unwrap();
+    let seen = Arc::new(AtomicUsize::new(0));
+    let (counted, taker) = (seen.clone(), node_a.background());
+    node_a.spawn(async move {
+        while let Some((_, mut stream)) = taker.next_stream(&mut incoming).await {
+            let n = counted.fetch_add(1, SeqCst);
+            if n < 100 && n % 3 == 2 {
+                let mut kind = [0u8; 1];
+                stream.read_exact(&mut kind).await.unwrap();
+                // Nothing (0) to an ask or a word; not here (4) to a fetch.
+                let answer = if kind[0] == 2 { 4 } else { 0 };
+                stream.write_all(&[answer]).await.unwrap();
+                stream.close().await.unwrap();
+            }
+        }
+    });
+    let peer_a = node_a.local_peer();
+    timeout(Duration::from_secs(60), async {
+        while !node_b.advertises(&peer_a, &updates::UPDATE_PROTOCOL) {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("never saw Ana");
+
+    let asked = updates::ask(&node_b, peer_a, 1, "linux-flatpak").await;
+    assert!(matches!(asked, Ok(None)), "{asked:?}");
+    assert_eq!(seen.load(SeqCst), 3);
+    let told = updates::tell(&node_b, peer_a, 2).await;
+    assert!(told.is_ok(), "{told:?}");
+    assert_eq!(seen.load(SeqCst), 6);
+    let dir = std::env::temp_dir().join(format!("fogata-update-again-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let data = vec![3u8; 10];
+    let artifact = Artifact::of("p", &data);
+    let part = dir.join("p.part");
+    let fetched = updates::fetch(&node_b, peer_a, 2, "p", &artifact, &part, |_| {}).await;
+    assert!(matches!(fetched, Err(FetchError::NotHere)), "{fetched:?}");
+    assert_eq!(seen.load(SeqCst), 9);
+
+    seen.store(100, SeqCst);
+    let asked = updates::ask(&node_b, peer_a, 1, "linux-flatpak").await;
+    assert!(matches!(asked, Err(FetchError::Refused)), "{asked:?}");
+    assert_eq!(seen.load(SeqCst), 104, "asked once and again three times");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A member that sends its request a byte at a time, slower than any asker does but each
+/// byte within the wait for the next, has its stream closed once the request is late: such
+/// streams would otherwise hold places among the few answered at once for as long as the
+/// member liked, and every other friend's ask would be closed unread.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_that_trickles_in_is_closed_once_late() {
+    use futures::{AsyncReadExt as _, AsyncWriteExt as _};
+    let _one = ONE_AT_A_TIME.lock().await;
+    let ana = Arc::new(DeviceIdentity::generate().unwrap());
+    let bea = Arc::new(DeviceIdentity::generate().unwrap());
+    let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+    log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+    let port_a = free_port();
+    let (node_a, _events_a) = node(
+        ana.clone(),
+        vec![GroupSetup::Member(log.clone())],
+        port_a,
+        Vec::new(),
+    );
+    let (node_b, _events_b) = node(
+        bea,
+        vec![GroupSetup::Member(log)],
+        0,
+        vec![loopback(port_a)],
+    );
+    let (heard_tx, _heard) = mpsc::unbounded_channel();
+    updates::serve(
+        node_a.clone(),
+        Shelf::default(),
+        heard_tx,
+        Misbehave::default(),
+    )
+    .unwrap();
+    let (peer_a, peer_b) = (node_a.local_peer(), node_b.local_peer());
+    wait_for(&node_b, peer_a).await;
+    timeout(Duration::from_secs(30), async {
+        while node_a.trusted_device(peer_b).await.is_none() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    })
+    .await
+    .expect("Ana never took Bea for a member");
+
+    let stream = node_b
+        .streams()
+        .open_stream(peer_a, updates::UPDATE_PROTOCOL)
+        .await
+        .unwrap();
+    let (mut reader, mut writer) = stream.split();
+    // A whole ask (kind, build, a platform's name), one byte every two seconds: 30 s.
+    let mut ask = vec![1u8];
+    ask.extend_from_slice(&1u64.to_be_bytes());
+    ask.push(5);
+    ask.extend_from_slice(b"linux");
+    let trickle = tokio::spawn(async move {
+        for byte in ask {
+            if writer.write_all(&[byte]).await.is_err() || writer.flush().await.is_err() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+        // Kept open past the end, so only Ana's side can end it early.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let started = std::time::Instant::now();
+    let mut byte = [0u8; 1];
+    let read = timeout(Duration::from_secs(20), reader.read(&mut byte)).await;
+    trickle.abort();
+    assert!(
+        matches!(read, Ok(Ok(0) | Err(_))),
+        "a request still arriving after {:?} was kept: {read:?}",
+        started.elapsed()
+    );
+    assert!(
+        started.elapsed() >= Duration::from_secs(8),
+        "{:?}",
+        started.elapsed()
+    );
+}

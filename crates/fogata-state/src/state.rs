@@ -89,7 +89,9 @@ pub enum Level {
     ///   ([`NamedInvite`]), and only they do; an invite that names nobody
     ///   ([`Body::Invite`]) applies no more;
     /// - a `Rotate` gives the new key to every member its author saw, but for keys nothing
-    ///   can be sealed to: one that leaves some out is not kept.
+    ///   can be sealed to: one that leaves some out is not kept. Judged on that view, at its
+    ///   level, so only of a `Rotate` whose author saw the group at level three: one signed
+    ///   on entries from before the raise is judged, and applies, as at level two.
     Three,
 }
 

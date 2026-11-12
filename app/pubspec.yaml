@@ -1,7 +1,7 @@
 name: fogata
 description: "Fogata: voice, video and text rooms for groups of friends, device to device."
 publish_to: 'none'
-version: 0.1.0+8
+version: 0.1.0+9
 
 environment:
   sdk: ^3.13.5
@@ -24,6 +24,9 @@ dependencies:
   rust_lib_fogata:
     path: rust_builder
   window_manager: ^0.5.2
+  # MIT; window_manager's own (already in the build): the screen's work area, so the
+  # window is never made larger than it (window.dart's mainWindowSizes).
+  screen_retriever: ^0.2.2
   # The icon in Windows' notification area and macOS's menu bar; our copy of tray_manager
   # 0.5.3 (MIT) without its Linux plugin (see its FOGATA.md).
   tray_manager:

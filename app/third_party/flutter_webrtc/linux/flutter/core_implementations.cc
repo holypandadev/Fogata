@@ -24,6 +24,7 @@
 #include "binary_messenger_impl.h"
 #include "include/flutter/engine_method_result.h"
 #include "include/flutter/texture_registrar.h"
+#include "retired_textures.h"
 #include "texture_registrar_impl.h"
 
 struct FlTextureProxy {
@@ -66,61 +67,39 @@ static gboolean fl_texture_proxy_no_frame(const uint8_t** out_buffer,
 // buffer it reads (freed at once, a participant leaving as a frame of theirs was being
 // drawn read freed memory). That thread copies one texture at a time: once it starts
 // copying another texture after the unregistering, the old one is no longer in use and
-// never will be. The same rule as packages/fogata_video's `retire`.
+// never will be. The same rule as packages/fogata_video's `retire`. What the texture
+// showed is also let go of a few seconds after the unregistering if the engine copies
+// no other texture meanwhile (see RetiredTextures::Expire).
 namespace {
 
-struct Retired {
-  FlTextureProxy* proxy;
-  // `copies` when it was unregistered.
-  uint64_t after;
-  // Frees what the texture read; run on the platform thread.
-  std::function<void()> release;
-};
+flutter::RetiredTextures<FlTextureProxy*> retired;
 
-std::mutex retired_mutex;
-std::vector<Retired> retired;
-// The releases of textures no longer in use, waiting for the platform thread.
-std::vector<std::function<void()>> released;
-// How many times the raster thread has started copying pixels.
-uint64_t copies = 0;
+// How long after its unregistering what a texture showed goes at the latest.
+constexpr guint kExpireSeconds = 5;
 
 gboolean run_released(gpointer) {
-  std::vector<std::function<void()>> run;
-  {
-    std::lock_guard<std::mutex> lock(retired_mutex);
-    run.swap(released);
-  }
-  for (auto& release : run) release();
+  for (auto& release : retired.TakeReleased()) release();
   return G_SOURCE_REMOVE;
 }
 
-// Hands the plugin's reference to [proxy] over to the list above.
+gboolean expire(gpointer serial) {
+  if (auto release = retired.Expire(uint64_t(GPOINTER_TO_SIZE(serial)))) release();
+  return G_SOURCE_REMOVE;
+}
+
+// Hands the plugin's reference to [proxy] over to the list above. On the platform
+// thread, whose main context runs the timeout.
 void retire(FlTextureProxy* proxy, std::function<void()> release) {
-  std::lock_guard<std::mutex> lock(retired_mutex);
-  retired.push_back({proxy, copies, std::move(release)});
+  const uint64_t serial = retired.Retire(proxy, std::move(release));
+  g_timeout_add_seconds(kExpireSeconds, expire, GSIZE_TO_POINTER(gsize(serial)));
 }
 
 // On the raster thread, as [current] is about to be copied: the textures it has moved
 // past go. Their last unref runs here, on the thread whose GL context made their GL
 // textures; what they read is freed on the platform thread.
 void moved_on(FlTextureProxy* current) {
-  std::vector<FlTextureProxy*> done;
   bool release = false;
-  {
-    std::lock_guard<std::mutex> lock(retired_mutex);
-    copies++;
-    for (auto it = retired.begin(); it != retired.end();) {
-      if (copies > it->after && it->proxy != current) {
-        done.push_back(it->proxy);
-        released.push_back(std::move(it->release));
-        release = true;
-        it = retired.erase(it);
-      } else {
-        ++it;
-      }
-    }
-  }
-  for (FlTextureProxy* gone : done) g_object_unref(gone);
+  for (FlTextureProxy* gone : retired.MovedOn(current, &release)) g_object_unref(gone);
   if (release) g_idle_add(run_released, nullptr);
 }
 

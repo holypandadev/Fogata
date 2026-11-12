@@ -11,6 +11,7 @@ thread_local! {
     static SETTLED: Cell<usize> = const { Cell::new(0) };
     static VIEWED: Cell<usize> = const { Cell::new(0) };
     static VERIFIED: Cell<usize> = const { Cell::new(0) };
+    static NAMED: Cell<usize> = const { Cell::new(0) };
 }
 
 /// What was counted on this thread since [`Work::start`].
@@ -26,12 +27,14 @@ pub struct Work {
     pub viewed: usize,
     /// Signatures checked.
     pub verified: usize,
+    /// Named invites read from their bytes, keys checked (see `NamedInvite::of`).
+    pub named: usize,
 }
 
 impl Work {
     /// Counts from nothing.
     pub fn start() {
-        for count in [&APPLIED, &COPIED, &SETTLED, &VIEWED, &VERIFIED] {
+        for count in [&APPLIED, &COPIED, &SETTLED, &VIEWED, &VERIFIED, &NAMED] {
             count.set(0);
         }
     }
@@ -44,6 +47,7 @@ impl Work {
             settled: SETTLED.get(),
             viewed: VIEWED.get(),
             verified: VERIFIED.get(),
+            named: NAMED.get(),
         }
     }
 }
@@ -66,4 +70,8 @@ pub(crate) fn viewed() {
 
 pub(crate) fn verified() {
     VERIFIED.set(VERIFIED.get() + 1);
+}
+
+pub(crate) fn named() {
+    NAMED.set(NAMED.get() + 1);
 }

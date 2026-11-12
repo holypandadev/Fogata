@@ -164,13 +164,13 @@ void main() {
 
   test('a level up is tried only if it would fit', () {
     // Down to 720 lines at 15 fps.
-    final load = ScreenLoad()..watchersAre(5);
+    final load = ScreenLoad()..watchersAre(4);
     expect(load.level, 3);
     // Three encoders at 0.27 of a core each: 0.8 cores now, 1.8 at the full size.
     expect(feed(load, 0, 100, busy: 0.27), isFalse);
     expect(load.level, 3);
     // At 0.5 cores now, 1.1 at the full size: under the limit, so up after 20 s.
-    final light = ScreenLoad()..watchersAre(5);
+    final light = ScreenLoad()..watchersAre(4);
     feed(light, 0, 30, busy: 0.17);
     expect(light.level, 2);
     expect(ScreenLoad.costOf(2) / ScreenLoad.costOf(3), closeTo(2.25, 0.01));
@@ -214,7 +214,7 @@ void main() {
   });
 
   test('"cpu" stuck with idle encoders lets it go back up', () {
-    final load = ScreenLoad()..watchersAre(5, now: start);
+    final load = ScreenLoad()..watchersAre(4, now: start);
     expect(load.level, 3);
     // WebRTC says "cpu" and the screen goes out at the level's rate, but the encoders do
     // almost nothing (0.15 cores): its word is taken as stuck after 20 s of that, and the
@@ -261,21 +261,110 @@ void main() {
     expect(load.level, 0);
     // A fourth is more than ever since the change.
     expect(load.watchersAre(4), isTrue);
-    expect(load.level, 2);
+    expect(load.level, ScreenLoad.startFor(4));
   });
 
   test('more watchers start it lower', () {
     expect(ScreenLoad.startFor(1), 0);
     expect(ScreenLoad.startFor(2), 0);
     expect(ScreenLoad.startFor(3), 2);
-    expect(ScreenLoad.startFor(5), 3);
+    // From four, lower still: a big room does not begin large and fall.
+    expect(ScreenLoad.startFor(4), 3);
+    expect(ScreenLoad.startFor(5), 4);
+    expect(ScreenLoad.startFor(20), 4);
     final load = ScreenLoad();
     expect(load.watchersAre(2), isFalse);
     expect(load.watchersAre(5), isTrue);
-    expect(load.limits, (lines: 720, fps: 15));
+    expect(load.limits, (lines: 540, fps: 15));
     // Fewer watchers do not raise it by themselves; the processor does, in time.
     expect(load.watchersAre(1), isFalse);
-    expect(load.level, 3);
+    expect(load.level, 4);
+  });
+
+  test('the ceiling comes down at once as more watch', () {
+    final load = ScreenLoad();
+    expect(load.watchersAre(1, now: start), isFalse);
+    expect(load.watchersAre(2, now: start), isFalse);
+    expect(load.ceiling, isNull);
+    expect(load.watchersAre(3, now: start), isTrue);
+    expect(load.ceiling, 1080);
+    expect(load.watchersAre(5, now: start), isTrue);
+    expect(load.ceiling, 720);
+  });
+
+  test('the ceiling goes back up only once fewer have watched for 20 s', () {
+    final load = ScreenLoad()..watchersAre(5, now: start);
+    expect(load.ceiling, 720);
+    DateTime at(int seconds) => start.add(Duration(seconds: seconds));
+    // Two leave: not yet.
+    expect(load.watchersAre(3, now: at(2)), isFalse);
+    expect(load.watchersAre(3, now: at(20)), isFalse);
+    expect(load.ceiling, 720);
+    expect(load.watchersAre(3, now: at(22)), isTrue);
+    expect(load.ceiling, 1080);
+    // All but one leave: the ceiling goes too, 20 s on.
+    expect(load.watchersAre(1, now: at(24)), isFalse);
+    expect(load.watchersAre(1, now: at(44)), isTrue);
+    expect(load.ceiling, isNull);
+  });
+
+  test('someone who comes and goes quickly does not move the ceiling', () {
+    final load = ScreenLoad()..watchersAre(4, now: start);
+    expect(load.ceiling, 1080);
+    DateTime at(int seconds) => start.add(Duration(seconds: seconds));
+    // Down to two and back to three, every few seconds: the 20 s start over each time.
+    for (var t = 2; t < 120; t += 6) {
+      expect(load.watchersAre(2, now: at(t)), isFalse);
+      expect(load.watchersAre(3, now: at(t + 3)), isFalse);
+    }
+    expect(load.ceiling, 1080);
+    // A fifth for a moment: down at once (the new encoder starts small), and back up
+    // only 20 s after it left, as high as the most that watched meanwhile allow.
+    expect(load.watchersAre(5, now: at(130)), isTrue);
+    expect(load.ceiling, 720);
+    expect(load.watchersAre(4, now: at(131)), isFalse);
+    expect(load.watchersAre(2, now: at(140)), isFalse);
+    expect(load.watchersAre(2, now: at(151)), isTrue);
+    expect(load.ceiling, 1080);
+    expect(load.watchersAre(2, now: at(171)), isTrue);
+    expect(load.ceiling, isNull);
+  });
+
+  test('levels that send the same within the ceiling are passed over', () {
+    // Five watching: 720 lines at most, starting at 540 lines and 15 frames a second.
+    final load = ScreenLoad()..watchersAre(5, now: start);
+    expect(load.level, 4);
+    expect(load.lowered, isTrue);
+    // Light: up a level, past "full size at 15" (720 lines here, as the one below), and
+    // then to 30 frames a second, never above 720 lines.
+    expect(feed(load, 0, 18, busy: 0.05), isFalse);
+    expect(feed(load, 20, 20, busy: 0.05), isTrue);
+    expect(load.level, 2);
+    expect(load.lowered, isTrue);
+    expect(feed(load, 22, 60, busy: 0.05), isTrue);
+    expect(load.level, 0);
+    expect(load.lowered, isFalse);
+    // Under load again: from 720 lines at 30 straight to 15, then to 540 lines.
+    expect(feed(load, 62, 64, cpu: true), isTrue);
+    expect(load.level, 2);
+    expect(feed(load, 66, 80, cpu: true), isTrue);
+    expect(load.level, 4);
+    // What a level up costs counts the lines the ceiling leaves.
+    expect(
+      ScreenLoad.costOf(2, ceiling: 720) / ScreenLoad.costOf(4, ceiling: 720),
+      closeTo(720 * 720 / (540 * 540), 0.01),
+    );
+    expect(
+      ScreenLoad.costOf(0, ceiling: 720) / ScreenLoad.costOf(2, ceiling: 720),
+      closeTo(2, 0.01),
+    );
+  });
+
+  test('a new share forgets the ceiling', () {
+    final load = ScreenLoad()..watchersAre(6, now: start);
+    load.reset();
+    expect(load.ceiling, isNull);
+    expect(load.level, 0);
   });
 
   test('the same watchers again do not undo a level up', () {
@@ -301,7 +390,7 @@ void main() {
     expect(load.level, 0);
     // A fourth comes: more watchers, so down again to where four start.
     expect(readingWith(4), isTrue);
-    expect(load.level, 2);
+    expect(load.level, ScreenLoad.startFor(4));
   });
 
   test('a new share starts over', () {

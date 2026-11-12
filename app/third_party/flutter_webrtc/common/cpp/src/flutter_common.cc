@@ -148,8 +148,8 @@ class EventChannelProxyImpl : public EventChannelProxy {
          [&](const EncodableValue* arguments,
              std::unique_ptr<flutter::EventSink<EncodableValue>>&& events)
              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+           std::lock_guard<std::mutex> guard(mutex_);
            sink_ = std::move(events);
-           std::weak_ptr<EventSink> weak_sink = sink_;
            for (auto& event : event_queue_) {
             PostEvent(event);
            }
@@ -159,6 +159,7 @@ class EventChannelProxyImpl : public EventChannelProxy {
          },
          [&](const EncodableValue* arguments)
              -> std::unique_ptr<flutter::StreamHandlerError<EncodableValue>> {
+           std::lock_guard<std::mutex> guard(mutex_);
            on_listen_called_ = false;
            return nullptr;
          });
@@ -190,7 +191,12 @@ class EventChannelProxyImpl : public EventChannelProxy {
      channel_->SetStreamHandler(nullptr);
    }
 
+   // Fogata: called on libwebrtc's threads (a connection's or a data channel's
+   // observer) while the platform thread starts or stops listening: the queue, the
+   // sink and the flag are shared, under `mutex_`. Events queued before the listener
+   // came go out before any sent after, as both post under it.
    void Success(const EncodableValue& event, bool cache_event = true) override {
+     std::lock_guard<std::mutex> guard(mutex_);
      if (on_listen_called_) {
        PostEvent(event);
      } else {
@@ -200,6 +206,7 @@ class EventChannelProxyImpl : public EventChannelProxy {
      }
    }
 
+   // With `mutex_` held.
    void PostEvent(const EncodableValue& event) {
      if(task_runner_) {
       std::weak_ptr<EventSink> weak_sink = sink_;
@@ -219,6 +226,7 @@ class EventChannelProxyImpl : public EventChannelProxy {
    std::shared_ptr<flutter::EventSink<flutter::EncodableValue>> sink_;
    std::list<EncodableValue> event_queue_;
    bool on_listen_called_ = false;
+   std::mutex mutex_;
    TaskRunner* task_runner_;
 #if defined(_WIN32)
    FlutterDesktopMessengerRef host_messenger_ = nullptr;

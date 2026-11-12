@@ -83,6 +83,83 @@ pub(super) const ASK_IDS_AGAIN: Duration = Duration::from_secs(10);
 /// Most events asked for, or given, at once.
 const MAX_ASKED: usize = 64;
 
+/// Bytes of chat this device keeps from the rooms of all its groups together, at most (as
+/// [`fogata_state::RoomTracker::chat_weights`] counts them). Each room keeps its last 500
+/// lines, and one member that floods every room of a group with the heaviest lines it may
+/// send makes every member keep about 70 MiB of them; nothing bounded that across groups.
+/// Honest lines weigh about a kilobyte each as kept: this is some 130 000 of them, which
+/// no device in many busy groups comes near, and past it the heaviest sender loses its
+/// oldest lines first (see [`fit_chat`]).
+pub(super) const ROOM_CHAT_BYTES: usize = 128 * 1024 * 1024;
+
+impl Node {
+    /// Keeps the chat of every room of every group within [`ROOM_CHAT_BYTES`] (see
+    /// [`fit_chat`]). Every slot, rather than at each event: going over by what arrives in
+    /// one costs little, and looking at every line kept costs more than most events.
+    pub(super) fn fit_room_chat(&mut self) {
+        let trackers = self.groups.values_mut().flat_map(|s| s.rooms.values_mut());
+        let dropped = fit_chat(trackers, ROOM_CHAT_BYTES);
+        if dropped > 0 {
+            tracing::debug!(dropped, "room chat lines let go to keep within the bound");
+        }
+    }
+}
+
+/// Lets go of chat lines kept by `trackers` until they keep at most `budget` bytes
+/// together (see [`fogata_state::RoomTracker::forget_chat`]): each time the oldest line of
+/// whoever has the most kept in all of them. A member that floods its rooms (in one group
+/// or many, with one device or several) so loses its own lines, and nobody else's while it
+/// still keeps more than they do; the others' lines go only once every sender keeps as
+/// little as they do. What is kept for the room's other members does not change: each
+/// member answers with what it keeps. Returns how many lines went.
+fn fit_chat<'a>(
+    trackers: impl Iterator<Item = &'a mut fogata_state::RoomTracker<WireMessage>>,
+    budget: usize,
+) -> usize {
+    use std::collections::{BinaryHeap, HashMap};
+    let mut trackers: Vec<_> = trackers.collect();
+    // A line: its time, its id, its weight and the tracker it is in.
+    type Line = (u64, [u8; 16], usize, usize);
+    // Every sender's lines, newest first, so the oldest comes off the end.
+    let mut lines: HashMap<DevicePublicKey, Vec<Line>> = HashMap::new();
+    let mut total = 0usize;
+    for (at, tracker) in trackers.iter().enumerate() {
+        for (sender, time, id, weight) in tracker.chat_weights() {
+            total += weight;
+            lines
+                .entry(sender)
+                .or_default()
+                .push((time, id, weight, at));
+        }
+    }
+    if total <= budget {
+        return 0;
+    }
+    let mut senders: BinaryHeap<(usize, DevicePublicKey)> = BinaryHeap::new();
+    for (sender, theirs) in lines.iter_mut() {
+        theirs.sort_unstable_by_key(|l| std::cmp::Reverse((l.0, l.1)));
+        senders.push((theirs.iter().map(|l| l.2).sum(), *sender));
+    }
+    let mut dropped = 0;
+    while total > budget {
+        let Some((kept, sender)) = senders.pop() else {
+            break;
+        };
+        let Some((_, id, weight, at)) = lines.get_mut(&sender).and_then(Vec::pop) else {
+            continue;
+        };
+        if trackers[at].forget_chat(&id) {
+            dropped += 1;
+        }
+        total = total.saturating_sub(weight);
+        let kept = kept.saturating_sub(weight);
+        if lines.get(&sender).is_some_and(|l| !l.is_empty()) {
+            senders.push((kept, sender));
+        }
+    }
+    dropped
+}
+
 /// About how many bytes a sealed message takes in an answer.
 fn wire_size(wire: &WireMessage) -> usize {
     wire.group_id.len()
@@ -1637,5 +1714,141 @@ mod tests {
         .await;
         drop(events);
         node.shutdown().await.unwrap();
+    }
+
+    /// Rooms of `groups` groups, in each of which `honest` senders say `lines` lines of
+    /// `chars` characters each, the first half before and the rest after a member that
+    /// floods says `flood` of the heaviest lines it may send.
+    fn chat_rooms(
+        groups: usize,
+        honest: &[DevicePublicKey],
+        lines: usize,
+        chars: usize,
+        flooder: DevicePublicKey,
+        flood: usize,
+    ) -> Vec<RoomTracker<WireMessage>> {
+        use fogata_state::{EVENT_SLACK_BYTES, MAX_CHAT_CHARS};
+        let me = DeviceIdentity::generate().unwrap().public_key();
+        let mut n = 0u32;
+        let mut send = |t: &mut RoomTracker<WireMessage>, sender, input: RoomInput, weight| {
+            n += 1;
+            let mut message_id = [0u8; 16];
+            message_id[..4].copy_from_slice(&n.to_be_bytes());
+            let mut wire = record(0, 0);
+            wire.message_id = message_id.to_vec();
+            wire.ciphertext = vec![5; weight - crate::group::room_record_weight(&wire)];
+            let event = RoomEvent {
+                room: [1; 16],
+                sender,
+                timestamp_ms: 1_000 + u64::from(n),
+                message_id,
+                input,
+            };
+            t.apply(event, wire, 1_000);
+        };
+        let chat = |text: String| RoomInput::Chat {
+            nick: "m".into(),
+            text,
+        };
+        let honest_line = "a".repeat(chars);
+        // The text as the message encodes it, and the rest of a sealed message.
+        let honest_weight = chars + 300;
+        let heavy = "\u{1}".repeat(MAX_CHAT_CHARS);
+        let heavy_weight = 6 * MAX_CHAT_CHARS + 1 + EVENT_SLACK_BYTES;
+        (0..groups)
+            .map(|_| {
+                let mut t = RoomTracker::new(me).weighing(crate::group::room_record_weight);
+                for sender in honest.iter().chain([&flooder]) {
+                    let join = RoomInput::Join {
+                        started_ms: 1_000,
+                        nick: "m".into(),
+                    };
+                    send(&mut t, *sender, join, 300);
+                }
+                for i in 0..lines {
+                    if i == lines / 2 {
+                        for _ in 0..flood {
+                            send(&mut t, flooder, chat(heavy.clone()), heavy_weight);
+                        }
+                    }
+                    for sender in honest {
+                        send(&mut t, *sender, chat(honest_line.clone()), honest_weight);
+                    }
+                }
+                t
+            })
+            .collect()
+    }
+
+    fn kept(trackers: &[RoomTracker<WireMessage>], sender: DevicePublicKey) -> (usize, usize) {
+        let theirs: Vec<usize> = trackers
+            .iter()
+            .flat_map(|t| t.chat_weights())
+            .filter(|(s, ..)| *s == sender)
+            .map(|(.., weight)| weight)
+            .collect();
+        (theirs.len(), theirs.iter().sum())
+    }
+
+    /// A member that floods every room of many groups with the heaviest lines loses its own
+    /// lines, the oldest first, until the device keeps what the bound allows; the others'
+    /// lines, older and newer than the flood, all stay. Two that flood lose theirs alike.
+    #[test]
+    fn a_flood_of_chat_in_many_groups_loses_only_its_own_lines() {
+        let key = || DeviceIdentity::generate().unwrap().public_key();
+        let (ana, bea, bad, worse) = (key(), key(), key(), key());
+        let mut trackers = chat_rooms(6, &[ana, bea], 40, 120, bad, 400);
+        trackers.extend(chat_rooms(4, &[ana], 40, 120, worse, 450));
+        let total = |t: &[RoomTracker<WireMessage>]| -> usize {
+            t.iter().flat_map(|t| t.chat_weights()).map(|l| l.3).sum()
+        };
+        let before = total(&trackers);
+        let times = |t: &[RoomTracker<WireMessage>]| -> Vec<u64> {
+            let mut times: Vec<u64> = t
+                .iter()
+                .flat_map(|t| t.chat_weights())
+                .filter(|(s, ..)| *s == bad)
+                .map(|(_, time, ..)| time)
+                .collect();
+            times.sort_unstable();
+            times
+        };
+        let bad_before = times(&trackers);
+        let honest = |t: &[RoomTracker<WireMessage>]| (kept(t, ana), kept(t, bea));
+        let honest_before = honest(&trackers);
+        let budget = honest_before.0.1 + honest_before.1.1 + 8 * 1024 * 1024;
+        assert!(before > 4 * budget, "{before} of {budget}");
+        let dropped = fit_chat(trackers.iter_mut(), budget);
+        assert!(dropped > 0);
+        assert!(total(&trackers) <= budget);
+        assert_eq!(honest(&trackers), honest_before);
+        // What the two floods keep is about even, each its newest lines.
+        let (bad_kept, worse_kept) = (kept(&trackers, bad).1, kept(&trackers, worse).1);
+        assert!(
+            bad_kept.abs_diff(worse_kept) < 16 * 1024,
+            "{bad_kept} {worse_kept}"
+        );
+        let bad_after = times(&trackers);
+        assert!(!bad_after.is_empty() && bad_after.len() < bad_before.len());
+        assert_eq!(
+            bad_after,
+            bad_before[bad_before.len() - bad_after.len()..],
+            "the flood's oldest lines go first"
+        );
+        // Within the bound already: nothing more goes.
+        assert_eq!(fit_chat(trackers.iter_mut(), budget), 0);
+    }
+
+    /// A busy device in many groups, every room of each full of honest chat (500 lines of
+    /// 300 characters), keeps all of it within the bound.
+    #[test]
+    fn honest_chat_in_many_busy_groups_is_all_kept() {
+        let key = || DeviceIdentity::generate().unwrap().public_key();
+        let people: Vec<DevicePublicKey> = (0..5).map(|_| key()).collect();
+        // 100 rooms (ten groups of ten), each with its 500 lines.
+        let mut trackers = chat_rooms(100, &people, 100, 300, key(), 0);
+        let lines: usize = trackers.iter().map(|t| t.chat_weights().len()).sum();
+        assert_eq!(lines, 100 * 500);
+        assert_eq!(fit_chat(trackers.iter_mut(), ROOM_CHAT_BYTES), 0);
     }
 }

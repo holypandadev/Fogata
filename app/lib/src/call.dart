@@ -1611,6 +1611,10 @@ class Call extends ChangeNotifier {
   ) async {
     if (event.track.kind == 'audio') {
       final screen = event.transceiver?.mid == '$_screenSound';
+      if (event.transceiver?.mid == '$_audio' &&
+          peer.connection == connection) {
+        peer._voice = (on: connection, track: event.track);
+      }
       await _setGain(
         event.track,
         screen ? screenSoundGain(peer.id) : gainOf(peer.id),
@@ -1643,7 +1647,14 @@ class Call extends ChangeNotifier {
     }
     await peer._prepare();
     // Let go of meanwhile (gone from the room, or the call ended): its pictures are freed.
-    if (_closed || peers[peer.id] != peer || !peer.rendering) return;
+    // Or its connection was replaced meanwhile: the new one's pictures, which may have
+    // come first, are the ones to show, and this track has ended.
+    if (_closed ||
+        peers[peer.id] != peer ||
+        !peer.rendering ||
+        peer.connection != connection) {
+      return;
+    }
     final renderer = switch (mid) {
       _camera => peer.camera,
       _screen => peer.screen,
@@ -1717,7 +1728,11 @@ class Call extends ChangeNotifier {
       peer.screen = fresh;
     }
     try {
-      _attach(peer, mid, fresh, stream);
+      // What the failed one shows by now: a connection made again meanwhile gave it the
+      // new connection's pictures, and the stream taken before has ended; one kept out
+      // meanwhile left it none.
+      final shown = failed.srcObject;
+      if (shown != null) _attach(peer, mid, fresh, shown);
     } catch (e) {
       _trace('showing a picture of ${peer.id.substring(0, 8)} again: $e');
     }

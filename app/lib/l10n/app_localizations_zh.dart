@@ -1550,6 +1550,9 @@ class L10nZh extends L10n {
   }
 
   @override
+  String get streamQualitySpared => '为了减轻你电脑的负担，目前所有观看者收到的画面都较小或不够流畅。';
+
+  @override
   String get streamQualityGoingOut => '当前发送';
 
   @override
@@ -4713,6 +4716,7 @@ class L10nZh extends L10n {
       'qr': '显示二维码',
       'link': '显示链接',
       'code': '显示好友码',
+      'key': '显示密钥',
       'other': '显示',
     });
     return '$_temp0';
@@ -4720,6 +4724,12 @@ class L10nZh extends L10n {
 
   @override
   String get widgetsHide => '隐藏';
+
+  @override
+  String get widgetsShowMore => '展开';
+
+  @override
+  String get widgetsShowLess => '收起';
 
   @override
   String revealFailed(String path) {

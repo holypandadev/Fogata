@@ -205,7 +205,8 @@ refuses a folder that holds any key already.
       none of the build's code, lists the SHA-256 of the three zips (in the run's summary)
       and has GitHub attest each: a build provenance attestation (SLSA), signed through
       Sigstore, saying that `release-build.yml` of this repository made that file from that
-      commit on GitHub's computers. The builds are kept 30 days.
+      commit on GitHub's computers. The run keeps the builds 90 days (the most GitHub
+      allows); the release keeps them for good (step 3).
 
    b. On the Linux computer, at that commit (`git status` clean), fetch and check the
       Linux and Windows builds (`gh auth login` once; reading is enough):
@@ -219,9 +220,13 @@ refuses a folder that holds any key already.
       and keeps a build only when `gh attestation verify` finds GitHub's attestation of it
       (by `release-build.yml` of holypandadev/Fogata, from this commit, not on a self-hosted
       computer) and its SHA-256 is the one the run listed. It leaves
-      `linux/bundle` (for `--linux-bundle`), `Fogata-windows-x64.zip`, `SHA256SUMS`, and
-      each build's `toolchain-<system>.txt` (not attested: a note of what built it); keep
-      them with the release.
+      `linux/bundle` (for `--linux-bundle`), `Fogata-windows-x64.zip`, `SHA256SUMS`, the
+      attested zips themselves in `attested/`, and each build's `toolchain-<system>.txt`
+      (not attested: a note of what built it). The whole folder is what `release.py
+      --ci-builds` takes (step 3). A gh without `gh attestation` (older than 2.49) cannot
+      fetch: then fetch all three on the Mac (2c, without `--only`) and copy that whole
+      folder to the Linux computer (`rsync -a`, or `tar` and back: links and modes must
+      stay).
 
    c. On the Mac, at the same commit, the same for macOS, then sign it there (see 2d for
       the identity and the team) and zip it:
@@ -238,10 +243,15 @@ refuses a folder that holds any key already.
 
    What the attestations show: that the builds that go into the release are the ones
    GitHub made from the commit, which anyone can check (`gh attestation verify <zip>
-   --repo holypandadev/Fogata`). What testers download is made from them on your computers
-   (the Flatpak, the Windows zip with its installer, the Mac app with your signature), so
-   those files are covered by `SHA256SUMS`, signed by the release key, as before, not by the
-   attestations.
+   --repo holypandadev/Fogata`). `release.py --ci-builds` (step 3) refuses any build that is
+   not, file for file, the attested one (the Mac app but for the signatures `sign-macos.sh`
+   gives it: each Mach-O file is compared with its code signature taken off), and copies
+   the attested zips into `attested/` beside the release, to upload with it. What testers
+   download is made from them on your computers (the Flatpak, the Windows zip with its
+   installer, the Mac app with your signature), so those files are covered by `SHA256SUMS`,
+   signed by the release key, as before, not by the attestations; with the attested zips on
+   the release page, anyone can check the chain: the attestation names the zip, and the
+   shipped files hold what the zip holds.
 
    d. By hand, when GitHub cannot build (the fallback), on each system. The Rust is the one
       `rust-toolchain.toml` names (rustup installs it the first time), and the crates the
@@ -268,7 +278,14 @@ refuses a folder that holds any key already.
         then
         `ditto -c -k --keepParent app/build/macos/Build/Products/Release/Fogata.app Fogata-macos-universal.zip`.
         Sign every release with the same identity, or macOS forgets the permissions testers
-        gave Fogata and the updater refuses the new bundle. An Apple Development certificate
+        gave Fogata and the updater refuses the new bundle. Every signature carries the
+        certificate, which anyone can read from the app (`codesign -dv --verbose=4`): an
+        Apple Development certificate names the Apple Account's e-mail, and a personal
+        team's the account holder's name. Moving the Apple Account to another e-mail
+        changes what the next certificate names and keeps the team; only a Developer ID
+        certificate of an organisation's team (a paid membership) names the organisation
+        instead of a person, and a new team means every Mac tester installs again (the
+        updater pins the team). An Apple Development certificate
         lasts a year: `security find-certificate -c "<identity>" -p | openssl x509 -noout
         -enddate` says when; before that day, make a new one in Xcode (same team) and sign the
         next release with it.
@@ -282,13 +299,18 @@ refuses a folder that holds any key already.
    ```sh
    cargo build --release -p fogata
    python3 -I tools/beta/release.py --build 2 --version 0.1.0-beta.2 --min-build 1 \
-       --notes notes.txt --linux-bundle ~/fogata-ci-builds/0.1.0-beta.2/linux/bundle \
+       --notes notes.txt --ci-builds ~/fogata-ci-builds/0.1.0-beta.2 \
+       --linux-bundle ~/fogata-ci-builds/0.1.0-beta.2/linux/bundle \
        --windows-zip ~/fogata-ci-builds/0.1.0-beta.2/Fogata-windows-x64.zip \
        --macos-zip Fogata-macos-universal.zip --out ~/fogata-releases/0.1.0-beta.2
    ```
 
-   (`--build-linux` in place of `--linux-bundle` builds the Linux bundle there, from a clean
-   worktree of the commit checked out.) It refuses to go on while `RELEASE_KEYS` lacks a release key or a rescue key (no copy would
+   `--ci-builds` names the folder `ci_builds.py fetch` made (2b): every build given must be
+   the one GitHub built and attested there, file for file, and the Mac app the attested one
+   but for its signatures; the attested zips must still have the SHA-256 their run listed.
+   With builds made by hand (2d), or `--build-linux` in place of `--linux-bundle` (which builds the Linux bundle there, from a clean
+   worktree of the commit checked out), give `--no-ci-builds` instead: `release.py` says in
+   large letters that nothing was compared. It refuses to go on while `RELEASE_KEYS` lacks a release key or a rescue key (no copy would
    take the release), while the checkout has changes not committed, while nothing says the
    commit passed CI and the test against the last release (step 1; `--no-ci-check`,
    `--no-previous-check`), or while the command-line
@@ -349,10 +371,73 @@ refuses a folder that holds any key already.
    `release.sig` and the `.pack` of each system. Every copy looks at the newest releases
    there at its start and every six hours and takes the newest one the release key signed
    (docs/architecture.md, 5f), so this is what updates everyone; friends give it on as
-   well. Upload the files of `drive/` to the same pre-release, for new testers. They check
+   well. Upload the files of `drive/` to the same pre-release, for new testers, and those of
+   `attested/` (GitHub's builds the release was made from, kept there for good: the run's
+   copies go after 90 days; the README tells testers they are for checking, not for
+   installing). Testers check
    `SHA256SUMS.sig` with the key lines of `tools/allowed_signers` from the source code, then
    compare the checksum of their file with what their computer works out before they open
    anything (the README tells them how).
+
+## Dates that break things
+
+- **Each release expires 180 days after it is made** (`--days`). After that no copy takes or
+  installs it, from friends or from the web; installed copies keep running. When the newest
+  release has expired, a new tester cannot be brought up to date at all. So release at least
+  every 150 days. beta.8 expires on 2027-05-10.
+- **The Apple Development certificate expires a year after it was made** (the current one on
+  2027-06-26). Signatures made before stay valid (they are timestamped), so installed Macs
+  keep running; the next release needs a new certificate of the same team (2d). If the Apple
+  account or its team is lost, every Mac tester must install again: the updater and
+  `Checks.swift` pin the team.
+- **The Flatpak signing key and the `tools/allowed_signers` lines never expire.** Nothing
+  forces a renewal; the drill below is what shows they still work.
+
+`tools/beta/deadlines.py` lists these dates and how far each is; the weekly workflow runs it
+(job `dates`, with the newest release's `release.json` read from GitHub) and fails 30 days
+before any of them, with a warning from 75 days before. When a certificate is renewed, change
+its line in `DEADLINES` there, in the same commit as anything else it changes.
+
+## Twice a year: check that the keys still open
+
+Every key is useless without its file and its passphrase, and nothing else ever opens the
+backups: check each one, by hand, every six months (and after moving house, a new computer, a
+stick that was dropped). Each check signs a list of one throwaway file, which says nothing
+about any release, and checks it with the keys compiled into `fogata`.
+
+1. At the commit of the last release, build the command line (`cargo build --release -p
+   fogata`): its `RELEASE_KEYS` are the keys copies trust.
+2. For each copy of each key: the release key in `~/.config/fogata-release`, its backup stick
+   (keys section, step 6), and both rescue sticks (step 3, offline, as when it was made). Plug
+   the stick in, then, with `<key>` the key file (`release-key` or `rescue-key`) and the
+   passphrase typed from the paper copy, not from memory:
+
+   ```sh
+   drill=$(mktemp -d)
+   echo "key drill $(date -u +%F)" > "$drill/drill.txt"
+   target/release/fogata release sign-sums --key <key> "$drill"
+   target/release/fogata release verify-sums "$drill"
+   rm -rf "$drill"
+   ```
+
+   `verify-sums` must say `SHA256SUMS: signed with the release key <hex>` (or `rescue key`)
+   and `drill.txt: good`. A passphrase refused, a file that does not open, or a signature
+   `verify-sums` does not take (a key that is not the one compiled in) means that copy is
+   lost: make a new copy from one that passed, or follow "If the release key leaks or is
+   lost" (or the rescue key's section) while the other copies still open.
+3. The Flatpak signing key, in `~/.config/fogata-flatpak-key/gnupg` and on its backup stick
+   (step 6), with its passphrase from the paper:
+
+   ```sh
+   echo drill | gpg --homedir <gnupg folder> --clearsign > /dev/null && echo opens
+   gpg --homedir <gnupg folder> --list-secret-keys --with-fingerprint
+   ```
+
+   It must say `opens`, and the fingerprint must be the one of
+   `~/.config/fogata-flatpak-key/flatpak-signing-key.gpg` (`gpg --show-keys --with-fingerprint`
+   on that file).
+4. Unmount the sticks and put them back. Note the day in `published.log` beside the release
+   key (`echo "$(date -u +%FT%TZ) key drill: all copies open" >> ~/.config/fogata-release/published.log`).
 
 ## If the release key leaks or is lost
 

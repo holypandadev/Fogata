@@ -309,7 +309,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> Channel<S> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "fuzzing"))]
     pub(crate) fn into_inner(self) -> S {
         self.io
     }

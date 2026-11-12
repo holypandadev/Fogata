@@ -1,4 +1,5 @@
 pub mod api;
+mod bridge;
 mod denoise;
 mod disk;
 // Written by flutter_rust_bridge_codegen; not formatted by hand. The bridge needs unsafe

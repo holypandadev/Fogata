@@ -1,6 +1,7 @@
 #include "flutter_media_stream.h"
 
 #include "flutter_utf8_sanitize.h"
+#include "fogata_track_owner.h"
 #ifdef __linux__
 #include "output_keeper.h"
 #include "test_camera.h"
@@ -651,16 +652,28 @@ void FlutterMediaStream::MediaStreamDispose(
     return;
   }
 
+  // Fogata: a stream made to show a received track holds that track, whose id can be one
+  // of this device's own: that one (its camera, its shared screen) is not let go of with
+  // the stream. Known by how the track was added (mediaStreamAddTrack with a connection
+  // as its owner), not by its wrapper's pointer, which is a new one each time the
+  // stream's tracks change (ReceivedInStreams, fogata_track_owner.h). Every other track
+  // is let go of by id, as the package always did.
+  const ReceivedInStreams& received = base_->received_in_streams_;
+
   vector<scoped_refptr<RTCAudioTrack>> audio_tracks = stream->audio_tracks();
 
   for (auto track : audio_tracks.std_vector()) {
     stream->RemoveTrack(track);
+    if (received.Holds(stream_id, track->id().std_string()))
+      continue;
     base_->local_tracks_.erase(track->id().std_string());
   }
 
   vector<scoped_refptr<RTCVideoTrack>> video_tracks = stream->video_tracks();
   for (auto track : video_tracks.std_vector()) {
     stream->RemoveTrack(track);
+    if (received.Holds(stream_id, track->id().std_string()))
+      continue;
     base_->local_tracks_.erase(track->id().std_string());
     auto stopper = base_->track_stoppers_.find(track->id().std_string());
     if (stopper != base_->track_stoppers_.end()) {
@@ -678,6 +691,7 @@ void FlutterMediaStream::MediaStreamDispose(
     }
   }
 
+  base_->received_in_streams_.Forget(stream_id);
   base_->RemoveStreamForId(stream_id);
   result->Success();
 }
@@ -711,6 +725,9 @@ void FlutterMediaStream::MediaStreamTrackDispose(
     const std::string& track_id,
     std::unique_ptr<MethodResultProxy> result) {
   for (auto it : base_->local_streams_) {
+    // Fogata: a stream showing a received track of the same id keeps it.
+    if (base_->received_in_streams_.Holds(it.first, track_id))
+      continue;
     auto stream = it.second;
     auto audio_tracks = stream->audio_tracks();
     for (auto track : audio_tracks.std_vector()) {

@@ -17,7 +17,9 @@ NS_ASSUME_NONNULL_BEGIN
 //   until the input is available again, which happens when an input device is added or
 //   the default one changes, a microphone is asked for (`getUserMedia`) or chosen.
 // - If the engine still ends up stopped while the module counts itself as playing, it is
-//   made again without the input, and the input is not tried again until one of those.
+//   made again: without the input, which is not tried again until one of those (or the
+//   default output changes), when the engine that stopped was to record; as it was when
+//   it only played, as the speaker, not the input, failed then.
 //
 // All the work runs on a queue of its own: the module's calls wait for its thread, which
 // can be busy for up to two seconds while an engine starts.

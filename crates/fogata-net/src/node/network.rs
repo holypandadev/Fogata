@@ -17,7 +17,7 @@ use libp2p::{
     },
 };
 
-use super::{ADDRESSES_WAIT, Node, STARTUP, is_loopback, udp_check};
+use super::{ADDRESSES_WAIT, ConnectionInfo, Node, STARTUP, is_loopback, udp_check};
 use crate::{NetworkReport, NodeEvent, addr};
 
 /// Addresses others report for this device, and reporters per address, kept at most.
@@ -26,9 +26,10 @@ const MAX_REPORTERS: usize = 64;
 /// A confirmed address nobody has reported for this long is dropped.
 const CONFIRMED_FOR: Duration = Duration::from_secs(15 * 60);
 /// Networks ([`Network`]) whose peers must agree on an address of this device before it is
-/// taken: with a member or friend among them, and with strangers only. Anyone can connect
-/// and say anything; two strangers' providers are easy to come by, and the address taken is
-/// announced to everyone who looks this device up.
+/// taken: with a member or friend among them, and with strangers only, one of them a
+/// stranger this device dialled (see `Report`). Anyone can connect and say anything; two strangers'
+/// providers are easy to come by, and the address taken is announced to everyone who looks
+/// this device up.
 const NETWORKS_WITH_CONTACT: usize = 2;
 const NETWORKS_OF_STRANGERS: usize = 3;
 
@@ -62,9 +63,29 @@ pub(super) fn v6_net(address: &Multiaddr) -> Option<[u16; 4]> {
 /// coming up, each with its addresses) are taken as one.
 const NETWORK_SETTLE: Duration = Duration::from_secs(2);
 
+/// What one peer reported of this device's address: the address it reported from, and
+/// whether this device dialled it itself. Strangers on [`NETWORKS_OF_STRANGERS`] networks
+/// make an address taken, whoever connected, as before, but only once one of them is a
+/// stranger this device dialled (see [`Node::confirm_if_agreed`]): anyone can connect
+/// from wherever it likes, and three cheap machines at one cloud provider's three /16s that
+/// connect by themselves would otherwise have this device announce an address of their
+/// choice, which its members and friends then dial first. The peers it dials (the bootstrap
+/// nodes, those its own lookups lead to) tell it its real address as soon as it starts; a
+/// device that hears only from strangers that came in counts their networks as before
+/// once one it dialled says the same.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Report {
+    from: Option<std::net::IpAddr>,
+    dialled: bool,
+}
+
 /// How many different addresses the reporters of an address reported from.
-fn distinct_ips(reporters: &HashMap<PeerId, Option<std::net::IpAddr>>) -> usize {
-    reporters.values().flatten().collect::<HashSet<_>>().len()
+fn distinct_ips(reporters: &HashMap<PeerId, Report>) -> usize {
+    reporters
+        .values()
+        .filter_map(|r| r.from)
+        .collect::<HashSet<_>>()
+        .len()
 }
 
 /// The network an address is in, as far as telling machines apart goes: its /16 for IPv4,
@@ -370,14 +391,35 @@ impl Node {
                 return;
             }
         }
-        let from_ip = self.peer_ip(&reporter);
+        // Whether this device dialled the reporter itself (at an address, or at a name), and
+        // where.
+        let dialled: Vec<&ConnectionInfo> = self
+            .connections
+            .iter()
+            .filter(|(id, c)| c.peer == reporter && self.dialled_public.contains(id))
+            .map(|(_, c)| c)
+            .collect();
+        let report = Report {
+            from: dialled
+                .iter()
+                .find_map(|c| addr::ip(&c.address))
+                .or_else(|| self.peer_ip(&reporter)),
+            dialled: !dialled.is_empty(),
+        };
         let reporters = self.observed.entry(observed.clone()).or_default();
-        if reporters.len() < MAX_REPORTERS && reporters.insert(reporter, from_ip).is_none() {
+        if let Some(known) = reporters.get_mut(&reporter) {
+            // Said again over a connection this device dialled.
+            if report.dialled && !known.dialled {
+                *known = report;
+            }
+        } else if reporters.len() < MAX_REPORTERS {
+            reporters.insert(reporter, report);
             // One line per milestone instead of one per peer keeps the log readable while
             // still showing how many peers agree on each address.
             let count = reporters.len();
             if [1, 2, 5, 10, 25, 50].contains(&count) {
-                tracing::debug!(%observed, peers = count, "address observed by peers");
+                let dialled = reporters.values().filter(|r| r.dialled).count();
+                tracing::debug!(%observed, peers = count, dialled, "address observed by peers");
             } else {
                 tracing::trace!(%reporter, %observed, "address observed by a peer");
             }
@@ -389,7 +431,7 @@ impl Node {
         // around. A single report, or several from one machine, is not enough.
         if !self.port_change_reported {
             let ip = addr::ip(&observed);
-            let same_ip: Vec<&HashMap<PeerId, Option<std::net::IpAddr>>> = self
+            let same_ip: Vec<&HashMap<PeerId, Report>> = self
                 .observed
                 .iter()
                 .filter(|(a, _)| addr::ip(a) == ip && udp_port(a).is_some())
@@ -398,19 +440,31 @@ impl Node {
             let confirmed_ports = same_ip.iter().filter(|r| distinct_ips(r) >= 2).count();
             let all_ips: HashSet<std::net::IpAddr> = same_ip
                 .iter()
-                .flat_map(|r| r.values().flatten().copied())
+                .flat_map(|r| r.values().filter_map(|r| r.from))
                 .collect();
+            // A member, a friend or a stranger this device dialled among them (see `Report`).
+            let vouched = same_ip
+                .iter()
+                .flat_map(|r| r.iter())
+                .any(|(p, r)| r.dialled || self.members.contains_key(p) || self.is_friend_peer(p));
             let all_different = all_ips.len() >= 3 && same_ip.iter().all(|r| r.len() == 1);
             if confirmed_ports >= 2 || all_different {
                 self.port_change_reported = true;
                 self.emit(NodeEvent::PortChangesPerDestination);
                 // No port is right for everyone, but announcing the public IP still lets
                 // members whose router filters by address only open it for us: once peers
-                // on two networks said so, as for any address taken.
+                // on three networks said so, one of them dialled by this device, as for any
+                // address taken by strangers (see `Report`).
                 if self.confirmed.is_empty()
+                    && vouched
                     && distinct_networks(&all_ips) >= NETWORKS_OF_STRANGERS
                     && self.confirmed.insert(observed.clone())
                 {
+                    tracing::info!(
+                        %observed,
+                        networks = distinct_networks(&all_ips),
+                        "this device's public address taken, its port changing per destination"
+                    );
                     self.confirmed_seen.insert(observed.clone(), Instant::now());
                     self.swarm.add_external_address(observed);
                 }
@@ -434,7 +488,10 @@ impl Node {
         let contact = reporters
             .keys()
             .any(|p| self.members.contains_key(p) || self.is_friend_peer(p));
-        let networks = distinct_networks(reporters.values().flatten());
+        // Every reporter's network counts, as before; strangers only alone once one of them
+        // is one this device dialled (see `Report`).
+        let networks = distinct_networks(reporters.values().filter_map(|r| r.from.as_ref()));
+        let dialled = reporters.values().filter(|r| r.dialled).count();
         let needed = if contact {
             NETWORKS_WITH_CONTACT
         } else {
@@ -443,6 +500,24 @@ impl Node {
         if networks < needed {
             return;
         }
+        if !contact && dialled == 0 {
+            tracing::debug!(
+                %observed,
+                reporters = reporters.len(),
+                networks,
+                "strangers that came in by themselves agree on an address of this device; \
+                 not taken until one it dialled says so too"
+            );
+            return;
+        }
+        tracing::info!(
+            %observed,
+            reporters = reporters.len(),
+            networks,
+            dialled,
+            contact,
+            "this device's public address confirmed"
+        );
         let ip = addr::ip(observed);
         let same_family = |a: &Multiaddr| {
             addr::ip(a).is_some_and(|a| Some(a.is_ipv4()) == ip.map(|ip| ip.is_ipv4()))
@@ -508,6 +583,101 @@ mod tests {
 
     use super::*;
     use crate::node::tests::{inspect, lone_member};
+
+    fn quic_at(ip: &str) -> Multiaddr {
+        if ip.contains(':') {
+            format!("/ip6/{ip}/udp/4001/quic-v1")
+        } else {
+            format!("/ip4/{ip}/udp/4001/quic-v1")
+        }
+        .parse()
+        .unwrap()
+    }
+
+    /// A connection this device dialled to `ip`.
+    fn dialled_at(ip: &str) -> ConnectedPoint {
+        ConnectedPoint::Dialer {
+            address: quic_at(ip),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        }
+    }
+
+    /// A connection that came in from `ip`.
+    fn came_in_from(ip: &str) -> ConnectedPoint {
+        ConnectedPoint::Listener {
+            local_addr: "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
+            send_back_addr: quic_at(ip),
+        }
+    }
+
+    /// Strangers that connected by themselves, from three networks, cannot have this device
+    /// take and announce an address of their choice, nor take one for a port that changes
+    /// per destination. Once one stranger this device dialled says the same, the networks
+    /// of all count as before: a bootstrap node dialled by its name counts as dialled, and
+    /// two DHT nodes dialled and a device that came in through its router, on three
+    /// networks, confirm its address (the network lab's case).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn strangers_that_came_in_by_themselves_do_not_confirm_an_address() {
+        let (node, _group) = lone_member();
+        let found = inspect(&node, |n| {
+            let mut next = 9700;
+            let mut connect = |n: &mut Node, peer: PeerId, how: ConnectedPoint| {
+                next += 1;
+                n.on_connection_established(peer, ConnectionId::new_unchecked(next), &how);
+            };
+            let made_up: Multiaddr = "/ip4/198.51.100.66/udp/4001/quic-v1".parse().unwrap();
+            for from in ["203.0.113.10", "192.0.2.11", "198.18.0.12"] {
+                let peer = PeerId::random();
+                connect(n, peer, came_in_from(from));
+                n.on_observed_address(peer, made_up.clone());
+            }
+            let came_in = n.confirmed.contains(&made_up);
+            // Each told another port of one address: the port changes per destination, but
+            // no address is taken for it.
+            for (i, from) in ["203.0.113.20", "192.0.2.21", "198.18.0.22"]
+                .iter()
+                .enumerate()
+            {
+                let peer = PeerId::random();
+                connect(n, peer, came_in_from(from));
+                let says = format!("/ip4/198.51.100.9/udp/{}/quic-v1", 5000 + i);
+                n.on_observed_address(peer, says.parse().unwrap());
+            }
+            let port_changes = (n.port_change_reported, n.confirmed.is_empty());
+            // A bootstrap node dialled by its name says the same: now it counts.
+            let boot = PeerId::random();
+            connect(
+                n,
+                boot,
+                ConnectedPoint::Dialer {
+                    address: format!("/dnsaddr/bootstrap.example/p2p/{boot}")
+                        .parse()
+                        .unwrap(),
+                    role_override: libp2p::core::Endpoint::Dialer,
+                    port_use: libp2p::core::transport::PortUse::Reuse,
+                },
+            );
+            n.on_observed_address(boot, made_up.clone());
+            let vouched = n.confirmed.contains(&made_up);
+            // The lab's case: two DHT nodes dialled on two networks, the other device come
+            // in from a third.
+            let real: Multiaddr = "/ip4/198.51.100.50/udp/4001/quic-v1".parse().unwrap();
+            for how in [
+                dialled_at("203.0.113.30"),
+                dialled_at("198.51.100.31"),
+                came_in_from("192.0.2.70"),
+            ] {
+                let peer = PeerId::random();
+                connect(n, peer, how);
+                n.on_observed_address(peer, real.clone());
+            }
+            (came_in, port_changes, vouched, n.confirmed.contains(&real))
+        })
+        .await;
+        assert_eq!(found, (false, (true, true), true, true));
+        node.shutdown().await.unwrap();
+    }
 
     /// Asked for its addresses before it listens on any network (just started, on a busy
     /// computer), a device waits for the first one rather than answer none: an invite made
@@ -579,18 +749,10 @@ mod tests {
             let mut report = |n: &mut Node, from: &str, says: &Multiaddr| {
                 let peer = PeerId::random();
                 next += 1;
-                let back = if from.contains(':') {
-                    format!("/ip6/{from}/udp/4001/quic-v1")
-                } else {
-                    format!("/ip4/{from}/udp/4001/quic-v1")
-                };
                 n.on_connection_established(
                     peer,
                     ConnectionId::new_unchecked(next),
-                    &ConnectedPoint::Listener {
-                        local_addr: "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
-                        send_back_addr: back.parse().unwrap(),
-                    },
+                    &dialled_at(from),
                 );
                 n.on_observed_address(peer, says.clone());
             };
@@ -600,7 +762,7 @@ mod tests {
                     "/ip4/198.51.100.7/udp/4001/quic-v1",
                     ["203.0.113.10", "203.0.113.11", "203.0.200.12"],
                     "192.0.2.13",
-                    "100.64.0.14",
+                    "198.18.0.14",
                 ),
                 (
                     "/ip6/2001:db8:9::7/udp/4001/quic-v1",
@@ -841,36 +1003,30 @@ mod tests {
         let found = inspect(&node, move |n| {
             n.started = Instant::now() - Duration::from_secs(3600);
             let mut next = 9600;
-            let mut report = |n: &mut Node, peer: PeerId, from: &str, says: &Multiaddr| {
+            let mut report = |n: &mut Node, peer: PeerId, how: ConnectedPoint, says: &Multiaddr| {
                 next += 1;
-                n.on_connection_established(
-                    peer,
-                    ConnectionId::new_unchecked(next),
-                    &ConnectedPoint::Listener {
-                        local_addr: "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
-                        send_back_addr: format!("/ip4/{from}/udp/4001/quic-v1").parse().unwrap(),
-                    },
-                );
+                n.on_connection_established(peer, ConnectionId::new_unchecked(next), &how);
                 n.on_observed_address(peer, says.clone());
             };
             let here: Multiaddr = "/ip4/198.51.100.7/udp/4001/quic-v1".parse().unwrap();
             let made_up: Multiaddr = "/ip4/198.51.100.66/udp/4001/quic-v1".parse().unwrap();
             let moved_to: Multiaddr = "/ip4/198.51.100.8/udp/4001/quic-v1".parse().unwrap();
-            for from in ["203.0.113.10", "192.0.2.11", "100.64.0.12"] {
-                report(n, PeerId::random(), from, &here);
+            for from in ["203.0.113.10", "192.0.2.11", "198.18.0.12"] {
+                report(n, PeerId::random(), dialled_at(from), &here);
             }
             n.last_network_change = None;
-            for from in ["203.0.113.20", "192.0.2.21", "100.64.0.22"] {
-                report(n, PeerId::random(), from, &made_up);
+            for from in ["203.0.113.20", "192.0.2.21", "198.18.0.22"] {
+                report(n, PeerId::random(), dialled_at(from), &made_up);
             }
             let by_strangers = (
                 n.confirmed.contains(&made_up),
                 n.last_network_change.is_some(),
             );
-            // A member on a second network, its report made before it proved itself.
+            // A member on a second network, its report made before it proved itself; both
+            // came in by themselves, which counts with a member among them.
             let bea = PeerId::random();
-            report(n, PeerId::random(), "203.0.113.30", &moved_to);
-            report(n, bea, "192.0.2.31", &moved_to);
+            report(n, PeerId::random(), came_in_from("203.0.113.30"), &moved_to);
+            report(n, bea, came_in_from("192.0.2.31"), &moved_to);
             let before_proof = n.confirmed.contains(&moved_to);
             crate::node::tests::add_member(n, group, bea);
             n.reported_by_member(bea);
@@ -889,9 +1045,10 @@ mod tests {
     async fn strangers_cannot_make_another_address_this_devices_own() {
         let (node, _group) = lone_member();
         let (confirmed, own) = inspect(&node, |n| {
-            // Three DHT nodes on three networks say this device is at a member's address.
+            // Three DHT nodes on three networks, which this device dialled, say it is at a
+            // member's address.
             let member_at: Multiaddr = "/ip4/198.51.100.7/udp/4001/quic-v1".parse().unwrap();
-            for (i, from) in ["203.0.113.10", "192.0.2.11", "100.64.0.12"]
+            for (i, from) in ["203.0.113.10", "192.0.2.11", "198.18.0.12"]
                 .iter()
                 .enumerate()
             {
@@ -899,10 +1056,7 @@ mod tests {
                 n.on_connection_established(
                     stranger,
                     ConnectionId::new_unchecked(9000 + i),
-                    &ConnectedPoint::Listener {
-                        local_addr: "/ip4/0.0.0.0/udp/4001/quic-v1".parse().unwrap(),
-                        send_back_addr: format!("/ip4/{from}/udp/4001/quic-v1").parse().unwrap(),
-                    },
+                    &dialled_at(from),
                 );
                 n.on_observed_address(stranger, member_at.clone());
             }

@@ -27,13 +27,28 @@ use super::types::{
 };
 use crate::{frb_generated::StreamSink, sounds::Sound};
 
+/// The core's runtime, which also runs the calls of the screens ([`crate::bridge`]).
 pub(crate) static RUNTIME: LazyLock<Runtime> = LazyLock::new(|| {
     tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers())
         .enable_all()
         .thread_name("fogata")
         .build()
         .expect("cannot start the runtime")
 });
+/// Most workers of [`RUNTIME`]. Its tasks mostly wait for the network; what blocks (a file,
+/// a key opened) goes to its pool for blocking work, whose threads are not counted here. A
+/// computer with four cores or fewer has as many workers as before, one per core: more
+/// cores only added threads that waited, each with its own memory.
+pub(crate) const MAX_WORKERS: usize = 4;
+
+/// The workers of [`RUNTIME`]: one per core, at most [`MAX_WORKERS`].
+fn workers() -> usize {
+    std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(MAX_WORKERS)
+}
+
 /// The core, while it runs; it stops for a move of the account and starts again after.
 static CORE: std::sync::RwLock<Option<Core>> = std::sync::RwLock::new(None);
 static STARTING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -93,7 +108,9 @@ pub fn events_taken(count: u32) {
     TAKEN.notify_waiters();
 }
 
-/// Runs `work` with the core on the core's runtime.
+/// Runs `work` with the core on the core's runtime. A panic in it, or in a task of the
+/// core that it waited for, reaches the screens with what it said scrubbed
+/// ([`crate::bridge::scrub_panicked`]).
 pub(crate) async fn run<T, F>(work: impl FnOnce(Core) -> F) -> Result<T>
 where
     F: Future<Output = Result<T>> + Send + 'static,
@@ -104,7 +121,15 @@ where
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .context("Fogata is not running yet")?;
-    RUNTIME.spawn(work(core)).await?
+    crate::bridge::joined(RUNTIME.spawn(work(core)).await)?.map_err(crate::bridge::scrub_panicked)
+}
+
+/// Runs `work` on the core's runtime's pool for blocking work (a file, the keychain), a
+/// panic in it reaching the screens with what it said scrubbed.
+pub(crate) async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T> {
+    crate::bridge::joined(RUNTIME.spawn_blocking(work).await)
 }
 
 fn group_id(id: &str) -> Result<GroupId> {
@@ -136,6 +161,8 @@ fn to_avatar(preset: u8, photo: Option<Vec<u8>>) -> Avatar {
 
 #[frb(init)]
 pub fn init_app() {
+    // First, so the bridge's hook, set next, hands each panic on to this one.
+    crate::logs::report_panics();
     flutter_rust_bridge::setup_default_user_utils();
     raise_open_files_limit();
 }
@@ -351,7 +378,7 @@ pub async fn start(data_dir: String) -> Result<UiProfile> {
             let dir = PathBuf::from(data_dir);
             let free = dir.clone();
             // A folder still held fails to start below, saying so.
-            let _ = RUNTIME.spawn_blocking(move || wait_until_free(&free)).await;
+            let _ = blocking(move || wait_until_free(&free)).await;
             let (core, events) = {
                 let _runtime = RUNTIME.enter();
                 Core::start(dir, options)?
@@ -459,7 +486,7 @@ pub async fn stop_core(data_dir: String) -> Result<()> {
     let _starting = STARTING.lock().await;
     // The microphone closes with the core: a voice message recorded now could not be sent.
     // A message playing stops: it is the account's, which the core no longer holds.
-    RUNTIME.spawn_blocking(crate::voice::record::cancel).await?;
+    blocking(crate::voice::record::cancel).await?;
     crate::voice::play::stop();
     let core = CORE.write().unwrap_or_else(|e| e.into_inner()).take();
     // Its calls go with it, and so does their ring.
@@ -489,9 +516,7 @@ pub async fn stop_core(data_dir: String) -> Result<()> {
             })
             .await?;
     }
-    RUNTIME
-        .spawn_blocking(move || wait_until_free(Path::new(&data_dir)))
-        .await?
+    blocking(move || wait_until_free(Path::new(&data_dir))).await?
 }
 
 /// Longest a core takes to stop for a move.
@@ -669,7 +694,7 @@ pub fn note_input() {
 pub async fn damaged_secret() -> Result<Option<String>> {
     run(|core| async move {
         // Opens every secret of the folder to find it: away from the async threads.
-        let damaged = tokio::task::spawn_blocking(move || core.damaged_secret()).await?;
+        let damaged = blocking(move || core.damaged_secret()).await?;
         Ok(damaged.map(|path| {
             path.file_name()
                 .map(|n| n.to_string_lossy().into_owned())
@@ -682,10 +707,7 @@ pub async fn damaged_secret() -> Result<Option<String>> {
 /// Sets the damaged secret aside at the next start, which takes back its copy from before
 /// encrypting and finishes; the screens start the application again after this.
 pub async fn set_damaged_secret_aside() -> Result<()> {
-    run(|core| async move {
-        tokio::task::spawn_blocking(move || core.set_damaged_secret_aside()).await?
-    })
-    .await
+    run(|core| async move { blocking(move || core.set_damaged_secret_aside()).await? }).await
 }
 
 /// How this device's secrets (its identity, friends and direct chats) are kept on this

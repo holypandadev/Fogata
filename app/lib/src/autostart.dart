@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/services.dart';
 
 import 'l10n.dart';
+import 'test_switches.dart';
 
 /// Whether Fogata opens when the person signs in to the computer, as the system has it.
 enum AutostartState {
@@ -35,7 +36,7 @@ abstract class Autostart {
 
 /// What the settings use. Widget tests never reach the system's: they get one that
 /// keeps it in memory, unless they put their own.
-Autostart autostart = Platform.environment.containsKey('FLUTTER_TEST')
+Autostart autostart = testSwitch('FLUTTER_TEST') != null
     ? MemoryAutostart()
     : Autostart.forThisSystem();
 

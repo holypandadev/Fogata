@@ -119,6 +119,13 @@ class CallPeer {
   /// Their voice as last read (see [Call._flushLateVoice]).
   ({num packets, num delay, num target, num emitted})? _voiceIn;
 
+  /// The track their voice arrives on, with the connection that receives it, so who talks
+  /// is read from that receiver's statistics alone ([Call._readLevelsNow]).
+  ({RTCPeerConnection on, MediaStreamTrack track})? _voice;
+  @visibleForTesting
+  set voiceForTests(MediaStreamTrack track) =>
+      _voice = (on: connection!, track: track);
+
   /// A reading found nothing of their voice while their microphone was on; the next five
   /// look for voice that waited in the network and came all at once.
   int _voiceGap = 0;
@@ -148,7 +155,11 @@ class CallPeer {
     if (c != null) await closeConnection(c);
   }
 
-  /// It sent pictures larger than any participant sends (see [fairPicture]): its
+  /// How fast the pictures of [connection] arrive, reading after reading ([VideoFlood]).
+  VideoFlood _pictures = VideoFlood();
+
+  /// It sent pictures larger than any participant sends (see [fairPicture]), or far more
+  /// of them ([VideoFlood]): its
   /// connection was closed, and no other is made with it while it stays in the call.
   bool _keptOut = false;
   @visibleForTesting
@@ -179,6 +190,8 @@ class CallPeer {
     connection = null;
     final shown = [..._shown];
     _shown.clear();
+    _voice = null;
+    _pictures = VideoFlood();
     _described = false;
     _candidates = 0;
     _offering = false;

@@ -16,7 +16,7 @@ use libp2p::{
     },
 };
 
-use super::{ConnectionInfo, Member, Node, dial::private_block};
+use super::{ConnectionInfo, Member, Node};
 use crate::{NodeEvent, Path, addr};
 
 /// How often the direct connections to members are checked for silence, and how long one
@@ -114,8 +114,9 @@ impl Node {
     /// between two devices behind the same router, which rarely sends traffic back in. Only
     /// those where the member is seen to be, at most [`MAX_QUIC_ADDRESSES`]: an address it
     /// says it listens on at the IP of one of its own connections here, and a local one it
-    /// sent on a local network of this device's block. Anything else a member says would
-    /// let it make this device send handshakes to any address, its own network's included.
+    /// sent on a local network of this device's block (see [`Self::member_lan_for`]).
+    /// Anything else a member says would let it make this device send handshakes to any
+    /// address, its own network's included.
     pub(super) fn member_quic_addresses(&self, peer: &PeerId) -> Vec<Multiaddr> {
         let seen_at: HashSet<std::net::IpAddr> = self
             .connections
@@ -123,14 +124,8 @@ impl Node {
             .filter(|c| c.peer == *peer && !matches!(c.path, Path::ThroughMember { .. }))
             .filter_map(|c| addr::ip(&c.address))
             .collect();
-        let own_blocks: HashSet<[u8; 3]> =
-            self.listen_addrs.iter().filter_map(private_block).collect();
-        let lan = self
-            .member_lan
-            .get(peer)
-            .into_iter()
-            .flatten()
-            .filter(|a| private_block(a).is_none_or(|b| own_blocks.contains(&b)));
+        let own_blocks = self.own_blocks();
+        let lan = self.member_lan_for(peer, &own_blocks);
         let listening = self
             .peer_listening
             .get(peer)
@@ -438,6 +433,74 @@ mod tests {
         .await;
         let only: Multiaddr = "/ip4/192.0.2.50/udp/4001/quic-v1".parse().unwrap();
         assert_eq!(found, (vec![only], 1, 1));
+        node.shutdown().await.unwrap();
+    }
+
+    /// The local addresses a member sends are dialled (for media, in the punch slots and
+    /// when it is lost) on every network this device shares with it: the same home /24, the
+    /// same unique-local IPv6 site, carrier-grade NAT or a VPN such as Tailscale when this
+    /// device is on one too. Those of networks this device is not on are never dialled,
+    /// whatever block they are in.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_s_local_addresses_are_dialled_only_on_networks_this_device_is_on() {
+        let (node, group) = lone_member();
+        let (shared, elsewhere) = inspect(&node, move |n| {
+            let quic = |a: &str| -> Multiaddr {
+                let ip: std::net::IpAddr = a.parse().unwrap();
+                let at = match ip {
+                    std::net::IpAddr::V4(_) => format!("/ip4/{a}/udp/4001/quic-v1"),
+                    std::net::IpAddr::V6(_) => format!("/ip6/{a}/udp/4001/quic-v1"),
+                };
+                at.parse().unwrap()
+            };
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            let sent: Vec<Multiaddr> = [
+                "192.168.1.30",
+                "fd12:3456:789a:1::30",
+                "100.70.8.9",
+                "192.168.7.30",
+                "10.0.0.1",
+                "fd99:1:2:1::1",
+            ]
+            .iter()
+            .map(|a| quic(a))
+            .collect();
+            n.member_lan.insert(bea, sent);
+            let chosen = |n: &Node| {
+                let own = n.own_blocks();
+                let lan: Vec<String> = n
+                    .member_lan_for(&bea, &own)
+                    .map(|a| a.to_string())
+                    .collect();
+                let quic: Vec<String> = n
+                    .member_quic_addresses(&bea)
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect();
+                assert_eq!(lan, quic);
+                lan
+            };
+            // On the member's home network over IPv4 and IPv6, and on a Tailscale network.
+            n.listen_addrs = ["192.168.1.20", "fd12:3456:789a:1:aaaa::20", "100.101.2.3"]
+                .iter()
+                .map(|a| quic(a))
+                .collect();
+            let shared = chosen(n);
+            // Elsewhere, on a network of none of those blocks.
+            n.listen_addrs = vec![quic("192.168.50.2"), quic("fd00:aaaa:bbbb:1::2")];
+            (shared, chosen(n))
+        })
+        .await;
+        assert_eq!(
+            shared,
+            [
+                "/ip4/192.168.1.30/udp/4001/quic-v1",
+                "/ip6/fd12:3456:789a:1::30/udp/4001/quic-v1",
+                "/ip4/100.70.8.9/udp/4001/quic-v1",
+            ]
+        );
+        assert!(elsewhere.is_empty(), "{elsewhere:?}");
         node.shutdown().await.unwrap();
     }
 

@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 
 import 'l10n.dart';
+import 'motion.dart';
 import 'photo.dart';
 import 'round.dart';
 import 'safe_image.dart';
@@ -16,8 +17,9 @@ export 'photo.dart' show PictureProblem;
 // Moving pictures: a GIF or WebP animation shown in place of a profile picture or a card's
 // banner. Each still picture (a profile's, a banner's) is the animation's first frame, the
 // one every version of the app shows and the one shown while an animation waits. An
-// animation plays only while it is on screen and the window is seen and focused; at any
-// other time it stays on the frame it reached.
+// animation plays only while it is on screen and the window is seen and focused, and never
+// where the system asks for less motion (motion.dart); at any other time it stays on the
+// frame it reached.
 
 /// Most bytes of an animated profile picture: it goes to every member of every group, at
 /// each connection.
@@ -555,8 +557,11 @@ class _MovingPictureState extends State<MovingPicture> {
     _failed = false;
   }
 
+  // With less motion asked for, it stays on its first frame.
   void _update() => _frames?.play =
-      motionAllowed.value && TickerMode.valuesOf(context).enabled;
+      motionAllowed.value &&
+      TickerMode.valuesOf(context).enabled &&
+      !lessMotion(context);
 
   @override
   void initState() {

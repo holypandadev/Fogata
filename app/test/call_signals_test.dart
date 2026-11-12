@@ -136,6 +136,57 @@ void main() {
     expect(call.focused, isNull);
   });
 
+  test('a description takes no lowest bitrate and a start bitrate no higher '
+      'than copies ask for; one as copies send it stays as it is', () async {
+    String withFmtp(String fmtp) =>
+        described(callKinds)
+            .replaceFirst('a=mid:1\r\n', 'a=fmtp:96 $fmtp\r\na=mid:1\r\n');
+    // As every copy describes it.
+    final honest = withFmtp(
+      'x-google-max-bitrate=$cameraMaxKbps;'
+      'x-google-start-bitrate=$cameraStartKbps',
+    );
+    // This device offers, Ana answers.
+    final call = Call(group: 'g', me: me);
+    final connection = _Connection();
+    call.peers[ana] = CallPeer(ana)..connection = connection;
+    final latest = call.offerNumberTo(ana)!;
+    for (final sdp in [
+      honest,
+      withFmtp(
+        'x-google-min-bitrate=20000;x-google-max-bitrate=20000;'
+        'x-google-start-bitrate=20000',
+      ),
+      withFmtp('x-google-min-bitrate=20000'),
+    ]) {
+      await call.handleSignal(ana, {'t': 'answer', 'sdp': sdp, 'n': latest});
+    }
+    expect(connection.remote, [
+      honest,
+      withFmtp(
+        'x-google-max-bitrate=20000;x-google-start-bitrate=$maxStartKbps',
+      ),
+      described(callKinds),
+    ]);
+    // Zoe answers Ana, who offers, on a new connection.
+    final answering = Call(group: 'g', me: zoe);
+    final made = _Connection();
+    answering.connectionsForTests = () async => made;
+    answering.peers[ana] = CallPeer(ana);
+    try {
+      await answering.handleSignal(ana, {
+        't': 'offer',
+        'sdp': withFmtp('x-google-min-bitrate=5000;x-google-max-bitrate=1500'),
+        'n': 1,
+      });
+    } catch (_) {
+      // The fake goes no further than taking the offer.
+    }
+    expect(made.remote, [withFmtp('x-google-max-bitrate=1500')]);
+    await call.stop();
+    await answering.stop();
+  });
+
   test('an offer from the side that does not offer is dropped', () async {
     // This device has the smaller id: it offers, Ana answers.
     final call = Call(group: 'g', me: me);
@@ -243,6 +294,57 @@ void main() {
       await call.measureNow();
       expect(other.keptOut, isFalse);
       expect(told, hasLength(1));
+      expect(fine.closed, isFalse);
+    },
+  );
+
+  test(
+    'someone sending pictures far faster than any copy sends is kept out',
+    () async {
+      final call = Call(
+        group: 'g',
+        me: zoe,
+        nameOf: (id) => id == ana ? 'Ana' : 'Bea',
+      );
+      final told = <String>[];
+      call.onProblem = told.add;
+      StatsReport camera(num frames, num bytes) =>
+          StatsReport('in-1', 'inbound-rtp', 0, {
+            'kind': 'video',
+            'mid': '1',
+            'frameWidth': 1280,
+            'frameHeight': 720,
+            'framesDecoded': frames,
+            'bytesReceived': bytes,
+          });
+      final flooding = _Connection()..stats = [camera(0, 0)];
+      final peer = CallPeer(ana)
+        ..connection = flooding
+        ..connected = true;
+      call.peers[ana] = peer;
+      final fine = _Connection()..stats = [camera(0, 0)];
+      final other = CallPeer(bea)
+        ..connection = fine
+        ..connected = true;
+      call.peers[bea] = other;
+      // Readings a second apart: Ana's camera at about 500 frames a second, Bea's at 60
+      // and 1500 kbit/s, a copy's most.
+      Future<void> reading(int i) async {
+        flooding.stats = [camera(500 * i, 150000 * i)];
+        fine.stats = [camera(60 * i, 187500 * i)];
+        await call.measureNow();
+        await Future<void>.delayed(const Duration(seconds: 1));
+      }
+
+      await reading(0);
+      // The first reading above the limit is let through.
+      await reading(1);
+      expect(peer.keptOut, isFalse);
+      await reading(2);
+      expect(peer.keptOut, isTrue);
+      expect(flooding.closed, isTrue);
+      expect(told, ['Lost the connection with Ana.']);
+      expect(other.keptOut, isFalse);
       expect(fine.closed, isFalse);
     },
   );

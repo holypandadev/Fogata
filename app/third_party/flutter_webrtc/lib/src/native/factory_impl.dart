@@ -25,7 +25,11 @@ class RTCFactoryNative extends RTCFactory {
     if (response == null) {
       throw Exception('createLocalMediaStream return null, something wrong');
     }
-    return MediaStreamNative(response['streamId'], label);
+    // Fogata: owned by this device ('local'), whatever its label. The package gave the
+    // label as its owner, which the plugin would take for a connection's id: such an
+    // owner finds only what that connection received (fogata_track_owner.h), so the
+    // stream would show nothing and never be let go of.
+    return MediaStreamNative(response['streamId'], 'local');
   }
 
   @override

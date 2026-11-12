@@ -536,24 +536,34 @@ class _NewKeyDialogState extends State<NewKeyDialog> {
       body: [
         Text(l10n.recoveryKeyText, style: tx(c.fg2, height: 1.45)),
         const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-          decoration: BoxDecoration(
-            color: c.bg2,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: c.border),
-          ),
-          child: Text(
-            widget.newKey.text,
-            key: const ValueKey('recovery-key-text'),
-            textAlign: TextAlign.center,
-            style: tx(
-              c.fg,
-              size: 20,
-              weight: w500,
-              monospace: true,
-              height: 1.6,
-              spacing: 1,
+        // Blurred until the eye button shows it, as every other secret: a window on a
+        // shared screen shows nothing of it.
+        SecretBox(
+          text: widget.newKey.text,
+          what: 'Key',
+          copy: false,
+          stays: true,
+          buttonsBelow: true,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: c.bg2,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: c.border),
+            ),
+            child: Text(
+              widget.newKey.text,
+              key: const ValueKey('recovery-key-text'),
+              textAlign: TextAlign.center,
+              style: tx(
+                c.fg,
+                size: 20,
+                weight: w500,
+                monospace: true,
+                height: 1.6,
+                spacing: 1,
+              ),
             ),
           ),
         ),

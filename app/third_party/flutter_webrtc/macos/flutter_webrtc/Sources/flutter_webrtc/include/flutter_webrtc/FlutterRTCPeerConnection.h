@@ -13,6 +13,22 @@
 // registered until it is disposed so that its event channel handler can be
 // released at that point.
 @property(nonatomic, assign) BOOL closedByPlugin;
+
+// Fogata: `remoteTracks` and `remoteStreams` are written by the connection's delegate
+// methods, which WebRTC calls on its signalling thread, and read by method calls on the
+// main thread: they are used only through these, under a lock. The lock is never held
+// while anything else is called, and what leaves the maps is let go of after it: freeing
+// a received track or stream may wait for the signalling thread, which may be waiting
+// for the lock.
+- (nullable RTCMediaStreamTrack*)fogataRemoteTrack:(nonnull NSString*)trackId;
+- (nullable RTCMediaStream*)fogataRemoteStream:(nonnull NSString*)streamId;
+- (void)fogataKeepRemoteTrack:(nonnull RTCMediaStreamTrack*)track;
+- (void)fogataKeepRemoteStream:(nonnull RTCMediaStream*)stream;
+- (void)fogataForgetRemoteTrack:(nonnull NSString*)trackId;
+// How many entries of `remoteStreams` hold `stream`.
+- (NSUInteger)fogataRemoteStreamEntries:(nonnull RTCMediaStream*)stream;
+// Empties both maps.
+- (void)fogataForgetRemote;
 @end
 
 @interface FlutterWebRTCPlugin (RTCPeerConnection)

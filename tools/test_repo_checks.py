@@ -5,13 +5,15 @@ against the main one (tools/fuzz_lock.py), the layers of the workspace's crates
 offline parts of the comparison of the vendored crates with crates.io (tools/vendor_diff.py)
 and of the WebRTC pins with Chrome's Stable channel (tools/webrtc/check_stable.py); the
 Flutter every computer builds with, the setting that keeps the jni plugin out of the Linux
-and Windows builds, and what the GitHub workflows may use.
+and Windows builds, what the GitHub workflows may use, and the dates the weekly workflow
+watches (tools/beta/deadlines.py).
 
     python3 -I tools/test_repo_checks.py
 """
 
 import importlib.util
 import io
+import json
 import pathlib
 import re
 import shutil
@@ -36,6 +38,7 @@ crate_layers = load("crate_layers")
 limits = load("limits")
 vendor_diff = load("vendor_diff")
 check_stable = load("check_stable", TOOLS / "webrtc")
+deadlines = load("deadlines", TOOLS / "beta")
 REGISTRY = "registry+https://github.com/rust-lang/crates.io-index"
 
 
@@ -209,6 +212,35 @@ class VendorDiff(unittest.TestCase):
                 name, version = vendor_diff.recorded(folder)
                 self.assertIn(f"{name} {version}", (folder / "FOGATA.md").read_text())
 
+    def test_a_dart_package_is_unpacked_from_its_top_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            into = pathlib.Path(tmp) / "x"
+            vendor_diff.unpack(self.archive(("lib/a.dart", b"code"), ("./pubspec.yaml", b"p")),
+                               into, None)
+            self.assertEqual((into / "lib/a.dart").read_bytes(), b"code")
+            self.assertEqual((into / "pubspec.yaml").read_bytes(), b"p")
+            for member in [("../evil", b"x"), ("/etc/evil", b"x"), ("lib/link", "->/etc/passwd")]:
+                with self.subTest(member=member[0]):
+                    with self.assertRaises(SystemExit):
+                        vendor_diff.unpack(self.archive(member), pathlib.Path(tmp) / "y", None)
+            self.assertFalse((pathlib.Path(tmp) / "evil").exists())
+
+    def test_each_dart_fork_says_what_it_forked_and_pub_dev_is_read(self):
+        forks = [f for f in sorted((TOOLS.parent / "app/third_party").iterdir())
+                 if (f / "pubspec.yaml").is_file()]
+        self.assertEqual([f.name for f in forks], ["desktop_drop", "flutter_webrtc", "tray_manager"])
+        for folder in forks:
+            with self.subTest(fork=folder.name):
+                name, version = vendor_diff.pub_recorded(folder)
+                self.assertEqual(name, folder.name)
+                self.assertIn(version, (folder / "FOGATA.md").read_text())
+        versions, newest = vendor_diff.pub_published({
+            "latest": {"version": "1.6.3"},
+            "versions": [{"version": "1.6.2+hotfix.4", "archive_url": "u1", "archive_sha256": "a"},
+                         {"version": "1.6.3", "archive_url": "u2"}]})
+        self.assertEqual(versions, {"1.6.2+hotfix.4": ("u1", "a"), "1.6.3": ("u2", None)})
+        self.assertEqual(newest, "1.6.3")
+
 
 class WebrtcStable(unittest.TestCase):
     BRANCHES = {158: "8127", 157: "8103", 156: "8078", 155: "8059"}
@@ -238,6 +270,50 @@ class WebrtcStable(unittest.TestCase):
                                               self.BRANCHES)[0], "error")
 
 
+class Deadlines(unittest.TestCase):
+    """tools/beta/deadlines.py, which the weekly workflow runs: the dates after which
+    something of the pre-releases breaks, failing well before each."""
+
+    MANIFEST = b'{"format": 1, "version": "0.1.0-beta.8", "published": 1794355395, ' \
+               b'"expires": 1809907395}'
+
+    def test_a_release_s_expiry_is_read_from_its_manifest(self):
+        version, when = deadlines.release_expiry(self.MANIFEST)
+        self.assertEqual((version, f"{when:%Y-%m-%d %H:%M:%S}"),
+                         ("0.1.0-beta.8", "2027-05-10 00:03:15"))
+        with self.assertRaises(ValueError):
+            deadlines.release_expiry(b'{"version": "x"}')
+
+    def test_it_fails_a_month_before_and_warns_before_that(self):
+        when = deadlines.parse_date("2027-05-10T00:03:15Z")
+        dates = [(when, "it ends", "renew it")]
+        for today, level in [("2026-11-11", "ok"), ("2027-03-01", "note"),
+                             ("2027-04-12", "warn"), ("2027-06-01", "warn")]:
+            with self.subTest(today=today):
+                now = deadlines.parse_date(f"{today}T00:00:00Z")
+                lines, found = deadlines.report(dates, now)
+                self.assertEqual(found, level)
+                self.assertIn("2027-05-10: it ends", lines[0])
+
+    def test_the_newest_release_with_a_manifest_is_read_from_github(self):
+        pages = {
+            "https://api.github.com/repos/holypandadev/Fogata/releases?per_page=20": json.dumps([
+                {"draft": True, "assets": [{"name": "release.json", "browser_download_url": "d"}]},
+                {"draft": False, "assets": [{"name": "README.txt", "browser_download_url": "r"}]},
+                {"draft": False, "prerelease": True,
+                 "assets": [{"name": "release.json", "browser_download_url": "new"}]},
+                {"draft": False, "assets": [{"name": "release.json", "browser_download_url": "old"}]},
+            ]).encode(),
+            "new": self.MANIFEST,
+        }
+        self.assertEqual(deadlines.newest_release_json(lambda url, token: pages[url]), self.MANIFEST)
+        self.assertIsNone(deadlines.newest_release_json(lambda url, token: b"[]"))
+
+    def test_every_date_is_well_formed(self):
+        for when, what, todo in deadlines.DEADLINES:
+            self.assertTrue(deadlines.parse_date(when) and what and todo)
+
+
 class MacosWebrtc(unittest.TestCase):
     """The Mac app carries Fogata's WebRTC only: with Swift packages on, flutter_webrtc's
     package would add webrtc-sdk's beside it, and the build fails or ships the wrong one."""
@@ -245,6 +321,29 @@ class MacosWebrtc(unittest.TestCase):
     def test_swift_packages_are_off_for_the_app(self):
         pubspec = (TOOLS.parent / "app" / "pubspec.yaml").read_text()
         self.assertRegex(pubspec, r"\nflutter:\n(  .*\n|\s*#.*\n)*?  config:\n    enable-swift-package-manager: false\n")
+
+    def test_no_swift_package_of_flutter_webrtc_brings_another_webrtc(self):
+        # Without a Package.swift the plugin is built through its podspec, with Fogata's
+        # WebRTC, even if the setting above were lost or renamed by a newer Flutter.
+        plugin = TOOLS.parent / "app/third_party/flutter_webrtc"
+        self.assertEqual(sorted(plugin.rglob("Package.swift")), [])
+        for package in sorted((TOOLS.parent / "app/third_party").rglob("Package.swift")):
+            with self.subTest(package=package):
+                self.assertNotIn("binaryTarget", package.read_text())
+
+    def test_the_two_darwin_copies_of_flutter_webrtc_are_the_same(self):
+        # FOGATA.md's "both copies, identical": only the macOS copy is built.
+        plugin = TOOLS.parent / "app/third_party/flutter_webrtc"
+        common = plugin / "common/darwin/Classes"
+        built = plugin / "macos/flutter_webrtc/Sources/flutter_webrtc"
+        headers = built / "include/flutter_webrtc"
+        shared = sorted((p.name, folder) for p in common.iterdir() for folder in (built, headers)
+                        if (folder / p.name).is_file())
+        self.assertIn(("FlutterWebRTCPlugin.m", built), shared)
+        self.assertIn(("FlutterWebRTCPlugin.h", headers), shared)
+        for name, folder in shared:
+            with self.subTest(file=name):
+                self.assertEqual((common / name).read_bytes(), (folder / name).read_bytes())
 
 
 class Toolchains(unittest.TestCase):
@@ -297,6 +396,26 @@ class Toolchains(unittest.TestCase):
         release = (workflows / "release-build.yml").read_text()
         for system in ("linux", "windows", "macos"):
             self.assertRegex(release, rf"\n            toolchain-{system}\.txt\n")
+
+    def test_ci_runs_both_halves_of_ci_sh_and_judges_each(self):
+        # The Linux steps of tools/ci.sh run as two jobs side by side (--split): neither half
+        # may go missing, and each job must judge its own record (ci.sh exits non-zero for
+        # any split run, so the step that runs it may not fail the job by itself).
+        text = (TOOLS.parent / ".github/workflows/ci.yml").read_text()
+        runs = re.findall(r"(?m)^        run: (tools/ci\.sh .*)$", text)
+        self.assertEqual(sorted(runs), ['tools/ci.sh --full --split app "$GITHUB_SHA"',
+                                        'tools/ci.sh --full --split checks "$GITHUB_SHA"'])
+        for half, job in (("app", "linux"), ("checks", "linux-checks")):
+            with self.subTest(job=job):
+                body = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  \S|\Z)", text).group(1)
+                self.assertIn(f"--split {half}", body)
+                self.assertIn(f"'split: {half}'", body)
+                self.assertIn("- name: Judge the record", body)
+                self.assertNotIn("needs:", body)
+        checks = re.search(r"(?ms)^  linux-checks:\n(.*?)(?=^  \S|\Z)", text).group(1)
+        for needed in ("'codegen: checked'", "'notices: checked'", "^advisories: checked",
+                       "cargo deny fetch db", "FOGATA_FUZZ_TOOLCHAIN", "cargo-fuzz"):
+            self.assertIn(needed, checks)
 
     def test_the_jni_plugin_is_never_built_on_linux_or_windows(self):
         # The jni package (an Android FFI plugin some dependency brings) builds a library

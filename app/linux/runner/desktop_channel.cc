@@ -217,15 +217,19 @@ void on_composited_changed(GdkScreen*, gpointer window) {
 }
 
 // The splash window (see my_application.cc) becomes the main one: its frame, the
-// smallest size, 1440 x 900 or the work area if that is smaller, centred on the monitor
-// it is on. It is hidden while it changes and shown again: as a new window, which is
-// how Wayland, where no window places itself, lets the compositor place it. Answers the
-// corner radius it has (0 for square corners).
+// smallest size (960 x 640, or the work area if that is smaller: a window that may not
+// be made smaller than the screen has its bottom under the panel), 1440 x 900 or the
+// work area if that is smaller, centred on the monitor it is on (window.dart's
+// mainWindowSizes does the same on Windows and macOS). It is hidden while it changes and
+// shown again: as a new window, which is how Wayland, where no window places itself,
+// lets the compositor place it. Answers the corner radius it has (0 for square corners).
 void main_window(FlView* view, FlMethodCall* call) {
   GtkWidget* widget = gtk_widget_get_toplevel(GTK_WIDGET(view));
   GtkWindow* window = GTK_WINDOW(widget);
   int width = 1440;
   int height = 900;
+  int min_width = 960;
+  int min_height = 640;
   GdkRectangle area = {0, 0, width, height};
   GdkWindow* gdk_window = gtk_widget_get_window(widget);
   if (gdk_window != nullptr) {
@@ -233,8 +237,12 @@ void main_window(FlView* view, FlMethodCall* call) {
         gtk_widget_get_display(widget), gdk_window);
     if (monitor != nullptr) {
       gdk_monitor_get_workarea(monitor, &area);
-      width = MAX(960, MIN(width, area.width));
-      height = MAX(640, MIN(height, area.height));
+      if (area.width > 0 && area.height > 0) {
+        min_width = MIN(min_width, area.width);
+        min_height = MIN(min_height, area.height);
+      }
+      width = MAX(min_width, MIN(width, area.width));
+      height = MAX(min_height, MIN(height, area.height));
     }
   }
   // Hidden meanwhile: it shows again at its new size and place.
@@ -260,7 +268,7 @@ void main_window(FlView* view, FlMethodCall* call) {
     gtk_widget_set_app_paintable(widget, FALSE);
   }
   gtk_window_set_decorated(window, TRUE);
-  gtk_widget_set_size_request(widget, 960, 640);
+  gtk_widget_set_size_request(widget, min_width, min_height);
   gtk_window_resize(window, width, height);
   gtk_window_move(window, area.x + (area.width - width) / 2,
                   area.y + (area.height - height) / 2);

@@ -197,3 +197,10 @@ path = "fuzz_targets/recorder.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "transfer_wire"
+path = "fuzz_targets/transfer_wire.rs"
+test = false
+doc = false
+bench = false

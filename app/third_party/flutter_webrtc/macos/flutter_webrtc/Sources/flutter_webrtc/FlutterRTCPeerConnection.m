@@ -5,6 +5,10 @@
 #import "FlutterWebRTCPlugin.h"
 
 #import <WebRTC/WebRTC.h>
+#import <os/lock.h>
+
+// Fogata: guards every connection's `remoteTracks` and `remoteStreams` (see the header).
+static os_unfair_lock gRemoteLock = OS_UNFAIR_LOCK_INIT;
 
 @implementation RTCPeerConnection (Flutter)
 
@@ -71,6 +75,76 @@
 - (void)setRemoteTracks:(NSMutableDictionary<NSString*, RTCMediaStreamTrack*>*)remoteTracks {
   objc_setAssociatedObject(self, @selector(remoteTracks), remoteTracks,
                            OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+- (RTCMediaStreamTrack*)fogataRemoteTrack:(NSString*)trackId {
+  RTCMediaStreamTrack* track = nil;
+  os_unfair_lock_lock(&gRemoteLock);
+  track = self.remoteTracks[trackId];
+  os_unfair_lock_unlock(&gRemoteLock);
+  return track;
+}
+
+- (RTCMediaStream*)fogataRemoteStream:(NSString*)streamId {
+  RTCMediaStream* stream = nil;
+  os_unfair_lock_lock(&gRemoteLock);
+  stream = self.remoteStreams[streamId];
+  os_unfair_lock_unlock(&gRemoteLock);
+  return stream;
+}
+
+- (void)fogataKeepRemoteTrack:(RTCMediaStreamTrack*)track {
+  NSString* trackId = track.trackId;
+  RTCMediaStreamTrack* replaced = nil;  // let go of after the lock
+  os_unfair_lock_lock(&gRemoteLock);
+  replaced = self.remoteTracks[trackId];
+  self.remoteTracks[trackId] = track;
+  os_unfair_lock_unlock(&gRemoteLock);
+  replaced = nil;
+}
+
+- (void)fogataKeepRemoteStream:(RTCMediaStream*)stream {
+  NSString* streamId = stream.streamId;
+  RTCMediaStream* replaced = nil;  // let go of after the lock
+  os_unfair_lock_lock(&gRemoteLock);
+  replaced = self.remoteStreams[streamId];
+  self.remoteStreams[streamId] = stream;
+  os_unfair_lock_unlock(&gRemoteLock);
+  replaced = nil;
+}
+
+- (void)fogataForgetRemoteTrack:(NSString*)trackId {
+  RTCMediaStreamTrack* removed = nil;  // let go of after the lock
+  os_unfair_lock_lock(&gRemoteLock);
+  removed = self.remoteTracks[trackId];
+  [self.remoteTracks removeObjectForKey:trackId];
+  os_unfair_lock_unlock(&gRemoteLock);
+  removed = nil;
+}
+
+- (NSUInteger)fogataRemoteStreamEntries:(RTCMediaStream*)stream {
+  NSUInteger count = 0;
+  os_unfair_lock_lock(&gRemoteLock);
+  for (NSString* streamId in self.remoteStreams) {
+    if (self.remoteStreams[streamId] == stream) count++;
+  }
+  os_unfair_lock_unlock(&gRemoteLock);
+  return count;
+}
+
+- (void)fogataForgetRemote {
+  // The maps themselves are replaced, and the old ones (with all they hold) let go of
+  // after the lock.
+  NSMutableDictionary* tracks = nil;
+  NSMutableDictionary* streams = nil;
+  os_unfair_lock_lock(&gRemoteLock);
+  tracks = self.remoteTracks;
+  streams = self.remoteStreams;
+  self.remoteTracks = [NSMutableDictionary new];
+  self.remoteStreams = [NSMutableDictionary new];
+  os_unfair_lock_unlock(&gRemoteLock);
+  tracks = nil;
+  streams = nil;
 }
 
 #pragma mark - FlutterStreamHandler methods
@@ -186,8 +260,7 @@
   [peerConnection close];
 
   // Clean up peerConnection's streams and tracks
-  [peerConnection.remoteStreams removeAllObjects];
-  [peerConnection.remoteTracks removeAllObjects];
+  [peerConnection fogataForgetRemote];
 
   // Clean up peerConnection's dataChannels.
   NSMutableDictionary<NSString*, RTCDataChannel*>* dataChannels = peerConnection.dataChannels;
@@ -216,6 +289,10 @@
       receiver = r;
     }
   }
+  // Fogata: a track this connection receives comes before one it sends of the same id,
+  // as on Linux and Windows (a received track is named after the sender's msid, which
+  // may be the id of one of this device's own).
+  if (receiver != nil) sender = nil;
 
   if (sender != nil) {
     [peerConnection statisticsForSender:sender
@@ -413,9 +490,9 @@
 - (void)peerConnection:(RTCPeerConnection*)peerConnection
            mediaStream:(RTCMediaStream*)stream
            didAddTrack:(RTCVideoTrack*)track {
-  peerConnection.remoteTracks[track.trackId] = track;
+  [peerConnection fogataKeepRemoteTrack:track];
   NSString* streamId = stream.streamId;
-  peerConnection.remoteStreams[streamId] = stream;
+  [peerConnection fogataKeepRemoteStream:stream];
 
   FlutterEventSink eventSink = peerConnection.eventSink;
   if (eventSink) {
@@ -438,7 +515,7 @@
 - (void)peerConnection:(RTCPeerConnection*)peerConnection
            mediaStream:(RTCMediaStream*)stream
         didRemoveTrack:(RTCVideoTrack*)track {
-  [peerConnection.remoteTracks removeObjectForKey:track.trackId];
+  [peerConnection fogataForgetRemoteTrack:track.trackId];
   NSString* streamId = stream.streamId;
   FlutterEventSink eventSink = peerConnection.eventSink;
   if (eventSink) {
@@ -464,7 +541,7 @@
 
   BOOL hasAudio = NO;
   for (RTCAudioTrack* track in stream.audioTracks) {
-    peerConnection.remoteTracks[track.trackId] = track;
+    [peerConnection fogataKeepRemoteTrack:track];
     [audioTracks addObject:@{
       @"id" : track.trackId,
       @"kind" : track.kind,
@@ -477,7 +554,7 @@
   }
 
   for (RTCVideoTrack* track in stream.videoTracks) {
-    peerConnection.remoteTracks[track.trackId] = track;
+    [peerConnection fogataKeepRemoteTrack:track];
     [videoTracks addObject:@{
       @"id" : track.trackId,
       @"kind" : track.kind,
@@ -489,7 +566,7 @@
   }
 
   NSString* streamId = stream.streamId;
-  peerConnection.remoteStreams[streamId] = stream;
+  [peerConnection fogataKeepRemoteStream:stream];
 
   if (hasAudio) {
     [self ensureAudioSession];
@@ -507,19 +584,18 @@
 }
 
 - (void)peerConnection:(RTCPeerConnection*)peerConnection didRemoveStream:(RTCMediaStream*)stream {
-  NSArray* keysArray = [peerConnection.remoteStreams allKeysForObject:stream];
   // We assume there can be only one object for 1 key
-  if (keysArray.count > 1) {
+  if ([peerConnection fogataRemoteStreamEntries:stream] > 1) {
     NSLog(@"didRemoveStream - more than one stream entry found for stream instance with id: %@",
           stream.streamId);
   }
   NSString* streamId = stream.streamId;
 
   for (RTCVideoTrack* track in stream.videoTracks) {
-    [peerConnection.remoteTracks removeObjectForKey:track.trackId];
+    [peerConnection fogataForgetRemoteTrack:track.trackId];
   }
   for (RTCAudioTrack* track in stream.audioTracks) {
-    [peerConnection.remoteTracks removeObjectForKey:track.trackId];
+    [peerConnection fogataForgetRemoteTrack:track.trackId];
   }
 
   FlutterEventSink eventSink = peerConnection.eventSink;
@@ -654,9 +730,10 @@
       }
     }
 
-    peerConnection.remoteTracks[rtpReceiver.track.trackId] = rtpReceiver.track;
+    RTCMediaStreamTrack* received = rtpReceiver.track;
+    if (received != nil) [peerConnection fogataKeepRemoteTrack:received];
     if (mediaStreams.count > 0) {
-      peerConnection.remoteStreams[mediaStreams[0].streamId] = mediaStreams[0];
+      [peerConnection fogataKeepRemoteStream:mediaStreams[0]];
     }
 
     if ([rtpReceiver.track.kind isEqualToString:@"audio"]) {

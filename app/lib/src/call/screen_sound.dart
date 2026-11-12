@@ -203,7 +203,9 @@ extension _ScreenSound on Call {
         _traceSound(connection, from);
       }
     };
-    await connection.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+    await connection.setRemoteDescription(
+      RTCSessionDescription(peerBitrates(sdp), 'offer'),
+    );
     final answer = await connection.createAnswer({});
     final mine = await _withCandidates(
       connection,

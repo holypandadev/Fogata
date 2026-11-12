@@ -34,6 +34,14 @@ while read -r local_ref local_sha remote_ref remote_sha; do
         refused=1
         continue
     fi
+    # Half the Linux steps (tools/ci.sh --split, as GitHub's CI runs them on two computers):
+    # what the other half checked is not in this record.
+    if [[ "$(field split)" != "" && "$(field split)" != none ]]; then
+        echo "pre-push: $local_ref ($sha) was checked by half of tools/ci.sh only" \
+            "(--split $(field split)); run tools/ci.sh $sha without --split" >&2
+        refused=1
+        continue
+    fi
     skipped=$(grep -E '^(linux|macos|windows|advisories|codegen|notices|integration): (skipped|incomplete)|^pairs: (skipped|incomplete|not run)' "$record" |
         cut -d: -f1 | tr '\n' ' ' || true)
     case "$(field result)" in

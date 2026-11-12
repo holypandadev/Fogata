@@ -17,10 +17,12 @@
 //!
 //! Uploads are bounded: three at once in all and one per device (a friend or member may
 //! connect with several sessions), at most [`UPLOAD_RATE`] bytes a second in all, and asks
-//! from one device at most every few seconds. Who asks is checked
-//! before anything is read; requests answered at once are bounded per peer and in all, and a
-//! peer's asks, words that it has a build and fetches that found nothing are each answered
-//! at most every few seconds.
+//! from one device at most every few seconds; one that has gone slower than
+//! [`MIN_UPLOAD_RATE`] for a minute ends while another device waits for a place. Who asks
+//! is checked before anything is read; requests answered at once are bounded per device
+//! and in all, each must arrive whole within [`REQUEST_WITHIN`], and a peer's asks, words
+//! that it has a build and fetches that found nothing are each answered at most every few
+//! seconds.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -55,6 +57,19 @@ const NOT_HERE: u8 = 4;
 
 /// How long a transfer waits for the other side's next bytes.
 const IDLE: Duration = Duration::from_secs(30);
+/// How long a request may take to arrive whole. An asker writes it at once, in one small
+/// write; without this, one byte every [`IDLE`] would hold a place among [`REQUESTS`] for
+/// as long as the asker likes.
+const REQUEST_WITHIN: Duration = Duration::from_secs(10);
+/// An upload that went on this long at less than [`MIN_UPLOAD_RATE`] on average ends
+/// while another device was turned away for want of a place (see [`Server::turned_away`]):
+/// a reader that takes a chunk now and then would otherwise hold a place for hours. The
+/// device goes on from its last whole chunk when it asks again; while nobody else waits, a
+/// slow line keeps its place.
+const SLOW_AFTER: Duration = Duration::from_secs(60);
+const MIN_UPLOAD_RATE: u64 = 64 * 1024;
+/// How long a device turned away for want of a place counts as waiting.
+const WAITING_FOR: Duration = Duration::from_secs(2 * 60);
 /// Uploads at once, in all.
 const UPLOADS: usize = 3;
 /// Bytes a second all uploads together send at most: a release spreads in minutes without
@@ -158,6 +173,7 @@ pub fn serve(
         answering: Arc::new(Mutex::new(HashMap::new())),
         throttle: Throttle::new(UPLOAD_RATE),
         sent: crate::allowance::Allowance::new(SENT_PER_DAY),
+        turned_away: Mutex::new(None),
     });
     let node = server.node.clone();
     node.spawn(async move {
@@ -231,6 +247,8 @@ struct Server {
     answering: Arc<Mutex<HashMap<DevicePublicKey, usize>>>,
     throttle: Throttle,
     sent: crate::allowance::Allowance<DevicePublicKey>,
+    /// When a device was last turned away because every upload's place was taken.
+    turned_away: Mutex<Option<Instant>>,
 }
 
 impl Server {
@@ -255,11 +273,16 @@ impl Server {
         device: DevicePublicKey,
         mut stream: Stream,
     ) -> io::Result<()> {
-        let kind = read_u8(&mut stream).await?;
-        match kind {
-            ASK => {
-                let have = read_u64(&mut stream).await?;
-                let _platform = read_name(&mut stream).await?;
+        let request = tokio::time::timeout(REQUEST_WITHIN, read_request(&mut stream))
+            .await
+            .unwrap_or_else(|_| {
+                Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "the request did not arrive in time",
+                ))
+            })?;
+        match request {
+            Request::Ask { have } => {
                 if self.too_soon(device, ASK) {
                     idle(stream.write_all(&[BUSY])).await?;
                     return stream.close().await;
@@ -287,10 +310,11 @@ impl Server {
                     None => idle(stream.write_all(&[NOTHING])).await?,
                 }
             }
-            FETCH => {
-                let build = read_u64(&mut stream).await?;
-                let platform = read_name(&mut stream).await?;
-                let first = u64::from(read_u32(&mut stream).await?);
+            Request::Fetch {
+                build,
+                platform,
+                first,
+            } => {
                 if self.failed_fetch_lately(device) {
                     idle(stream.write_all(&[BUSY])).await?;
                     return stream.close().await;
@@ -299,16 +323,25 @@ impl Server {
                     .await?;
                 return Ok(());
             }
-            HAVE => {
-                let build = read_u64(&mut stream).await?;
+            Request::Have { build } => {
                 if !self.too_soon(device, HAVE) {
                     let _ = self.heard.send(Heard::Have { peer, build });
                 }
                 idle(stream.write_all(&[NOTHING])).await?;
             }
-            _ => return Ok(()),
+            Request::Unknown => return Ok(()),
         }
         stream.close().await
+    }
+
+    /// Notes that a device was turned away for want of a place for its upload.
+    fn turn_away(&self) {
+        *locked(&self.turned_away) = Some(Instant::now());
+    }
+
+    /// Whether a device was turned away for want of a place lately, and may be waiting.
+    fn someone_waits(&self) -> bool {
+        locked(&self.turned_away).is_some_and(|at| at.elapsed() < WAITING_FOR)
     }
 
     async fn send_package(
@@ -343,6 +376,7 @@ impl Server {
         }
         // One upload per device, a few in all.
         let Ok(_permit) = self.uploads.try_acquire() else {
+            self.turn_away();
             stream.write_all(&[BUSY]).await?;
             return stream.close().await;
         };
@@ -365,11 +399,19 @@ impl Server {
         file.seek(SeekFrom::Start(first * CHUNK))?;
         idle(stream.write_all(&[DATA])).await?;
         let mut buf = vec![0u8; CHUNK as usize];
+        let started = Instant::now();
+        let mut sent = 0u64;
         for index in first..artifact.chunk_count() {
             // A newer release replaced this one, or the peer is no friend or member any more:
             // the rest is not sent.
             if self.shelf.build() != Some(build) || self.node.trusted_device(peer).await.is_none() {
                 return Err(io::Error::other("no longer given to that device"));
+            }
+            if too_slow(started.elapsed(), sent) && self.someone_waits() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "too slow while another device waits",
+                ));
             }
             let len = artifact.chunk_len(index) as usize;
             let (back, read) = blocking((file, buf), move |(file, buf)| {
@@ -389,9 +431,51 @@ impl Server {
             self.throttle.take(len as u64).await;
             idle(stream.write_all(&(len as u32).to_be_bytes())).await?;
             idle(stream.write_all(&buf[..len])).await?;
+            sent += len as u64;
         }
         stream.close().await
     }
+}
+
+/// Whether an upload that has gone on for `elapsed` and sent `sent` bytes is too slow to
+/// keep its place from a device that waits (see [`SLOW_AFTER`]).
+fn too_slow(elapsed: Duration, sent: u64) -> bool {
+    elapsed >= SLOW_AFTER && (sent as f64) < MIN_UPLOAD_RATE as f64 * elapsed.as_secs_f64()
+}
+
+/// A request, as read from its stream.
+enum Request {
+    Ask {
+        have: u64,
+    },
+    Fetch {
+        build: u64,
+        platform: String,
+        first: u64,
+    },
+    Have {
+        build: u64,
+    },
+    Unknown,
+}
+
+async fn read_request(stream: &mut Stream) -> io::Result<Request> {
+    Ok(match read_u8(stream).await? {
+        ASK => {
+            let have = read_u64(stream).await?;
+            let _platform = read_name(stream).await?;
+            Request::Ask { have }
+        }
+        FETCH => Request::Fetch {
+            build: read_u64(stream).await?,
+            platform: read_name(stream).await?,
+            first: u64::from(read_u32(stream).await?),
+        },
+        HAVE => Request::Have {
+            build: read_u64(stream).await?,
+        },
+        _ => Request::Unknown,
+    })
 }
 
 /// Takes a device off the uploads running when dropped.
@@ -449,6 +533,34 @@ async fn send(stream: &mut Stream, request: &[u8]) -> Result<u8, FetchError> {
     read_u8(stream).await.map_err(refused)
 }
 
+/// Opens a stream to `peer`, sends `request` on it and reads the first byte of the answer.
+/// A request whose stream is dropped before any answer is made again, a few times (see
+/// [`crate::files::ASKED_AGAIN_AFTER`]): copies before 0.1.0-beta.9 keep only one of the
+/// streams of one kind that come in together, and friends that hear of a release at once
+/// all ask its holder at once. Each request here only reads, or says what the asker has,
+/// so making it again changes nothing.
+async fn request(
+    node: &NodeHandle,
+    peer: PeerId,
+    request: &[u8],
+) -> Result<(Stream, u8), FetchError> {
+    let mut again = crate::files::ASKED_AGAIN_AFTER.iter();
+    loop {
+        let mut stream = open(node, peer).await?;
+        match send(&mut stream, request).await {
+            Ok(first) => return Ok((stream, first)),
+            Err(FetchError::Refused) => {
+                let Some(wait) = again.next() else {
+                    return Err(FetchError::Refused);
+                };
+                tracing::debug!(%peer, "update request dropped unanswered, asking again");
+                tokio::time::sleep(*wait).await;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Asks `peer` for a release newer than `have`.
 pub async fn ask(
     node: &NodeHandle,
@@ -456,11 +568,11 @@ pub async fn ask(
     have: u64,
     platform: &str,
 ) -> Result<Option<Offer>, FetchError> {
-    let mut stream = open(node, peer).await?;
     let mut out = vec![ASK];
     out.extend_from_slice(&have.to_be_bytes());
     put_name(&mut out, platform);
-    match send(&mut stream, &out).await? {
+    let (mut stream, first) = request(node, peer, &out).await?;
+    match first {
         RELEASE => {}
         NOTHING => return Ok(None),
         BUSY => return Err(FetchError::Busy),
@@ -493,10 +605,9 @@ pub async fn ask(
 
 /// Tells `peer` that this device has `build`.
 pub async fn tell(node: &NodeHandle, peer: PeerId, build: u64) -> Result<(), FetchError> {
-    let mut stream = open(node, peer).await?;
     let mut out = vec![HAVE];
     out.extend_from_slice(&build.to_be_bytes());
-    send(&mut stream, &out).await?;
+    request(node, peer, &out).await?;
     Ok(())
 }
 
@@ -522,12 +633,12 @@ pub async fn fetch(
     // they are on the disk before the error goes up, not still on their way there.
     let fetched: Result<(), FetchError> = async {
         if next < count {
-            let mut stream = open(node, peer).await?;
             let mut out = vec![FETCH];
             out.extend_from_slice(&build.to_be_bytes());
             put_name(&mut out, platform);
             out.extend_from_slice(&(next as u32).to_be_bytes());
-            match send(&mut stream, &out).await? {
+            let (mut stream, first) = request(node, peer, &out).await?;
+            match first {
                 DATA => {}
                 NOT_HERE => return Err(FetchError::NotHere),
                 BUSY => return Err(FetchError::Busy),
@@ -721,6 +832,25 @@ async fn read_name(stream: &mut Stream) -> io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An upload is too slow to keep its place from a device that waits only once it has
+    /// gone on for a minute at less than the least rate on average: a reader that takes one
+    /// chunk every half minute is, a slow home line well above that rate is not, and nothing
+    /// is in its first minute.
+    #[test]
+    fn an_upload_is_too_slow_only_after_a_minute_under_the_least_rate() {
+        let secs = Duration::from_secs;
+        // A chunk taken every 29 s, as slowly as the idle timeout allows.
+        assert!(too_slow(secs(116), 4 * CHUNK));
+        assert!(too_slow(secs(60), 0));
+        // A line of 1 Mbit/s up, shared by three uploads: about 40 KiB/s each.
+        assert!(too_slow(secs(120), 120 * 40 * 1024));
+        // At the least rate, or above it.
+        assert!(!too_slow(secs(120), 120 * MIN_UPLOAD_RATE));
+        assert!(!too_slow(secs(600), 600 * 100 * 1024));
+        // Not in the first minute, however slow.
+        assert!(!too_slow(secs(59), 0));
+    }
 
     #[tokio::test]
     async fn uploads_together_keep_to_the_rate() {

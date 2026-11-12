@@ -1191,6 +1191,54 @@ void main() {
     state.dispose();
   });
 
+  test(
+    'the chat shown is read again for a change of its own, not of another chat',
+    () async {
+      final state = AppState('/nonexistent/fogata-direct-events');
+      var reads = 0;
+      state.direct
+        ..open = sofia.id
+        ..loadChat = ({required deviceId, required limit}) async {
+          reads++;
+          return page([message('1', 'Hello')]);
+        };
+      UiEvent changed(UiEventKind kind, String? device) =>
+          UiEvent(kind: kind, device: device, received: 0, total: 0);
+      Future<void> settle() =>
+          Future<void>.delayed(const Duration(milliseconds: 300));
+      const other = 'aa11';
+      // Messages, deliveries and downloads in another chat leave the page shown alone.
+      for (final kind in [
+        UiEventKind.direct,
+        UiEventKind.directMessage,
+        UiEventKind.directDownload,
+      ]) {
+        state.direct.onEvent(changed(kind, other));
+      }
+      await settle();
+      expect(reads, 0);
+      // One in the chat shown reads it again, once however many come at once.
+      state.direct.onEvent(changed(UiEventKind.direct, sofia.id));
+      state.direct.onEvent(changed(UiEventKind.directMessage, sofia.id));
+      await settle();
+      expect(reads, 1);
+      // Another chat's change asked for right after does not drop it.
+      state.direct.onEvent(changed(UiEventKind.directDownload, sofia.id));
+      state.direct.onEvent(changed(UiEventKind.direct, other));
+      await settle();
+      expect(reads, 2);
+      // A change not said to be of any chat reads it too.
+      state.direct.onEvent(changed(UiEventKind.direct, null));
+      await settle();
+      expect(reads, 3);
+      // And nothing is left that reads it later.
+      state.direct.onEvent(changed(UiEventKind.direct, other));
+      await settle();
+      expect(reads, 3);
+      state.dispose();
+    },
+  );
+
   testWidgets('a message that does not go stays in the box with its files', (
     tester,
   ) async {

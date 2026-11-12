@@ -545,6 +545,68 @@ sys.exit(int(os.environ.get("CHECK_BUILD_EXIT", "0")))
         self.record.unlink()
         self.assertEqual(self.push().returncode, 1)
 
+    def test_each_half_runs_its_own_steps_and_is_never_a_pass(self):
+        legs = {"FOGATA_CI_MAC": MAC_SAYS, "FOGATA_CI_WINDOWS": WINDOWS_SAYS}
+        app_steps = ["flutter build linux", "check-build", "native tests", "gen-l10n",
+                     "flutter analyze", "flutter test", "integration tests",
+                     "integration pairs", "smoke"]
+        check_steps = ["check.sh", "fuzz build"]
+        # What both halves run between them is what one whole run runs.
+        self.assertEqual(self.ci("--full", env=legs).returncode, 0)
+        whole = self.calls.read_text()
+        for name in app_steps + check_steps:
+            self.assertIn(name, whole)
+
+        self.calls.unlink()
+        result = self.ci("--full", "--split", "checks", env=legs)
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls.read_text()
+        self.assertIn("flutter pub get --offline", calls)
+        for name in check_steps:
+            self.assertIn(name, calls)
+        for name in app_steps:
+            self.assertNotIn(name, calls)
+        record = self.fields()
+        self.assertEqual((record["split"], record["linux"], record["result"]),
+                         ("checks", "pass", "incomplete"))
+        self.assertEqual(record["advisories"], "checked (RustSec database of 2026-10-30)")
+        self.assertEqual((record["codegen"], record["notices"]), ("checked", "checked"))
+        for part in ("native", "integration", "pairs", "smoke"):
+            self.assertEqual(record[part], "elsewhere (--split checks)", part)
+        # The hook never takes half a run, whatever is named.
+        push = self.push({"FOGATA_CI_ALLOW_SKIPPED": "linux macos windows native integration "
+                                                     "pairs smoke"})
+        self.assertEqual(push.returncode, 1)
+        self.assertIn("without --split", push.stderr)
+
+        self.calls.unlink()
+        result = self.ci("--full", "--split", "app", env=legs)
+        self.assertNotEqual(result.returncode, 0)
+        calls = self.calls.read_text()
+        for name in app_steps:
+            self.assertIn(name, calls)
+        for name in check_steps:
+            self.assertNotIn(name, calls)
+        record = self.fields()
+        self.assertEqual((record["split"], record["linux"], record["native"], record["integration"],
+                          record["result"]), ("app", "pass", "pass", "pass", "incomplete"))
+        self.assertEqual(record["pairs"], "pass (call direct voice move)")
+        for check in ("advisories", "codegen", "notices"):
+            self.assertEqual(record[check], "elsewhere (--split app)", check)
+        self.assertEqual(self.push().returncode, 1)
+
+        # A failure in either half fails it.
+        self.assertNotEqual(self.ci("--full", "--split", "checks", env={**legs, "FUZZ_EXIT": "1"}).returncode, 0)
+        self.assertEqual((self.fields()["linux"], self.fields()["result"]), ("fail", "fail"))
+        self.assertNotEqual(self.ci("--full", "--split", "app", env={**legs, "SMOKE_EXIT": "1"}).returncode, 0)
+        self.assertEqual((self.fields()["linux"], self.fields()["result"]), ("fail", "fail"))
+        # A half that is neither is refused.
+        self.assertEqual(self.ci("--split", "other").returncode, 2)
+        self.assertEqual(self.ci("--split").returncode, 2)
+        # A whole run says so.
+        self.assertEqual(self.ci("--full", env=legs).returncode, 0)
+        self.assertEqual(self.fields()["split"], "none")
+
 
 class Leg(Sandbox):
     """tools/ci-leg.sh, what a leg of another system runs there."""

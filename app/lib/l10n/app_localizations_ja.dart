@@ -1577,6 +1577,10 @@ class L10nJa extends L10n {
   }
 
   @override
+  String get streamQualitySpared =>
+      'パソコンの負荷を抑えるため、現在は視聴している全員に小さめ、またはなめらかさを抑えた映像で届いています。';
+
+  @override
   String get streamQualityGoingOut => '現在の送信状況';
 
   @override
@@ -4786,6 +4790,7 @@ class L10nJa extends L10n {
       'qr': 'QRコードを表示',
       'link': 'リンクを表示',
       'code': 'コードを表示',
+      'key': 'キーを表示',
       'other': '表示',
     });
     return '$_temp0';
@@ -4793,6 +4798,12 @@ class L10nJa extends L10n {
 
   @override
   String get widgetsHide => '隠す';
+
+  @override
+  String get widgetsShowMore => 'もっと見る';
+
+  @override
+  String get widgetsShowLess => '折りたたむ';
 
   @override
   String revealFailed(String path) {

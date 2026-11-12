@@ -98,6 +98,8 @@ start and can be changed in Settings.
 
 ## Documentation
 
+- [docs/first-day.md](docs/first-day.md): where to start in the code, what to run, and the
+  rules that are easy to break.
 - [docs/building.md](docs/building.md): building the app and the command-line program, and the
   checks every change passes.
 - [docs/cli.md](docs/cli.md): the command-line program.

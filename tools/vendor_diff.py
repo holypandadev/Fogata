@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""What Fogata changed in each vendored crate, against the crate published on crates.io.
+"""What Fogata changed in each vendored crate and each forked Dart package, against the one
+published on crates.io or pub.dev.
 
     python3 -I tools/vendor_diff.py [--diff <file>] [<crate>...]
 
@@ -7,13 +8,17 @@ For each folder of vendor/ (or the crates named), downloads the crate at the ver
 Cargo.toml records from crates.io, unpacks it in a temporary folder, and compares it with
 vendor/<name>: the files changed, added and removed, each changed file checked against the
 crate's FOGATA.md, which must name it (a change no note explains is reported), and the newest
-version crates.io has, so a fork that fell behind is seen. --diff writes the whole diff
-(`diff -ruN`) there. It only reports: the exit status is 0 unless a crate cannot be compared
-at all (crates.io unreachable, a checksum that does not match, an archive that is not one).
+version crates.io has, so a fork that fell behind is seen. Without crates named, the same for
+each package of app/third_party (flutter_webrtc, tray_manager, desktop_drop), against pub.dev
+at the version its pubspec.yaml records, a fork that fell behind also as a warning in the
+run's annotations. --diff writes the whole diff (`diff -ruN`) there. It only reports: the
+exit status is 0 unless a package cannot be compared at all (the registry unreachable, a
+checksum that does not match, an archive that is not one).
 
 The published crate is checked against the SHA-256 crates.io's index records for that
-version; the archive is unpacked by this script, member by member, refusing links and paths
-that climb out. Needs the network; run by .github/workflows/weekly.yml.
+version, a Dart package against the one pub.dev's API gives; the archive is unpacked by this
+script, member by member, refusing links and paths that climb out. Needs the network; run by
+.github/workflows/weekly.yml.
 """
 
 import argparse
@@ -75,18 +80,24 @@ def recorded(folder):
 
 
 def unpack(data, into, prefix):
-    """The files of the crate archive `data` (its members under `prefix/`), written into
-    `into`: plain files and folders only, never a link or a path that climbs out."""
+    """The files of the archive `data` (a crate's: its members under `prefix/`; a pub
+    package's, with `prefix` None: its members at the top), written into `into`: plain files
+    and folders only, never a link or a path that climbs out."""
     with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
         for member in archive.getmembers():
             path = pathlib.PurePosixPath(member.name)
-            if path.parts[:1] != (prefix,) or ".." in path.parts or path.is_absolute():
-                raise SystemExit(f"vendor_diff.py: {member.name} is outside the crate")
-            if member.isdir():
+            parts = [p for p in path.parts if p != "."]
+            if prefix is not None:
+                if parts[:1] != [prefix]:
+                    raise SystemExit(f"vendor_diff.py: {member.name} is outside the crate")
+                parts = parts[1:]
+            if ".." in parts or path.is_absolute():
+                raise SystemExit(f"vendor_diff.py: {member.name} is outside the package")
+            if member.isdir() or not parts:
                 continue
             if not member.isfile():
                 raise SystemExit(f"vendor_diff.py: {member.name} is not a plain file")
-            target = into.joinpath(*path.parts[1:])
+            target = into.joinpath(*parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(archive.extractfile(member).read())
 
@@ -111,35 +122,90 @@ def compare(name, folder, out):
     with tempfile.TemporaryDirectory(prefix="fogata-vendor-") as tmp:
         upstream = pathlib.Path(tmp) / "upstream"
         unpack(data, upstream, f"{vendored_name}-{version}")
-        ours, theirs = files(folder), files(upstream)
-        changed = sorted(p for p in ours & theirs
-                         if (folder / p).read_bytes() != (upstream / p).read_bytes())
-        added, removed = sorted(ours - theirs), sorted(theirs - ours)
-        for path in changed + added + removed:
-            old = (upstream / path).read_text(errors="replace").splitlines(True) \
-                if path in theirs else []
-            new = (folder / path).read_text(errors="replace").splitlines(True) \
-                if path in ours else []
-            out.writelines(difflib.unified_diff(old, new, f"a/{name}/{path}", f"b/{name}/{path}"))
+        behind = "" if newest in (None, version) else f"; crates.io has {newest}"
+        return report(f"vendor/{name}", f"{vendored_name} {version}{behind}", folder, upstream,
+                      out, "src/")
+
+
+def report(where, what, folder, upstream, out, code):
+    """Prints what differs in the fork `folder` (`where` in the repository) from `upstream`,
+    as published (`what`: its name and version), adds the diff to `out`; returns the number
+    of changed files FOGATA.md does not name. A file removed outside the folder `code` (the
+    package's own code) needs no note."""
+    ours, theirs = files(folder), files(upstream)
+    changed = sorted(p for p in ours & theirs
+                     if (folder / p).read_bytes() != (upstream / p).read_bytes())
+    added, removed = sorted(ours - theirs), sorted(theirs - ours)
+    for path in changed + added + removed:
+        old = (upstream / path).read_text(errors="replace").splitlines(True) \
+            if path in theirs else []
+        new = (folder / path).read_text(errors="replace").splitlines(True) \
+            if path in ours else []
+        out.writelines(difflib.unified_diff(old, new, f"a/{where}/{path}", f"b/{where}/{path}"))
     notes = folder / "FOGATA.md"
     told = notes.read_text() if notes.is_file() else ""
-    behind = "" if newest in (None, version) else f"; crates.io has {newest}"
-    print(f"{name}: {vendored_name} {version}{behind}: {len(changed)} changed, "
-          f"{len(added)} added, {len(removed)} removed")
+    # A note may name several files at once, as `linux/x.{h,cc}`.
+    told += "\n".join(f"{stem}.{ending}" for stem, endings in
+                      re.findall(r"([\w./-]+)\.\{([\w.,]+)\}", told)
+                      for ending in endings.split(","))
+    print(f"{where}: {what}: {len(changed)} changed, {len(added)} added, {len(removed)} removed")
     unexplained = 0
     for kind, paths in (("changed", changed), ("added", added), ("removed", removed)):
         for path in paths:
             # A file is explained when FOGATA.md names it (as `src/x.rs` or `x.rs`). A licence
-            # added, or a file left out that is no code of the crate (changelogs, tests,
+            # added, or a file left out that is no code of the package (changelogs, tests,
             # benches, examples), needs no note.
             named = (path in told or pathlib.PurePosixPath(path).name in told
                      or path.startswith("LICENSE")
-                     or (kind == "removed" and not path.startswith("src/")))
+                     or (kind == "removed" and not path.startswith(code)))
             unexplained += 0 if named else 1
             print(f"  {kind:8} {path}{'' if named else '   (not named in FOGATA.md)'}")
     if not notes.is_file():
-        print(f"  no FOGATA.md in vendor/{name}")
+        print(f"  no FOGATA.md in {where}")
     return unexplained
+
+
+def pub_recorded(folder):
+    """The name and version the fork's pubspec.yaml records."""
+    text = (folder / "pubspec.yaml").read_text()
+    name = re.search(r"^name: *(\S+)", text, re.M)
+    version = re.search(r"^version: *(\S+)", text, re.M)
+    if not name or not version:
+        raise SystemExit(f"vendor_diff.py: no name or version in {folder}/pubspec.yaml")
+    return name.group(1), version.group(1)
+
+
+def pub_published(info):
+    """{version: (archive URL, its SHA-256)} of every version pub.dev's API answer `info`
+    lists, and the newest one (pub.dev's `latest`)."""
+    versions = {v["version"]: (v["archive_url"], v.get("archive_sha256"))
+                for v in info.get("versions", [])}
+    return versions, info.get("latest", {}).get("version")
+
+
+def compare_pub(folder, out):
+    """The same as compare, for a fork of a Dart package in app/third_party, against the
+    package pub.dev publishes at the version its pubspec.yaml records (checked against the
+    SHA-256 pub.dev's API gives for that archive)."""
+    name, version = pub_recorded(folder)
+    versions, newest = pub_published(json.loads(fetch(f"https://pub.dev/api/packages/{name}")))
+    if version not in versions:
+        raise SystemExit(f"vendor_diff.py: pub.dev has no {name} {version}")
+    url, digest = versions[version]
+    data = fetch(url)
+    if not digest or hashlib.sha256(data).hexdigest() != digest:
+        raise SystemExit(f"vendor_diff.py: {name} {version} does not match the checksum "
+                         "pub.dev records")
+    where = folder.relative_to(ROOT).as_posix()
+    if newest not in (None, version):
+        # Seen in the run's annotations too, not only in its log.
+        print(f"::warning::{where} is a fork of {name} {version}; pub.dev has {newest}: "
+              "read its changes for fixes to take (FOGATA.md lists what Fogata changed)")
+    with tempfile.TemporaryDirectory(prefix="fogata-vendor-") as tmp:
+        upstream = pathlib.Path(tmp) / "upstream"
+        unpack(data, upstream, None)
+        behind = "" if newest in (None, version) else f"; pub.dev has {newest}"
+        return report(where, f"{name} {version}{behind}", folder, upstream, out, "lib/")
 
 
 def main():
@@ -153,10 +219,15 @@ def main():
     unexplained = 0
     for name in names:
         unexplained += compare(name, ROOT / "vendor" / name, out)
+    # Without crates named, the forks of Dart packages too.
+    if not args.crates:
+        for folder in sorted((ROOT / "app/third_party").iterdir()):
+            if (folder / "pubspec.yaml").is_file():
+                unexplained += compare_pub(folder, out)
     if args.diff:
         args.diff.write_text(out.getvalue())
     if unexplained:
-        print(f"{unexplained} file(s) differ from the published crates without a note in "
+        print(f"{unexplained} file(s) differ from the published packages without a note in "
               "FOGATA.md")
 
 

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
-# renderer's with ThreadSanitizer, the check of the noise suppression table, and libwebrtc
+# renderer's, a connection's received tracks' and the retired textures' with
+# ThreadSanitizer, the check of the noise suppression table, which outputs a shared
+# screen's sound takes, the portal's frame conversion, and libwebrtc
 # taking a local offer with a section rejected as call.dart rejects one, its voice engine
 # stopping with the last connection unless one is kept (voice_engine_test.cc), screen
 # sharing's choice of desktop and libwebrtc's screen and window lists (on an Xvfb display of its own
@@ -27,9 +29,32 @@ engine=$(dirname "$(readlink -f "$(command -v flutter)")")/cache/artifacts/engin
   "$here/video_renderer_test.cc" "$root/common/cpp/src/flutter_video_renderer.cc" \
   -L"$lib" -Wl,-rpath,"$lib" -lwebrtc -lpthread -o "$out/video_renderer_test"
 TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/video_renderer_test"
+# A connection's received streams and tracks, added on libwebrtc's signalling thread while
+# the platform thread looks them up (fogata_remote_tracks.h): ThreadSanitizer, plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/common/cpp/include" \
+  "$here/remote_tracks_test.cc" -lpthread -o "$out/remote_tracks_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/remote_tracks_test"
+# Unregistered textures kept until the engine is done with them, while a raster thread
+# copies (linux/flutter/retired_textures.h): ThreadSanitizer, plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/linux/flutter" \
+  "$here/retired_textures_test.cc" -lpthread -o "$out/retired_textures_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/retired_textures_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -I"$root/common/cpp/include" -I"$webrtc/include" \
   "$here/denoise_table_test.cc" -ldl -o "$out/denoise_table_test"
 "$out/denoise_table_test"
+# What a track's id stands for by its owner (fogata_track_owner.h): plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/common/cpp/include" \
+  "$here/track_owner_test.cc" -o "$out/track_owner_test"
+"$out/track_owner_test"
+# Which outputs a shared screen's sound takes (linux/screen_sound_node.h): plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/linux" \
+  "$here/screen_sound_node_test.cc" -o "$out/screen_sound_node_test"
+"$out/screen_sound_node_test"
+# The portal's frames turned into I420 (linux/portal_i420.h), byte for byte as the loop it
+# replaced, built as a release build is; `portal_i420_test 300` also times it.
+"${CXX:-clang++}" -std=c++17 -O2 -Wall -Werror -I"$root/linux" \
+  "$here/portal_i420_test.cc" -o "$out/portal_i420_test"
+"$out/portal_i420_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -I"$webrtc/include" "$here/rejected_section_test.cc" \
   -L"$lib" -Wl,-rpath,"$lib" -lwebrtc -lpthread -o "$out/rejected_section_test"
 # The audio module libwebrtc makes at start must reach the sound server (it stops the

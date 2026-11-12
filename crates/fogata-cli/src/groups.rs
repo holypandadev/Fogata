@@ -152,6 +152,14 @@ fn print_members(log: &GroupLog, me: &DevicePublicKey, book: Option<&fogata_frie
 }
 
 pub async fn run(store: Store, command: GroupCommand) -> Result<()> {
+    // What changes the groups here holds the folder (see `friends::hold_folder`); joining
+    // starts a node, which holds it itself.
+    let _running = (!matches!(
+        command,
+        GroupCommand::Join(_) | GroupCommand::List | GroupCommand::Members { .. }
+    ))
+    .then(|| friends::hold_folder(&store))
+    .transpose()?;
     let (identity, _) = store.identity()?;
     let me = identity.public_key();
     match command {

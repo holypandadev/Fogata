@@ -1100,6 +1100,187 @@ class FlatpakPermissions(unittest.TestCase):
         self.assertIn("\nRUNTIME_VERSION=26.08\n", text)
 
 
+def thin_macho(code, signature=None, cpu=0x0100000C, pad=0):
+    """A thin 64-bit Mach-O file as the linker and codesign lay it out: the header, the
+    __LINKEDIT segment's load command, room for one more, then `code`. With `signature`,
+    codesign's work: a last load command LC_CODE_SIGNATURE in that room, the code padded with
+    `pad` zero bytes, the signature after it, and __LINKEDIT grown over it."""
+    signed = signature is not None
+    offset = 32 + 72 + 16 + len(code) + (pad if signed else 0)
+    linkedit_size = len(code) + (pad + len(signature) if signed else 0)
+    segment = ((0x19).to_bytes(4, "little") + (72).to_bytes(4, "little")
+               + b"__LINKEDIT".ljust(16, b"\0") + (0x4000).to_bytes(8, "little")
+               + (linkedit_size + 0x1000).to_bytes(8, "little") + (120).to_bytes(8, "little")
+               + linkedit_size.to_bytes(8, "little") + bytes(16))
+    commands = segment + ((0x1D).to_bytes(4, "little") + (16).to_bytes(4, "little")
+                          + offset.to_bytes(4, "little") + len(signature).to_bytes(4, "little")
+                          if signed else bytes(16))
+    header = (b"\xcf\xfa\xed\xfe" + cpu.to_bytes(4, "little") + bytes(4)
+              + (6).to_bytes(4, "little") + (2 if signed else 1).to_bytes(4, "little")
+              + (88 if signed else 72).to_bytes(4, "little") + bytes(8))
+    data = header + commands + code
+    return data + (bytes(pad) + signature if signed else b"")
+
+
+def fat_macho(*slices, gap=0):
+    """A universal file of the thin `slices`, each at its own 4 KB boundary (`gap` more
+    pages apart, as a signature that grew one would push them)."""
+    entries, body, at = b"", b"", 0x1000
+    for piece in slices:
+        entries += (piece[4:8][::-1] + piece[8:12][::-1] + at.to_bytes(4, "big")
+                    + len(piece).to_bytes(4, "big") + (12).to_bytes(4, "big"))
+        body += piece.ljust(-(-len(piece) // 0x1000) * 0x1000 + gap * 0x1000, b"\0")
+        at += -(-len(piece) // 0x1000) * 0x1000 + gap * 0x1000
+    header = b"\xca\xfe\xba\xbe" + len(slices).to_bytes(4, "big") + entries
+    return header.ljust(0x1000, b"\0") + body
+
+
+class AttestedBuilds(unittest.TestCase):
+    """--ci-builds: what release.py ships must be what GitHub built and attested (fetched by
+    tools/beta/ci_builds.py), the Mac app but for the signatures it gets here."""
+
+    CODE = b"\x90" * 200 + b"fogata-commit-marker:" + b"a" * 40 + b";"
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="fogata-attested-test-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def test_a_signature_added_or_replaced_leaves_the_same_code(self):
+        unsigned = thin_macho(self.CODE)
+        adhoc = thin_macho(self.CODE, signature=b"adhoc" * 10, pad=8)
+        developer = thin_macho(self.CODE, signature=b"team-signature" * 40, pad=8)
+        self.assertNotEqual(adhoc, developer)
+        for a, b in [(unsigned, adhoc), (adhoc, developer), (unsigned, developer)]:
+            self.assertTrue(release.same_code(a, b))
+            self.assertTrue(release.same_code(b, a))
+        # Universal, with the slices moved by a grown signature.
+        intel = 0x01000007
+        fat_unsigned = fat_macho(unsigned, thin_macho(self.CODE, cpu=intel))
+        fat_signed = fat_macho(developer, thin_macho(self.CODE, b"x" * 5000, cpu=intel, pad=4),
+                               gap=1)
+        self.assertTrue(release.same_code(fat_unsigned, fat_signed))
+
+    def test_other_code_is_never_the_same(self):
+        developer = thin_macho(self.CODE, signature=b"team-signature" * 40, pad=8)
+        changed = self.CODE.replace(b"a" * 40, b"b" * 40)
+        self.assertFalse(release.same_code(thin_macho(changed), developer))
+        self.assertFalse(release.same_code(thin_macho(self.CODE + b"more"), developer))
+        # Code hidden where the padding before the signature goes.
+        self.assertFalse(release.same_code(
+            thin_macho(self.CODE), thin_macho(self.CODE, signature=b"s" * 40, pad=8)[:-48]
+            + b"\x01" + bytes(7) + b"s" * 40))
+        # Another architecture, or one slice missing from a universal file.
+        intel = 0x01000007
+        self.assertFalse(release.same_code(thin_macho(self.CODE), thin_macho(self.CODE, cpu=intel)))
+        both = fat_macho(thin_macho(self.CODE), thin_macho(self.CODE, cpu=intel))
+        self.assertFalse(release.same_code(both, fat_macho(thin_macho(self.CODE))))
+        # Not Mach-O: byte for byte.
+        self.assertTrue(release.same_code(b"plist", b"plist"))
+        self.assertFalse(release.same_code(b"plist", b"plisT"))
+        # A signature that is not the last load command is not codesign's.
+        odd = bytearray(developer)
+        odd[20:24] = (104).to_bytes(4, "little")  # one more command's room after it
+        self.assertFalse(release.same_code(thin_macho(self.CODE), bytes(odd)))
+
+    def folder(self, name, files):
+        """A folder of `files`: path -> bytes, ("x", bytes) for an executable file, "->target"
+        for a link."""
+        root = self.tmp / name
+        for path, data in files.items():
+            target = root / path
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(data, str):
+                os.symlink(data[2:], target)
+            elif isinstance(data, tuple):
+                target.write_bytes(data[1])
+                target.chmod(0o755)
+            else:
+                target.write_bytes(data)
+        return root
+
+    def test_a_bundle_must_be_the_attested_one_file_for_file(self):
+        files = {"fogata": ("x", b"program"), "lib/libapp.so": b"app",
+                 "lib/libflutter.so": "->libapp.so", "data/icudtl.dat": b"icu"}
+        attested = self.folder("attested", files)
+        release.check_same_build(attested, self.folder("same", files), "Linux bundle")
+        for change in [{"lib/extra.so": b"more"}, {"lib/libapp.so": b"other"},
+                       {"fogata": b"program"},  # no longer executable
+                       {"lib/libflutter.so": "->../elsewhere.so"}]:
+            with self.subTest(change=change):
+                given = self.folder(f"given{len(list(self.tmp.iterdir()))}", {**files, **change})
+                with self.assertRaises(SystemExit) as stop:
+                    release.check_same_build(attested, given, "Linux bundle")
+                self.assertIn("not the one GitHub built and attested", str(stop.exception))
+        missing = dict(files)
+        del missing["data/icudtl.dat"]
+        with self.assertRaises(SystemExit):
+            release.check_same_build(attested, self.folder("missing", missing), "Linux bundle")
+
+    def test_a_mac_app_may_differ_by_its_signatures_only(self):
+        code = thin_macho(self.CODE, signature=b"adhoc", pad=8)
+        app = {"Contents/MacOS/Fogata": ("x", code), "Contents/Info.plist": b"<plist/>",
+               "Contents/_CodeSignature/CodeResources": b"adhoc seal",
+               # The updater, which the build left unsealed (beta.8's was so).
+               "Contents/Library/Helpers/U.app/Contents/Info.plist": b"<plist/>"}
+        attested = self.folder("attested/Fogata.app", app)
+        signed = self.folder("signed/Fogata.app", {
+            **app, "Contents/MacOS/Fogata": ("x", thin_macho(self.CODE, b"developer" * 9, pad=8)),
+            "Contents/_CodeSignature/CodeResources": b"developer seal",
+            "Contents/Library/Helpers/U.app/Contents/_CodeSignature/CodeResources": b"new"})
+        release.check_same_build(attested, signed, "macOS app", signed=True)
+        # Byte for byte, as the other systems are compared, it is not the same.
+        with self.assertRaises(SystemExit):
+            release.check_same_build(attested, signed, "macOS app")
+        other = self.folder("other/Fogata.app", {
+            **app, "Contents/MacOS/Fogata": ("x", thin_macho(b"other code", b"developer", pad=8))})
+        with self.assertRaises(SystemExit):
+            release.check_same_build(attested, other, "macOS app", signed=True)
+        plist = self.folder("plist/Fogata.app", {**app, "Contents/Info.plist": b"<plist>x"})
+        with self.assertRaises(SystemExit):
+            release.check_same_build(attested, plist, "macOS app", signed=True)
+
+    def test_the_attested_zips_must_be_those_the_run_listed(self):
+        folder = self.tmp / "ci-builds"
+        (folder / "attested").mkdir(parents=True)
+        zips = {}
+        for system, name in release.CI_BUILDS.items():
+            zips[system] = folder / "attested" / name
+            zips[system].write_bytes(name.encode())
+        (folder / "SHA256SUMS").write_text("".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+            for path in zips.values()))
+        self.assertEqual(release.read_ci_builds(folder, ["linux", "macos"]),
+                         {"linux": zips["linux"], "macos": zips["macos"]})
+        zips["windows"].write_bytes(b"changed since")
+        with self.assertRaises(SystemExit) as stop:
+            release.read_ci_builds(folder, ["windows"])
+        self.assertIn("not the", str(stop.exception))
+        zips["linux"].unlink()
+        with self.assertRaises(SystemExit):
+            release.read_ci_builds(folder, ["linux"])
+        with self.assertRaises(SystemExit):
+            release.read_ci_builds(self.tmp, ["macos"])  # no SHA256SUMS
+        # Kept for the release, under names apart from drive/'s.
+        (folder / "toolchain-macos.txt").write_text("xcode\n")
+        release.keep_ci_builds(folder, {"macos": zips["macos"]}, self.tmp / "out")
+        self.assertEqual(sorted(p.name for p in (self.tmp / "out").iterdir()),
+                         ["Fogata-macos-unsigned.zip", "SHA256SUMS.attested",
+                          "toolchain-macos.txt"])
+
+    def test_builds_come_from_ci_unless_said_otherwise(self):
+        with self.assertRaises(SystemExit) as stop:
+            release.check_ci_builds_given(None, False, False, ["linux"])
+        self.assertIn("--no-ci-builds", str(stop.exception))
+        with self.assertRaises(SystemExit):
+            release.check_ci_builds_given(self.tmp, True, False, ["linux"])
+        with self.assertRaises(SystemExit) as stop:
+            release.check_ci_builds_given(self.tmp, False, True, [])
+        self.assertIn("--build-linux", str(stop.exception))
+        self.assertEqual(release.check_ci_builds_given(None, True, True, ["windows"]), {})
+
+
 def main():
     """unittest.main, except that a test skipped where it can run fails the run. Only Windows
     skips (links of a Mac bundle, the Linux build): a Linux or macOS computer without

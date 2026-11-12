@@ -18,7 +18,7 @@ use fogata_core::{
 };
 
 use super::{
-    app::{RUNTIME, bridge_enabled, use_keychain},
+    app::{RUNTIME, blocking, bridge_enabled, use_keychain},
     types::{UiProfile, profile},
 };
 use crate::frb_generated::StreamSink;
@@ -272,9 +272,7 @@ fn ui_event(event: TransferEvent) -> UiMoveEvent {
 pub async fn move_state(data_dir: String) -> Result<UiMoveState> {
     use_keychain();
     let dir = PathBuf::from(data_dir);
-    let state = RUNTIME
-        .spawn_blocking(move || transfer::state(&dir))
-        .await?;
+    let state = blocking(move || transfer::state(&dir)).await?;
     Ok(match state {
         TransferState::None => UiMoveState {
             kind: "none".into(),
@@ -390,24 +388,18 @@ pub fn move_cancel() -> bool {
 /// Old computer, after the move: deletes what is left of the account, and its key.
 pub async fn move_forget(data_dir: String) -> Result<()> {
     use_keychain();
-    RUNTIME
-        .spawn_blocking(move || transfer::forget(Path::new(&data_dir)))
-        .await?
+    blocking(move || transfer::forget(Path::new(&data_dir))).await?
 }
 
 /// Old computer, "moving": uses the account here again (the screens warn first).
 pub async fn move_keep(data_dir: String) -> Result<()> {
     use_keychain();
-    RUNTIME
-        .spawn_blocking(move || transfer::keep_this_computer(Path::new(&data_dir)))
-        .await?
+    blocking(move || transfer::keep_this_computer(Path::new(&data_dir))).await?
 }
 
 /// New computer: throws away an account that came whole but was not finished; `false`
 /// when it was already being put in place, which then finished.
 pub async fn move_discard(data_dir: String) -> Result<bool> {
     use_keychain();
-    RUNTIME
-        .spawn_blocking(move || transfer::discard_incoming(Path::new(&data_dir)))
-        .await?
+    blocking(move || transfer::discard_incoming(Path::new(&data_dir))).await?
 }

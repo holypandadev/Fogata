@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The checks a commit must pass before it is pushed, run on this computer:
 #
-#     tools/ci.sh [--full] [--no-advisories] [--no-codegen] [--no-notices] [<commit>]   (by default HEAD)
+#     tools/ci.sh [--full] [--no-advisories] [--no-codegen] [--no-notices] [--split app|checks]
+#                 [<commit>]   (by default HEAD)
 #
 # In a clean temporary worktree of that commit: a release build of the Linux application,
 # checked as tools/beta/release.py checks a bundle before it packs it (tools/beta/ci_builds.py
@@ -34,6 +35,14 @@
 # that exits 0 without saying so (a bare `true`) leaves the leg "incomplete". A leg not set is
 # recorded as skipped.
 # Each --no-... skips that check of tools/check.sh and is recorded as skipped too.
+# --split runs one half of the Linux steps, for two computers that run the halves side by side
+# (GitHub's CI, .github/workflows/ci.yml): `checks` is tools/check.sh and the fuzz targets'
+# build; `app` is everything else (the release build and its checks, the native tests, the
+# localizations, dart format, flutter analyze and test, the integration, pair and smoke
+# tests). Both halves fetch the Dart packages first and end with the check that nothing in
+# the worktree was changed by a generator. What the other half runs is recorded as
+# `elsewhere (--split ...)`, and a split record never says `result: pass` (at best
+# `incomplete`): the pre-push hook refuses it, and each half's own lines say what it did.
 #
 # It writes the record of the run to <git dir>/fogata-ci/<commit> and its log beside it
 # (<commit>.log): each leg and check (the native, integration and pair tests on their own
@@ -61,17 +70,29 @@ set -euo pipefail
 # releases page on GitHub.
 export FOGATA_UPDATE_WEB=off
 
+usage="usage: tools/ci.sh [--full] [--no-advisories] [--no-codegen] [--no-notices] [--split app|checks] [<commit>]"
 skips=()
 full=0
+split=none
 commit=HEAD
-for arg in "$@"; do
-    case "$arg" in
-        --no-advisories | --no-codegen | --no-notices) skips+=("$arg") ;;
+while (( $# )); do
+    case "$1" in
+        --no-advisories | --no-codegen | --no-notices) skips+=("$1") ;;
         --full) full=1 ;;
-        -*) echo "usage: tools/ci.sh [--full] [--no-advisories] [--no-codegen] [--no-notices] [<commit>]" >&2; exit 2 ;;
-        *) commit=$arg ;;
+        --split)
+            [[ ${2:-} == app || ${2:-} == checks ]] || { echo "$usage" >&2; exit 2; }
+            split=$2
+            shift
+            ;;
+        -*) echo "$usage" >&2; exit 2 ;;
+        *) commit=$1 ;;
     esac
+    shift
 done
+# Whether this run does the half $1 (app or checks) of the Linux steps: both without --split.
+half() { [[ $split == none || $split == "$1" ]]; }
+# What the record says of a part the other half runs.
+elsewhere="elsewhere (--split $split)"
 script=$(cd "$(dirname "$0")" && pwd -P)/$(basename "$0")
 # Whether check $1 (advisories, codegen, notices) runs.
 checked() {
@@ -166,6 +187,10 @@ pairs="not run (--full not given)"
 [[ $full == 1 ]] && pairs="not run"
 smoke="not run (--full not given)"
 [[ $full == 1 ]] && smoke="not run"
+if ! half app; then
+    native=$elsewhere integration=$elsewhere
+    [[ $full == 0 ]] || pairs=$elsewhere smoke=$elsewhere
+fi
 native_tests() {
     if step "native tests (video renderer with ThreadSanitizer, noise suppression table)" \
         nice -n 10 app/third_party/flutter_webrtc/common/cpp/test/run_tests.sh; then
@@ -255,22 +280,28 @@ fuzz_build() {
     [[ "${FOGATA_CI_FRESH:-0}" == 1 ]] || ln -s "$records/fuzz-target" fuzz/target
     cd fuzz && ${slot[@]+"${slot[@]}"} nice -n 10 cargo "+${FOGATA_FUZZ_TOOLCHAIN:-nightly}" fuzz build --fuzz-dir .
 }
+# Runs the rest of the arguments when this run does half $1 (see --split); else passes.
+in_half() {
+    local which=$1
+    shift
+    if half "$which"; then "$@"; fi
+}
 linux=pass
 {
     step "flutter pub get" bash -c 'cd app && flutter pub get --offline' &&
-    step "linux build" bash -c 'cd app && "$@" nice -n 10 flutter build linux --release' _ ${slot[@]+"${slot[@]}"} &&
-    step "release checks of the bundle" python3 -I -B tools/beta/ci_builds.py check-build linux app/build/linux/x64/release/bundle &&
-    native_tests &&
-    step "check.sh" ${slot[@]+"${slot[@]}"} nice -n 10 tools/check.sh ${skips[@]+"${skips[@]}"} &&
-    step "fuzz targets build" fuzz_build &&
-    step "gen-l10n" bash -c 'cd app && flutter gen-l10n' &&
+    in_half app step "linux build" bash -c 'cd app && "$@" nice -n 10 flutter build linux --release' _ ${slot[@]+"${slot[@]}"} &&
+    in_half app step "release checks of the bundle" python3 -I -B tools/beta/ci_builds.py check-build linux app/build/linux/x64/release/bundle &&
+    in_half app native_tests &&
+    in_half checks step "check.sh" ${slot[@]+"${slot[@]}"} nice -n 10 tools/check.sh ${skips[@]+"${skips[@]}"} &&
+    in_half checks step "fuzz targets build" fuzz_build &&
+    in_half app step "gen-l10n" bash -c 'cd app && flutter gen-l10n' &&
     step "nothing generated differs" bash -c 'test -z "$(git status --porcelain --untracked-files=no)" || { git status --short; git diff --stat; exit 1; }' &&
-    step "dart format" bash -c 'cd app && dart format --output=none --set-exit-if-changed lib test integration_test test_driver packages/fogata_video' &&
-    step "flutter analyze" bash -c 'cd app && flutter analyze' &&
-    step "flutter test" bash -c 'cd app && "$@" nice -n 10 flutter test' _ ${slot[@]+"${slot[@]}"} &&
-    integration_tests &&
-    { [[ $full == 0 ]] || pair_tests; } &&
-    { [[ $full == 0 ]] || smoke_tests; }
+    in_half app step "dart format" bash -c 'cd app && dart format --output=none --set-exit-if-changed lib test integration_test test_driver packages/fogata_video' &&
+    in_half app step "flutter analyze" bash -c 'cd app && flutter analyze' &&
+    in_half app step "flutter test" bash -c 'cd app && "$@" nice -n 10 flutter test' _ ${slot[@]+"${slot[@]}"} &&
+    in_half app integration_tests &&
+    { [[ $full == 0 ]] || in_half app pair_tests; } &&
+    { [[ $full == 0 ]] || in_half app smoke_tests; }
 } || linux=fail
 if [[ "${FOGATA_CI_FRESH:-0}" != 1 ]]; then
     cp "$tree/$webrtc_downloads/"*.zip "$records/downloads/" 2> /dev/null || true
@@ -339,12 +370,16 @@ done
 if [[ $integration == skipped* && $result == pass ]]; then
     result=incomplete
 fi
+# Half the steps is never a pass, whatever that half did.
+if [[ $split != none && $result == pass ]]; then
+    result=incomplete
+fi
 # The pair tests not run (no --full), or skipped, leave the result incomplete, never a pass: a
 # commit that breaks a call, a direct chat, a voice message or an account move gets through
 # the hook only when FOGATA_CI_ALLOW_SKIPPED names `pairs`.
 case $pairs in
     fail*) result=fail ;;
-    skipped* | "not run"*) [[ $result == pass ]] && result=incomplete ;;
+    skipped* | "not run"* | elsewhere*) [[ $result == pass ]] && result=incomplete ;;
 esac
 # The smoke test fails the run when it fails; skipped (no desktop could be built here) it is
 # only recorded.
@@ -365,6 +400,7 @@ done
     echo "macos: $mac"
     echo "windows: $windows"
     echo "full: $([[ $full == 1 ]] && echo yes || echo no)"
+    echo "split: $split"
     echo "legs ran: ${ran[*]:-nothing}"
     echo "legs not run: ${notrun[*]:-nothing}"
     for leg_name in macos windows; do
@@ -377,14 +413,20 @@ done
         echo "$leg_name output: ${values[2]}"
         echo "$leg_name steps: ${values[3]}"
     done
-    if checked advisories; then
-        echo "advisories: checked (RustSec database of ${database:-an unknown date})"
+    if ! half checks; then
+        for check in advisories codegen notices; do
+            echo "$check: $elsewhere"
+        done
     else
-        echo "advisories: skipped"
+        if checked advisories; then
+            echo "advisories: checked (RustSec database of ${database:-an unknown date})"
+        else
+            echo "advisories: skipped"
+        fi
+        for check in codegen notices; do
+            echo "$check: $(checked "$check" && echo checked || echo skipped)"
+        done
     fi
-    for check in codegen notices; do
-        echo "$check: $(checked "$check" && echo checked || echo skipped)"
-    done
     echo "native: $native"
     echo "integration: $integration"
     echo "pairs: $pairs"

@@ -57,10 +57,19 @@ class MediaStreamNative extends MediaStream {
     }
 
     if (addToNative) {
-      await WebRTC.invokeMethod('mediaStreamAddTrack',
-          <String, dynamic>{'streamId': id, 'trackId': track.id});
+      // Fogata: with the track's owner, so a local track of the same id never
+      // stands for one a connection received.
+      await WebRTC.invokeMethod('mediaStreamAddTrack', <String, dynamic>{
+        'streamId': id,
+        'trackId': track.id,
+        'peerConnectionId': _ownerOf(track)
+      });
     }
   }
+
+  /// Fogata: the connection a track came on, or 'local' for this device's own.
+  static String? _ownerOf(MediaStreamTrack track) =>
+      track is MediaStreamTrackNative ? track.peerConnectionId : null;
 
   @override
   Future<void> removeTrack(MediaStreamTrack track,
@@ -72,8 +81,11 @@ class MediaStreamNative extends MediaStream {
     }
 
     if (removeFromNative) {
-      await WebRTC.invokeMethod('mediaStreamRemoveTrack',
-          <String, dynamic>{'streamId': id, 'trackId': track.id});
+      await WebRTC.invokeMethod('mediaStreamRemoveTrack', <String, dynamic>{
+        'streamId': id,
+        'trackId': track.id,
+        'peerConnectionId': _ownerOf(track)
+      });
     }
   }
 
@@ -89,9 +101,11 @@ class MediaStreamNative extends MediaStream {
 
   @override
   Future<void> dispose() async {
+    // Fogata: with its owner: a stream a connection received goes with that
+    // connection, and its id never lets go of this device's own stream of that id.
     await WebRTC.invokeMethod(
       'streamDispose',
-      <String, dynamic>{'streamId': id},
+      <String, dynamic>{'streamId': id, 'ownerTag': ownerTag},
     );
   }
 

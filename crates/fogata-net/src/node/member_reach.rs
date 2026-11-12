@@ -18,7 +18,7 @@ use libp2p::{
     },
 };
 
-use super::{ConnectionInfo, Node, Pending, dial::private_block, links::THROUGH_DIAL_WAIT};
+use super::{ConnectionInfo, Node, Pending, dial::on_own_network, links::THROUGH_DIAL_WAIT};
 use crate::{Path, addr};
 
 /// Most local addresses kept for a member.
@@ -199,8 +199,8 @@ impl Node {
     /// Dials the lost members (see [`Self::keep_lost`]) whose turn it is. One is let go once
     /// it has a direct or local QUIC connection again, is no longer a member or is back as
     /// another session, or after [`REDIAL_FOR`]; the punch slots and discovery go on as for
-    /// anyone. A private address is dialled only while this device is on a network of the
-    /// same block, since elsewhere it names some other computer.
+    /// anyone. A local address is dialled only while this device is on a network of the
+    /// same block (see `dial::LocalBlock`), since elsewhere it names some other computer.
     pub(super) fn redial_lost(&mut self) {
         if self.lost.is_empty() {
             return;
@@ -223,8 +223,7 @@ impl Node {
                     .values()
                     .any(|s| s.ctx.is_member_device(&lost.device))
         });
-        let own_blocks: HashSet<[u8; 3]> =
-            self.listen_addrs.iter().filter_map(private_block).collect();
+        let own_blocks = self.own_blocks();
         let due: Vec<(PeerId, Vec<Multiaddr>)> = self
             .lost
             .iter_mut()
@@ -235,7 +234,7 @@ impl Node {
                 let addresses: Vec<Multiaddr> = lost
                     .addresses
                     .iter()
-                    .filter(|a| private_block(a).is_none_or(|b| own_blocks.contains(&b)))
+                    .filter(|a| on_own_network(a, &own_blocks))
                     .cloned()
                     .collect();
                 (*peer, addresses)

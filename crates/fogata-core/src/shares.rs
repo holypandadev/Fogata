@@ -215,7 +215,7 @@ impl Drop for Room {
 
 /// The room held for a copy of a file of `size` bytes: a sealed copy takes a little more
 /// than the file, a tag for each part.
-fn held_for(size: u64) -> u64 {
+pub(crate) fn held_for(size: u64) -> u64 {
     size.saturating_add(size / 1024).saturating_add(64 * 1024)
 }
 

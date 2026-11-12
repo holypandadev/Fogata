@@ -10,6 +10,7 @@ import 'package:fogata/src/rust/api/types.dart';
 import 'package:fogata/src/rust/frb_generated.dart';
 import 'package:fogata/src/screens/recovery.dart';
 import 'package:fogata/src/theme.dart';
+import 'package:fogata/src/widgets.dart';
 
 import 'wait.dart';
 
@@ -330,6 +331,44 @@ void main() {
     await _settle(tester);
     expect(core.forgotKey, isTrue);
     expect(core.turnedOnWith, isNull);
+    await _end(tester, state);
+  });
+
+  testWidgets('the new key is blurred until the eye button shows it, stays shown, and has no '
+      'copy button', (tester) async {
+    final state = await _show(
+      tester,
+      const RecoveryCopyPanel(),
+      fakeRoom(people: 1),
+    );
+    await tester.tap(find.text('Turn on…'));
+    await _settle(tester);
+    final blurred = find.ancestor(
+      of: find.text(_key),
+      matching: find.byType(ImageFiltered),
+    );
+    // Blurred as a friend link is, so a shared screen shows nothing of it.
+    expect(blurred, findsOneWidget);
+    expect(
+      find.descendant(
+        of: find.byKey(const ValueKey('recovery-new-key')),
+        matching: find.byType(CopyButton),
+      ),
+      findsNothing,
+    );
+    await tester.tap(find.byTooltip('Show key'));
+    await tester.pump();
+    expect(blurred, findsNothing);
+    // It stays for as long as writing it down takes, unlike a link or a code, and is
+    // blurred again with the same button.
+    await tester.pump(SecretBox.shownFor * 3);
+    await tester.pump();
+    expect(blurred, findsNothing);
+    await tester.tap(find.byTooltip('Hide'));
+    await tester.pump();
+    expect(blurred, findsOneWidget);
+    await tester.tap(find.text('Cancel'));
+    await _settle(tester);
     await _end(tester, state);
   });
 

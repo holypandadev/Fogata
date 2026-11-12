@@ -28,6 +28,7 @@ import 'rust/api/app.dart' as api;
 import 'rust/api/direct.dart' as dm;
 import 'rust/api/types.dart';
 import 'shown.dart';
+import 'test_switches.dart';
 import 'theme.dart';
 import 'typing.dart';
 import 'update.dart';
@@ -462,9 +463,7 @@ class AppState extends ChangeNotifier {
     unawaited(relabelTray());
     if (prefs.audioOutput != null) unawaited(soundsTo(prefs.audioOutput));
     // Test copies save into a folder of their own; a release build never moves it.
-    if (!kReleaseMode) {
-      prefs.downloadsDir = Platform.environment['FOGATA_DOWNLOADS'];
-    }
+    prefs.downloadsDir = testSwitch('FOGATA_DOWNLOADS');
     try {
       prefs.downloadsDir ??= (await getDownloadsDirectory())?.path;
     } catch (_) {}

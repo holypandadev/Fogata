@@ -15,7 +15,10 @@ use libp2p::{
     },
 };
 
-use super::{Node, PUNCH_ATTEMPT};
+use super::{
+    Node, PUNCH_ATTEMPT,
+    dial::{LocalBlock, may_route_to},
+};
 use crate::addr;
 
 /// Addresses of one peer dialled at once for what mDNS told of it, over every dial still
@@ -33,15 +36,19 @@ const MAX_MDNS_DIALLED: usize = 16;
 const MDNS_RETRIES: u8 = 2;
 const MDNS_RETRY_AFTER: Duration = Duration::from_secs(2);
 
-/// Whether `address`, which a response from `by` told of, may be dialled: one at `by`
-/// itself, or on a local network (see [`addr::is_lan`]). Loopback only from this very
+/// Whether `address`, which a response from `by` told of, may be dialled from a device on
+/// the networks of `own` (see [`Node::own_blocks`]): one at `by` itself, or on a local
+/// network (see [`addr::is_lan`]); a carrier-grade NAT or unique-local IPv6 one only when
+/// this device is on that network too (see [`may_route_to`]). Loopback only from this very
 /// computer, never a public address another one names: a response's addresses are
 /// whatever its sender likes, and would otherwise make this device send packets to any
-/// host on the internet, or to services on this computer.
-fn mdns_address_ok(address: &Multiaddr, by: std::net::IpAddr) -> bool {
+/// host on the internet, to services on this computer, or into a VPN it is on. A private
+/// IPv4 one in another /24 is still dialled: the response came over this network, and one
+/// such as 10.0.0.0/16 has its devices in many /24s.
+fn mdns_address_ok(address: &Multiaddr, by: std::net::IpAddr, own: &HashSet<LocalBlock>) -> bool {
     match addr::ip(address) {
         Some(ip) if ip == by => true,
-        Some(_) => addr::is_lan(address),
+        Some(_) => addr::is_lan(address) && may_route_to(address, own),
         None => false,
     }
 }
@@ -101,13 +108,14 @@ impl Node {
     ) {
         type Told = Vec<(std::net::IpAddr, Vec<Multiaddr>)>;
         let mut by_peer: HashMap<PeerId, Told> = HashMap::new();
+        let own_blocks = self.own_blocks();
         for (peer, address, by) in found {
             // One whose response is no longer known (it made room for others at once) is
             // not dialled at what it told, nor one from an address not heard for a while.
             let Some(by) = by.filter(|by| !self.teller_muted(by)) else {
                 continue;
             };
-            if peer == self.local_peer() || !mdns_address_ok(&address, by) {
+            if peer == self.local_peer() || !mdns_address_ok(&address, by, &own_blocks) {
                 continue;
             }
             let tellers = by_peer.entry(peer).or_default();
@@ -401,6 +409,64 @@ mod tests {
             [
                 "/ip4/192.168.1.66/udp/4001/quic-v1",
                 "/ip4/10.1.2.3/udp/4001/quic-v1"
+            ]
+        );
+        node.shutdown().await.unwrap();
+    }
+
+    /// A response may name a peer at carrier-grade NAT and unique-local IPv6 addresses only
+    /// of networks this device is on: a neighbour on the home network is dialled at its
+    /// addresses on it, over IPv4 and IPv6, and at its VPN one when this device is on that
+    /// VPN too; never at one of another site or a VPN this device is not on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn mdns_dials_carrier_and_unique_local_addresses_only_of_networks_this_device_is_on() {
+        let (node, _group) = lone_member();
+        let (home, vpn) = inspect(&node, |n| {
+            let neighbour = std::net::IpAddr::from([192, 168, 1, 66]);
+            let told = [
+                "/ip4/192.168.1.66/udp/4001/quic-v1",
+                "/ip6/fd12:3456:789a:1::66/udp/4001/quic-v1",
+                "/ip6/fd99:1:2:1::66/udp/4001/quic-v1",
+                "/ip4/100.70.8.9/udp/4001/quic-v1",
+            ];
+            let dial = |n: &mut Node| {
+                let peer = PeerId::random();
+                n.dial_mdns_found(
+                    told.iter()
+                        .map(|a| (peer, a.parse().unwrap(), Some(neighbour)))
+                        .collect(),
+                );
+                n.mdns_dials
+                    .iter()
+                    .filter(|(p, _)| *p == peer)
+                    .flat_map(|(_, a)| a.iter().map(ToString::to_string))
+                    .collect::<Vec<_>>()
+            };
+            n.listen_addrs = vec![
+                "/ip4/192.168.1.20/udp/4001/quic-v1".parse().unwrap(),
+                "/ip6/fd12:3456:789a:1:aaaa::20/udp/4001/quic-v1"
+                    .parse()
+                    .unwrap(),
+            ];
+            let home = dial(n);
+            n.listen_addrs
+                .push("/ip4/100.101.2.3/udp/4001/quic-v1".parse().unwrap());
+            (home, dial(n))
+        })
+        .await;
+        assert_eq!(
+            home,
+            [
+                "/ip4/192.168.1.66/udp/4001/quic-v1",
+                "/ip6/fd12:3456:789a:1::66/udp/4001/quic-v1"
+            ]
+        );
+        assert_eq!(
+            vpn,
+            [
+                "/ip4/192.168.1.66/udp/4001/quic-v1",
+                "/ip6/fd12:3456:789a:1::66/udp/4001/quic-v1",
+                "/ip4/100.70.8.9/udp/4001/quic-v1"
             ]
         );
         node.shutdown().await.unwrap();

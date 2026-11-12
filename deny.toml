@@ -45,7 +45,21 @@ allow-git = []
 wildcards = "deny"
 allow-wildcard-paths = true
 # Two versions of one crate are reported, not refused: many come from libp2p and the WebRTC
-# crates and cannot be unified from here.
+# crates and cannot be unified from here. Among them, two generations of the RustCrypto and
+# dalek crates: Fogata's own code is on the new one (curve25519-dalek 5, sha2 0.11, hkdf 0.13,
+# chacha20poly1305 0.11, rand 0.10); the old one (curve25519-dalek 4, sha2/digest/hmac 0.10
+# and 0.12, hkdf 0.12, chacha20poly1305/aead 0.10, blake2 0.10, rand_core 0.6) comes from
+# two places only:
+#   - snow 0.10 (libp2p's Noise handshake, through libp2p-noise 0.47; with aes-gcm 0.10 and
+#     blake2 0.10), whose newest release is still on it: it goes when libp2p takes a snow on
+#     the new crates;
+#   - the vendored spake2 0.4.0 (vendor/spake2), alone in pulling curve25519-dalek 4, hkdf 0.12
+#     and rand_core 0.6: only spake2 0.5.0-pre.0 (a pre-release) is on the new crates. Moving
+#     the fork to it, or porting the fork, changes the code that runs every friend and move
+#     code: done on its own, with the tests of crates/fogata-friends against beta.8's
+#     handshakes, never as a lockfile bump.
+# (rand 0.9 is the WebRTC crates' own: stun, webrtc-util and the vendored turn.)
+# `cargo tree -d` lists them, `cargo tree -i <crate>@<version>` says what pulls each.
 multiple-versions = "warn"
 
 # Known vulnerabilities, from the RustSec advisory database kept on this computer. It is

@@ -236,7 +236,8 @@ class StreamQualityCard extends StatelessWidget {
 }
 
 /// What each person watching this device's screen gets now, as measured, and why someone's
-/// connection made theirs smaller than the choice above.
+/// connection made theirs smaller than the choice above, or this computer made it smaller
+/// or slower for everyone (many watching, or a busy processor).
 class _GoingOut extends StatelessWidget {
   const _GoingOut({required this.out});
   final Map<String, ScreenOut> out;
@@ -256,7 +257,9 @@ class _GoingOut extends StatelessWidget {
       for (final w in watchers)
         if (w.value.lowered) state.nameOf(w.key, l10n.streamQualitySomeone),
     ];
-    final others = watchers.length > lowered.length;
+    // Lowered for everyone, to spare this computer: nobody gets what was chosen.
+    final spared = watchers.any((w) => w.value.spared);
+    final others = !spared && watchers.length > lowered.length;
     final why = switch (lowered.length) {
       0 => null,
       1 => l10n.streamQualityLoweredOne(lowered.single, others ? 'yes' : 'no'),
@@ -297,7 +300,7 @@ class _GoingOut extends StatelessWidget {
                   Text(
                     l10n.streamQualityNow(now.height, now.fps.round()),
                     style: tx(
-                      now.lowered ? c.amber : c.fg2,
+                      now.lowered || now.spared ? c.amber : c.fg2,
                       size: 12,
                       monospace: true,
                     ),
@@ -305,7 +308,7 @@ class _GoingOut extends StatelessWidget {
                 ],
               ),
             ),
-        if (why != null) ...[
+        for (final note in [?why, if (spared) l10n.streamQualitySpared]) ...[
           const SizedBox(height: 6),
           Container(
             width: double.infinity,
@@ -314,7 +317,7 @@ class _GoingOut extends StatelessWidget {
               color: c.amberSoft,
               borderRadius: BorderRadius.circular(10),
             ),
-            child: Text(why, style: tx(c.amber, size: 12, height: 1.4)),
+            child: Text(note, style: tx(c.amber, size: 12, height: 1.4)),
           ),
         ],
       ],

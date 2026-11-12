@@ -32,6 +32,12 @@ pub const HERE_INTERVAL_MS: u64 = 20_000;
 pub const CUT_OFF_MS: u64 = 25_000;
 /// Chat lines kept per room.
 const MAX_CHAT: usize = 500;
+/// What holding a chat line costs past its record, text and nickname (see
+/// [`RoomTracker::chat_weights`]): the line's own fields and the allocations behind them.
+const CHAT_LINE_OVERHEAD: usize = 256;
+/// Ids of chat lines let go remembered per room (see [`RoomTracker::forget_chat`]), 16
+/// bytes each.
+const MAX_FORGOTTEN: usize = 4 * MAX_CHAT;
 /// What a chat line or a share may weigh as sent (see [`RoomTracker::weighing`]) past what
 /// its event says (its text and nickname, or its name and picture, as the message encodes
 /// them): the rest of the message, its header and its seal, with room for a field or two a
@@ -214,6 +220,9 @@ pub struct Room<S> {
     joins: BTreeMap<DevicePublicKey, S>,
     chat_records: VecDeque<([u8; 16], S)>,
     share_records: BTreeMap<([u8; 32], DevicePublicKey), (u64, usize, S)>,
+    /// Chat lines let go to keep this device's memory within a bound (see
+    /// [`RoomTracker::forget_chat`]), newest last: a copy that comes again is not taken.
+    forgotten: VecDeque<[u8; 16]>,
 }
 
 impl<S> Room<S> {
@@ -228,6 +237,7 @@ impl<S> Room<S> {
             joins: BTreeMap::new(),
             chat_records: VecDeque::new(),
             share_records: BTreeMap::new(),
+            forgotten: VecDeque::new(),
         }
     }
 
@@ -384,6 +394,48 @@ impl<S: Clone> RoomTracker<S> {
                 *theirs += cost;
             }
         }
+    }
+
+    /// Each chat line the room keeps: its sender, its time, its id and what keeping it
+    /// costs here (its record as sent, see [`Self::weighing`], its text and nickname, and
+    /// [`CHAT_LINE_OVERHEAD`]). For a bound on the chat of every room a device is in.
+    pub fn chat_weights(&self) -> Vec<(DevicePublicKey, u64, [u8; 16], usize)> {
+        let Some(room) = &self.room else {
+            return Vec::new();
+        };
+        let records: BTreeMap<&[u8; 16], usize> = room
+            .chat_records
+            .iter()
+            .map(|(id, record)| (id, (self.weigh)(record)))
+            .collect();
+        room.chat
+            .iter()
+            .map(|line| {
+                let record = records.get(&line.message_id).copied().unwrap_or(0);
+                let weight = record + line.text.len() + line.nick.len() + CHAT_LINE_OVERHEAD;
+                (line.sender, line.timestamp_ms, line.message_id, weight)
+            })
+            .collect()
+    }
+
+    /// Lets go of chat line `message_id`, and of its record: a device keeps the chat of
+    /// every room of every group it is in, and lets the heaviest go past a bound of its own
+    /// (what is kept for others, and what they keep, does not change). A copy of it that
+    /// comes again is not taken, nor shown again as new. Whether it was here.
+    pub fn forget_chat(&mut self, message_id: &[u8; 16]) -> bool {
+        let Some(room) = self.room.as_mut() else {
+            return false;
+        };
+        let Some(at) = room.chat.iter().position(|l| l.message_id == *message_id) else {
+            return false;
+        };
+        room.chat.remove(at);
+        room.chat_records.retain(|(id, _)| id != message_id);
+        room.forgotten.push_back(*message_id);
+        if room.forgotten.len() > MAX_FORGOTTEN {
+            room.forgotten.pop_front();
+        }
+        true
     }
 
     /// How many bytes of shares this room keeps, as counted against [`MAX_SHARE_BYTES`].
@@ -670,8 +722,10 @@ impl<S: Clone> RoomTracker<S> {
                 let Some(room) = self.room.as_mut().filter(|r| r.has_id(&event.room)) else {
                     return changes;
                 };
-                // Copies of a line already here, for example among a room's events.
+                // Copies of a line already here, for example among a room's events, or of
+                // one let go (see `forget_chat`).
                 if room.chat.iter().any(|l| l.message_id == event.message_id)
+                    || room.forgotten.contains(&event.message_id)
                     || text.chars().count() > MAX_CHAT_CHARS
                 {
                     return changes;
@@ -1547,6 +1601,33 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(t.room().unwrap().chat.len(), 2);
+    }
+
+    /// A chat line let go is weighed as kept, goes with its record, and a copy of it that
+    /// comes again (among a room's events) is not taken, nor shown again.
+    #[test]
+    fn a_chat_line_let_go_does_not_come_back() {
+        let ana = key();
+        let mut t: RoomTracker<u32> = RoomTracker::new(ana).weighing(|r| *r as usize);
+        let room = [7; 16];
+        t.apply(event(room, ana, 0, join("Ana", 0)), 1, 0);
+        t.apply(event(room, ana, 10, chat("first")), 400, 1);
+        t.apply(event(room, ana, 20, chat("second")), 500, 2);
+        let weights = t.chat_weights();
+        let first = event(room, ana, 10, chat("first")).message_id;
+        assert_eq!(
+            weights[0],
+            (ana, 10, first, 400 + "first".len() + 1 + CHAT_LINE_OVERHEAD)
+        );
+        assert!(t.forget_chat(&first));
+        assert!(!t.forget_chat(&first));
+        assert_eq!(t.room().unwrap().chat.len(), 1);
+        assert_eq!(t.snapshot(), [1, 500]);
+        assert!(
+            t.apply(event(room, ana, 10, chat("first")), 400, 3)
+                .is_empty()
+        );
+        assert_eq!(t.chat_weights().len(), 1);
     }
 
     #[test]

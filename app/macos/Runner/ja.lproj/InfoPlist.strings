@@ -1,0 +1,6 @@
+/* The texts of the permission prompts, in this language. Info.plist has the English ones;
+   test/macos_permission_texts_test.dart checks every language has every key. */
+
+"NSLocalNetworkUsageDescription" = "Fogataはローカルネットワーク上でフレンドやグループを探し、直接接続します。";
+"NSMicrophoneUsageDescription" = "Fogataは、グループのルームであなたの声が聞こえるようにマイクを使います。";
+"NSCameraUsageDescription" = "Fogataは、グループのルームであなたの姿が見えるようにカメラを使います。";

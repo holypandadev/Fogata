@@ -894,6 +894,17 @@ pub struct NamedInvite {
     pub welcomers: Vec<DevicePublicKey>,
 }
 
+/// How many invites [`NamedInvite::of`] keeps read, per thread: far more than an honest
+/// group has open, and about 1 MB at most.
+const READ_KEPT: usize = 1024;
+
+thread_local! {
+    /// What [`NamedInvite::of`] read, by the digest of the bytes read; `None` for bytes
+    /// that are no invite.
+    static READ: std::cell::RefCell<std::collections::HashMap<[u8; 32], Option<NamedInvite>>> =
+        std::cell::RefCell::default();
+}
+
 impl NamedInvite {
     /// The body that carries this invite. The managers named are sorted and deduplicated,
     /// and the issuer left out (it is always allowed).
@@ -915,6 +926,13 @@ impl NamedInvite {
     }
 
     /// The invite `body` carries, if it is one in the one encoding [`Self::body`] writes.
+    ///
+    /// Asked for the same entries again and again (each time the order or the group is
+    /// worked out, at level three), and reading one checks that each of its keys, the
+    /// issuer's and up to [`crate::MAX_MEMBERS`] others, is a point of the curve, which
+    /// costs far more than the rest: so what was read is kept, by the digest of the bytes,
+    /// for the last [`READ_KEPT`] invites this thread read. Only a pure function of the bytes
+    /// is kept, so the answer is the same as reading them again.
     pub fn of(body: &Body) -> Option<Self> {
         let Body::Unknown {
             kind: NAMED_INVITE_KIND,
@@ -923,6 +941,24 @@ impl NamedInvite {
         else {
             return None;
         };
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        if let Some(read) = READ.with_borrow(|read| read.get(&digest).cloned()) {
+            return read;
+        }
+        let invite = Self::read(body, bytes);
+        READ.with_borrow_mut(|read| {
+            if read.len() >= READ_KEPT {
+                read.clear();
+            }
+            read.insert(digest, invite.clone());
+        });
+        invite
+    }
+
+    /// [`Self::of`], read from `bytes`, those of `body`, without what was kept.
+    fn read(body: &Body, bytes: &[u8]) -> Option<Self> {
+        #[cfg(any(test, feature = "counts"))]
+        crate::work::named();
         let mut r = Reader::new(bytes);
         let ticket = Ticket::read(&mut r).ok()?;
         let token = r.array().ok()?;

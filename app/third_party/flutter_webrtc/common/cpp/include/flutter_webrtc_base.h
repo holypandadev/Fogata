@@ -3,6 +3,7 @@
 
 #include "flutter_common.h"
 #include "fogata_denoise.h"
+#include "fogata_track_owner.h"
 
 #include <string.h>
 #include <functional>
@@ -63,16 +64,34 @@ class FlutterWebRTCBase {
   virtual scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id);
 
   // Fogata: the track `id` as the application holds it, `owner` being the track's own
-  // peerConnectionId ("local" for this device's own tracks): the tracks that connection
-  // received come first, then the plain lookup (a sender's track is held with its
-  // connection's id, and is found as before). A connection that receives a track sent by
-  // another connection of this same application (mic_test.dart's LevelLoop, which reads
-  // the microphone's level while alone in a call) gets it under the same id: a received
-  // track is named after the sender's msid. The plain lookup, local tracks first, then
-  // gave the microphone for the received track, and muting the loop's playback disabled
-  // the microphone in every call until it was opened again.
+  // peerConnectionId ("local" for this device's own tracks). For a connection, a track
+  // it receives, else one it sends (a sender's track is held with its connection's id),
+  // and nothing else: not this device's own track of that id, nor another connection's,
+  // also once that connection is gone (TrackOfOwner, fogata_track_owner.h). A connection
+  // that receives a track sent by another connection of this same application
+  // (mic_test.dart's LevelLoop, which reads the microphone's level while alone in a
+  // call) gets it under the same id: a received track is named after the sender's msid.
+  // The plain lookup, local tracks first, then gave the microphone for the received
+  // track, and muting the loop's playback disabled the microphone in every call until it
+  // was opened again. "local", or no owner, is the plain lookup.
+  //
+  // What it gives must be held (a scoped_refptr) for as long as it is used: a track
+  // found among the connection's receivers or senders is a wrapper libwebrtc's C++
+  // wrapper makes for this one lookup, which nothing else keeps. Nor is it ever the
+  // object another lookup of the same track gives: compare tracks by where they were
+  // found, or by id, never by pointer.
   scoped_refptr<RTCMediaTrack> MediaTrackForId(const std::string& id,
                                                const std::string& owner);
+
+  // Fogata: the track `id` the connection `owner` receives (its observer's list, then
+  // its receivers), or null; held as MediaTrackForId's.
+  scoped_refptr<RTCMediaTrack> ReceivedTrackForId(const std::string& id,
+                                                  const std::string& owner);
+
+  // Fogata: the track `id` the connection `owner` sends (its senders'), or null; held as
+  // MediaTrackForId's.
+  scoped_refptr<RTCMediaTrack> SentTrackForId(const std::string& id,
+                                              const std::string& owner);
 
   // Fogata: records from the input at `index` of the list, whose id is `id` (for the
   // list's first entry, the system's default, nothing more is kept). WebRTC keeps only
@@ -168,6 +187,9 @@ class FlutterWebRTCBase {
   std::map<std::string, scoped_refptr<RTCPeerConnection>> peerconnections_;
   std::map<std::string, scoped_refptr<RTCMediaStream>> local_streams_;
   std::map<std::string, scoped_refptr<RTCMediaTrack>> local_tracks_;
+  // Fogata: the received tracks added to each local stream, by the stream's id: not let
+  // go of as this device's own when the stream is (ReceivedInStreams).
+  ReceivedInStreams received_in_streams_;
   std::map<std::string, scoped_refptr<RTCVideoCapturer>> video_capturers_;
   // Fogata: stops what feeds a local track (the portal's screen capture) when the
   // track or its stream is disposed.

@@ -21,6 +21,8 @@
 #include <iostream>
 #include <memory>
 #include <vector>
+
+#include "portal_i420.h"
 #endif
 
 namespace flutter_webrtc_plugin {
@@ -303,44 +305,6 @@ void Ask(const StatePtr& s,
                          parameters, G_VARIANT_TYPE("(o)"),
                          G_DBUS_CALL_FLAGS_NONE, -1, nullptr, OnCalled,
                          new std::shared_ptr<Pending>(pending));
-}
-
-// BT.601 limited range, as WebRTC's encoders expect. Each colour sample is the
-// average of the 2x2 block it stands for: the top-left pixel alone gave coloured
-// fringes along text and thin lines. (libyuv is inside libwebrtc, but the library
-// exports only the wrapper's API.)
-void ToI420(const uint8_t* src, int stride, int width, int height, bool bgr,
-            uint8_t* y, uint8_t* u, uint8_t* v) {
-  const int r_at = bgr ? 2 : 0;
-  const int b_at = bgr ? 0 : 2;
-  const int half = (width + 1) / 2;
-  for (int row = 0; row < height; row++) {
-    const uint8_t* p = src + size_t(row) * stride;
-    uint8_t* yrow = y + size_t(row) * width;
-    for (int col = 0; col < width; col++, p += 4) {
-      yrow[col] = uint8_t(((66 * p[r_at] + 129 * p[1] + 25 * p[b_at] + 128) >> 8) + 16);
-    }
-  }
-  for (int row = 0; row < height; row += 2) {
-    const uint8_t* top = src + size_t(row) * stride;
-    // The last row of an odd height stands for itself twice.
-    const uint8_t* bottom = row + 1 < height ? top + stride : top;
-    uint8_t* urow = u + size_t(row / 2) * half;
-    uint8_t* vrow = v + size_t(row / 2) * half;
-    for (int col = 0; col < width; col += 2) {
-      const size_t left = size_t(col) * 4;
-      // And the last column of an odd width.
-      const size_t right = col + 1 < width ? left + 4 : left;
-      const int r = top[left + r_at] + top[right + r_at] + bottom[left + r_at] +
-                    bottom[right + r_at];
-      const int g = top[left + 1] + top[right + 1] + bottom[left + 1] + bottom[right + 1];
-      const int b = top[left + b_at] + top[right + b_at] + bottom[left + b_at] +
-                    bottom[right + b_at];
-      // Sums of four: the shift takes the average too.
-      urow[col / 2] = uint8_t(((-38 * r - 74 * g + 112 * b + 512) >> 10) + 128);
-      vrow[col / 2] = uint8_t(((112 * r - 94 * g - 18 * b + 512) >> 10) + 128);
-    }
-  }
 }
 
 void OnParamChanged(void* data, uint32_t id, const spa_pod* param) {

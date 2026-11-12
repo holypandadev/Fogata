@@ -2325,6 +2325,12 @@ abstract class L10n {
   /// **'Some connections can’t take more right now: {names} get a smaller picture.{others, select, yes{ The others get what you chose.} other{}}'**
   String streamQualityLoweredMany(String names, String others);
 
+  /// Stream quality panel: why everyone watching gets a smaller picture, or fewer frames per second, than chosen: this computer sends one copy of the screen to each watcher, and lowers it for all of them when many watch or the computer is busy.
+  ///
+  /// In en, this message translates to:
+  /// **'Everyone watching gets a smaller or less smooth picture right now, to spare your computer.'**
+  String get streamQualitySpared;
+
   /// Stream quality panel: small heading in capitals over what each watcher receives now.
   ///
   /// In en, this message translates to:
@@ -7009,16 +7015,16 @@ abstract class L10n {
   /// **'Night'**
   String get themeBannerNight;
 
-  /// Tooltip and screen-reader label of a copy button. {what} says which secret it copies: qr (a QR code; English says "QR code"), link (a friend link) or code (a friend code).
+  /// Tooltip and screen-reader label of a copy button. {what} says which secret it copies: qr (a QR code; English says "QR code"), link (a friend link), code (a friend code) or key (a new recovery key).
   ///
   /// In en, this message translates to:
   /// **'{what, select, qr{Copy QR code} link{Copy link} code{Copy code} other{Copy}}'**
   String widgetsCopyWhat(String what);
 
-  /// Tooltip of the eye button that shows a blurred secret for ten seconds. {what} says which: qr (a QR code; English says "QR code"), link (a friend link) or code (a friend code).
+  /// Tooltip of the eye button that shows a blurred secret for ten seconds. {what} says which: qr (a QR code; English says "QR code"), link (a friend link), code (a friend code) or key (a new recovery key).
   ///
   /// In en, this message translates to:
-  /// **'{what, select, qr{Show QR code} link{Show link} code{Show code} other{Show}}'**
+  /// **'{what, select, qr{Show QR code} link{Show link} code{Show code} key{Show key} other{Show}}'**
   String widgetsShowWhat(String what);
 
   /// Tooltip of the eye button that blurs a shown secret (a link, code or QR) again.
@@ -7026,6 +7032,18 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Hide'**
   String get widgetsHide;
+
+  /// Under a long chat message cut after some lines: shows the rest of it. Small underlined words.
+  ///
+  /// In en, this message translates to:
+  /// **'Show more'**
+  String get widgetsShowMore;
+
+  /// Under a long chat message shown whole: cuts it again after some lines. Small underlined words.
+  ///
+  /// In en, this message translates to:
+  /// **'Show less'**
+  String get widgetsShowLess;
 
   /// Toast when the file manager could not be opened on a file; {path} is where the file is.
   ///

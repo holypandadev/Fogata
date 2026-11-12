@@ -5,6 +5,7 @@
 #include <pipewire/pipewire.h>
 #include <unistd.h>
 
+#include <atomic>
 #include <iostream>
 
 #include <mutex>
@@ -24,6 +25,11 @@ struct Silence {
   pw_proxy* node = nullptr;
   spa_hook node_listener = {};
   bool listening = false;
+  spa_hook core_listener = {};
+  bool watching = false;
+  // The connection to the server was lost (PipeWire restarted, as after an update):
+  // the node went with it. Written on the loop's thread.
+  std::atomic<bool> lost{false};
   // The server's answer to making the node, written on the loop's thread.
   int pending = -1;
   bool answered = false;
@@ -57,6 +63,23 @@ void OnDone(void* data, int seq) {
   pw_thread_loop_signal(s->loop, false);
 }
 
+// An error of the connection itself (id PW_ID_CORE), such as EPIPE when the server
+// goes away: the input is gone, and the next Start makes it again.
+void OnCoreError(void* data, uint32_t id, int, int res, const char* message) {
+  if (id != PW_ID_CORE) return;
+  auto s = static_cast<Silence*>(data);
+  std::cerr << "[SilentInput] connection lost: " << (message ? message : "")
+            << " (" << res << ")\n";
+  s->lost = true;
+}
+
+const pw_core_events kCoreEvents = [] {
+  pw_core_events events = {};
+  events.version = PW_VERSION_CORE_EVENTS;
+  events.error = OnCoreError;
+  return events;
+}();
+
 const pw_proxy_events kNodeEvents = [] {
   pw_proxy_events events = {};
   events.version = PW_VERSION_PROXY_EVENTS;
@@ -73,6 +96,7 @@ void Destroy(Silence* s) {
   if (s->loop != nullptr) {
     pw_thread_loop_lock(s->loop);
     if (s->listening) spa_hook_remove(&s->node_listener);
+    if (s->watching) spa_hook_remove(&s->core_listener);
     if (s->node != nullptr) pw_proxy_destroy(s->node);
     if (s->core != nullptr) pw_core_disconnect(s->core);
     pw_thread_loop_unlock(s->loop);
@@ -87,7 +111,12 @@ void Destroy(Silence* s) {
 
 bool SilentInput::Start() {
   std::lock_guard<std::mutex> guard(lock);
-  if (current != nullptr) return true;
+  if (current != nullptr) {
+    if (!current->lost) return true;
+    // Made on a connection since lost: the node is gone. Made again on a new one.
+    Destroy(current);
+    current = nullptr;
+  }
   static const bool initialized = (pw_init(nullptr, nullptr), true);
   (void)initialized;
   auto s = new Silence();
@@ -104,6 +133,8 @@ bool SilentInput::Start() {
   pw_thread_loop_lock(s->loop);
   s->core = pw_context_connect(s->context, nullptr, 0);
   if (s->core != nullptr) {
+    pw_core_add_listener(s->core, &s->core_listener, &kCoreEvents, s);
+    s->watching = true;
     // The lowest priority, so the system never picks it as its own default
     // input. Named after this process, so the application picks its own and
     // not another Fogata's, which goes away with it.

@@ -26,6 +26,16 @@ lab_devices() { # copies
     pactl load-module module-null-sink sink_name=lab${r}_quiet sink_properties=device.description=FogataQuietOut-lab$r. > /dev/null
     pactl load-module module-remap-source source_name=lab${r}_quiet_mic master=lab${r}_quiet.monitor source_properties=device.description=FogataQuiet-lab$r. > /dev/null
   done
+  # CALL_LAB_LOOPBACK=1: a loopback carrying what copy a plays into the default output,
+  # and a combined output, both made by pipewire-pulse as on a desktop with such a setup.
+  # A shared screen's sound must take neither (they pass on sound from elsewhere, maybe
+  # the call itself): with FOGATA_SCREEN_SOUND_FROM= in MEASURE_ENV (so that more than
+  # paplay is taken), a's log must say "passed on, not linked" for their nodes and never
+  # "linking node ... binary=pipewire-pulse".
+  if [ "${CALL_LAB_LOOPBACK:-}" = 1 ]; then
+    pactl load-module module-loopback source=laba_quiet.monitor sink=lab_default latency_msec=60 > /dev/null
+    pactl load-module module-combine-sink sink_name=lab_combined slaves=lab_default sink_properties=device.description=LabCombined > /dev/null
+  fi
   pactl set-default-sink lab_default
   pactl set-default-source lab_default_mic
 }

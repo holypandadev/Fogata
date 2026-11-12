@@ -1715,6 +1715,10 @@ class L10nRu extends L10n {
   }
 
   @override
+  String get streamQualitySpared =>
+      'Чтобы не перегружать ваш компьютер, сейчас все зрители получают изображение меньшего размера или с меньшей частотой кадров.';
+
+  @override
   String get streamQualityGoingOut => 'СЕЙЧАС ОТПРАВЛЯЕТСЯ';
 
   @override
@@ -5190,6 +5194,7 @@ class L10nRu extends L10n {
       'qr': 'Показать QR-код',
       'link': 'Показать ссылку',
       'code': 'Показать код',
+      'key': 'Показать ключ',
       'other': 'Показать',
     });
     return '$_temp0';
@@ -5197,6 +5202,12 @@ class L10nRu extends L10n {
 
   @override
   String get widgetsHide => 'Скрыть';
+
+  @override
+  String get widgetsShowMore => 'Показать полностью';
+
+  @override
+  String get widgetsShowLess => 'Свернуть';
 
   @override
   String revealFailed(String path) {

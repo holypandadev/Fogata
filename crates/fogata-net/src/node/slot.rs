@@ -11,8 +11,12 @@ use fogata_crypto::GroupId;
 use libp2p::{Multiaddr, PeerId};
 
 use super::{
-    Node, PUNCH_SLOT, candidates::RESTING_EVERY, dial::PUNCHED_WITHIN, friends::Target,
-    links::THROUGH_DIAL_WAIT, now_ms,
+    Node, PUNCH_SLOT,
+    candidates::RESTING_EVERY,
+    dial::{PUNCHED_WITHIN, may_route_to},
+    friends::Target,
+    links::THROUGH_DIAL_WAIT,
+    now_ms,
 };
 use crate::{NodeEvent, addr, rendezvous};
 
@@ -54,6 +58,7 @@ impl Node {
         self.want_proven();
         self.publish_known_addresses();
         self.trim_logs();
+        self.fit_room_chat();
         if let Some(left) = self.network_pending.take() {
             self.after_network_change(left);
         }
@@ -113,6 +118,7 @@ impl Node {
         let own_ips = self.own_public_ips();
         let slot = now_ms() / PUNCH_SLOT.as_millis() as u64;
         let resting_too = slot.is_multiple_of(RESTING_EVERY);
+        let own_blocks = self.own_blocks();
         let targets: Vec<(PeerId, Vec<Multiaddr>)> = self
             .candidates
             .iter()
@@ -129,9 +135,19 @@ impl Node {
                     .filter(|a| addr::ip(a).is_none_or(|ip| !own_ips.contains(&ip)))
                     .cloned()
                     .collect();
-                // The way back may be on a local network the two share.
+                // The way back may be on a local network the two share, or one this
+                // device's router leads to (two routers at home): a private IPv4 address
+                // in any /24, but a carrier-grade NAT or unique-local IPv6 one only of a
+                // network this device is on, never one of a VPN it is not on.
                 if self.only_relayed(peer) {
-                    addrs.extend(self.member_lan.get(peer).into_iter().flatten().cloned());
+                    addrs.extend(
+                        self.member_lan
+                            .get(peer)
+                            .into_iter()
+                            .flatten()
+                            .filter(|a| may_route_to(a, &own_blocks))
+                            .cloned(),
+                    );
                 }
                 (*peer, addrs)
             })

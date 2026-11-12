@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use flutter_rust_bridge::frb;
 use fogata_core::direct::VoiceNote;
 
-use super::app::{device, file_id, run};
+use super::app::{blocking, device, file_id, run};
 use crate::voice::{play, record};
 
 /// A recording under way, or stopped and waiting for Send or Delete.
@@ -44,7 +44,7 @@ fn ms(v: u64) -> i64 {
 /// microphone can be used; otherwise true when `input` could not be used and the system's
 /// default microphone records instead.
 pub async fn voice_record_start(input: Option<String>, noise_suppression: bool) -> Result<bool> {
-    tokio::task::spawn_blocking(move || record::start(input, noise_suppression))
+    blocking(move || record::start(input, noise_suppression))
         .await?
         .map_err(|e| anyhow!("{e}"))
 }
@@ -82,7 +82,7 @@ pub async fn voice_record_send(device_id: String) -> Result<bool> {
         fogata_crypto::random_bytes(&mut bytes)?;
         u32::from_le_bytes(bytes)
     };
-    let (recording, id) = tokio::task::spawn_blocking(move || record::finish(serial))
+    let (recording, id) = blocking(move || record::finish(serial))
         .await?
         .map_err(|e| anyhow!("{e}"))?;
     let Some(recording) = recording else {
@@ -114,7 +114,7 @@ pub async fn voice_play(device_id: String, file: String, speed: f64) -> Result<(
     .await?;
     // Reading the file checks all of it (up to 4 MB): not on the threads that run the
     // core's work.
-    tokio::task::spawn_blocking(move || play::play(device_id, file, bytes, speed))
+    blocking(move || play::play(device_id, file, bytes, speed))
         .await?
         .map_err(|e| anyhow!("{e}"))
 }

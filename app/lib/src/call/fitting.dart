@@ -88,9 +88,41 @@ const maxScreenPixels = 7680 * 4320;
 /// smoothly at its chosen size; text stays readable down to the last.
 const screenSteps = [1080, 720, 540];
 
+/// The most lines a shared screen goes out at with [watchers] watching it, as the 16:9 box
+/// of [ScreenQuality.lines]; null for no more than the quality chosen. Everyone watching
+/// has an encoder of their own for the same picture, and each one's memory and work grow
+/// with its pixels: shared to seven, a 1600×900 screen took the sharer about 1 GB and a
+/// core. One or two watchers get the quality chosen; three or four at most 1080 lines,
+/// where a screen shared at its own size (1440 lines, or 4K) would take two to four times
+/// that; five or more at most 720, the smaller quality offered, so that what [ScreenLoad]
+/// gives back when the processor allows is frames rather than size.
+int? screenCeiling(int watchers) => switch (watchers) {
+  <= 2 => null,
+  <= 4 => 1080,
+  _ => 720,
+};
+
+/// The lines of the 16:9 box a shared screen goes out in: those of the quality [chosen]
+/// (null: as captured), at most [ceiling] (null: none). The ceiling never makes it larger
+/// than chosen, and [screenScale] never larger than captured.
+int? cappedLines(int? chosen, int? ceiling) => chosen == null
+    ? ceiling
+    : ceiling == null
+    ? chosen
+    : math.min(chosen, ceiling);
+
 /// How this device's shared screen reaches one person watching it: the size and rate it
-/// goes out at, and whether their connection made it smaller than the chosen quality.
-typedef ScreenOut = ({int width, int height, double fps, bool lowered});
+/// goes out at, whether their connection made it smaller than the chosen quality
+/// ([lowered]), and whether it goes out smaller or slower than chosen to everyone, to spare
+/// this device ([spared]: for the number watching, see [screenCeiling], or for its
+/// processor, see [ScreenLoad]).
+typedef ScreenOut = ({
+  int width,
+  int height,
+  double fps,
+  bool lowered,
+  bool spared,
+});
 
 /// How a shared screen goes out to one person. It keeps its size, so text stays sharp, and
 /// WebRTC drops frames when the connection falls short. When that leaves it choppy (see
@@ -190,7 +222,8 @@ class ScreenFit {
 /// How much of this device's processor a shared screen may take. Everyone watching has an
 /// encoder of their own for the same picture, so the work grows with each one: on a
 /// 16-thread desktop, five watchers of a 1600×900 screen took 2.7 cores and seven brought it
-/// down to 5 frames a second for everyone, as measured. Unlike [ScreenFit],
+/// down to 5 frames a second for everyone, as measured. It also keeps the screen within
+/// the [ceiling] the number watching calls for (see [screenCeiling]). Unlike [ScreenFit],
 /// which follows one person's connection, this follows the encoders together and lowers
 /// the screen for everyone at once, a level at a time (see [levels]): when WebRTC says an
 /// encoder is held back by the processor (`qualityLimitationReason` "cpu") or the encoders
@@ -213,6 +246,7 @@ class ScreenLoad {
     (lines: null, fps: 30),
     (lines: null, fps: 15),
     (lines: 720, fps: 15),
+    (lines: 540, fps: 15),
     (lines: 540, fps: 10),
     (lines: 540, fps: 5),
   ];
@@ -230,21 +264,42 @@ class ScreenLoad {
   static const _longestWait = Duration(seconds: 160);
 
   /// The level a share starts at with [watchers] watching: the full screen for one or
-  /// two, 15 frames a second from three, and a smaller size too from five.
-  static int startFor(int watchers) => watchers >= 5
-      ? 3
-      : watchers >= 3
-      ? 2
-      : 0;
+  /// two, 15 frames a second for three, 720 lines at 15 for four, and 540 lines at 15
+  /// from five, where it would otherwise begin larger and fall: in the lab, three
+  /// watchers of a 1600×900 screen kept 15 frames a second at its full size, but five
+  /// started at 720 lines went down to 10. 540 lines at 15 takes seven encoders about
+  /// what 720 lines took five. With fewer pixels from five on (see [screenCeiling]), a
+  /// level up there brings back frames rather than size.
+  static int startFor(int watchers) => switch (watchers) {
+    <= 2 => 0,
+    3 => 2,
+    4 => 3,
+    _ => 4,
+  };
 
   /// How much encoding a level takes, as lines squared times frames a second, with the
-  /// screen captured at most [fps] frames a second: the full screen counts as 1080 lines.
+  /// screen captured at most [fps] frames a second and kept within [ceiling] lines: the
+  /// full screen counts as 1080 lines.
   @visibleForTesting
-  static double costOf(int level, {int fps = 30}) {
+  static double costOf(int level, {int fps = 30, int? ceiling}) {
     final limits = levels[level];
-    final lines = (limits.lines ?? 1080).toDouble();
+    final lines = (cappedLines(limits.lines, ceiling) ?? 1080).toDouble();
     return lines * lines * math.min(limits.fps, fps);
   }
+
+  /// The most lines the screen goes out at for the number watching (see
+  /// [screenCeiling]), whatever the level; null for none. It comes down at once when
+  /// more watch, before the new watcher's encoder starts, and goes back up only once
+  /// fewer have watched for [ceilingWait]: someone who comes and goes within it leaves
+  /// it where it is.
+  int? ceiling;
+
+  /// How long fewer must watch before the [ceiling] goes back up.
+  static const ceilingWait = Duration(seconds: 20);
+
+  /// Since when fewer watch than the [ceiling] is for, and the most that watched since.
+  DateTime? _fewerSince;
+  int _mostSinceFewer = 0;
 
   /// The most frames a second the screen is captured at (its quality's, or less as it
   /// was asked for); the call sets it.
@@ -287,9 +342,11 @@ class ScreenLoad {
   /// The most frames a second the screen goes out at now.
   int get _fps => math.min(limits.fps, capturedFps);
 
-  /// What level [at] sends of a screen captured at [capturedFps].
-  ({int? lines, int fps}) _sent(int at) =>
-      (lines: levels[at].lines, fps: math.min(levels[at].fps, capturedFps));
+  /// What level [at] sends of a screen captured at [capturedFps], within the [ceiling].
+  ({int? lines, int fps}) _sent(int at) => (
+    lines: cappedLines(levels[at].lines, ceiling),
+    fps: math.min(levels[at].fps, capturedFps),
+  );
 
   /// The next level down that sends less than [level]; [level] itself at the last.
   int _below(int level) {
@@ -313,21 +370,61 @@ class ScreenLoad {
 
   void _setLevel(int to, DateTime now) {
     level = to;
-    _changed = now;
     _mostWatchers = _watchers;
+    _settle(now);
+  }
+
+  /// What the encoders are asked for changed: readings start over, and WebRTC's word that
+  /// the processor holds one back is not taken for [settling].
+  void _settle(DateTime now) {
+    _changed = now;
     _heavy = 0;
     _light = null;
   }
 
-  /// [watchers] watch now: when more than ever since the level last changed, a level as
-  /// low as their number calls for, if not lower already. Returns whether [level] changed.
+  /// [watchers] watch now: the [ceiling] their number calls for (lower at once, higher
+  /// after [ceilingWait]), and, when more than ever since the level last changed, a level
+  /// as low as their number calls for, if not lower already. Returns whether [level] or
+  /// [ceiling] changed.
   bool watchersAre(int watchers, {DateTime? now}) {
+    final at = now ?? DateTime.now();
+    final capped = _followCeiling(watchers, at);
     _watchers = watchers;
     final more = watchers > _mostWatchers;
     _mostWatchers = math.max(_mostWatchers, watchers);
     final start = startFor(watchers);
-    if (!more || start <= level) return false;
-    _setLevel(start, now ?? DateTime.now());
+    if (!more || start <= level) return capped;
+    _setLevel(start, at);
+    return true;
+  }
+
+  /// Moves the [ceiling] towards what [watchers] call for, as [ceiling] says; returns
+  /// whether it moved.
+  bool _followCeiling(int watchers, DateTime now) {
+    final wanted = screenCeiling(watchers);
+    final current = ceiling;
+    final lower = wanted != null && (current == null || wanted < current);
+    if (lower || wanted == current) {
+      _fewerSince = null;
+      if (!lower) return false;
+      ceiling = wanted;
+      _settle(now);
+      return true;
+    }
+    final since = _fewerSince;
+    if (since == null) {
+      _fewerSince = now;
+      _mostSinceFewer = watchers;
+      return false;
+    }
+    _mostSinceFewer = math.max(_mostSinceFewer, watchers);
+    if (now.difference(since) < ceilingWait) return false;
+    // As high as the most that watched meanwhile allow; as many as now watch have
+    // watched since, for higher still.
+    ceiling = screenCeiling(_mostSinceFewer);
+    _fewerSince = ceiling == wanted ? null : now;
+    _mostSinceFewer = watchers;
+    _settle(now);
     return true;
   }
 
@@ -416,8 +513,8 @@ class ScreenLoad {
     if (level == 0 ||
         (encoders.values.any((e) => e.cpu) && !stuck) ||
         busy *
-                costOf(above, fps: capturedFps) /
-                costOf(level, fps: capturedFps) >
+                costOf(above, fps: capturedFps, ceiling: ceiling) /
+                costOf(level, fps: capturedFps, ceiling: ceiling) >
             busyCores * 0.9) {
       _light = null;
       return false;
@@ -432,6 +529,9 @@ class ScreenLoad {
   /// Starts over, as for a new share.
   void reset() {
     level = 0;
+    ceiling = null;
+    _fewerSince = null;
+    _mostSinceFewer = 0;
     wait = _firstWait;
     _watchers = 0;
     _mostWatchers = 0;
@@ -737,10 +837,13 @@ extension _Fitting on Call {
 
   /// The most the shared screen may use going out scaled down by [scale] (see
   /// [screenKbps]), at the rate it goes out at now. Before its size is known it is taken
-  /// to fill its quality's 16:9 box (1080 lines when as captured).
+  /// to fill its quality's 16:9 box, within the ceiling for those watching (1080 lines
+  /// when as captured).
   int _screenKbpsAt(double scale) {
     final video = localScreen.value;
-    final lines = (screenQuality.lines ?? 1080).toDouble();
+    final lines =
+        (cappedLines(screenQuality.lines, _screenLoad.ceiling) ?? 1080)
+            .toDouble();
     final (width, height) = video.width > 0 && video.height > 0
         ? (video.width / scale, video.height / scale)
         : (lines * 16 / 9, lines);
@@ -823,7 +926,8 @@ extension _Fitting on Call {
         width: width,
         height: lines,
         fps: fps,
-        lowered: peer._fit.step > 0 || _screenLoad.lowered,
+        lowered: peer._fit.step > 0,
+        spared: _spared,
       ));
     }
     if (!changed) return;
@@ -896,17 +1000,44 @@ extension _Fitting on Call {
     _screenLoad.capturedFps = _capturedAt > 0
         ? math.min(screenQuality.fps, _capturedAt)
         : screenQuality.fps;
+    final ceiling = _screenLoad.ceiling;
+    // Also where the ceiling goes back up once fewer have watched for a while.
     final more = _screenLoad.watchersAre(watchers);
     final changed = _screenLoad.take(encoders: encoders, now: DateTime.now());
     if (!more && !changed) return;
+    _screenLoadChanged(before, ceiling);
+  }
+
+  /// Someone started or stopped watching this device's shared screen: the screen's
+  /// ceiling and level follow their number at once (see [ScreenLoad.watchersAre]), before
+  /// a new watcher's encoder starts, rather than at the next reading. Those who watch are
+  /// tuned after what is under way on their connections, all but [inTurn], whose turn this
+  /// is: its caller tunes it.
+  void _watchersChanged(CallPeer inTurn) {
+    if (!sharing) return;
+    final before = _screenLoad.level;
+    final ceiling = _screenLoad.ceiling;
+    if (_screenLoad.watchersAre(watchers)) {
+      _screenLoadChanged(before, ceiling, except: inTurn);
+    }
+  }
+
+  /// The screen's level or ceiling changed from [before] and [ceiling]: its scale follows,
+  /// and every connection watching is tuned again, but [except].
+  void _screenLoadChanged(int before, int? ceiling, {CallPeer? except}) {
     final limits = _screenLoad.limits;
+    _scaleAgain();
     _trace(
-      'screen for the processor: level ${_screenLoad.level} (was $before), '
-      '${limits.lines ?? 'full'} lines at most ${limits.fps} fps, $watchers watching',
+      'screen for everyone: level ${_screenLoad.level} (was $before), '
+      '${limits.lines ?? 'full'} lines at most ${limits.fps} fps, within '
+      '${_screenLoad.ceiling ?? 'any'} lines (was ${ceiling ?? 'any'}), '
+      '$watchers watching',
     );
     for (final peer in peers.values) {
       final connection = peer.connection;
-      if (connection != null && peer.watches == me) _tuneSoon(peer, connection);
+      if (connection != null && peer.watches == me && peer != except) {
+        _tuneSoon(peer, connection);
+      }
     }
   }
 
@@ -921,42 +1052,62 @@ extension _Fitting on Call {
   }
 
   /// Every person's screen fit starts over, as for a new share; one stepped down goes back
-  /// to the full size.
+  /// to the full size. Those already watching (another screen picked while they watch)
+  /// set where it starts at once, as their number calls for (see [ScreenLoad.startFor]).
   Future<void> _resetFits() async {
     var stepped = _screenLoad.level > 0;
     _screenLoad.reset();
+    if (sharing) _screenLoad.watchersAre(watchers);
     for (final peer in peers.values) {
       stepped |= peer._fit.step > 0;
       peer._fit.reset();
     }
+    stepped |= _scaleAgain();
     if (stepped) await _retune();
   }
 
-  /// How much the shared screen is scaled down now, from its captured size and quality.
-  double _scaleNow() {
+  /// How much the shared screen is scaled down now, from its captured size and quality,
+  /// within the ceiling for the number watching (see [screenCeiling]).
+  double _scaleNow() =>
+      _scaleTo(cappedLines(screenQuality.lines, _screenLoad.ceiling));
+
+  /// How much the shared screen is scaled down to fit the 16:9 box of [lines] (null: as
+  /// captured), from its captured size.
+  double _scaleTo(int? lines) {
     final video = localScreen.value;
     final (width, height) = video.width > 0 && video.height > 0
         ? (video.width, video.height)
         : (_screenTooLarge?.width ?? 0.0, _screenTooLarge?.height ?? 0.0);
     return width <= 0 || height <= 0
         ? 1.0
-        : screenScale(width, height, lines: screenQuality.lines);
+        : screenScale(width, height, lines: lines);
   }
+
+  /// Whether the shared screen goes out smaller or slower than chosen to everyone, to
+  /// spare this device (see [ScreenOut]).
+  bool get _spared =>
+      _screenLoad.lowered || _screenScale > _scaleTo(screenQuality.lines);
 
   /// The shared screen's size became known or changed: every connection is told the new
   /// scale, and the bitrate the new size may use (see [screenKbps]).
   Future<void> _rescale() async {
+    if (_scaleAgain()) await _retune();
+  }
+
+  /// Takes the scale and bitrate the shared screen goes out at now; returns whether
+  /// either changed, and the connections are to be told.
+  bool _scaleAgain() {
     // A size not known (no picture yet, or none any more) keeps the scale there is: while
     // another screen is picked, the one before may still send to those who watch it.
     final video = localScreen.value;
     final known = video.width > 0 && video.height > 0;
-    if (!known && _screenTooLarge == null) return;
+    if (!known && _screenTooLarge == null) return false;
     final scale = _scaleNow();
     final kbps = _screenKbpsAt(scale);
-    if (_closed || (scale == _screenScale && kbps == _screenKbps)) return;
+    if (_closed || (scale == _screenScale && kbps == _screenKbps)) return false;
     _screenScale = scale;
     _screenKbps = kbps;
-    await _retune();
+    return true;
   }
 
   /// Tells every connection how the camera and the screen go out now.

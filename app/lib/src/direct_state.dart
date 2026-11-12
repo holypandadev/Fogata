@@ -565,17 +565,33 @@ class DirectChats extends Piece {
   void onEvent(UiEvent e) {
     switch (e.kind) {
       case UiEventKind.direct || UiEventKind.directDownload:
-        _later('chats', refresh);
+        _changedIn(e.device);
       case UiEventKind.directMessage:
-        _later('chats', refresh);
+        _changedIn(e.device);
         if (!reading(e.device)) _sound();
       case UiEventKind.directDownloadFailed:
         app.say(l10n.directStateFileFailed(explain(e.text ?? '')), error: true);
-        _later('chats', refresh);
+        _changedIn(e.device);
       default:
         break;
     }
   }
+
+  /// The chat with [friend] changed (any chat, when not said): the chats are read again
+  /// soon, and the page shown too if it is that chat's. The page holds every item scrolled
+  /// back to, which is read whole each time, and nothing in it comes from another chat.
+  void _changedIn(String? friend) {
+    if (friend == null || friend == open) _pageChanged = true;
+    _later('chats', () {
+      final page = _pageChanged;
+      _pageChanged = false;
+      return refresh(page: page);
+    });
+  }
+
+  /// The page shown is read again at the next refresh [_changedIn] asks for: one that waits
+  /// for a change of another chat keeps a change of this one asked for before it.
+  bool _pageChanged = false;
 
   /// The message sound, at most once every 0.8 s.
   void _sound() {
@@ -600,7 +616,7 @@ class DirectChats extends Piece {
   /// The window came back into view: the chat shown is read now.
   void shown() {
     if (reading(open) && (chat(open)?.unread ?? 0) > 0) {
-      _later('chats', refresh);
+      _changedIn(open);
     }
   }
 }

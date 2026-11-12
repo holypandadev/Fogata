@@ -3,7 +3,7 @@
 Everything Fogata reads from outside goes through a decoder: what other devices send (group
 log entries and logs, member and friend requests and answers, room events, membership
 proofs, typing signals, media packets and their parts, packets to the TURN endpoint, direct
-messages), what people paste (group invites, friend links and codes), the signed records
+messages, what two computers moving an account send each other), what people paste (group invites, friend links and codes), the signed records
 passed around (profiles, banners, bios, animations, group banners), and what the device
 keeps on its disk (sealed files, chat journals, friends file, group logs). Fuzzing feeds
 each of them damaged and made-up inputs, looking for any that make it panic, hang or use too
@@ -23,7 +23,7 @@ order its entries come in; a packet split in parts comes back whole.
 | Target | What it reads |
 |---|---|
 | `entry` | A group log entry, an invite ticket |
-| `log` | A group log, taken in as a member does, then what the node asks of the group |
+| `log` | A group log, taken in as a member does (among the seeds, one raised to level three, with named invites and a `Welcome` its invite does not allow), then what the node asks of the group and a joining device of the log of the group it was invited to |
 | `proof` | Sealed membership proofs, boxes sealed to the device, group tags |
 | `member_wire` | Member requests and answers off the wire (CBOR), and their fields |
 | `node_request` | Member requests handled by a running node against its real state (a group, a member, a stranger) |
@@ -38,7 +38,7 @@ order its entries come in; a packet split in parts comes back whole.
 | `typing` | Typing signals |
 | `sealed_name` | Sealed local addresses in DHT announcements |
 | `invite` | Group invites, friend links and friend codes as people paste them |
-| `records` | Group banners, animations, profiles, banners, bios, the friends file |
+| `records` | Group banners (also read for their stamp alone, unchecked), animations, profiles, banners, bios, the friends file |
 | `at_rest` | Sealed files, chat journals (sealed and plain), sealed attachments, group log files |
 | `mls` | Log entries of groups on MLS (and the chain worked out with them), KeyPackages, a device's MLS state file, Commits followed and Welcomes joined with |
 | `ogg_read` | A friend's voice message file (Ogg Opus), as it came and with its checksums fixed; one that reads is written again and must read back the same |
@@ -46,6 +46,7 @@ order its entries come in; a packet split in parts comes back whole.
 | `wsola_step` | Voice stretched in time from only what each step says it needs, which must be what stretching from all of it gives |
 | `resample` | Sound changed between two rates, whole and in pieces |
 | `recorder` | Sound from a microphone, any values, encoded; the file made must read back with its length |
+| `transfer_wire` | An account move (`/fogata/transfer/2`): the run of its code (starts, replies, proofs, answers), the messages over the channel after it, sealed with fixed keys, read by either computer, and codes as people type them |
 
 ## Long runs, with the stable toolchain
 

@@ -4,12 +4,13 @@ import 'package:flutter/foundation.dart';
 
 import 'l10n.dart';
 import 'rust/api/app.dart' as api;
+import 'test_switches.dart';
 
 /// Opens the system's file manager at [path], with the file selected where the system
 /// allows it. False if no file manager could be reached.
 Future<bool> showInFolder(String path) async {
   // Tests write what would open into a file instead of opening anything.
-  final record = Platform.environment['FOGATA_TEST_OPENED'];
+  final record = testSwitch('FOGATA_TEST_OPENED');
   if (record != null) {
     await File(record).writeAsString('$path\n', mode: FileMode.append);
     return true;

@@ -142,9 +142,14 @@ class MediaStreamTrackNative extends MediaStreamTrack {
   @override
   Future<void> stop() async {
     _local.remove(_trackId);
+    // Fogata: with its owner: a track a connection received goes with that
+    // connection, and its id never stops this device's own track of the same id.
     await WebRTC.invokeMethod(
       'trackDispose',
-      <String, dynamic>{'trackId': _trackId},
+      <String, dynamic>{
+        'trackId': _trackId,
+        'peerConnectionId': _peerConnectionId
+      },
     );
   }
 }

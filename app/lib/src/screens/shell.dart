@@ -8,6 +8,7 @@ import '../format.dart';
 import '../host.dart';
 import '../icons.dart';
 import '../l10n.dart';
+import '../motion.dart';
 import '../quality.dart';
 import '../reveal.dart';
 import '../room_count.dart';
@@ -1800,10 +1801,12 @@ const maxTextScale = 2.0;
 
 /// What the app puts around every page: the system's text size up to [maxTextScale], and
 /// the toasts.
-Widget appFrame(BuildContext context, Widget? child) => _RoundWindow(
-  child: MediaQuery.withClampedTextScaling(
-    maxScaleFactor: maxTextScale,
-    child: withToasts(context, child),
+Widget appFrame(BuildContext context, Widget? child) => FollowMotion(
+  child: _RoundWindow(
+    child: MediaQuery.withClampedTextScaling(
+      maxScaleFactor: maxTextScale,
+      child: withToasts(context, child),
+    ),
   ),
 );
 

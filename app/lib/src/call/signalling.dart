@@ -129,7 +129,7 @@ extension _Signalling on Call {
             connection != null &&
             peer._described) {
           await connection.setRemoteDescription(
-            RTCSessionDescription(message['sdp'] as String, 'offer'),
+            RTCSessionDescription(peerBitrates(sdp), 'offer'),
           );
           await _reply(peer, connection, message['n']);
         } else {
@@ -153,7 +153,7 @@ extension _Signalling on Call {
           return;
         }
         await connection.setRemoteDescription(
-          RTCSessionDescription(sdp, 'answer'),
+          RTCSessionDescription(peerBitrates(sdp), 'answer'),
         );
         peer._offering = false;
         await _described(peer);
@@ -201,8 +201,16 @@ extension _Signalling on Call {
           onSound?.call(
             peer.watches == me ? UiSound.watchStart : UiSound.watchStop,
           );
+          _watchersChanged(peer);
           await _resendTo(peer, _screen);
           await _resendTo(peer, _screenSound);
+          // The screen goes to them as it goes to everyone now: their connection was last
+          // told how when it was made, or when they last watched, and the size and rate
+          // may have changed since (more watching, or the processor).
+          final connection = peer.connection;
+          if (peer.watches == me && connection != null) {
+            await _tune(peer, connection);
+          }
           await _soundTo(peer);
         }
       case 'sound':
@@ -217,7 +225,7 @@ extension _Signalling on Call {
           return;
         }
         await peer._soundOut?.setRemoteDescription(
-          RTCSessionDescription(sdp, 'answer'),
+          RTCSessionDescription(peerBitrates(sdp), 'answer'),
         );
       case 'sound-end':
         await peer._closeSoundIn();
@@ -345,7 +353,9 @@ extension _Signalling on Call {
 
   Future<void> _answer(CallPeer peer, String sdp, Object? number) async {
     final connection = await _connect(peer);
-    await connection.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+    await connection.setRemoteDescription(
+      RTCSessionDescription(peerBitrates(sdp), 'offer'),
+    );
     await _reply(peer, connection, number);
     await _described(peer);
   }

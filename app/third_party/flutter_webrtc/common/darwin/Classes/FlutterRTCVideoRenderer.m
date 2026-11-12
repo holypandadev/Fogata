@@ -155,8 +155,13 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
 
 - (void)copyI420ToCVPixelBuffer:(CVPixelBufferRef)outputPixelBuffer
                       withFrame:(RTCVideoFrame*)frame {
-  id<RTCI420Buffer> i420Buffer = [self correctRotation:[frame.buffer toI420]
-                                          withRotation:frame.rotation];
+  id<RTCI420Buffer> i420Buffer = [frame.buffer toI420];
+  // Fogata: turned only when the frame is turned. Turning by 0 made a full copy of every
+  // frame (libyuv's I420Rotate copies the planes then), the same pixels at the same size;
+  // the buffer from toI420 is held here until the conversion below is done.
+  if (frame.rotation != RTCVideoRotation_0) {
+    i420Buffer = [self correctRotation:i420Buffer withRotation:frame.rotation];
+  }
   CVPixelBufferLockBaseAddress(outputPixelBuffer, 0);
 
   const OSType pixelFormat = CVPixelBufferGetPixelFormatType(outputPixelBuffer);

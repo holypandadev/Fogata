@@ -1083,6 +1083,55 @@ fn a_named_invite_is_a_kind_level_two_does_not_know() {
     assert_eq!(levels_disagree_on(&log, &at_the_level_before(&log)), vec![]);
 }
 
+/// Working out the order and the group of a log reads each named invite many times, at
+/// level three (its author's run, what a demotion outranks, what applies); each is read
+/// from its bytes, its keys checked, only once per thread, and every copy judges alike.
+#[test]
+fn a_named_invite_is_read_from_its_bytes_once() {
+    let (mut log, ana, bea, _carlos) = at_level_three();
+    let invites = 12;
+    for n in 0..invites {
+        let by = if n % 2 == 0 { &ana } else { &bea };
+        log.invite(&by.id, 100_000, 6 + n).unwrap();
+    }
+    assert_eq!(log.state().open_invites.len(), invites as usize);
+    crate::work::Work::start();
+    for _ in 0..3 {
+        let mut copy = GroupLog::empty(log.group_id());
+        copy.insert_all(log.entries().cloned());
+        assert_eq!(copy.state().open_invites.len(), invites as usize);
+        assert_eq!(copy.level(), Level::Three);
+    }
+    let read = crate::work::Work::done().named;
+    assert!(
+        read <= invites as usize,
+        "{read} reads of {invites} invites"
+    );
+    // Bytes that are no invite are none each time they are asked about, kept or not.
+    let entry = log
+        .entries()
+        .find(|e| NamedInvite::of(&e.body).is_some())
+        .unwrap();
+    let Body::Unknown { kind, bytes } = &entry.body else {
+        unreachable!("a named invite is a kind level two does not know")
+    };
+    let mut damaged = bytes.clone();
+    // The issuer's key, made bytes that are no point of the curve: no invite.
+    let off_curve = (0..=u8::MAX)
+        .map(|n| [n; 32])
+        .find(|bytes| fogata_crypto::DevicePublicKey::from_bytes(bytes).is_err())
+        .unwrap();
+    let issuer_at = 16 + 16;
+    assert_eq!(&damaged[issuer_at..issuer_at + 32], entry.author.as_bytes());
+    damaged[issuer_at..issuer_at + 32].copy_from_slice(&off_curve);
+    let damaged = Body::Unknown {
+        kind: *kind,
+        bytes: damaged,
+    };
+    assert_eq!(NamedInvite::of(&damaged), None);
+    assert_eq!(NamedInvite::of(&damaged), None);
+}
+
 /// A copy of the version that brought level two, given a group raised to level three,
 /// refuses the `Level` entry and waits on what is signed on it, as for any level it does
 /// not judge at; this version takes it, and judges what follows at level three.

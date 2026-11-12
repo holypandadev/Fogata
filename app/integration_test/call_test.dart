@@ -3938,8 +3938,118 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       break;
     case 'devices':
       if (_role == 'a') await _listedAfterCall(tester, state);
+    case 'media':
+      await _mediaLetGo(tester, state);
     default:
       throw StateError('no microphone check called $name');
+  }
+}
+
+/// What the video library holds that a camera or a shared screen adds: local streams and
+/// tracks, cameras' capturers, and what stops a screen's capture. The microphone's own
+/// stream and track stay while the call does.
+const _mediaHeld = ['streams', 'tracks', 'capturers', 'stoppers'];
+
+/// tools/call-lab/mic.sh media: copy a turns its camera on (the made-up one,
+/// FOGATA_TEST_CAMERA=1) and shares the screen while b shows both, then stops both: the
+/// video library must hold no more local streams, tracks, capturers or screen stoppers
+/// than before, while the call goes on (a camera or a screen still captured would show
+/// there), and nothing at all on either copy once the call ended. Copy b also lets go of
+/// the streams it made to show a's pictures, which hold tracks it received.
+Future<void> _mediaLetGo(WidgetTester tester, AppState state) async {
+  final call = state.callState.call!;
+  final problems = <String>[];
+  void compare(String when, Map<String, int> before, Map<String, int> now) {
+    _log('held $when: $now (before: $before)');
+    for (final key in _mediaHeld) {
+      if ((now[key] ?? 0) > (before[key] ?? 0)) {
+        problems.add('${now[key]} $key held $when, ${before[key] ?? 0} before');
+      }
+    }
+  }
+
+  await _until(
+    tester,
+    'connected',
+    () => call.peers.values.any((p) => p.connected),
+    seconds: 120,
+  );
+  if (_role == 'a') {
+    final before = await _held();
+    for (var round = 1; round <= 2; round++) {
+      await state.setCamera(true);
+      if (!call.camera) throw StateError('no camera: ${call.problem}');
+      final sources = await call.screens();
+      await call.shareScreen(
+        sources.firstWhere(
+          (s) => s.type == SourceType.Screen,
+          orElse: () => throw StateError('no screen to share'),
+        ),
+      );
+      if (!call.sharing) throw StateError('not sharing: ${call.problem}');
+      _log('round $round: camera and screen on, held ${await _held()}');
+      await _say(state, 'media on $round');
+      await _hear(tester, state, ['media seen $round']);
+      await state.setCamera(false);
+      await call.stopSharing();
+      await _wait(tester, const Duration(seconds: 3));
+      compare(
+        'after camera and screen stopped ($round)',
+        before,
+        await _held(),
+      );
+      await _say(state, 'media off $round');
+      await _hear(tester, state, ['media let go $round']);
+    }
+  } else {
+    final a = (await _hear(tester, state, ['media on 1'])).keys.single;
+    final peer = _peer(state, a);
+    for (var round = 1; round <= 2; round++) {
+      if (round > 1) await _hearFrom(tester, state, a, 'media on $round');
+      await _until(
+        tester,
+        "a's camera shown ($round)",
+        () => peer.cam && peer.camera.videoWidth > 0,
+        seconds: 60,
+      );
+      await _until(
+        tester,
+        "a's screen offered ($round)",
+        () => peer.sharing,
+        seconds: 60,
+      );
+      call.watch(a.id);
+      await _until(
+        tester,
+        "a's screen shown ($round)",
+        () => peer.screen.videoWidth > 0,
+        seconds: 60,
+      );
+      _log('round $round: shown, held ${await _held()}');
+      await _say(state, 'media seen $round');
+      await _hearFrom(tester, state, a, 'media off $round');
+      await _until(
+        tester,
+        "a's camera and screen gone ($round)",
+        () => !peer.cam && !peer.sharing,
+        seconds: 30,
+      );
+      call.watch(null);
+      await _wait(tester, const Duration(seconds: 2));
+      await _say(state, 'media let go $round');
+    }
+  }
+  await _say(state, 'media done');
+  await _hear(tester, state, ['media done']);
+  await state.endCallForTests();
+  await _wait(tester, const Duration(seconds: 5));
+  final after = await _held();
+  _log('held 5 s after the call: $after');
+  for (final e in after.entries) {
+    if (e.value > 0) problems.add('${e.value} ${e.key} held after the call');
+  }
+  if (problems.isNotEmpty) {
+    throw StateError('media not let go of: ${problems.join('; ')}');
   }
 }
 

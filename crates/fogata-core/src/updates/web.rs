@@ -12,7 +12,11 @@
 //! What the releases page learns: this computer's network address, that it runs Fogata (the
 //! `User-Agent`), and when it looks. Settings turn it off.
 
-use std::{collections::HashMap, path::Path, time::Duration};
+use std::{
+    collections::HashMap,
+    path::Path,
+    time::{Duration, Instant},
+};
 
 use fogata_net::updates::FetchError;
 use fogata_update::{Artifact, Signed};
@@ -27,6 +31,41 @@ const LOOKED_AT: usize = 10;
 const FETCHED: usize = 3;
 /// A connection that sends nothing for this long is given up.
 const IDLE: Duration = Duration::from_secs(60);
+/// A package download that brings less than [`MIN_RATE`] bytes a second over any
+/// [`RATE_WINDOW`] is given up and tried again later from its whole chunks: a connection
+/// that sends a byte now and then, never quite [`IDLE`], would otherwise hold the fetch
+/// for ever, and the next try never come.
+const RATE_WINDOW: Duration = Duration::from_secs(2 * 60);
+const MIN_RATE: u64 = 16 * 1024;
+/// The longest a small file (the list of releases, a manifest, a signature) may take.
+const SMALL_WITHIN: Duration = Duration::from_secs(5 * 60);
+
+/// Bytes a download brought in its current [`RATE_WINDOW`].
+struct Pace {
+    since: Instant,
+    bytes: u64,
+}
+
+impl Pace {
+    fn new(now: Instant) -> Pace {
+        Pace {
+            since: now,
+            bytes: 0,
+        }
+    }
+
+    /// Counts `bytes` that came at `now`; false once a whole window brought too few.
+    fn keeps_up(&mut self, bytes: u64, now: Instant) -> bool {
+        self.bytes += bytes;
+        let window = now.saturating_duration_since(self.since);
+        if window < RATE_WINDOW {
+            return true;
+        }
+        let enough = self.bytes as f64 >= MIN_RATE as f64 * window.as_secs_f64();
+        *self = Pace::new(now);
+        enough
+    }
+}
 
 /// Where releases are read from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,7 +181,7 @@ impl Web {
         max: usize,
         accept: Option<&str>,
     ) -> Result<Vec<u8>, FetchError> {
-        let mut request = self.client.get(url);
+        let mut request = self.client.get(url).timeout(SMALL_WITHIN);
         if let Some(accept) = accept {
             request = request.header(reqwest::header::ACCEPT, accept);
         }
@@ -202,10 +241,16 @@ impl Web {
                     have
                 };
                 let mut buf: Vec<u8> = Vec::with_capacity(chunk as usize);
+                let mut pace = Pace::new(Instant::now());
                 while next < count {
                     let Some(mut piece) = response.chunk().await.map_err(unreachable)? else {
                         return Err(FetchError::Io(std::io::ErrorKind::UnexpectedEof.into()));
                     };
+                    if !pace.keeps_up(piece.len() as u64, Instant::now()) {
+                        return Err(FetchError::Unreachable(
+                            "the releases page: the download is too slow".into(),
+                        ));
+                    }
                     if skip > 0 {
                         let n = skip.min(piece.len() as u64);
                         let _ = piece.split_to(n as usize);
@@ -260,4 +305,33 @@ fn too_large() -> FetchError {
         std::io::ErrorKind::InvalidData,
         "the releases page sent more than a release holds",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A download that brings a byte now and then, never waiting [`IDLE`] for the next,
+    /// is given up after a window; one at a slow line's pace, or that stalls a while and
+    /// then catches up within the window, is not.
+    #[test]
+    fn a_download_that_trickles_is_given_up_after_a_window() {
+        let start = Instant::now();
+        let at = |secs: u64| start + Duration::from_secs(secs);
+        let mut trickle = Pace::new(start);
+        let kept = (1..=10)
+            .take_while(|i| trickle.keeps_up(1, at(i * 59)))
+            .count();
+        assert_eq!(kept, 2, "the third byte, 177 s on, ends it");
+
+        // 20 KiB/s for ten minutes.
+        let mut slow_line = Pace::new(start);
+        assert!((1..=600).all(|s| slow_line.keeps_up(20 * 1024, at(s))));
+
+        // Nothing for 90 s, then the rest of the window's worth at once.
+        let mut stall = Pace::new(start);
+        assert!(stall.keeps_up(0, at(90)));
+        assert!(stall.keeps_up(MIN_RATE * 125, at(119)));
+        assert!(stall.keeps_up(1, at(125)));
+    }
 }

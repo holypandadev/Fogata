@@ -219,6 +219,61 @@ where
     }
 }
 
+// ----- Panics -----
+
+/// Reports panics through the log, scrubbed as every line is (the days' log, and standard
+/// error from the start of the core on), and only where in the code one happened on standard
+/// error itself: a panic's message may carry a path or a value, and Rust's own report prints
+/// it as it is on standard error, which may end in the system's journal. A debug build with
+/// [`RAW_VARIABLE`] set keeps Rust's report. Set before anything else takes the hook (the
+/// bridge's, which keeps the backtrace for the application, then hands each panic on here).
+pub(crate) fn report_panics() {
+    if cfg!(debug_assertions) && std::env::var_os(RAW_VARIABLE).is_some() {
+        return;
+    }
+    std::panic::set_hook(Box::new(|info| report_panic(info, &mut io::stderr())));
+}
+
+fn report_panic(info: &std::panic::PanicHookInfo<'_>, err: &mut dyn Write) {
+    thread_local! {
+        static REPORTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let place = info.location().map_or_else(
+        || "an unknown place".to_string(),
+        |l| format!("{}:{}", l.file(), l.line()),
+    );
+    let _ = writeln!(
+        err,
+        "Fogata panicked at {place}; what it said is in the log, without what is personal"
+    );
+    // A panic while the log writes this one (in the scrubbing, say) is told only above.
+    if REPORTING.with(|r| r.replace(true)) {
+        return;
+    }
+    let message = info.payload_as_str().unwrap_or("(not text)");
+    tracing::error!("panicked at {place}: {message}");
+    REPORTING.with(|r| r.set(false));
+}
+
+/// What a panic said (its payload), without what is personal, as the log has it: for the
+/// screens, which the bridge tells of a panic in a call with what it said, and which may
+/// write that where the log's scrubbing does not reach (standard output, say).
+pub(crate) fn scrubbed_panic(payload: &(dyn std::any::Any + Send)) -> String {
+    let said = payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str));
+    match said {
+        Some(text) => scrubbed(text),
+        None => "(not text)".to_string(),
+    }
+}
+
+/// `text` without what is personal, as a message of the log.
+pub(crate) fn scrubbed(text: &str) -> String {
+    scrub::message(text, &known())
+}
+
 // ----- Formatting -----
 
 /// Formats the message and the fields of an event or a span with what is personal taken
@@ -718,6 +773,38 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A panic's message goes to the log scrubbed, and standard error is told only where in
+    /// the code it happened.
+    #[test]
+    fn a_panic_tells_standard_error_only_where_it_happened() {
+        use tracing_subscriber::prelude::*;
+        let (log, err) = (Sink::default(), Sink::default());
+        let (writer, stderr) = (log.clone(), err.clone());
+        let subscriber = tracing_subscriber::registry().with(scrubbed_layer(
+            move || writer.clone(),
+            EnvFilter::new("error"),
+            false,
+        ));
+        let before = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            report_panic(info, &mut stderr.clone());
+        }));
+        let caught = tracing::subscriber::with_default(subscriber, || {
+            std::panic::catch_unwind(|| panic!("no answer from {PEER}"))
+        });
+        std::panic::set_hook(before);
+        assert!(caught.is_err());
+        let err = String::from_utf8(err.0.lock().unwrap().clone()).unwrap();
+        assert!(err.contains("logs.rs:"), "{err}");
+        assert!(!err.contains("no answer") && !err.contains(PEER), "{err}");
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("panicked at") && log.contains("no answer"),
+            "{log}"
+        );
+        assert!(!log.contains(PEER), "{log}");
     }
 
     fn fp_full() -> &'static str {

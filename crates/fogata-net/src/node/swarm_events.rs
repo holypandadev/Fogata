@@ -17,7 +17,7 @@ use libp2p::{
 use super::{
     ConnectionInfo, Node, STARTUP,
     candidates::{Budget, MAX_FAILURES, MAX_RESTS},
-    dial::{PUNCHED_WITHIN, private_block},
+    dial::{PUNCHED_WITHIN, local_block},
     is_loopback,
     network::{probe_lost_udp, v6_net},
 };
@@ -55,9 +55,9 @@ impl Node {
                 // A slot at a member's relay is no network of this device's own.
                 if !is_loopback(&address) && !addr::is_relayed(&address) {
                     self.swarm.behaviour_mut().relay_address(&address, true);
-                    let block = private_block(&address);
+                    let block = local_block(&address);
                     let new_block = block.is_some()
-                        && !self.listen_addrs.iter().any(|a| private_block(a) == block);
+                        && !self.listen_addrs.iter().any(|a| local_block(a) == block);
                     // A new temporary IPv6 address in a /64 this device is on already: the
                     // same network.
                     let same_v6 = v6_net(&address).is_some_and(|net| {
@@ -223,6 +223,15 @@ impl Node {
         self.reached_peers.insert(peer);
         self.udp.connected(connection, &address, Instant::now());
         let public = !addr::is_local(&address) && !addr::is_relayed(&address);
+        // Dialled by this device at a public address, or at a name (the bootstrap nodes'
+        // `/dnsaddr`, which the connection keeps unresolved): whoever answers there is one this
+        // device chose, whichever part of it (its own code or the DHT's) dialled.
+        if public
+            && matches!(endpoint, ConnectedPoint::Dialer { .. })
+            && (addr::ip(&address).is_some() || addr::is_named(&address))
+        {
+            self.dialled_public.insert(connection);
+        }
         if public && addr::ip(&address).is_some() {
             self.public_contact();
             if !addr::is_quic(&address)
@@ -305,6 +314,7 @@ impl Node {
         let closed = self.connections.remove(&connection);
         self.closing.remove(&connection);
         self.dialled_tcp.remove(&connection);
+        self.dialled_public.remove(&connection);
         self.punch_dials.remove(&connection);
         self.ping_misses.remove(&connection);
         if remaining > 0 {

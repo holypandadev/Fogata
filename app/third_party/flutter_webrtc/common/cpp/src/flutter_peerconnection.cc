@@ -1094,8 +1094,12 @@ void FlutterPeerConnection::GetStats(
     RTCPeerConnection* pc,
     std::unique_ptr<MethodResultProxy> result) {
   std::shared_ptr<MethodResultProxy> result_ptr(result.release());
-  scoped_refptr<RTCMediaTrack> track = base_->MediaTracksForId(track_id);
-  if (track != nullptr && track_id != "") {
+  // Fogata: a track asked for is looked for in this connection's receivers, then its
+  // senders, and nowhere else. A lookup of the id among every track first (local ones
+  // first) only decided whether to look: an id it did not know, a received track not
+  // listed yet, gave the whole report, and the caller's narrow reading silently became
+  // a full one.
+  if (!track_id.empty()) {
     bool found = false;
     auto receivers = pc->receivers();
     for (auto receiver : receivers.std_vector()) {
@@ -1348,7 +1352,7 @@ void FlutterPeerConnectionObserver::OnAddStream(
 
     videoTracks.push_back(EncodableValue(videoTrack));
   }
-  remote_streams_[streamId] = scoped_refptr<RTCMediaStream>(stream);
+  remote_.AddStream(streamId, scoped_refptr<RTCMediaStream>(stream));
   params[EncodableValue("videoTracks")] = EncodableValue(videoTracks);
 
   event_channel_->Success(EncodableValue(params));
@@ -1368,7 +1372,7 @@ void FlutterPeerConnectionObserver::OnAddTrack(
     scoped_refptr<RTCRtpReceiver> receiver) {
   auto track = receiver->track();
   if (track.get()) {
-    remote_tracks_[track->id().std_string()] = track;
+    remote_.AddTrack(track->id().std_string(), track);
   }
 
   std::vector<scoped_refptr<RTCMediaStream>> mediaStreams;
@@ -1401,7 +1405,7 @@ void FlutterPeerConnectionObserver::OnTrack(
   auto receiver = transceiver->receiver();
   auto track = receiver->track();
   if (track.get()) {
-    remote_tracks_[track->id().std_string()] = track;
+    remote_.AddTrack(track->id().std_string(), track);
   }
   EncodableMap params;
   EncodableList streams_info;
@@ -1425,7 +1429,7 @@ void FlutterPeerConnectionObserver::OnRemoveTrack(
     scoped_refptr<RTCRtpReceiver> receiver) {
   auto track = receiver->track();
   if (track.get()) {
-    remote_tracks_.erase(track->id().std_string());
+    remote_.RemoveTrack(track->id().std_string());
   }
 
   EncodableMap params;
@@ -1493,40 +1497,33 @@ void FlutterPeerConnectionObserver::OnRenegotiationNeeded() {
 
 scoped_refptr<RTCMediaStream> FlutterPeerConnectionObserver::MediaStreamForId(
     const std::string& id) {
-  auto it = remote_streams_.find(id);
-  if (it != remote_streams_.end())
-    return (*it).second;
-  return nullptr;
+  return remote_.StreamFor(id);
 }
 
 scoped_refptr<RTCMediaTrack> FlutterPeerConnectionObserver::MediaTrackForId(
     const std::string& id) {
-  auto known = remote_tracks_.find(id);
-  if (known != remote_tracks_.end())
-    return (*known).second;
-
-  for (auto it = remote_streams_.begin(); it != remote_streams_.end(); it++) {
-    auto remoteStream = (*it).second;
-    auto audio_tracks = remoteStream->audio_tracks();
-    for (auto track : audio_tracks.std_vector()) {
-      if (track->id().std_string() == id) {
-        return track;
-      }
-    }
-    auto video_tracks = remoteStream->video_tracks();
-    for (auto track : video_tracks.std_vector()) {
-      if (track->id().std_string() == id) {
-        return track;
-      }
-    }
-  }
-  return nullptr;
+  return remote_.TrackFor(
+      id,
+      [](const scoped_refptr<RTCMediaStream>& remoteStream,
+         const std::string& wanted) -> scoped_refptr<RTCMediaTrack> {
+        auto audio_tracks = remoteStream->audio_tracks();
+        for (auto track : audio_tracks.std_vector()) {
+          if (track->id().std_string() == wanted) {
+            return track;
+          }
+        }
+        auto video_tracks = remoteStream->video_tracks();
+        for (auto track : video_tracks.std_vector()) {
+          if (track->id().std_string() == wanted) {
+            return track;
+          }
+        }
+        return nullptr;
+      });
 }
 
 void FlutterPeerConnectionObserver::RemoveStreamForId(const std::string& id) {
-  auto it = remote_streams_.find(id);
-  if (it != remote_streams_.end())
-    remote_streams_.erase(it);
+  remote_.RemoveStream(id);
 }
 
 }  // namespace flutter_webrtc_plugin

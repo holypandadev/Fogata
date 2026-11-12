@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Simulated internet with home NATs, built in unprivileged Linux network namespaces.
 #
-# Every scenario gets fresh namespaces: two lab DHT nodes on a "public" network, each in a
-# network of its own (203.0.113.0/24 and 198.51.100.0/24, as a device takes an address for
-# its own only from peers on two networks), which write every announcement they take to
+# Every scenario gets fresh namespaces: three lab DHT nodes on a "public" network, each in a
+# network of its own (203.0.113.0/24, 198.51.100.0/24 and 192.0.2.0/24, as a device takes an
+# address for its own from strangers only when peers on three networks agree, one of them
+# dialled by the device), which write every announcement they take to
 # <logs>/dht<n>.records, and Fogata devices behind NAT routers of different kinds:
 #   cone       Linux masquerade: keeps the source port, filters by address and port.
 #   symmetric  masquerade fully-random: a new random public port for every destination.
@@ -359,7 +360,13 @@ DHT1=$DHT_ADDR
 public_host dht2 198.51.100.11
 start_dht dht2 4001 --peer "$DHT1"
 DHT2=$DHT_ADDR
-BOOT="--bootstrap $DHT1 --bootstrap $DHT2"
+# A third, on a network of its own: a device takes its address from strangers only when
+# peers on three networks agree, as on the internet, where the DHT nodes a device's own
+# lookups lead to are on many.
+public_host dht3 192.0.2.12
+start_dht dht3 4001 --peer "$DHT1"
+DHT3=$DHT_ADDR
+BOOT="--bootstrap $DHT1 --bootstrap $DHT2 --bootstrap $DHT3"
 "$BIN" --data-dir "$WORK/creator" group create lab > /dev/null
 
 # Makes devices $@ members of the lab group: the creator (who stays offline) adds each one
@@ -393,8 +400,14 @@ befriend() {
 }
 
 # A test release key, trusted by every copy here through FOGATA_RELEASE_KEY, and release
-# build 2 in $WORK/rel2 with a Linux and a Windows package of random bytes.
+# build $REL in $WORK/rel2 with a Linux and a Windows package of random bytes. $RUNS is the
+# build the copies here run (the program's own, which grows with every release), $REL the
+# next one: a release no newer than the program's is refused, at publish as on the wire.
 release_setup() {
+    RUNS=$("$BIN" --data-dir "$WORK/build-probe" update status |
+        awk '/^This copy: build/ {print $4}' || true)
+    [[ $RUNS =~ ^[0-9]+$ ]] || { echo "netlab: cannot tell the build $BIN runs" >&2; exit 1; }
+    REL=$((RUNS + 1))
     # The lab's key is sealed like a real one; its passphrase comes from the environment
     # (release --lab).
     export FOGATA_RELEASE_PASSPHRASE=network-lab-release-key
@@ -406,8 +419,8 @@ release_setup() {
     head -c 3000000 /dev/urandom > "$WORK/linux.pack"
     head -c 2500000 /dev/urandom > "$WORK/windows.pack"
     echo "A release of the network lab." > "$WORK/notes"
-    "$BIN" release --lab sign --key "$WORK/key/release-key" --build 2 --version 0.1.0-beta.2 \
-        --min-build 1 --notes "$WORK/notes" --out "$WORK/rel2" \
+    "$BIN" release --lab sign --key "$WORK/key/release-key" --build "$REL" \
+        --version "0.1.0-beta.$REL" --min-build 1 --notes "$WORK/notes" --out "$WORK/rel2" \
         linux-flatpak="$WORK/linux.pack" windows-x64="$WORK/windows.pack" > /dev/null
 }
 
@@ -548,8 +561,8 @@ SAY_AT=70
 
 case $SCENARIO in
     update-chain)
-        # A publishes release 2. B is A's friend; C is B's friend but not A's, and runs on
-        # another platform (Windows): C can only get its package through B, which fetches
+        # A publishes the next release ($REL, see release_setup). B is A's friend; C is B's
+        # friend but not A's, and runs on another platform (Windows): C can only get its package through B, which fetches
         # it from A because C asked it for one. D, a stranger that dials B, gets nothing.
         nat_host A 203.0.113.21 cone
         public_host B 203.0.113.30
@@ -583,10 +596,10 @@ case $SCENARIO in
             grep -E 'update:|state: (ready|failed)|ask:|fetch:' "$WORK/$device.out" | sort -u || true
         done
         result=0
-        grep -q "package linux-flatpak of build 2 from $a_id" "$WORK/B.out" || result=1
-        grep -q "package windows-x64 of build 2 from $a_id" "$WORK/B.out" || result=1
-        grep -q "build 2 (0.1.0-beta.2) from $b_id" "$WORK/C.out" || result=1
-        grep -q "package windows-x64 of build 2 from $b_id" "$WORK/C.out" || result=1
+        grep -q "package linux-flatpak of build $REL from $a_id" "$WORK/B.out" || result=1
+        grep -q "package windows-x64 of build $REL from $a_id" "$WORK/B.out" || result=1
+        grep -q "build $REL (0.1.0-beta.$REL) from $b_id" "$WORK/C.out" || result=1
+        grep -q "package windows-x64 of build $REL from $b_id" "$WORK/C.out" || result=1
         grep -q 'state: ready to install' "$WORK/C.out" || result=1
         cmp -s "$WORK/windows.pack" "$WORK/data-C/updates/windows-x64.pack" || result=1
         grep -q "from $a_id" "$WORK/C.out" && result=1
@@ -596,12 +609,12 @@ case $SCENARIO in
         echo "result: $([[ $result == 0 ]] && echo PASS || echo FAIL)   logs: $WORK"
         exit $result ;;
     update-refusals)
-        # B holds release 2. L, a friend of B, runs a modified copy that offers B, one after
-        # the other: a release signed by an unknown key, one whose signature does not match,
-        # an older build (a downgrade), one further above B's build than a release key may go,
-        # one with a package over the size limit, and a good
-        # release 3 whose chunks it damages. B refuses each; release 3, which is good, takes
-        # release 2's place, but none of its damaged package is kept.
+        # B holds the next release ($REL, see release_setup). L, a friend of B, runs a
+        # modified copy that offers B, one after the other: a release signed by an unknown
+        # key, one whose signature does not match, an older build (a downgrade), one further
+        # above B's build than a release key may go, one with a package over the size limit,
+        # and a good release $REL + 1 whose chunks it damages. B refuses each; that release,
+        # which is good, takes $REL's place, but none of its damaged package is kept.
         public_host B 203.0.113.30
         nat_host L 203.0.113.21 cone
         for device in B L; do
@@ -610,27 +623,27 @@ case $SCENARIO in
         befriend B L
         release_setup
         "$BIN" release --lab keygen --dir "$WORK/key2" > /dev/null
-        "$BIN" release --lab sign --key "$WORK/key2/release-key" --build 5 --version 5 --min-build 1 \
+        "$BIN" release --lab sign --key "$WORK/key2/release-key" --build $((REL + 3)) --version 5 --min-build 1 \
             --out "$WORK/rel-unknown" linux-flatpak="$WORK/linux.pack" > /dev/null
         cp -r "$WORK/rel2" "$WORK/rel-tampered"
         sed -i 's/A release of the network lab./A release of the network lap./' \
             "$WORK/rel-tampered/release.json"
-        sed -i 's/"build": 2/"build": 4/' "$WORK/rel-tampered/release.json"
-        "$BIN" release --lab sign --key "$WORK/key/release-key" --build 1 --version 0.1.0-beta.1 \
+        sed -i "s/\"build\": $REL/\"build\": $((REL + 2))/" "$WORK/rel-tampered/release.json"
+        "$BIN" release --lab sign --key "$WORK/key/release-key" --build "$RUNS" --version "0.1.0-beta.$RUNS" \
             --min-build 1 --out "$WORK/rel1" linux-flatpak="$WORK/linux.pack" > /dev/null
-        # Further above B's build (1) than a release key may go.
-        "$BIN" release --lab sign --key "$WORK/key/release-key" --build 1002 --version 0.1.0-beta.1002 \
+        # Further above B's build ($RUNS) than a release key may go.
+        "$BIN" release --lab sign --key "$WORK/key/release-key" --build $((RUNS + 1001)) --version "0.1.0-beta.$((RUNS + 1001))" \
             --min-build 1 --out "$WORK/rel-far" linux-flatpak="$WORK/linux.pack" > /dev/null
         python3 -I -c '
 import json, sys
 m = json.load(open(sys.argv[1]))
-m["build"] = 6
+m["build"] = int(sys.argv[3])
 m["artifacts"]["linux-flatpak"]["size"] = 500 * 1024 * 1024
 json.dump(m, open(sys.argv[2], "w"), indent=2)
-' "$WORK/rel2/release.json" "$WORK/big.json"
+' "$WORK/rel2/release.json" "$WORK/big.json" $((REL + 4))
         "$BIN" lab-sign-raw --key "$WORK/key/release-key" "$WORK/big.json" --out "$WORK/rel-big"
         head -c 3500000 /dev/urandom > "$WORK/linux3.pack"
-        "$BIN" release --lab sign --key "$WORK/key/release-key" --build 3 --version 0.1.0-beta.3 \
+        "$BIN" release --lab sign --key "$WORK/key/release-key" --build $((REL + 1)) --version "0.1.0-beta.$((REL + 1))" \
             --min-build 1 --out "$WORK/rel3" linux-flatpak="$WORK/linux3.pack" > /dev/null
         "$BIN" --data-dir "$WORK/data-B" release publish "$WORK/rel2" > "$WORK/B-publish.out"
         in_ns B timeout 600 "$BIN" --data-dir "$WORK/data-B" update run --for 580 --port 4100 \
@@ -661,8 +674,8 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         }
         liar unknown-key "$WORK/rel-unknown" 'refused a release from .*key this copy does not know'
         liar bad-signature "$WORK/rel-tampered" "refused a release from .*signature is not good"
-        liar downgrade "$WORK/rel1" 'refused build 1 from .*not newer than build 2'
-        liar too-far "$WORK/rel-far" 'refused build 1002 from .*further ahead of build 1'
+        liar downgrade "$WORK/rel1" "refused build $RUNS from .*not newer than build $REL"
+        liar too-far "$WORK/rel-far" "refused build $((RUNS + 1001)) from .*further ahead of build $RUNS"
         liar oversize "$WORK/rel-big" 'refused a release from .*larger than'
         liar damaged-chunk "$WORK/rel3" 'arrived damaged' --lab-damage-chunks
         kill "$b_pid" 2>/dev/null || true
@@ -673,12 +686,12 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         echo "--- B"
         grep -E 'update:' "$WORK/B.out" | sort -u || true
         cat "$WORK/B-status.out"
-        # Release 3 itself is good, so B keeps its manifest, but none of its package came.
-        grep -q 'build 3' "$WORK/B-status.out" || result=1
+        # Release $REL + 1 itself is good, so B keeps its manifest, but none of its package came.
+        grep -q "build $((REL + 1))" "$WORK/B-status.out" || result=1
         grep -q 'ready to install' "$WORK/B-status.out" && result=1
         [[ -e "$WORK/data-B/updates/linux-flatpak.pack" ]] && result=1
-        grep -q -E 'build (4|5|6|1002)' "$WORK/B-status.out" && result=1
-        echo "(expected: each one refused; build 3 known, its package not taken)"
+        grep -q -E "build ($((REL + 2))|$((REL + 3))|$((REL + 4))|$((RUNS + 1001)))\b" "$WORK/B-status.out" && result=1
+        echo "(expected: each one refused; build $((REL + 1)) known, its package not taken)"
         echo "result: $([[ $result == 0 ]] && echo PASS || echo FAIL)   logs: $WORK"
         exit $result ;;
     cone-cone)
@@ -869,11 +882,8 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
     network-check)
         # `fogata network` behind an easy NAT, a hard NAT, with a public address, and behind
         # an easy NAT on a network that drops every UDP packet going out (D, which meets the
-        # DHT nodes over TCP). A third DHT node gives enough reports to tell the NAT kinds
+        # DHT nodes over TCP). The third DHT node gives enough reports to tell the NAT kinds
         # apart, and D three peers alive over TCP that it can ask over QUIC.
-        public_host dht3 203.0.113.12
-        start_dht dht3 4001 --peer "$DHT1"
-        DHT3=$DHT_ADDR
         nat_host A 203.0.113.21 cone
         nat_host B 203.0.113.22 symmetric
         public_host C 203.0.113.50
@@ -885,7 +895,7 @@ table inet block {
 EOF
         for device in A B C; do
             in_ns "$device" timeout 60 "$BIN" --data-dir "$WORK/data-$device" network --no-mdns \
-                $BOOT --bootstrap "$DHT3" > "$WORK/$device.out" 2>&1 &
+                $BOOT > "$WORK/$device.out" 2>&1 &
             PIDS+=($!)
         done
         tcp_boot=()
@@ -915,9 +925,6 @@ EOF
         # towards two of the three DHT nodes only, whose QUIC is dead from there while TCP
         # works: UDP still works, not blocked. F has no way out at all: nothing answers,
         # however many DHT nodes its table holds from the bootstrap list.
-        public_host dht3 203.0.113.12
-        start_dht dht3 4001 --peer "$DHT1"
-        DHT3=$DHT_ADDR
         ip1=$(echo "$DHT1" | cut -d/ -f3)
         ip2=$(echo "$DHT2" | cut -d/ -f3)
         nat_host E 203.0.113.25 cone
@@ -940,7 +947,7 @@ EOF
             > "$WORK/E.out" 2>&1 &
         PIDS+=($!)
         in_ns F timeout 60 "$BIN" --data-dir "$WORK/data-F" network --no-mdns $BOOT \
-            --bootstrap "$DHT3" > "$WORK/F.out" 2>&1 &
+            > "$WORK/F.out" 2>&1 &
         PIDS+=($!)
         wait "${PIDS[-1]}" "${PIDS[-2]}" 2>/dev/null || true
         echo "=== $SCENARIO"
@@ -1194,13 +1201,18 @@ EOF
     fake-observed)
         # Peers tell D false addresses of its own. Three behind one public address: two say D
         # is at 203.0.113.66, one says D's address with another port. Two more, each on an
-        # address of its own but both in one network (/16), say 203.0.113.77. An address
-        # reported from fewer than two networks is not taken: D takes and announces only its
-        # real one, which both DHT nodes see, from two networks.
+        # address of its own but both in one network (/16), say 203.0.113.77. Three more, on
+        # three networks, that connect by themselves (as anyone may, from three cheap
+        # machines), say 203.0.113.88. Strangers make an address taken only from three
+        # networks, and only once one D dialled itself says it too: D takes and announces only
+        # its real one, which the three DHT nodes it dials see, from three networks.
         public_host D 203.0.113.50
         nat_hosts_shared 203.0.113.60 L1 L2 L3
         public_host L4 203.0.113.61
         public_host L5 203.0.113.62
+        public_host L6 203.0.113.63
+        public_host L7 198.51.100.63
+        public_host L8 192.0.2.63
         members D
         real=/ip4/203.0.113.50/udp/41000/quic-v1
         (sleep 90) |
@@ -1218,9 +1230,12 @@ EOF
         liar L3 /ip4/203.0.113.50/udp/4242/quic-v1
         liar L4 /ip4/203.0.113.77/udp/41000/quic-v1
         liar L5 /ip4/203.0.113.77/udp/41000/quic-v1
+        liar L6 /ip4/203.0.113.88/udp/41000/quic-v1
+        liar L7 /ip4/203.0.113.88/udp/41000/quic-v1
+        liar L8 /ip4/203.0.113.88/udp/41000/quic-v1
         wait "$device" 2>/dev/null || true
         echo "=== $SCENARIO"
-        for host in L1 L2 L3 L4 L5; do
+        for host in L1 L2 L3 L4 L5 L6 L7 L8; do
             echo "--- $host"
             grep -m2 -E 'connected to|told' "$WORK/$host.out" || true
         done
@@ -1228,21 +1243,27 @@ EOF
         grep -E 'other peers see|changes the public port' "$WORK/D.out" || true
         grep 'address observed by peers' "$WORK/D.out" |
             grep -o -E 'observed=[^ ]+ peers=[0-9]+' | sort -u || true
-        cat "$WORK/dht1.records" "$WORK/dht2.records" > "$WORK/records"
+        grep -E 'came in by themselves agree|public address confirmed' "$WORK/D.out" |
+            grep -o -E '(agree|confirmed).*' | sort -u || true
+        cat "$WORK/dht1.records" "$WORK/dht2.records" "$WORK/dht3.records" > "$WORK/records"
+        lies='203\.0\.113\.(66|77|88)|203\.0\.113\.50/udp/4242'
         echo "--- announcements on the lab DHT: $(grep -c -F "$real" "$WORK/records") with $real," \
-            "$(grep -c -E '203\.0\.113\.(66|77)|203\.0\.113\.50/udp/4242' "$WORK/records") with a false one"
+            "$(grep -c -E "$lies" "$WORK/records") with a false one"
         heard() { grep -q -E "address observed by peers observed=$1 peers=$2" "$WORK/D.out"; }
         pass=1
-        # The lies reached D (the two liars behind one address count once)...
+        # The lies reached D (the two liars behind one address count once; the three on
+        # three networks are said once they agree, and not taken)...
         heard /ip4/203.0.113.66/udp/41000/quic-v1 2 || pass=0
         heard /ip4/203.0.113.50/udp/4242/quic-v1 1 || pass=0
         heard /ip4/203.0.113.77/udp/41000/quic-v1 2 || pass=0
+        grep -q -E 'came in by themselves agree.* observed=/ip4/203\.0\.113\.88/udp/41000/quic-v1 reporters=3 networks=3' \
+            "$WORK/D.out" || pass=0
         # ...yet D took and announced only its real address.
         grep -q -F "other peers see this device at $real" "$WORK/D.out" || pass=0
         grep 'other peers see this device at' "$WORK/D.out" | grep -q -v -F "$real" && pass=0
         grep -q 'changes the public port' "$WORK/D.out" && pass=0
         grep -q -F "$real" "$WORK/records" || pass=0
-        grep -q -E '203\.0\.113\.(66|77)|203\.0\.113\.50/udp/4242' "$WORK/records" && pass=0
+        grep -q -E "$lies" "$WORK/records" && pass=0
         if [[ $pass == 1 ]]; then
             echo "result: PASS   logs: $WORK"
             exit 0
@@ -1526,6 +1547,7 @@ EOF2
         done
         in_ns dht1 tc qdisc add dev wan root netem delay 1500ms
         in_ns dht2 tc qdisc add dev wan root netem delay 1500ms
+        in_ns dht3 tc qdisc add dev wan root netem delay 1500ms
         BOOT="$liars $BOOT"
         public_host A 203.0.113.21
         public_host B 203.0.113.22
@@ -1726,7 +1748,7 @@ EOF2
         run_device A
         run_device B
         sleep $((DURATION + 2))
-        cat "$WORK/dht1.records" "$WORK/dht2.records" > "$WORK/records"
+        cat "$WORK/dht1.records" "$WORK/dht2.records" "$WORK/dht3.records" > "$WORK/records"
         local_a=$(in_ns A ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1)
         "$BIN" --data-dir "$WORK/data-B" lab-open "$WORK/records" > "$WORK/B-open.out"
         "$BIN" --data-dir "$WORK/data-S" lab-open "$WORK/records" > "$WORK/S-open.out"
@@ -1741,7 +1763,8 @@ EOF2
         echo "local addresses in clear: ${private:-none}"
         # What the devices list in identify to the DHT nodes (the lab's own list kad, which
         # Fogata devices, DHT clients, never do).
-        cat "$WORK/dht1.identified" "$WORK/dht2.identified" | grep -v -F /ipfs/kad/ \
+        cat "$WORK/dht1.identified" "$WORK/dht2.identified" "$WORK/dht3.identified" |
+            grep -v -F /ipfs/kad/ \
             > "$WORK/identified" || true
         told=$(grep -o -E '/fogata/[^ ]*' "$WORK/identified" | sort -u | tr '\n' ' ' || true)
         echo "devices identified to the DHT nodes: $(wc -l < "$WORK/identified")," \

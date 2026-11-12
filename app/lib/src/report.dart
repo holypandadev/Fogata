@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 
 import 'private_file.dart';
 import 'scrub.dart';
+import 'test_switches.dart';
 import 'version.dart';
 import 'zip.dart';
 
@@ -403,7 +404,7 @@ Future<bool> openExternal(
     return false;
   }
   // Tests write what would open into a file instead of opening anything.
-  final record = Platform.environment['FOGATA_TEST_OPENED'];
+  final record = testSwitch('FOGATA_TEST_OPENED');
   if (record != null) {
     await File(record).writeAsString('$uri\n', mode: FileMode.append);
     return true;

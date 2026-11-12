@@ -1088,7 +1088,7 @@ async fn until_gone<T>(
 /// one kind that come in together and drop the others (vendor/libp2p-stream/FOGATA.md), so
 /// several previews asked of one of them at once failed on a busy computer. A request
 /// changes nothing on the other device until it is answered, so asking again is safe.
-const ASKED_AGAIN_AFTER: [Duration; 3] = [
+pub(crate) const ASKED_AGAIN_AFTER: [Duration; 3] = [
     Duration::from_millis(100),
     Duration::from_millis(300),
     Duration::from_secs(1),
@@ -2456,6 +2456,41 @@ mod tests {
             seen.load(std::sync::atomic::Ordering::SeqCst),
             4 + 1 + ASKED_AGAIN_AFTER.len()
         );
+    }
+
+    /// A file fetched into memory (a room's preview) takes no more than the size it was asked
+    /// for, which is what the previews' memory is charged: a holder that says another size is
+    /// refused, and bytes it sends past the size are left unread.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_fetched_into_memory_takes_only_its_size() {
+        let (node_a, node_b, peer_a, log, _ana, _bea) = two_members().await;
+        let group = log.group_id();
+        let mut incoming = node_a.streams().accept(FILE_PROTOCOL).unwrap();
+        let file = b"0123456789".to_vec();
+        let id = *blake3::hash(&file).as_bytes();
+        // Ana says the file is 10 bytes, then 11; either way it sends a megabyte more.
+        let taker = node_a.background();
+        let sent = file.clone();
+        node_a.spawn(async move {
+            let mut says = 10u64;
+            while let Some((_, mut stream)) = taker.next_stream(&mut incoming).await {
+                let mut request = [0u8; 56];
+                stream.read_exact(&mut request).await.unwrap();
+                stream.write_all(&[FOUND]).await.unwrap();
+                stream.write_all(&says.to_be_bytes()).await.unwrap();
+                stream.write_all(&sent).await.unwrap();
+                let _ = stream.write_all(&vec![7u8; 1 << 20]).await;
+                let _ = stream.close().await;
+                says += 1;
+            }
+        });
+        let got = fetch_to_memory(&node_b, group, peer_a, id, 10)
+            .await
+            .unwrap();
+        assert_eq!(got, file);
+        assert!(got.capacity() < 1024, "{}", got.capacity());
+        let other = fetch_to_memory(&node_b, group, peer_a, id, 10).await;
+        assert!(matches!(other, Err(FileError::Damaged)), "{other:?}");
     }
 
     /// A path made a pipe between the check and the open is refused at once, rather than

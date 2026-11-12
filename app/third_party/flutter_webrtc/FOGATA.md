@@ -4,6 +4,14 @@ This is flutter_webrtc 1.6.2+hotfix.4 from pub.dev (MIT, see LICENSE), without i
 `example` and `test` folders. Fogata keeps its own copy to change how the screen is
 captured on Linux. Every change from the published package is listed here.
 
+The Objective-C code comes twice, as published: `common/darwin/Classes` and
+`macos/flutter_webrtc/Sources/flutter_webrtc`. Only the second is built (the macOS podspec
+compiles `Sources` alone; iOS is never built). Where a change below says "both copies,
+identical", each file it names is the same in both, and `tools/test_repo_checks.py` fails when
+a file present in both differs. Files Fogata added (`Fogata*`) are in the built copy only.
+`tools/vendor_diff.py` (weekly) compares this fork with the package on pub.dev and says when
+pub.dev has a newer one.
+
 ## Screen capture under Wayland (Linux)
 
 libwebrtc's own capture under Wayland asks the portal from its source list as well as from
@@ -14,8 +22,9 @@ list (before `tools/webrtc/patches/wrapper/0007`). Instead, `getDisplayMedia` wi
 - `linux/portal_screen_capturer.{h,cc}` (new): asks the xdg-desktop-portal ScreenCast
   interface once, for screens and windows, with the cursor drawn in; opens the stream it
   gives in PipeWire, in plain memory; turns each frame into I420 (each colour sample the
-  average of its 2x2 block), at most the asked frame
-  rate. The session bus and the portal's properties are reached without blocking the
+  average of its 2x2 block; `linux/portal_i420.h`, loops a release build vectorizes, as
+  libwebrtc does not export libyuv; `common/cpp/test/portal_i420_test.cc`), at most the
+  asked frame rate. The session bus and the portal's properties are reached without blocking the
   platform thread.
 - `common/cpp/src/flutter_screen_capture.cc`: `GetDisplayMediaFromPortal` feeds those
   frames to a custom video source and answers once the person has chosen (an error
@@ -212,7 +221,21 @@ others in a call would hear their own voices back. Instead:
   audio source. A link it made is let go (`pw_proxy_destroy`) when either of its ports
   goes away. For tests, `FOGATA_SCREEN_SOUND_FROM` names the one program whose sound is
   taken (debug builds); with `FOGATA_CALL_LOG` set each decision (node, process,
-  executable, client's process, taken or not) goes to standard error as `[ScreenSound]`.
+  executable, client's process, `node.link-group`, taken or not and why) goes to standard
+  error as `[ScreenSound]`.
+- `linux/screen_sound_node.h` (new): an output that passes on sound from elsewhere is
+  never linked, as it may carry this application's own call played into a sink it reads
+  from (the others then heard themselves): a loopback (`pw-loopback`, PipeWire's or
+  PulseAudio's `module-loopback`), a combined output (`module-combine-sink`), a
+  filter-chain or an effect host (EasyEffects). Told by the node's properties
+  (`node.link-group`, `node.group`, `stream.is-loopback`, `node.virtual`, a `Filter`
+  category or role) or by its program being the sound server's or an effect host's
+  (`pipewire`, `pipewire-pulse`, `wireplumber`, `pw-loopback`, `easyeffects`,
+  `pulseeffects`); once so, always so, and links already made go. Programs' own streams
+  (browsers, games through Wine or Proton, media players, Flatpak apps) carry none of
+  these: through pipewire-pulse their program is their own, as libpulse names it. Tested
+  by `common/cpp/test/screen_sound_node_test.cc`; in the call lab with
+  `CALL_LAB_LOOPBACK=1` (`tools/call-lab/lab.sh`).
 - `linux/loopback_capturer_factory.cc`: uses it when built with PipeWire, and only for a
   whole screen: a window's sound cannot be narrowed to its application here, and every
   other one's would go with it. Without PipeWire, or where it cannot connect (PulseAudio
@@ -236,7 +259,10 @@ others in a call would hear their own voices back. Instead:
   with that one. `fogataSilentInput` answers true only once the server has made the
   node (a sync after the request, 2 s at most); a PipeWire without the null sink factory
   answers false at once. It runs on a thread of its own, one request after the other in
-  the order asked, so a stalled server does not freeze the window.
+  the order asked, so a stalled server does not freeze the window. A connection lost
+  (PipeWire restarted, as after an update) is noticed by the core's error, and the next
+  `fogataSilentInput` makes the node again on a new one; it answered true at once for the
+  node gone with the old connection.
   WebRTC records from its input whenever any channel of sound sends; while the
   microphone is off and a shared screen's sound goes out, the application points WebRTC
   here so the microphone stays closed.
@@ -329,6 +355,15 @@ went with no sound at all.
   PCM at 48 kHz, two channels; a whole screen's keeps the endpoint's format. Both channels
   go to the source as they came (the package mixed them into one), as on Linux: a call
   that agreed on stereo for the screen's sound encodes both.
+- `windows/application_loopback_capturer.cc`: `TryInitApplicationLoopback` closes the
+  event its worker sets only after the worker ended; the package closed it first, so a
+  worker still going after 7 s set whatever object the handle's value then named. The
+  start still runs on the platform thread and waits for that worker (the audio service
+  answering, 5 s at most for the activation, then the client's set-up): a stalled
+  service freezes the window while a share with sound starts. Moving it off that thread
+  takes `getDisplayMedia` answering later (`MethodResultProxy`), the loopback members
+  set back on the platform thread, and a share stopped meanwhile; not done, as nobody
+  can run the Windows build before it ships.
 - `windows/loopback_capturer_factory.cc`: a window whose process cannot be found (closed
   meanwhile, an id that is no window) gets no sound at all; the package took the whole
   system's sound then.
@@ -408,19 +443,28 @@ something makes the engine again.
     "default", has an empty name then), or one that is gone, has no input channels or no
     rate. The module then plays alone and keeps WebRTC's requests to record for when the
     input is available. The input is looked at again when the system's devices or its
-    default input change (after 600 ms of quiet, past the module's own 500 ms), when
+    default input or output change (after 600 ms of quiet, past the module's own 500 ms), when
     `getUserMedia` takes a microphone and when one is chosen (`FlutterRTCMediaStream.m`,
     both copies, identical); a microphone that became usable is opened at once.
   - As the module's observer (unless an embedding plugin registered one): when the engine
     stops while playout goes on, it looks once the module's change is done, and again
     500 ms later; an engine still stopped while the module counts itself as playing is
-    released and made again with the speaker alone, and the input is not tried again
-    until one of the changes above (three times in a row at most).
-  - Its work runs on a queue of its own (the module's calls wait for its thread, up to
-    two seconds while an engine starts); `stop` waits for it before the factory goes.
+    released and made again (three times in a row at most). When an engine that stopped
+    was to record (the module's `isRecordingEnabled`, the state it was changing to), it
+    is made with the speaker alone, and the input is not tried again until one of the
+    changes above. When every engine that stopped was only to play, the input was not
+    the cause (a speaker that went to sleep or changed its profile): it is made again as
+    it was, the microphone left as it is. Without the observer (another one was set), no
+    stop is heard, and the input is taken for the cause.
+  - Its work runs on a queue of its own: the module's getters (`isPlaying`,
+    `isEngineRunning`) and setters wait for its thread (WebRTC-SDK's `RTCAudioDeviceModule`
+    calls the module with `BlockingCall` on the factory's network thread, which is also
+    WebRTC's worker thread, where every change of the engine runs from start to end), up
+    to two seconds while an engine starts. So the check 500 ms after a stop never sees a
+    start half done. `stop` waits for the queue before the factory goes.
   - The log says "Fogata: microphone not usable, playing only: ...", "microphone usable",
     "microphone could not be opened" and "the audio engine stopped while playing; made
-    again without the microphone".
+    again without the microphone" (or "as it was").
 - `FlutterWebRTCPlugin.m` (both copies, identical; macOS only): made with the factory,
   stopped in `dealloc`.
 - A headless check outside the app (the module of `app/macos/WebRTC-SDK.podspec`, its
@@ -442,15 +486,76 @@ microphone itself: every call that started alone then sent only silence (the mic
 `audioLevel` still read, as WebRTC measures it before a disabled track is muted) until the
 microphone was turned off and on, which opens a new track.
 
-- `common/cpp/include/flutter_webrtc_base.h`, `common/cpp/src/flutter_webrtc_base.cc`:
-  `MediaTrackForId(id, owner)` looks among the tracks the connection `owner` (the track's
-  own `peerConnectionId`) received first, then as before (a sender's track is held with its
-  connection's id). `common/cpp/src/flutter_webrtc.cc`: `mediaStreamTrackSetEnable` and
-  `setVolume` use it.
-- `FlutterWebRTCPlugin.m` (both copies, identical; macOS): `trackForId:peerConnectionId:`
-  the same.
-- Checked by `tools/call-lab/mic.sh alone` (Linux): copy a is alone in the call for 6 s
-  before b enters, and b must hear its voice.
+- `common/cpp/include/fogata_track_owner.h` (new), `common/cpp/include/flutter_webrtc_base.h`,
+  `common/cpp/src/flutter_webrtc_base.cc`: `MediaTrackForId(id, owner)`, for a connection
+  `owner` (the track's own `peerConnectionId`, neither `local` nor left out), finds a track
+  that connection receives (its observer's list, then its receivers), or else one it sends
+  (a sender's track is held with its connection's id), and nothing else: never this
+  device's own track of that id nor another connection's, also once that connection is
+  gone. `local`, or no owner, looks as the package did. `MediaStreamForId(id, ownerTag)`
+  likewise finds no local stream for a connection's owner.
+- `common/cpp/src/flutter_webrtc.cc`: `mediaStreamTrackSetEnable`, `setVolume`,
+  `mediaStreamAddTrack`, `mediaStreamRemoveTrack` and `captureFrame` look up by owner;
+  `trackDispose` for a connection's owner lets go of nothing unless that connection sends
+  the id and does not receive it (a sender's track is this device's own); `streamDispose`
+  for a connection's owner lets go of nothing (a received stream goes with its
+  connection). `mediaStreamAddTrack` notes a received track with the local stream it is
+  added to (`ReceivedInStreams`), and `common/cpp/src/flutter_media_stream.cc`:
+  `MediaStreamDispose` and `MediaStreamTrackDispose` leave such a track out, so letting go
+  of the stream `call.dart` makes to show a participant's picture never stops the camera
+  or the shared screen of the same id; every other track goes by id, as before.
+- Never by wrapper pointer, nor a wrapper kept past its statement: libwebrtc's C++ wrapper
+  makes a new `RTCMediaTrack` for the same native track on every `RTCRtpReceiver::track()`
+  and `RTCRtpSender::track()` (and new receivers and senders on every `receivers()` and
+  `senders()`), and its `RTCMediaStream` makes new ones for all its tracks whenever one is
+  added or removed (`MediaStreamImpl::OnChanged`, which the native stream calls inside
+  `AddTrack`): a shared screen's stream, its sound added after its picture, never again
+  gives the picture's object that `local_tracks_` holds. A track the owner-aware lookups
+  find is held in a `scoped_refptr` while used (a bare pointer to one made by
+  `receiver->track()` crashed `setVolume`). A renderer keeps the wrapper it was given and
+  removes itself from that same one, so a new wrapper for the same track only moves it.
+- `common/cpp/src/flutter_peerconnection.cc`: `getStats` with a track looks in that
+  connection's receivers, then its senders, and nowhere else; an id it did not know among
+  all tracks gave the whole report, so a narrow reading silently became a full one.
+- `FlutterWebRTCPlugin.m`, `FlutterRTCPeerConnection.m` (both copies, identical; macOS):
+  `trackForId:peerConnectionId:` and `streamForId:peerConnectionId:` the same;
+  `mediaStreamAddTrack`, `mediaStreamRemoveTrack` (which found only local tracks),
+  `trackDispose` the same as on Linux (by where the id is found: a sender's or receiver's
+  `track` is a new object on each call), `streamDispose` by object (which holds there: a
+  local stream's tracks are the very objects added to it, those `localTracks` keeps),
+  and `mediaStreamAddTrack` and
+  `mediaStreamRemoveTrack` answer once (an error was followed by a second answer); `getStats`
+  with a track takes a receiver before a sender of the same id.
+- `FlutterRTCPeerConnection.{h,m}`, `FlutterWebRTCPlugin.m` (both copies, identical;
+  macOS): a connection's `remoteTracks` and `remoteStreams`, written by its delegate
+  methods on WebRTC's signalling thread (WebRTC-SDK calls them there, and the package did
+  not move them to the main thread) and read by these lookups on the main thread, are
+  used only through `fogataRemoteTrack:` and its siblings, under one lock. The lock is
+  never held while anything else is called, and what leaves a map is let go of after it,
+  as freeing a received track or stream may wait for the signalling thread.
+- `lib/src/native/media_stream_impl.dart`, `media_stream_track_impl.dart`: `addTrack`,
+  `removeTrack` and `stop()` send the track's `peerConnectionId`, `dispose()` the stream's
+  `ownerTag`. `lib/src/native/factory_impl.dart`: `createLocalMediaStream` makes a stream
+  owned by `local`; the package gave it its label as owner, which now would read as a
+  connection's.
+- Tested by `common/cpp/test/track_owner_test.cc` (the rule, in plain C++) and the app's
+  `test/webrtc_owner_test.dart` (what Dart sends). Checked by `tools/call-lab/mic.sh alone`
+  (Linux): copy a is alone in the call for 6 s before b enters, and b must hear its voice.
+
+## What libwebrtc's threads share with the platform thread (Linux, Windows)
+
+libwebrtc calls a connection's observer on its signalling thread, while the platform
+thread looks up what it received (`setVolume` as soon as a voice's `onTrack` arrives, a
+track enabled or disabled, a renderer given a stream) and starts or stops listening to
+its events. Both were plain containers with no lock.
+
+- `common/cpp/include/fogata_remote_tracks.h` (new), `common/cpp/include/flutter_peerconnection.h`,
+  `common/cpp/src/flutter_peerconnection.cc`: the observer's received streams and tracks
+  are kept under a lock, never held while calling out: a search through a stream's
+  tracks runs on a copy of the list, as it asks libwebrtc, which may wait for the
+  signalling thread. Tested with ThreadSanitizer by `common/cpp/test/remote_tracks_test.cc`.
+- `common/cpp/src/flutter_common.cc`: an event channel's queue, sink and listening flag
+  are kept under a lock; events queued before Dart listened still go out first.
 
 ## A renderer freed while its stream changes
 
@@ -517,8 +622,12 @@ to draw").
 - macOS (`macos/flutter_webrtc.podspec`): WebRTC-SDK 156.8078.5, Fogata's own build of the
   same WebRTC (`tools/webrtc/MACOS.md`), which the app's Podfile takes from
   `app/macos/WebRTC-SDK.podspec` (this computer's store, checked by SHA-256). iOS
-  (`ios/flutter_webrtc.podspec`) and `macos/flutter_webrtc/Package.swift` (Swift Package
-  Manager, which the app does not use) still name webrtc-sdk's 150.7871.04.
+  (`ios/flutter_webrtc.podspec`, never built) still names webrtc-sdk's 150.7871.04.
+- `macos/flutter_webrtc/Package.swift` and `ios/flutter_webrtc/Package.swift` are removed:
+  they declared webrtc-sdk's WebRTC.xcframework 150.7871.04 as a binary, and a build with
+  Swift Package Manager on would link it beside Fogata's (the app turns it off in
+  `app/pubspec.yaml`, which `tools/test_repo_checks.py` pins; without a Package.swift the
+  plugin is built through its podspec even if that setting were lost).
 
 ## Pictures too large to draw (all platforms)
 
@@ -589,6 +698,12 @@ newest frame was lost and an older one stayed on screen.
   own, outside the lock, and puts it in place of the one before, drawn or not. A buffer
   Flutter may still draw from is never written again. A buffer of a size since replaced,
   or converted while the renderer was disposed, is let go.
+- `FlutterRTCVideoRenderer.m` (both copies, identical): a frame not turned (rotation 0,
+  every frame a computer sends) goes from its I420 buffer straight into the pixel buffer;
+  the package turned it by 0 first, a full copy of every frame. What is left: a frame
+  decoded into a `CVPixelBuffer` (NV12) is still copied into I420 before it is turned into
+  BGRA, and every frame is converted as it comes, on the decoder's thread, drawn or not
+  (Linux converts only the newest when Flutter asks for it).
 
 ## A texture before its first frame (Linux)
 
@@ -615,7 +730,11 @@ short sounds (through ALSA) and chat videos (through GStreamer) open the system'
 
 - `linux/output_keeper.{h,cc}` (new, with libpulse): keeps the chosen output's description
   and moves every sink input of this process to that sink as it appears (and when the
-  sink appears again); the system's default leaves streams where they open.
+  sink appears again); the system's default leaves streams where they open. A connection
+  lost (the sound server restarted) is made again 1 s later, then after 2, 4... up to
+  30 s between tries; it kept a dead connection and moved nothing until the application
+  restarted. `linux/input_watcher.cc`'s connection does the same, and once connected again
+  runs the change it would have missed.
 - `common/cpp/src/flutter_webrtc.cc`: the method `fogataSoundsTo` (`deviceId`, as
   `getSources` names outputs) sets it, outside a call too.
 - `common/cpp/src/flutter_media_stream.cc`: `selectAudioOutput` sets it as well.
@@ -766,6 +885,14 @@ had the raster thread read freed memory.
   (frames are marked available on the threads they arrive on).
 - `common/cpp/src/flutter_video_renderer.cc`: a disposed renderer is held by that release
   until then. Windows already waits for the engine's own callback.
+- `linux/flutter/retired_textures.h` (new): the list. When the engine copies no other
+  texture afterwards (the last picture of a call gone, nothing else drawn), the release
+  still runs 5 s after the unregistering, from a timeout on the platform thread: only a
+  copy that started before the unregistering could read the renderer (the texture's
+  pointer to it is cleared first), and none lasts seconds. The texture itself still waits
+  for the raster thread's next copy, for its last unref there. Before, a call left with
+  no picture kept the last renderer and its picture (up to 132 MB at 8K) indefinitely.
+  Tested with ThreadSanitizer by `common/cpp/test/retired_textures_test.cc`.
 
 ## A connection freed after its close (Linux, Windows)
 
@@ -811,8 +938,23 @@ to the system's default devices.
   chosen (`app/lib/src/call.dart`), as the engine now keeps the devices it was given last
   from one call or microphone test to the next.
 - A sound server restarted while the application runs is not reached again by the audio
-  device, as before for a server restarted before the first call ended (and for
-  `linux/input_watcher.cc`'s own connection).
+  device (Linux), as before for a server restarted before the first call ended; now it
+  is not reached again at all until the application restarts. libwebrtc's PulseAudio
+  device connects once, in `Init`, and keeps a dead context after the server goes (its
+  lists then hold only "default", and nothing plays or records); the wrapper's API has no
+  way to initialize the device again. The only one is to let the engine stop (the
+  plugin's idle connection let go while no other is open) and start again with the next
+  connection, which is not done: `adm_helpers::Init` ends the process (`RTC_CHECK`) if
+  the server refuses then, and `InitPulseAudio` waits with no limit for one that takes
+  the connection and never answers, on libwebrtc's worker thread; the devices chosen
+  also go back to the system's defaults. Doing it safely needs the device's own
+  `Terminate`/`Init` reachable from the wrapper with a bounded wait (a wrapper and WebRTC
+  patch), or proof on Linux that the stop and start are safe when `InputWatcher` has
+  just connected again. To see it: in `tools/call-lab/session.sh <folder> bash`, start a
+  debug build with `FOGATA_WEBRTC_LOG=info`, run the settings' microphone test, restart
+  the session's `pipewire-pulse` (or `pipewire` and all three), then open the settings
+  again and run the test: by the code, the lists should hold "System default" alone and
+  the meter stay empty until the application restarts (not yet seen on a computer).
 - Checked by `tools/call-lab/mic.sh devices` (Linux).
 
 ## Each connection from its own configuration (Linux, Windows)

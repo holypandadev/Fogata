@@ -128,9 +128,9 @@ class _ChatState extends State<_Chat> {
   /// [written] as it is drawn ([shownText]), with the parts that match [query] marked.
   /// The matches are found in the text itself, never in a lowercased copy, whose letters
   /// can be longer (`İ` is two there) and would put the marks elsewhere.
-  Widget _marked(String written, RegExp? query, Fg c) {
+  Widget _marked(String written, RegExp? query, Fg c, {Key? key}) {
     final text = shownText(written);
-    if (query == null) return Text.rich(emojiText(text, tx(c.fg)));
+    if (query == null) return LongText(emojiText(text, tx(c.fg)), key: key);
     final spans = <TextSpan>[];
     var at = 0;
     for (final m in query.allMatches(text)) {
@@ -149,7 +149,11 @@ class _ChatState extends State<_Chat> {
       at = m.end;
     }
     spans.add(TextSpan(text: text.substring(at)));
-    return Text.rich(TextSpan(children: spans), style: tx(c.fg));
+    return LongText(
+      TextSpan(children: spans),
+      style: tx(c.fg),
+      key: key,
+    );
   }
 
   Future<void> _send() async {
@@ -201,7 +205,9 @@ class _ChatState extends State<_Chat> {
 
     /// What entry [e] shows: the message, the file's card or the note.
     Widget content(_Entry e) {
-      if (e.line case final line?) return _marked(line.text, pattern, c);
+      if (e.line case final line?) {
+        return _marked(line.text, pattern, c, key: ValueKey(e.id));
+      }
       if (e.file case final seen?) {
         return isPicture(seen.name)
             ? _PictureCard(state: state, seen: seen)

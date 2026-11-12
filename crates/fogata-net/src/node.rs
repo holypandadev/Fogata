@@ -362,6 +362,7 @@ pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents
         port_change_reported: false,
         udp: udp_check::UdpCheck::default(),
         dialled_tcp: HashMap::new(),
+        dialled_public: HashSet::new(),
         public_contact: None,
         failed_public_dials: 0,
         seen: HashSet::new(),
@@ -1004,10 +1005,9 @@ struct Node {
     punching: HashMap<PeerId, Instant>,
     /// Members we asked for a relay slot, by the listener that holds it.
     reservations: HashMap<libp2p::core::transport::ListenerId, PeerId>,
-    /// Our own addresses as reported by others, and who reported them.
-    /// Addresses others reported for this device, with each reporter and the address it
-    /// reported from.
-    observed: HashMap<Multiaddr, HashMap<PeerId, Option<std::net::IpAddr>>>,
+    /// Addresses others reported for this device, with each reporter, the address it
+    /// reported from and whether this device dialled it there (see `network::Report`).
+    observed: HashMap<Multiaddr, HashMap<PeerId, network::Report>>,
     confirmed: HashSet<Multiaddr>,
     /// When each confirmed address was last reported: one nobody reports any more (a new
     /// public IP from the provider, another network) is dropped.
@@ -1026,6 +1026,9 @@ struct Node {
     /// Open TCP connections this node dialled itself to public addresses, with the address
     /// dialled: the peers the UDP check may ask over QUIC.
     dialled_tcp: HashMap<ConnectionId, (IpAddr, Instant)>,
+    /// Open connections this node dialled itself to public addresses, not through a relay:
+    /// a stranger there is at an address this device chose (see `network::Report`).
+    dialled_public: HashSet<ConnectionId>,
     /// When a peer at a public address last connected or answered a ping, on this network.
     public_contact: Option<Instant>,
     /// Dials to public addresses that failed since then.

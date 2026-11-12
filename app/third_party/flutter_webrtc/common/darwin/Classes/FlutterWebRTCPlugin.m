@@ -941,10 +941,20 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   } else if ([@"streamDispose" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* streamId = argsMap[@"streamId"];
+    // Fogata: a stream a connection received goes with that connection; its id never
+    // stands for this device's own stream of the same id.
+    if ([self ownedByConnection:argsMap[@"ownerTag"]]) {
+      result(nil);
+      return;
+    }
     RTCMediaStream* stream = self.localStreams[streamId];
     BOOL shouldCallResult = YES;
     if (stream) {
       for (RTCVideoTrack* track in stream.videoTracks) {
+        // Fogata: a stream made to show a received track holds that track, whose id can
+        // be one of this device's own: that one (its camera, its shared screen) is not
+        // let go of with it.
+        if (![self noOtherLocalTrack:track]) continue;
         [_localTracks removeObjectForKey:track.trackId];
         RTCVideoTrack* videoTrack = (RTCVideoTrack*)track;
         FlutterRTCVideoRenderer *renderer = [self findRendererByTrackId:videoTrack.trackId];
@@ -963,6 +973,7 @@ static void FlutterWebRTCApplyFieldTrials(void) {
         }
       }
       for (RTCAudioTrack* track in stream.audioTracks) {
+        if (![self noOtherLocalTrack:track]) continue;
         [_localTracks removeObjectForKey:track.trackId];
       }
       [self.localStreams removeObjectForKey:streamId];
@@ -990,7 +1001,10 @@ static void FlutterWebRTCApplyFieldTrials(void) {
 
     RTCMediaStream* stream = self.localStreams[streamId];
     if (stream) {
-      RTCMediaStreamTrack* track = [self trackForId:trackId peerConnectionId:nil];
+      // Fogata: by its owner, so a local track never stands for a received one (a stream
+      // made to show a participant's picture holds the track they send).
+      RTCMediaStreamTrack* track = [self trackForId:trackId
+                                   peerConnectionId:argsMap[@"peerConnectionId"]];
       if (track != nil) {
         if ([track isKindOfClass:[RTCAudioTrack class]]) {
           RTCAudioTrack* audioTrack = (RTCAudioTrack*)track;
@@ -1000,14 +1014,17 @@ static void FlutterWebRTCApplyFieldTrials(void) {
           [stream addVideoTrack:videoTrack];
         }
       } else {
+        // Fogata: answered once (the package then answered nil as well).
         result([FlutterError errorWithCode:@"mediaStreamAddTrack: Track is nil"
                                    message:nil
                                    details:nil]);
+        return;
       }
     } else {
       result([FlutterError errorWithCode:@"mediaStreamAddTrack: Stream is nil"
                                  message:nil
                                  details:nil]);
+      return;
     }
     result(nil);
   } else if ([@"mediaStreamRemoveTrack" isEqualToString:call.method]) {
@@ -1016,29 +1033,45 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     NSString* trackId = argsMap[@"trackId"];
     RTCMediaStream* stream = self.localStreams[streamId];
     if (stream) {
-        id<LocalTrack> track = self.localTracks[trackId];
+      // Fogata: by its owner, as for mediaStreamAddTrack (only local tracks were found,
+      // so a received track added to a stream could never be removed from it).
+      RTCMediaStreamTrack* track = [self trackForId:trackId
+                                   peerConnectionId:argsMap[@"peerConnectionId"]];
       if (track != nil) {
-          if ([track isKindOfClass:[LocalAudioTrack class]]) {
-          RTCAudioTrack* audioTrack = ((LocalAudioTrack*)track).audioTrack;
-          [stream removeAudioTrack:audioTrack];
-      } else if ([track isKindOfClass:[LocalVideoTrack class]]) {
-          RTCVideoTrack* videoTrack = ((LocalVideoTrack*)track).videoTrack;
-          [stream removeVideoTrack:videoTrack];
+        if ([track isKindOfClass:[RTCAudioTrack class]]) {
+          [stream removeAudioTrack:(RTCAudioTrack*)track];
+        } else if ([track isKindOfClass:[RTCVideoTrack class]]) {
+          [stream removeVideoTrack:(RTCVideoTrack*)track];
         }
       } else {
         result([FlutterError errorWithCode:@"mediaStreamRemoveTrack: Track is nil"
                                    message:nil
                                    details:nil]);
+        return;
       }
     } else {
       result([FlutterError errorWithCode:@"mediaStreamRemoveTrack: Stream is nil"
                                  message:nil
                                  details:nil]);
+      return;
     }
     result(nil);
   } else if ([@"trackDispose" isEqualToString:call.method]) {
     NSDictionary* argsMap = call.arguments;
     NSString* trackId = argsMap[@"trackId"];
+    // Fogata: by its owner. A track a connection received goes with that connection, and
+    // its id never stops this device's own track of the same id (a camera, a shared
+    // screen); a sender's track, held with its connection's id, is this device's own and
+    // is let go of as before.
+    id owner = argsMap[@"peerConnectionId"];
+    // Decided by where the id is found, not by comparing objects: a sender's track is a
+    // new object on each call, never the one localTracks holds.
+    if ([self ownedByConnection:owner] &&
+        ([self receivedTrackForId:trackId peerConnectionId:owner] != nil ||
+         [self sentTrackForId:trackId peerConnectionId:owner] == nil)) {
+      result(nil);
+      return;
+    }
     BOOL audioTrack = NO;
     for (NSString* streamId in self.localStreams) {
       RTCMediaStream* stream = [self.localStreams objectForKey:streamId];
@@ -1095,8 +1128,7 @@ static void FlutterWebRTCApplyFieldTrials(void) {
       peerConnection.closedByPlugin = YES;
 
       // Clean up peerConnection's streams and tracks
-      [peerConnection.remoteStreams removeAllObjects];
-      [peerConnection.remoteTracks removeAllObjects];
+      [peerConnection fogataForgetRemote];
 
       // Stop delivering data channel events. There is no need to close the
       // RTCDataChannel because it is owned by the RTCPeerConnection and the
@@ -2157,16 +2189,18 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   RTCMediaStream* stream = nil;
   if (peerConnectionId.length > 0) {
     RTCPeerConnection* peerConnection = [_peerConnections objectForKey:peerConnectionId];
-    stream = peerConnection.remoteStreams[streamId];
+    stream = [peerConnection fogataRemoteStream:streamId];
   } else {
     for (RTCPeerConnection* peerConnection in _peerConnections.allValues) {
-      stream = peerConnection.remoteStreams[streamId];
+      stream = [peerConnection fogataRemoteStream:streamId];
       if (stream) {
         break;
       }
     }
   }
-  if (!stream) {
+  // Fogata: a stream a connection received, never this device's own of the same id (see
+  // trackForId:peerConnectionId:).
+  if (!stream && ![self ownedByConnection:peerConnectionId]) {
     stream = _localStreams[streamId];
   }
   return stream;
@@ -2176,7 +2210,7 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     RTCMediaStreamTrack *mediaStreamTrack = nil;
       for (NSString* currentId in _peerConnections.allKeys) {
         RTCPeerConnection* peerConnection = _peerConnections[currentId];
-        mediaStreamTrack = peerConnection.remoteTracks[trackId];
+        mediaStreamTrack = [peerConnection fogataRemoteTrack:trackId];
         if (!mediaStreamTrack) {
           for (RTCRtpTransceiver* transceiver in peerConnection.transceivers) {
             if (transceiver.receiver.track != nil &&
@@ -2226,27 +2260,72 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     return audioTrackId;
 }
 
+// Fogata: whether `owner` is a connection's id (a peerConnectionId), not this device's own
+// ("local") nor left out.
+- (BOOL)ownedByConnection:(id)owner {
+  return [owner isKindOfClass:[NSString class]] && [(NSString*)owner length] > 0 &&
+         ![owner isEqualToString:@"local"];
+}
+
+// Fogata: whether no other track than `track` holds its id among this device's own, so
+// letting go of a stream that holds it may let go of what the id names locally (its
+// capturer, its renderer). A stream made to show a received track holds that track,
+// whose id can be one of this device's own. Compared by object, which holds here (unlike
+// on Linux and Windows): a local stream is made in Objective-C, and its videoTracks and
+// audioTracks are the very objects added to it (RTCMediaStream's addVideoTrack: keeps
+// them), which are those localTracks holds (FlutterRTCMediaStream.m adds and keeps the
+// same object; mediaStreamGetTracks keeps the stream's own). A shared screen's tracks
+// are not in localTracks at all, so they go as before.
+- (BOOL)noOtherLocalTrack:(RTCMediaStreamTrack*)track {
+  id<LocalTrack> local = _localTracks[track.trackId];
+  return local == nil || [local track] == track;
+}
+
+// Fogata: the track `trackId` the connection `peerConnectionId` receives, or nil. A
+// receiver's or a sender's track is a new Objective-C object on each call (WebRTC's
+// mediaTrackForNativeTrack:), so a track found here is told apart by where it was found
+// or by its id, never by comparing objects.
+- (RTCMediaStreamTrack*)receivedTrackForId:(NSString*)trackId
+                          peerConnectionId:(NSString*)peerConnectionId {
+  RTCPeerConnection* peerConnection = _peerConnections[peerConnectionId];
+  if (peerConnection == nil) return nil;
+  RTCMediaStreamTrack* received = [peerConnection fogataRemoteTrack:trackId];
+  if (received) return received;
+  for (RTCRtpTransceiver* transceiver in peerConnection.transceivers) {
+    RTCMediaStreamTrack* track = transceiver.receiver.track;
+    if (track != nil && [track.trackId isEqual:trackId]) return track;
+  }
+  return nil;
+}
+
+// Fogata: the track `trackId` the connection `peerConnectionId` sends, or nil.
+- (RTCMediaStreamTrack*)sentTrackForId:(NSString*)trackId
+                      peerConnectionId:(NSString*)peerConnectionId {
+  RTCPeerConnection* peerConnection = _peerConnections[peerConnectionId];
+  for (RTCRtpSender* sender in peerConnection.senders) {
+    RTCMediaStreamTrack* track = sender.track;
+    if (track != nil && [track.trackId isEqual:trackId]) return track;
+  }
+  return nil;
+}
+
 - (RTCMediaStreamTrack*)trackForId:(NSString*)trackId peerConnectionId:(NSString*)peerConnectionId {
-  // Fogata: the tracks received by the connection the track's own peerConnectionId names
-  // ("local" for this device's own) come before the local tracks. A connection receiving
-  // a track that another connection of this application sends (mic_test.dart's
-  // LevelLoop, reading the microphone's level while alone in a call) gets it under the
-  // same id, named after the sender's msid: local tracks first gave the microphone for
-  // it, and muting the loop's playback disabled the microphone in every call until it was
-  // opened again. A sender's track (held with its connection's id) is found as before.
-  if (peerConnectionId != nil && _peerConnections[peerConnectionId] != nil) {
-    RTCPeerConnection* peerConnection = _peerConnections[peerConnectionId];
-    RTCMediaStreamTrack* received = peerConnection.remoteTracks[trackId];
-    if (!received) {
-      for (RTCRtpTransceiver* transceiver in peerConnection.transceivers) {
-        if (transceiver.receiver.track != nil &&
-            [transceiver.receiver.track.trackId isEqual:trackId]) {
-          received = transceiver.receiver.track;
-          break;
-        }
-      }
-    }
+  // Fogata: for a connection (the track's own peerConnectionId), a track it receives, or
+  // else one it sends (a sender's track is held with its connection's id), and nothing
+  // else: not this device's own track of that id, nor another connection's, also once
+  // that connection is gone. A connection receiving a track that another connection of
+  // this application sends (mic_test.dart's LevelLoop, reading the microphone's level
+  // while alone in a call) gets it under the same id, named after the sender's msid: local
+  // tracks first gave the microphone for it, and muting the loop's playback disabled the
+  // microphone in every call until it was opened again. "local", or no owner, looks as the
+  // package always did. The same rule as fogata_track_owner.h on Linux and Windows.
+  // An owner sent as null comes as NSNull: no owner.
+  if (![peerConnectionId isKindOfClass:[NSString class]]) peerConnectionId = nil;
+  if ([self ownedByConnection:peerConnectionId]) {
+    RTCMediaStreamTrack* received = [self receivedTrackForId:trackId
+                                            peerConnectionId:peerConnectionId];
     if (received) return received;
+    return [self sentTrackForId:trackId peerConnectionId:peerConnectionId];
   }
   id<LocalTrack> track = _localTracks[trackId];
   RTCMediaStreamTrack *mediaStreamTrack = nil;
@@ -2256,7 +2335,7 @@ static void FlutterWebRTCApplyFieldTrials(void) {
         continue;
       }
       RTCPeerConnection* peerConnection = _peerConnections[currentId];
-      mediaStreamTrack = peerConnection.remoteTracks[trackId];
+      mediaStreamTrack = [peerConnection fogataRemoteTrack:trackId];
       if (!mediaStreamTrack) {
         for (RTCRtpTransceiver* transceiver in peerConnection.transceivers) {
           if (transceiver.receiver.track != nil &&

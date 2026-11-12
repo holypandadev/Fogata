@@ -21,11 +21,21 @@ Inputs (each optional, at least one):
                   same package under the platforms macos-arm64 and macos-x64; one built for
                   a single architecture is refused unless --macos-arch (arm64 or x64) names it
 
+  --ci-builds     the folder tools/beta/ci_builds.py fetch made (on any computer, then copied
+                  here whole): each build given must be the one GitHub built and attested
+                  there, file for file (the Mac app but for its signatures: every Mach-O
+                  file compared without its code signature), and each attested zip must
+                  still have the SHA-256 its run listed. --no-ci-builds instead, for builds
+                  made by hand (said loudly); one of the two is needed
+
 Writes into --out (made new):
   release/   release.json, release.sig and one package per system: publish it with
              `fogata --data-dir <folder> release publish <out>/release`
   drive/     the first install for each system, README.txt, and SHA256SUMS with every
              file's SHA-256, signed by the same key (SHA256SUMS.sig), to upload
+  attested/  with --ci-builds: the attested zips, SHA256SUMS.attested and the toolchain
+             records, to upload beside drive/, so that the attestations can be checked for
+             as long as the release stays (the run's own copies go after 90 days)
   work/      what was unpacked on the way (can go)
 
 THIS_BUILD and THIS_VERSION in crates/fogata-update/src/lib.rs must be --build and
@@ -148,6 +158,13 @@ What to expect from this early version
   - Messages and calls are encrypted end to end, but the encryption has not yet been
     reviewed by an outside auditor: do not rely on Fogata for anything that would put
     someone at risk.
+
+Where these files come from
+  The release page may also hold Fogata-linux-x64-bundle.zip, Fogata-windows-x64.zip and
+  Fogata-macos-unsigned.zip: the builds GitHub made from the source code, which the files
+  above were made from (the Flatpak, the installer, the Mac app with its signature). They are
+  for checking, not for installing: `gh attestation verify <zip> --repo holypandadev/Fogata`
+  shows that GitHub built each from the release's commit.
 """
 
 
@@ -478,6 +495,216 @@ def unzip(archive, dest):
         if link_climbs_out(path.parent, target, dest):
             fail(f"{name} links to {target}, out of the app")
         os.symlink(target, path)
+
+
+# The builds GitHub made and attested (tools/beta/ci_builds.py fetch), and what release.py
+# ships of each: the Linux bundle the Flatpak is made from, the Windows application folder, the
+# Mac app signed here (tools/sign-macos.sh). Each given build must be the attested one, file
+# for file; the Mac app only differs by its signatures.
+CI_BUILDS = {"linux": "Fogata-linux-x64-bundle.zip", "windows": "Fogata-windows-x64.zip",
+             "macos": "Fogata-macos-unsigned.zip"}
+CI_SUMS = "SHA256SUMS"
+CI_ATTESTED = "attested"
+# Where codesign keeps a bundle's seal of its files: written anew by every signature.
+CODE_SIGNATURE_FOLDER = "_CodeSignature"
+LC_SEGMENT_64, LC_CODE_SIGNATURE = 0x19, 0x1D
+
+
+def tree(root, signatures=False):
+    """What a folder holds, by path from `root`: ("dir",), ("link", target) or ("file",
+    executable, path); links are not followed. With `signatures`, what codesign writes in
+    every bundle it signs (_CodeSignature) is left out."""
+    found = {}
+    for folder, dirs, files in os.walk(root):
+        for name in sorted(dirs + files):
+            path = pathlib.Path(folder) / name
+            relative = path.relative_to(root).as_posix()
+            if signatures and CODE_SIGNATURE_FOLDER in relative.split("/"):
+                continue
+            if path.is_symlink():
+                found[relative] = ("link", os.readlink(path))
+            elif path.is_dir():
+                found[relative] = ("dir",)
+            else:
+                found[relative] = ("file", bool(path.stat().st_mode & 0o111), path)
+        # A link to a folder is listed above, never walked into.
+        dirs[:] = [d for d in dirs if not (pathlib.Path(folder) / d).is_symlink()]
+    return found
+
+
+def macho_slices(data):
+    """The 64-bit Mach-O slices of `data` by CPU type and subtype (one for a thin file, each of
+    a universal one's), or None when it is no 64-bit Mach-O file."""
+    if data[:4] == b"\xcf\xfa\xed\xfe":
+        return {data[4:12]: data}
+    if data[:4] not in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+        return None
+    wide = data[3] == 0xBF
+    count = int.from_bytes(data[4:8], "big")
+    size = 32 if wide else 20
+    if count > 64 or 8 + count * size > len(data):
+        return None
+    slices = {}
+    for at in range(8, 8 + count * size, size):
+        if wide:
+            offset, length = (int.from_bytes(data[at + 8:at + 16], "big"),
+                              int.from_bytes(data[at + 16:at + 24], "big"))
+        else:
+            offset, length = (int.from_bytes(data[at + 8:at + 12], "big"),
+                              int.from_bytes(data[at + 12:at + 16], "big"))
+        piece = data[offset:offset + length]
+        # Each slice by its own header's CPU type and subtype, as a thin file's.
+        if len(piece) != length or piece[:4] != b"\xcf\xfa\xed\xfe" or piece[4:12] in slices:
+            return None
+        slices[piece[4:12]] = piece
+    return slices
+
+
+def unsigned_code(piece):
+    """A 64-bit Mach-O slice as it is with no code signature: codesign appends the signature
+    after everything else, names it in a last load command (LC_CODE_SIGNATURE) and grows the
+    __LINKEDIT segment over it, and nothing else. So the load command goes (the header's count
+    and size of them with it), the segment's sizes are left out, and the slice ends where the
+    signature starts. A slice signed otherwise is refused (ValueError)."""
+    data = bytearray(piece)
+    count, commands = (int.from_bytes(data[16:20], "little"),
+                       int.from_bytes(data[20:24], "little"))
+    if 32 + commands > len(data):
+        raise ValueError("load commands past the end")
+    at, end, signature = 32, len(data), None
+    for _ in range(count):
+        kind, size = (int.from_bytes(data[at:at + 4], "little"),
+                      int.from_bytes(data[at + 4:at + 8], "little"))
+        if size < 8 or at + size > 32 + commands:
+            raise ValueError("a load command out of bounds")
+        if kind == LC_CODE_SIGNATURE:
+            signature = (at, size, int.from_bytes(data[at + 8:at + 12], "little"))
+        elif kind == LC_SEGMENT_64 and bytes(data[at + 8:at + 24]).rstrip(b"\0") == b"__LINKEDIT":
+            data[at + 32:at + 40] = bytes(8)  # vmsize
+            data[at + 48:at + 56] = bytes(8)  # filesize
+        at += size
+    if signature:
+        at, size, offset = signature
+        if at + size != 32 + commands or offset > len(data):
+            raise ValueError("a code signature that is not the last thing")
+        data[at:at + size] = bytes(size)
+        data[16:20] = (count - 1).to_bytes(4, "little")
+        data[20:24] = (commands - size).to_bytes(4, "little")
+        end = offset
+    return bytes(data[:end])
+
+
+def same_code(attested, signed):
+    """Whether the Mach-O files `attested` and `signed` (bytes) hold the same code, whatever
+    signature either carries: the same slices, each the same once unsigned (codesign may pad
+    the end before a signature with up to 15 zero bytes)."""
+    ours, theirs = macho_slices(attested), macho_slices(signed)
+    if ours is None or theirs is None:
+        return attested == signed
+    if ours.keys() != theirs.keys():
+        return False
+    for cpu in ours:
+        try:
+            a, b = unsigned_code(ours[cpu]), unsigned_code(theirs[cpu])
+        except ValueError:
+            return False
+        short, long = sorted((a, b), key=len)
+        if not (long.startswith(short) and len(long) - len(short) < 16
+                and not long[len(short):].strip(b"\0")):
+            return False
+    return True
+
+
+def check_same_build(attested, given, what, signed=False):
+    """Stops unless the folder `given` holds what the folder `attested` holds: the same files,
+    links and folders, each file the same bytes and executable or not alike. With `signed`
+    (the Mac app), Mach-O files may differ by their code signatures only, and the bundles'
+    _CodeSignature seals are left out."""
+    ours, theirs = tree(attested, signed), tree(given, signed)
+    differ = sorted(set(ours) ^ set(theirs))
+    for name in sorted(set(ours) & set(theirs)):
+        a, b = ours[name], theirs[name]
+        if a[0] != b[0] or (a[0] == "link" and a != b):
+            differ.append(name)
+        elif a[0] == "file":
+            first, second = a[2].read_bytes(), b[2].read_bytes()
+            same = same_code(first, second) if signed else first == second
+            if a[1] != b[1] or not same:
+                differ.append(name)
+    if differ:
+        shown = ", ".join(differ[:5]) + (f" and {len(differ) - 5} more" if len(differ) > 5 else "")
+        fail(f"the {what} given is not the one GitHub built and attested: {shown} differ")
+    print(f"{what}: the same as the attested build")
+
+
+def read_ci_builds(folder, systems):
+    """The attested zips of `systems` in the folder ci_builds.py fetch made, each checked
+    against the SHA-256 the run listed (SHA256SUMS there, which fetch kept only for builds
+    whose attestation verified). Returns {system: zip}."""
+    sums_file = folder / CI_SUMS
+    if not sums_file.is_file():
+        fail(f"no {sums_file}: give the folder tools/beta/ci_builds.py fetch made")
+    sums = {}
+    for line in sums_file.read_text().splitlines():
+        parts = line.split()
+        if len(parts) == 2 and re.fullmatch(r"[0-9a-f]{64}", parts[0]):
+            sums[parts[1].lstrip("*")] = parts[0]
+    zips = {}
+    for system in systems:
+        name = CI_BUILDS[system]
+        path = folder / CI_ATTESTED / name
+        if name not in sums or not path.is_file():
+            fail(f"{folder} holds no attested {system} build ({CI_ATTESTED}/{name} listed in "
+                 f"{CI_SUMS}): fetch it with tools/beta/ci_builds.py fetch, or give "
+                 "--no-ci-builds for builds made by hand")
+        digest = hashlib.sha256()
+        with open(path, "rb") as file:
+            for block in iter(lambda: file.read(1 << 20), b""):
+                digest.update(block)
+        digest = digest.hexdigest()
+        if digest != sums[name]:
+            fail(f"{path} has SHA-256 {digest}, not the {sums[name]} its run listed")
+        zips[system] = path
+    return zips
+
+
+def check_ci_builds_given(folder, by_hand, build_linux, given):
+    """The attested zip of each system in `given` ({system: zip}), from `folder`
+    (--ci-builds); {} with `by_hand` (--no-ci-builds), said loudly."""
+    if folder and by_hand:
+        fail("give --ci-builds or --no-ci-builds, not both")
+    if by_hand:
+        line = "!" * 78
+        print(f"\n{line}\nrelease.py: --no-ci-builds given: the builds are NOT compared with the "
+              f"ones GitHub built and attested\n{line}\n", file=sys.stderr)
+        return {}
+    if folder is None:
+        fail("give --ci-builds <the folder tools/beta/ci_builds.py fetch made>, so that every "
+             "build is checked to be the one GitHub built and attested, or --no-ci-builds for "
+             "builds made by hand")
+    if build_linux:
+        fail("--build-linux builds the Linux bundle here, which nothing attested: give "
+             "--no-ci-builds, or the attested bundle with --linux-bundle")
+    return read_ci_builds(folder, given)
+
+
+def keep_ci_builds(folder, attested, dest):
+    """Copies the attested zips into `dest`, with their SHA-256 and the toolchain records
+    fetch kept, to upload beside the release: anyone can then check them with `gh attestation
+    verify <zip> --repo holypandadev/Fogata` for as long as the release stays, long after the
+    run's own copies are gone, and compare the shipped files with them. Their names differ
+    from every file of drive/."""
+    dest.mkdir()
+    sums = []
+    for system, path in sorted(attested.items()):
+        shutil.copy(path, dest / path.name)
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        sums.append(f"{digest}  {path.name}\n")
+        record = folder / f"toolchain-{system}.txt"
+        if record.is_file():
+            shutil.copy(record, dest / record.name)
+    # Not SHA256SUMS: that name is the first installs' list, uploaded to the same release.
+    (dest / "SHA256SUMS.attested").write_text("".join(sums))
 
 
 RELEASE_KEY_FILES = ("release-key", "release-key.pub", "rescue-key", "rescue-key.pub")
@@ -907,6 +1134,12 @@ def main():
     parser.add_argument("--no-previous-check", action="store_true",
                         help="make the release although no run says the test against the last "
                              "release passed for the commit (said loudly)")
+    parser.add_argument("--ci-builds", type=pathlib.Path,
+                        help="the folder tools/beta/ci_builds.py fetch made: every build given "
+                             "must be the one GitHub built and attested there")
+    parser.add_argument("--no-ci-builds", action="store_true",
+                        help="make the release from builds made by hand, not compared with "
+                             "GitHub's attested ones (said loudly)")
     args = parser.parse_args()
 
     commit = checked_out()
@@ -925,6 +1158,10 @@ def main():
         fail("give --linux-bundle or --build-linux, not both")
     if not (args.build_linux or args.linux_bundle or args.windows_zip or args.macos_zip):
         fail("give at least one build")
+    given = [system for system, path in [("linux", args.linux_bundle),
+                                         ("windows", args.windows_zip),
+                                         ("macos", args.macos_zip)] if path]
+    attested = check_ci_builds_given(args.ci_builds, args.no_ci_builds, args.build_linux, given)
     if args.build_linux or args.linux_bundle:
         check_flatpak_key_apart(args.gpg_homedir, args.key)
     if not args.fogata.is_file():
@@ -942,6 +1179,9 @@ def main():
         args.linux_bundle = build_linux(commit, work)
 
     if args.linux_bundle:
+        if "linux" in attested:
+            unzip(attested["linux"], work / "attested/linux")
+            check_same_build(work / "attested/linux/bundle", args.linux_bundle, "Linux bundle")
         refuse_debug_folder(args.linux_bundle)
         check_linux_hardening(args.linux_bundle)
         run(fogata, "release", "pack", *expect, args.linux_bundle,
@@ -960,6 +1200,10 @@ def main():
     if args.windows_zip:
         unzip(args.windows_zip, work / "windows")
         app = find_dir_with(work / "windows", "fogata.exe")
+        if "windows" in attested:
+            unzip(attested["windows"], work / "attested/windows")
+            check_same_build(find_dir_with(work / "attested/windows", "fogata.exe"), app,
+                             "Windows application")
         refuse_debug_folder(app)
         check_windows_hardening(app)
         pack = work / f"Fogata-{version}-windows-x64.pack"
@@ -978,6 +1222,10 @@ def main():
             fail("the macOS zip holds no Fogata.app at its top")
         if not (app / "Contents/Library/Helpers/Fogata Updater.app").is_dir():
             fail("Fogata.app has no updater: run tools/beta/macos-updater.sh before signing")
+        if "macos" in attested:
+            # Signed here since (tools/sign-macos.sh): the same app but for its signatures.
+            unzip(attested["macos"], work / "attested/macos")
+            check_same_build(work / "attested/macos/Fogata.app", app, "macOS app", signed=True)
         refuse_debug_folder(app)
         check_macos_info(app, build)
         mac_name, platforms = macos_platforms(macos_archs(app), args.macos_arch)
@@ -1006,8 +1254,13 @@ def main():
     with open(args.key.parent / "published.log", "a") as log:
         log.write(f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())} build {build} "
                   f"{version} release.json sha256 {digest}\n")
+    if attested:
+        keep_ci_builds(args.ci_builds, attested, args.out / CI_ATTESTED)
     print(f"\nRelease in {release}; first installs in {drive}.")
     print("Upload drive/ to the pre-release; the pre-release keys' fogata-prerelease lines must be in tools/allowed_signers.")
+    if attested:
+        print(f"Upload {args.out / CI_ATTESTED} to it too: the builds GitHub attested, which "
+              "anyone can check with gh attestation verify.")
     print(f"Publish: {fogata} --data-dir <your data folder> release publish {release}")
 
 

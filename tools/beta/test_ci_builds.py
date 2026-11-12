@@ -143,6 +143,15 @@ class Fetch(unittest.TestCase):
         self.assertFalse((self.out / "download").exists())
         verified = [call[2] for call in self.gh.calls if call[:2] == ("attestation", "verify")]
         self.assertEqual(len(verified), 3)
+        # The attested zips themselves stay, as release.py --ci-builds reads them.
+        release = ci_builds.load_release()
+        self.assertEqual(release.CI_ATTESTED, ci_builds.ATTESTED)
+        for system, (artifact, name) in ci_builds.BUILDS.items():
+            self.assertEqual(release.CI_BUILDS[system], name)
+            self.assertEqual((self.out / ci_builds.ATTESTED / name).read_bytes(),
+                             (self.gh.artifacts / artifact / name).read_bytes())
+        self.assertEqual(set(release.read_ci_builds(self.out, ci_builds.SYSTEMS)),
+                         set(ci_builds.SYSTEMS))
 
     def test_the_toolchain_records_come_along(self):
         for system, (artifact, _) in ci_builds.BUILDS.items():

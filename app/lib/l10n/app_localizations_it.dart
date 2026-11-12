@@ -1669,6 +1669,10 @@ class L10nIt extends L10n {
   }
 
   @override
+  String get streamQualitySpared =>
+      'Per non sovraccaricare il computer, ora tutti quelli che guardano ricevono un’immagine più piccola o meno fluida.';
+
+  @override
   String get streamQualityGoingOut => 'IN USCITA ORA';
 
   @override
@@ -5097,6 +5101,7 @@ class L10nIt extends L10n {
       'qr': 'Mostra il codice QR',
       'link': 'Mostra il link',
       'code': 'Mostra il codice',
+      'key': 'Mostra la chiave',
       'other': 'Mostra',
     });
     return '$_temp0';
@@ -5104,6 +5109,12 @@ class L10nIt extends L10n {
 
   @override
   String get widgetsHide => 'Nascondi';
+
+  @override
+  String get widgetsShowMore => 'Mostra altro';
+
+  @override
+  String get widgetsShowLess => 'Mostra meno';
 
   @override
   String revealFailed(String path) {

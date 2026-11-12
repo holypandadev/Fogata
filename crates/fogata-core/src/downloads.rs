@@ -609,9 +609,9 @@ impl Core {
         }
     }
 
-    /// Lets the room downloads check the free space of their disk with `free_space`, as the
-    /// system tells it (this crate makes no system calls): one that would not fit is not
-    /// started.
+    /// Lets the room downloads and the direct chats' attachments check the free space of
+    /// their disk with `free_space`, as the system tells it (this crate makes no system
+    /// calls): one that would not fit is not started.
     pub fn use_free_space(&self, free_space: fn(&FsPath) -> Option<u64>) {
         self.inner.lock().free_space = Some(free_space);
     }
@@ -644,6 +644,8 @@ impl Core {
 
     /// Holds the memory of a preview of `size` bytes among the previews being fetched
     /// ([`PREVIEWS_KIB`]), waiting for it if need be; one bigger than all of it holds all.
+    /// The size its sharer gives is what it takes: `files::fetch_to_memory` refuses a holder
+    /// that says another and reads no byte past it.
     async fn preview_turn(&self, size: u64) -> Result<tokio::sync::SemaphorePermit<'_>> {
         let kib = size.div_ceil(1024).clamp(1, u64::from(PREVIEWS_KIB)) as u32;
         Ok(self.inner.previews.acquire_many(kib).await?)

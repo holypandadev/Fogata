@@ -1,6 +1,6 @@
 # The Rust the application and its releases are built with, the same on every system; rustup
-# installs it the first time cargo runs here. The workspace builds with any Rust from its
-# rust-version (Cargo.toml) on.
+# installs it the first time cargo runs here. Only this Rust is tested: the workspace's
+# rust-version (Cargo.toml) is the oldest no locked crate asks more than, not one CI builds with.
 [toolchain]
 channel = "1.99.1"
 components = ["clippy", "rustfmt"]

@@ -25,6 +25,39 @@ fn too_old_to_join(seen: u32, level: fogata_state::Level) -> bool {
         && !fogata_net::caps::judges_at(seen, level)
 }
 
+/// A line of a group's activity as told by its log, or a record this device saw arrive.
+enum Slot<L, S> {
+    Line(L),
+    Seen(S),
+}
+
+/// The page `skip..skip + take` of `lines` (the newest first) with `seen` (in any order)
+/// put among them by time, and whether more follow: a record goes before the first line
+/// that is not newer than it, and records of the same time keep their order. Nothing is
+/// made of the slots outside the page.
+fn page_by_time<L, S>(
+    lines: Vec<L>,
+    line_ms: impl Fn(&L) -> u64,
+    mut seen: Vec<S>,
+    seen_ms: impl Fn(&S) -> u64,
+    skip: usize,
+    take: usize,
+) -> (Vec<Slot<L, S>>, bool) {
+    seen.sort_by_key(|s| std::cmp::Reverse(seen_ms(s)));
+    let mut all = Vec::with_capacity(lines.len() + seen.len());
+    let mut seen = seen.into_iter().peekable();
+    for line in lines {
+        let at = line_ms(&line);
+        while let Some(record) = seen.next_if(|r| seen_ms(r) >= at) {
+            all.push(Slot::Seen(record));
+        }
+        all.push(Slot::Line(line));
+    }
+    all.extend(seen.map(Slot::Seen));
+    let more = all.len() > skip.saturating_add(take);
+    (all.into_iter().skip(skip).take(take).collect(), more)
+}
+
 impl Core {
     /// Every group, live rooms first, then by name.
     pub async fn groups(&self) -> Result<Vec<GroupView>> {
@@ -254,8 +287,40 @@ impl Core {
         let shared = log.shared_state();
         let person =
             |device: DevicePublicKey| self.person_with(device, None, book.as_ref(), &shared);
-        let mut lines: Vec<ActivityView> = Vec::new();
-        for a in log.activity().into_iter().rev() {
+        // The records this device saw, put among the rest by time. Only the page's lines are
+        // made into views: each names its people, whose profiles (pictures and all) are
+        // copied, and a long log has thousands of lines.
+        let seen: Vec<(DevicePublicKey, store::RecordSeen)> = self
+            .inner
+            .store
+            .record_history(&group)
+            .into_iter()
+            .filter_map(|r| {
+                let author = hex::decode(&r.author)
+                    .ok()
+                    .and_then(|b| DevicePublicKey::from_bytes(&b).ok())?;
+                Some((author, r))
+            })
+            .collect();
+        let lines = log.activity().into_iter().rev().collect();
+        let (page, more) = page_by_time(lines, |a| a.time_ms, seen, |(_, r)| r.time_ms, skip, take);
+        let view = |slot: Slot<fogata_state::Activity, (DevicePublicKey, store::RecordSeen)>| {
+            let a = match slot {
+                Slot::Seen((author, r)) => {
+                    let taken_away = r.taken_away;
+                    return ActivityView {
+                        by: person(author),
+                        at_ms: r.time_ms,
+                        what: match r.kind {
+                            store::RecordKind::Banner => ActivityWhat::Banner { taken_away },
+                            store::RecordKind::Picture => ActivityWhat::Picture { taken_away },
+                        },
+                        undone: None,
+                        seen_here: true,
+                    };
+                }
+                Slot::Line(a) => a,
+            };
             let what = match a.did {
                 Did::Created { name } => ActivityWhat::Created { name },
                 Did::Renamed { name } => ActivityWhat::Renamed { name },
@@ -313,49 +378,15 @@ impl Core {
                 UndoneBy::Left => (UndoneKind::Left, None),
                 UndoneBy::MovedDown { by } => (UndoneKind::MovedDown, Some(person(by))),
             });
-            lines.push(ActivityView {
+            ActivityView {
                 by: person(a.author),
                 at_ms: a.time_ms,
                 what,
                 undone,
                 seen_here: false,
-            });
-        }
-        // The records this device saw, put among the rest by time.
-        let mut seen: Vec<ActivityView> = self
-            .inner
-            .store
-            .record_history(&group)
-            .into_iter()
-            .filter_map(|r| {
-                let author = hex::decode(&r.author)
-                    .ok()
-                    .and_then(|b| DevicePublicKey::from_bytes(&b).ok())?;
-                let taken_away = r.taken_away;
-                Some(ActivityView {
-                    by: person(author),
-                    at_ms: r.time_ms,
-                    what: match r.kind {
-                        store::RecordKind::Banner => ActivityWhat::Banner { taken_away },
-                        store::RecordKind::Picture => ActivityWhat::Picture { taken_away },
-                    },
-                    undone: None,
-                    seen_here: true,
-                })
-            })
-            .collect();
-        seen.sort_by_key(|v| std::cmp::Reverse(v.at_ms));
-        let mut all = Vec::with_capacity(lines.len() + seen.len());
-        let mut seen = seen.into_iter().peekable();
-        for line in lines {
-            while let Some(record) = seen.next_if(|r| r.at_ms >= line.at_ms) {
-                all.push(record);
             }
-            all.push(line);
-        }
-        all.extend(seen);
-        let more = all.len() > skip.saturating_add(take);
-        Ok((all.into_iter().skip(skip).take(take).collect(), more))
+        };
+        Ok((page.into_iter().map(view).collect(), more))
     }
 
     pub async fn members(&self, group: GroupId) -> Result<Vec<MemberView>> {
@@ -892,7 +923,57 @@ impl Core {
 mod tests {
     use fogata_state::Level;
 
-    use super::too_old_to_join;
+    use super::{Slot, page_by_time, too_old_to_join};
+
+    /// The slots of a page as letters (lines) and digits (records), by their names.
+    fn page(
+        lines: &[(char, u64)],
+        seen: &[(char, u64)],
+        skip: usize,
+        take: usize,
+    ) -> (String, bool) {
+        let (slots, more) =
+            page_by_time(lines.to_vec(), |l| l.1, seen.to_vec(), |s| s.1, skip, take);
+        let names = slots
+            .into_iter()
+            .map(|s| match s {
+                Slot::Line((name, _)) | Slot::Seen((name, _)) => name,
+            })
+            .collect();
+        (names, more)
+    }
+
+    /// A record goes before the first line not newer than it, even among lines whose
+    /// authors' clocks disagree; records of the same time keep their order; and pages read
+    /// one after another give the whole list, saying whether more follow.
+    #[test]
+    fn records_go_among_the_lines_by_time_and_pages_add_up() {
+        let lines = [('a', 50), ('b', 40), ('c', 45), ('d', 10), ('e', 10)];
+        let seen = [('1', 10), ('2', 60), ('3', 42), ('4', 42), ('5', 5)];
+        let whole = "2a34bc1de5";
+        assert_eq!(
+            page(&lines, &seen, 0, usize::MAX),
+            (whole.to_string(), false)
+        );
+        for take in 1..=whole.len() + 1 {
+            let mut read = String::new();
+            let mut skip = 0;
+            loop {
+                let (part, more) = page(&lines, &seen, skip, take);
+                assert!(part.len() <= take);
+                read.push_str(&part);
+                skip += take;
+                assert_eq!(more, skip < whole.len(), "take {take}, skip {skip}");
+                if !more {
+                    break;
+                }
+            }
+            assert_eq!(read, whole, "take {take}");
+        }
+        assert_eq!(page(&lines, &seen, 20, 5), (String::new(), false));
+        assert_eq!(page(&[], &seen, 0, 2), ("23".to_string(), true));
+        assert_eq!(page(&lines, &[], 3, 9), ("de".to_string(), false));
+    }
 
     /// Only a friend known to be too old is kept out: one never seen saying its level may
     /// be new, and a group never raised is judged alike by every copy.

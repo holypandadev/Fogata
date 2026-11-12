@@ -83,7 +83,12 @@ whatever fontconfig finds, or as boxes.
 2. Write its part of the glossary below first, and keep to it.
 3. If it needs fonts of the system (scripts Inter does not cover), add them to `theme.dart`.
 4. Add it to `CFBundleLocalizations` in `macos/Runner/Info.plist`, so macOS shows its own
-   dialogs (file choosers, permission prompts' buttons) in it.
+   dialogs (file choosers, permission prompts' buttons) in it, and write the permission
+   prompts' texts (each `NS…UsageDescription` of Info.plist) in
+   `macos/Runner/<code>.lproj/InfoPlist.strings` (`pt-BR`, `zh-Hans`: the codes Info.plist
+   uses), added to the Runner target's resources in Xcode (the `InfoPlist.strings` group:
+   a new localization of it). `test/macos_permission_texts_test.dart` fails until both are
+   done, and when a new usage key misses a language.
 5. Check it: `flutter test test/l10n_test.dart test/languages_fit_test.dart`, then the
    screens with `FOGATA_TEST_LANGUAGE=<code>`, at the default size and with
    `FOGATA_TEST_WINDOW=960x640` (see `integration_test/screens_test.dart`), and look at

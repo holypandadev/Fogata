@@ -10,6 +10,11 @@ pub mod types;
 pub mod update;
 pub mod voice;
 
+/// How the bridge runs the calls (see [`crate::bridge`]): the generated code takes the
+/// handler of this name in place of its default one.
+pub static FLUTTER_RUST_BRIDGE_HANDLER: std::sync::LazyLock<crate::bridge::Handler> =
+    std::sync::LazyLock::new(crate::bridge::handler);
+
 #[cfg(test)]
 mod tests {
     /// The calls the interface makes on its own thread (`#[frb(sync)]`), each one quick:

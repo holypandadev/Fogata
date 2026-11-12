@@ -14,7 +14,7 @@ use fogata_proto::DirectPayload;
 use fogata_state::GroupLog;
 
 use super::{
-    ChatsState, Entry as ChatEntry, TICK, Taken,
+    ChatsState, Entry as ChatEntry, InUse, TICK, Taken,
     fetch::fetch_by_themselves,
     fits, flush,
     model::{self, Body, Item, ItemId},
@@ -166,6 +166,7 @@ pub(crate) async fn on_messages(
         let ChatsState {
             chats: entries,
             sent,
+            copying,
             takes_pins,
             takes_unsends,
             taken,
@@ -286,7 +287,7 @@ pub(crate) async fn on_messages(
         // saved then.
         let saved = direct.save(&from, entry, &records, None);
         if !gone.is_empty() {
-            remove_items(inner, &from, entry, sent, &gone);
+            remove_items(inner, &from, entry, sent, copying, &gone);
         }
         saved
     };
@@ -569,6 +570,7 @@ pub(crate) fn expire(inner: &Inner, now: u64) {
     let ChatsState {
         chats: entries,
         sent,
+        copying,
         ..
     } = &mut *chats;
     let mut changed = Vec::new();
@@ -577,7 +579,7 @@ pub(crate) fn expire(inner: &Inner, now: u64) {
         if ids.is_empty() {
             continue;
         }
-        remove_items(inner, friend, entry, sent, &ids);
+        remove_items(inner, friend, entry, sent, copying, &ids);
         changed.push(*friend);
     }
     drop(chats);
@@ -593,6 +595,7 @@ pub(crate) fn remove_items(
     friend: &DevicePublicKey,
     entry: &mut ChatEntry,
     sent: &mut HashMap<ItemId, Instant>,
+    copying: &mut InUse,
     ids: &[ItemId],
 ) -> Vec<Item> {
     let direct = &inner.direct;
@@ -611,7 +614,7 @@ pub(crate) fn remove_items(
                 .flat_map(Item::files)
                 .filter(|f| f.id == file.id)
                 .map(|f| f.name.as_str());
-            direct.store.remove_file(friend, &file.id, names);
+            copying.remove(&direct.store, friend, &file.id, names);
             if let Some(group) = entry.group_id() {
                 inner.shared.remove(group, file.id);
             }

@@ -3,6 +3,7 @@ import 'dart:math' as math;
 import 'package:flutter/widgets.dart';
 
 import 'l10n.dart';
+import 'motion.dart';
 import 'theme.dart';
 
 /// Who is typing in each chat, from the signals that come: each person shows until a few
@@ -235,7 +236,18 @@ class _TypingDotsState extends State<TypingDots>
   late final _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1200),
-  )..repeat();
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // With less motion, the dots hold still, at rest.
+    if (lessMotion(context)) {
+      _c.value = .9;
+    } else if (!_c.isAnimating) {
+      _c.repeat();
+    }
+  }
 
   @override
   void dispose() {

@@ -12,7 +12,9 @@ SHA-256 is the one the run listed. The run must have passed, for that commit. Th
 them out for release.py: the Linux bundle unpacked (--linux-bundle), the Windows zip
 (--windows-zip), and the macOS app, unsigned, which the Mac signs (tools/sign-macos.sh) and
 zips (--macos-zip): the commands to run are printed at the end. With --macos-team, the team
-pinned into the macOS updater must be that one.
+pinned into the macOS updater must be that one. The attested zips themselves stay in
+attested/, beside SHA256SUMS: release.py --ci-builds <folder> compares every build it ships
+with them, and keeps them to upload with the release.
 
 Each build's toolchain record (toolchain-<system>.txt: the runner image, Flutter's engine,
 Rust, CMake and each system's compilers and SDKs, uploaded beside the zip, outside it) is
@@ -59,6 +61,9 @@ BUILDS = {
     "macos": ("fogata-macos-unsigned", "Fogata-macos-unsigned.zip"),
 }
 SYSTEMS = tuple(BUILDS)
+# The folder of fetch's output that keeps the attested zips themselves (release.py's
+# CI_ATTESTED, and its CI_BUILDS names the same files).
+ATTESTED = "attested"
 
 
 def toolchain_file(system):
@@ -227,6 +232,11 @@ def fetch(run, out, commit, only, macos_team=None, gh=gh):
             fail(f"{name} has SHA-256 {digest}; the run listed {sums.get(name) or 'none'}")
         check_attestation(path, digest, commit, gh)
         print(f"{name}: SHA-256 {digest}, attested")
+        # Kept as it came: release.py --ci-builds compares what it ships with it, and puts
+        # it beside the release so that the attestation can be checked for as long as that
+        # stays.
+        (out / ATTESTED).mkdir(exist_ok=True)
+        shutil.copy(path, out / ATTESTED / name)
         if system == "linux":
             release.unzip(path, out / "linux")
             bundle = out / "linux/bundle"
@@ -300,8 +310,9 @@ def main():
     paths = " ".join(f"{given[s]} {laid[s]}" for s in ("linux", "windows") if s in laid)
     if "macos" in laid:
         paths += " --macos-zip Fogata-macos-universal.zip"
-    print(f"Then: python3 -I tools/beta/release.py --build <build> --version <version> "
-          f"--min-build <build> --notes notes.txt {paths} --out <folder>")
+    print(f"Then, with this whole folder on the computer that signs: python3 -I "
+          f"tools/beta/release.py --build <build> --version <version> --min-build <build> "
+          f"--notes notes.txt --ci-builds {out} {paths} --out <folder>")
 
 
 if __name__ == "__main__":

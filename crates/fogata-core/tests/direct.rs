@@ -845,6 +845,32 @@ async fn pictures_come_by_themselves_and_files_when_asked() {
     );
     assert_eq!(chat.usage.pictures, 300_000);
     let pdf = item.files[1].file.id;
+    // Asked for while the disk has no room for it and what it keeps free: refused at once,
+    // as a room download is, and asked for again once there is room.
+    bea.use_free_space(|_| Some(0));
+    let full = bea.fetch_direct_file(ana.me(), pdf).await.unwrap_err();
+    assert!(
+        format!("{full:#}").contains("not enough free space"),
+        "{full:#}"
+    );
+    let chat = bea.direct_chat(ana.me(), 100).await.unwrap();
+    assert_eq!(
+        chat.items.last().unwrap().files[1].file.local,
+        Local::Missing
+    );
+    // Nor is a copy kept of a file sent while the disk has no room for it.
+    let plan = base.join("plan.txt");
+    std::fs::write(&plan, vec![5u8; 1000]).unwrap();
+    let plan = vec![Outgoing {
+        path: plan,
+        video: None,
+    }];
+    let full = bea.send_direct(ana.me(), "plan", plan).await.unwrap_err();
+    assert!(
+        format!("{full:#}").contains("not enough free space"),
+        "{full:#}"
+    );
+    bea.use_free_space(|_| None);
     bea.fetch_direct_file(ana.me(), pdf).await.unwrap();
     chat_until(&bea, ana.me(), "the document here", |c| {
         c.items.last().unwrap().files[1].file.local == Local::Here
@@ -866,7 +892,10 @@ async fn pictures_come_by_themselves_and_files_when_asked() {
     // Saved elsewhere under its own name.
     let downloads = base.join("downloads");
     std::fs::create_dir_all(&downloads).unwrap();
-    let saved = bea.save_direct_file(ana.me(), pdf, &downloads).unwrap();
+    let saved = bea
+        .save_direct_file(ana.me(), pdf, &downloads)
+        .await
+        .unwrap();
     assert_eq!(saved, downloads.join("budget.pdf"));
     let storage = bea.direct_storage().await.unwrap();
     assert_eq!(storage.total.files, 220_000);

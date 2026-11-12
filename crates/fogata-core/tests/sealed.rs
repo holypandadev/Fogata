@@ -243,6 +243,7 @@ async fn sealed_friends_write_and_send_files() {
     std::fs::create_dir_all(&downloads).unwrap();
     let saved = bea
         .save_direct_file(ana.me(), video_id, &downloads)
+        .await
         .unwrap();
     assert_eq!(std::fs::read(saved).unwrap(), video_bytes);
     bea.send_direct(ana.me(), "how lovely, café time", Vec::new())

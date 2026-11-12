@@ -438,9 +438,10 @@ Discovery is layered; every layer runs in parallel and none is required.
 1. **Local cache**: the addresses where friends and members were last reached (direct,
    hole-punched or local QUIC connections; up to 32, for a month, in `meta.json`, each with
    the device reached there), dialled at start and whenever the network changes, before the
-   DHT finds anyone: only those of devices still friends or members, and a private address
-   only while this device is on a network of the same /24, since elsewhere it names some
-   other computer. A peer reached there proves itself as usual; one that may be a friend is
+   DHT finds anyone: only those of devices still friends or members, and a local address
+   only while this device is on a network of the same block (a private IPv4 /24, a
+   unique-local IPv6 /48, or carrier-grade NAT's 100.64/10, which VPNs such as Tailscale
+   use all of), since elsewhere it names some other computer. A peer reached there proves itself as usual; one that may be a friend is
    probed.
 2. **Invite links**: addresses of members who were online when the invite was made, and a
    rendezvous of the invite's own where the managers wait for the invited device (5.3).
@@ -510,10 +511,17 @@ rendezvous(e)  = SHA-256 multihash of HKDF(group_secret, "fogata/v1/rendezvous" 
 
 A member announces itself as a provider of the current key (and queries the current and
 previous one). The provider record carries the transport `PeerId` and the addresses the
-device has observed for itself (seen identically by at least two peers on different
-networks, /16 for IPv4 and /48 for IPv6, so one machine posing as several peers, or a few at
-one provider, cannot choose it; the same for the address announced when the device's
-network changes the port for each destination). Only an address a member or friend
+device has observed for itself (seen identically by peers on different networks, /16 for
+IPv4 and /48 for IPv6, so one machine posing as several peers, or a few at one provider,
+cannot choose it: two networks with a member or friend among them, three of strangers
+otherwise, one of them a stranger this device dialled itself (a bootstrap node, at its
+name too, or a DHT node its own lookups led to), since anyone can connect from three cheap
+machines at one cloud provider and say anything; the same for the address announced when
+the device's network changes the port for each destination). Strangers that came in by
+themselves still count towards the three networks once one it dialled says the same, as
+before: a device is never kept from its address by where its reports came from. The log
+says when an address is taken (`this device's public address confirmed`, with how many
+peers, networks and dialled ones), and when strangers that came in agree on one not taken. Only an address a member or friend
 reported too counts as this device's own when a candidate behind it is taken for one of
 its old sessions (rested at once, not punched): strangers on two networks could otherwise
 make it give up on another member.
@@ -626,7 +634,9 @@ the other asks for its own roster, which says it is counted in now. Without that
 that came in through one other member, say someone rung into a call by a friend, learnt of
 the rest only at the next heartbeat, 20 s on, and anyone who left meanwhile it never heard
 from. A member reached only through another member is still dialled at its public and
-local addresses every fifth punch slot (50 s), so the direct way comes back once it opens
+local addresses every fifth punch slot (50 s) (a private IPv4 one in any /24, which may be
+another network of the same home; a carrier-grade NAT or unique-local IPv6 one only of a
+network this device is on), so the direct way comes back once it opens
 again; the way through the member closes a few seconds later. In the lab
 (`member-lost-direct`) both ends talk through the third member 8 to 10 s after the cut, and
 are back on a direct connection within a minute of the way opening. Three copies of the app
@@ -639,8 +649,8 @@ A member on the local network whose last QUIC connection closes while it is stil
 again where it was reached there and at the local addresses it sent: 2 s later, then twice as
 long each time up to every 16 s, for five minutes or until a QUIC connection is back. That
 holds too while a TCP connection outlives the outage, which carries no media and comes back
-only once its own retries do. Up to 32 members at once; a private address only while this
-device is on a network of the same /24; failures of these dials never rest a member as a stale
+only once its own retries do. Up to 32 members at once; a local address only while this
+device is on a network of the same block (as for the local cache above); failures of these dials never rest a member as a stale
 announcement; public addresses are left to the punch slots, which a dial on its way would hold
 off. Only that session of the device can answer: the dial names its transport identity. On one
 local network nothing else brought it back: mDNS tells of a device again only once it has
@@ -682,7 +692,8 @@ Known limits:
 ### 3.5 Results in the network lab
 
 `tools/netlab/netlab.sh` builds the scenarios below in unprivileged network namespaces, with
-two lab DHT nodes standing in for Amino, in two networks (203.0.113.0/24 and 198.51.100.0/24). "Cone" is Linux masquerade (keeps the source port,
+three lab DHT nodes standing in for Amino, in three networks (203.0.113.0/24, 198.51.100.0/24
+and 192.0.2.0/24: strangers on three networks make an address taken). "Cone" is Linux masquerade (keeps the source port,
 filters by address and port); "symmetric" is masquerade with a random port per destination.
 The lab DHT nodes write down every announcement they take, as a stranger running a DHT node
 would see it. Hidden commands of the command-line client exist for the lab only (`lab-liar`
@@ -704,7 +715,7 @@ default program does not know any of them).
 | two routers at home, one public address without hairpin, no firewall on the devices | The device behind the inner router opens the other's sealed name and connects to its local address. |
 | the same, the outer device's firewall letting its port in | Connected the same way. |
 | the same, the outer device's firewall letting nothing in | No contact (known limit; the app shows the firewall command). |
-| a public device told false addresses of its own: by three peers behind one public address (two agreeing), and by two more at addresses of their own in one /16, agreeing (`fake-observed`) | It takes and announces only its real address, which the two DHT nodes report from two networks: an address counts once peers on two different networks (/16, /48) report it. |
+| a public device told false addresses of its own: by three peers behind one public address (two agreeing), by two more at addresses of their own in one /16, agreeing, and by three on three networks that connect by themselves, agreeing (`fake-observed`) | It takes and announces only its real address, which the three DHT nodes it dialled report from three networks: strangers' reports count from three different networks (/16, /48), one of them a stranger it dialled. |
 | a public device flooded with 512 incoming connections from 16 addresses (64 peers, as one peer gets 8 in) that ask it something cheap every half minute, and a member behind a symmetric NAT (`inbound-flood`) | The member comes in, one of the stranger's connections closing for it, and its message arrives. |
 | a public device sent silent TCP connections from 8 addresses, and a device behind a router sent them from one local address, each as fast as they close, each device limited to 2048 open files (`silent-flood`) | Each holds at most a few dozen sockets more than usual (the local one used up all 2048, and could no longer write its files, when the local network had no limit), and its member's message arrives. |
 | two members on one local network, mDNS only, and a neighbour answering every query with made-up peers and sending unasked answers (`mdns-flood`) | They find each other and talk; a bounded number of the made-up peers is taken, and few are dialled. |
@@ -1086,7 +1097,14 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   8 KiB. A member sending the heaviest events a room takes (500 lines of the longest text,
   each character escaped, and its part of the shares) makes each member keep about 14 MiB a
   room, 141 MiB for the ten rooms of a group (measured; 1.1 GiB when events padded to the
-  largest group message were kept).
+  largest group message were kept). The chat of every room of every group a device is in
+  is kept within 128 MiB together (each line counted as its message, text and nickname,
+  and 256 bytes more), some 130 000 honest lines: past it, checked every punch slot (10 s),
+  the sender with the most kept loses its oldest lines first, so a member that floods its
+  rooms (in any number of groups) loses its own lines and nobody else's while it keeps more
+  than they do. A line let go is not taken again when a copy comes back. That is this
+  device's memory only: each member answers with what it keeps. The shares stay bounded
+  by group.
 - Another member fetches it over a stream (`/fogata/file/1`) from any participant that has
   it: the request names the id and an offset, so an interrupted download resumes from its
   `.part` file (named after the file's id too, so two files of one name never mix). The connection's own encryption covers the transfer end to end, also when a
@@ -1448,7 +1466,10 @@ added) is let go too, and a new one is made when someone writes.
   friend sent that are not pinned (`model::to_free`): a friend's messages never push out
   what other chats keep, nor pinned files or the files this device sent. Messages that fill
   the room that way stay past it, and nothing comes by itself until there is room again
-  (what comes by itself must fit beside every journal and the other chats' attachments). A chat's files can be cleared by hand, pinned ones too; the
+  (what comes by itself must fit beside every journal and the other chats' attachments). An
+  attachment is fetched, as a room download is, only when the disk has room for it and
+  256 MiB to spare: one asked for is refused at once, one that comes by itself waits and is
+  tried again later. A chat's files can be cleared by hand, pinned ones too; the
   friend keeps its copies. Text always stays. Only a video keeps the first picture its
   message carries. What a friend's items (messages with what describes their files, timers
   and pins) take in the chat's journal, and in memory, is bounded too: 16 MiB a day per
@@ -1791,7 +1812,14 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   takes, so no screen it refuses shows black without a word) has its connection closed,
   whatever its state, and gets no
   other while it stays in the call (a connection being made meanwhile is closed as it
-  comes); a notice says the connection with them was lost. On Linux and Windows, Fogata's
+  comes); a notice says the connection with them was lost. So does a participant whose
+  camera or screen arrives far faster than any copy sends it, in two readings of the
+  statistics in a row (`VideoFlood`, `lib/src/call/measuring.dart`): more than 180 frames
+  decoded a second (copies send at most 60 on either channel), or more than three times
+  what this device's description lets the channel carry (1500 kbit/s for the camera, 20000
+  for the screen). A stall does not trip it: WebRTC skips the frames that came late rather
+  than decode them all, and a burst of bytes (a key frame, a network catching up) lasts one
+  reading. On Linux and Windows, Fogata's
   own libwebrtc (`tools/webrtc`) does not decode such a picture at all: a VP8 keyframe
   whose header names more than 8K (no side over 8192) is refused before its decoder makes
   room for it, and a small stand-in that tells its size reaches the renderer instead, so
@@ -1852,7 +1880,13 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   delay was back to normal 4 s after the network instead of 8 to 10. Readings with
   normal jitter or loss never come near it.
 - **Who is talking** comes from WebRTC's audio levels, read every 600 ms (this device's
-  own level once, from the first connection).
+  own level once, from the first connection). Each is read from the statistics of what
+  carries it alone: a speaking participant's voice receiver, and the sender the microphone
+  goes out on, a few entries each rather than the whole connection's report; the whole
+  report only while those list nothing yet. WebRTC still gathers the whole report inside
+  and filters it (kept 50 ms, so the second reading on the same connection costs little):
+  what is saved is turning every entry of every connection into a map, and handing it
+  over, each time.
 - **Each person's connection** shows as bars on their tile, always (the level's word only
   when it is not good), in the room list only when it is not good, and on the own card. While in a call, each device reads every connection's
   statistics every 2 s: the round trip of the chosen candidate pair, the share of voice
@@ -1886,11 +1920,35 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   reach for the whole connection, so with 6 a 1080p screen at 60 could never get more.
   The processor lowers the screen for everyone, a level at a time: the rate halves first
   (60, 30, 15 frames a second, a level that sends the same as the one above being passed
-  over), then 720 lines at 15, then 540 at 10 and at 5; it goes down when WebRTC says an
+  over), then 720 lines at 15, then 540 at 15, 10 and 5; it goes down when WebRTC says an
   encoder is held back by the processor (`cpu`) and sends well under its level's rate, or
   when the encoders together keep 1.5 cores busy, and back up a level once the one above
   would fit. A single step from 60 straight to 15 once left a screen there: to come back,
-  the encoders had to fit in a quarter of what they took. Measured in the lab with a moving 1600x900 screen: at
+  the encoders had to fit in a quarter of what they took. A share starts lower the more
+  watch, and goes there at once when someone starts watching (not at the next reading):
+  the full screen for one or two, 15 frames a second for three, 720 lines at 15 for four,
+  540 lines at 15 from five. In the lab (a 1600x900 screen, a loaded computer), three
+  watchers kept 15 frames a second at full size, while five started at 720 lines fell to
+  10 and seven to under 10.
+  The number watching also sets a ceiling on the size, on top of the quality chosen (never
+  more than chosen, nor than the screen is): one or two watchers get the quality chosen,
+  three or four at most 1080 lines, five or more at most 720 (each in a 16:9 box, as the
+  qualities are). The mesh encodes the screen once per watcher, and each encoder's memory
+  and work grow with its pixels: shared to seven, a 1600x900 screen took the sharer about
+  1 GB of memory and a core (`VideoEncoderQueue` threads and one allocator arena of 27-40
+  MB each), and a screen shared at its own size (1440 lines, 4K) would take two to four
+  times as much per encoder. Under the ceiling a level that sends the same as the one
+  below it is passed over, so when the processor allows more, a big room gets frames back
+  rather than size. The ceiling comes down as soon as more watch, before the new watcher's
+  encoder starts, and goes back up only once fewer have watched for 20 s (to what the most
+  that watched meanwhile allow), so someone coming and going does not make every encoder
+  change size each time. Like the levels it changes only what each connection is told
+  (`scaleResolutionDownBy`, `maxBitrate`): no capture again, no new agreement. Someone who
+  starts watching is told how the screen goes out now; before, their connection kept what
+  it was told when it was made. The quality card shows what each watcher gets as measured;
+  when the ceiling or the processor makes it smaller or slower for everyone, it says so
+  apart from a connection that falls short, and no longer says that the others get what
+  was chosen. Measured in the lab with a moving 1600x900 screen: at
   600 kbit/s, keeping the size gave 2.5 frames a second, WebRTC's own balance 600x336 at
   15, and the steps 960x540 at 10; at 1.5 Mbit/s, 11 frames a second at full size (the
   balance: 800x450 at 26); on a fast link full size at 26 (the balance shrank it to
@@ -1920,6 +1978,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   knew nothing of (muted copies), the camera went 1280x720, then 960x540 at 30 fps within
   a second, with no packet lost and no freeze (before: 320x180 at 10 fps, 640x360 at 15
   after 30 s); with 5 % loss and 40 ms each way, 720p at 1.6 Mbit/s as before.
+  A participant's description is taken without any lowest bitrate (`x-google-min-bitrate`,
+  which no copy sends: WebRTC would keep that connection's estimate above it however
+  congested this device's network, and every voice it sends would suffer) and with a start
+  of at most 2400 kbit/s, twice what copies ask (`peerBitrates` in `call/sdp.dart`).
 - **A camera goes out smaller the more people are in the call.** Everyone sends their
   camera to everyone else, with an encoder for each, so eight people with cameras would
   each upload up to 7 x 1.5 Mbit/s and encode seven 720p pictures. Instead, by the number
@@ -2192,9 +2254,12 @@ back in to its own public address, so two members on one network that did not fi
 other there (another subnet, a guest network, a virtual machine behind NAT) could not get a
 datagram link. Each device therefore tells every member it verifies its own local addresses
 (`MemberRequest::Addresses`, QUIC first; never to anyone else), and the QUIC dial for media
-tries those first. Only private addresses among them are kept, and new ones are dialled at
-most once a minute: a member could otherwise make the device send packets to any address,
-again and again. The
+tries those first. Only local addresses among them are kept, dialled for media only on a
+network this device is on (the same private IPv4 /24 or unique-local IPv6 /48, or
+carrier-grade NAT when this device is on it too), and new ones at most once a minute: a
+member could otherwise make the device send packets to any address, its own networks' and
+VPNs' included, again and again. mDNS answers may likewise name carrier-grade NAT and
+unique-local addresses only of networks this device is on. The
 local TURN endpoint accepts its random username and password only. It listens on
 `127.0.0.1`, and there the source address is not checked, because libwebrtc sends from the
 computer's own address even to `127.0.0.1`. On Windows a socket bound to a network address
@@ -2545,6 +2610,17 @@ three. The corpus of level two is judged in its test as a copy of level two (one
 no later level: the corpus holds `Level` entries naming three, which such a copy refuses),
 and still matches `level-two.txt`.
 
+The rotation rule binds only a `Rotate` whose author saw the group at level three: what is
+kept is judged on its author's view, at that view's level, and what applies falls back to
+level two for a `Rotate`. A member that signs one on entries from before the raise (when it
+saw someone gone hold the key) still starts an epoch for itself and a few, as at level two;
+and a `Remove`, which a member above another may write, carries a rotation no level checks
+for every member. The managers' devices repair either, as at level two: one left without
+the key starts a new epoch for everyone (`mend_key`, at most once a minute), one that has it
+sends it to the members that lack it (`welcome_lacking`). Holding a rotation to the rule
+where it applies changes what a log applies, so it waits for a later level (with the
+`Remove` rotations), raised once every member's copy judges at it.
+
 The order of the entries, the shortcut that judges an entry signed on every head on the
 group as the log has it, and the limits judging reads (members, rooms, names, picture,
 entry, parents, runs: `Level::caps`) are behind the level too: the order is worked out at
@@ -2619,7 +2695,7 @@ is joining with an invite) takes the log a manager sends only if the issuing man
 | `Welcome { member, secret }` | manager | Delivers the current epoch secret to a member who lacks it; signed on a `Join` of a device that is no member, with a ticket still unused, lets that device in with it first. |
 | `Remove { member, rotation }` | a member above `member` | Removes a device and starts a new epoch. |
 | `Leave { }` | the leaving member, any, the first too | Removes the author; the ladder closes up and the members then rotate (below). |
-| `Rotate { rotation }` | manager; another member only when, in the log as it was when it wrote the entry, a device that is no longer a member held the current secret (given it by an entry that applied, or sent it while no member by one that did not) | Starts a new epoch. Devices rotate for a key sent by an entry that did not apply only when they manage, as versions before those counted need. From level three it is kept only when it gives the new key to every member of the group as its author saw it (but keys nothing can be sealed to): a member could otherwise start an epoch for itself and a few, and leave the managers without the current key. |
+| `Rotate { rotation }` | manager; another member only when, in the log as it was when it wrote the entry, a device that is no longer a member held the current secret (given it by an entry that applied, or sent it while no member by one that did not) | Starts a new epoch. Devices rotate for a key sent by an entry that did not apply only when they manage, as versions before those counted need. From level three it is kept only when it gives the new key to every member of the group as its author saw it (but keys nothing can be sealed to), when its author saw the group at level three (5.1): a member could otherwise start an epoch for itself and a few, and leave the managers without the current key. |
 | `Invite { ticket, token }` | the manager that issued the ticket; to level two only | Opens an invite: managers announce under its token until it is used or expires (5.3). From level three it applies no more. |
 | `NamedInvite { ticket, token, welcomers }` | the manager that issued the ticket; from level three (kind 26, which level two keeps as a kind it does not know) | Opens an invite as `Invite` does, naming the managers (beside the issuer) who may let its device in: only they announce under its token, and only their `Welcome` lets the device in (5.3). |
 | `SetIcon { icon }` | manager | One of the preset icons the application draws. |
@@ -3424,8 +3500,10 @@ before they named their key are sealed again with its name at the next start. Th
 CLI only opens sealed folders, so test folders put nothing in the keychain, and
 `FOGATA_SEAL=off` makes a debug build of the application do the same (for test copies); a
 release build ignores it, so nothing around it can leave a new folder plain. The other
-switches for test copies (`FOGATA_DOWNLOADS`, a made-up camera, field trials, the program
-whose sound a shared screen takes, media over streams) are ignored by release builds too.
+switches for test copies (`FOGATA_DOWNLOADS`, `FOGATA_TEST_OPENED` which writes the links and
+folders that would open into a file, a made-up camera, field trials, the program whose sound
+a shared screen takes, media over streams) are ignored by release builds too; the application
+reads its own through `testSwitch` (app/lib/src/test_switches.dart), which a test keeps so.
 
 A folder is sealed the first time the application opens it while no other copy runs on it,
 when the keychain keeps and gives back a new key. With no keychain (no Secret Service on a
@@ -3514,6 +3592,10 @@ own.
 A Flutter application on top of the core. `crates/fogata-ffi` is the bridge
 (flutter_rust_bridge 2.13): it starts the core once on its own Tokio runtime and gives the
 screens plain values (ids as hex strings, times in milliseconds) and one stream of events.
+That runtime has one worker per core, at most four; the bridge's calls run on it too, the
+blocking ones on its pool for blocking work (`crates/fogata-ffi/src/bridge.rs`, in place of
+the bridge's default handler, which started a runtime and a pool of threads of its own, each
+as large as the computer has cores).
 `flutter_rust_bridge_codegen generate` (run in `app/`) writes `app/lib/src/rust/` and
 `crates/fogata-ffi/src/frb_generated.rs` from `crates/fogata-ffi/src/api/`.
 
@@ -3993,8 +4075,9 @@ pill (green, amber when this copy must update) restarts into it. The splash show
 window the splash before anything shows (Linux in `my_application.cc`, macOS in
 `MainFlutterWindow.swift`, Windows in `setUpWindow`, around the middle of the window made
 for the main one), and `becomeMainWindow` (`window.dart`) gives it back its frame, window
-buttons, smallest size (960 by 640) and 1440 by 900 (or the screen's work area) in the
-middle of the screen; on Linux through the channel `fogata/desktop` (`mainWindow`), which
+buttons, smallest size (960 by 640, or the screen's work area if that is smaller, so the
+window's bottom is never kept under the taskbar or the Dock) and 1440 by 900 (or the
+screen's work area) in the middle of the screen (`mainWindowSizes`); on Linux through the channel `fogata/desktop` (`mainWindow`), which
 hides the window while it changes and shows it again, so that on Wayland, where a window
 cannot place itself, the compositor places it as a new one. (GTK sizes a window that
 cannot be resized by what its contents ask, so the Linux splash is resizable, only with no
@@ -4031,7 +4114,11 @@ and other long hex their first six, fingerprints their short form, so the steps 
 device can still be followed. Fogata's own crates log ids, never names. Standard error,
 which a desktop session may keep in its journal, is scrubbed the same way at any level
 `RUST_LOG` asks for; only a debug build with `FOGATA_RAW_LOGS` set leaves the values as they
-are. The window scrubs its errors before writing them. A report is a
+are. A panic of the Rust side goes to the log as a scrubbed line, and standard error is
+told only where in the code it happened (`logs::report_panics`), not what it said. A panic
+in a call of the screens, or in a task one waits for, reaches the window with what it said
+scrubbed the same way (`bridge.rs`), since the window may print it. The
+window scrubs its errors before writing them. A report is a
 zip (`app/lib/src/report.dart`, at most 5 MB, the oldest lines going first): `report.txt`
 (what was written, version and build, system and its version, language) and the log files
 of the last 48 hours, scrubbed again line by line with the same rules and the names the
@@ -4085,7 +4172,14 @@ and the old computer proves the code first (`/fogata/transfer/2`):
   code after three, showing a new one. A run that stops before its proof (a stranger that
   learnt the nameplate and stalls, or goes once it has the answer) learnt nothing and costs
   the code nothing: under the first way, where the new computer proved first in its answer,
-  such a run had to count, so three of them ended any code whose nameplate was found.
+  such a run had to count, so three of them ended any code whose nameplate was found. The
+  new computer answers runs at once, each in a task of its own up to the proof it brings
+  (5 s for the start, 10 s for the proof): one per computer, its newest stream in place of
+  the one before, and at most eight, the oldest stopped for a new one; so a stranger that
+  stalls keeps neither the real run nor the person's Cancel nor the code's end waiting,
+  and to keep the real run out it must bring new computers faster than that run ends. The
+  proofs are checked one at a time, in the order they come, so runs side by side give no
+  more guesses than runs one after the other.
 A guesser therefore gets a handful of tries at 2^25 for the part it cannot see (about one in
 ten million). The application does not try a code that did not match a second time either.
 
@@ -4251,7 +4345,8 @@ of the shell's history and the list of processes.
 - Someone who announces under the rendezvous point (a DHT node near it, a device on the same
   network) can try one guess per code typed on the old computer and three against the new
   one, each a 2^-25 chance; failing, it makes the move stop with "wrong code" (a nuisance,
-  not a leak). It can also keep the new computer busy, which only delays the move.
+  not a leak). It can also hold some of the new computer's runs (see above), which only
+  delays the move while it keeps bringing new computers.
 - A frame changed or replayed on the way stops the move; nothing is applied.
 - A malicious new computer that won the code gets the account: that is what the code is for,
   and why the old computer names it and asks first. A malicious old computer that won it
@@ -4335,7 +4430,15 @@ in all, and 1 GiB to one device in a day (a package whose rest does not fit in t
 not started: the device is told to ask later and goes on from where it stopped); asks from one device are answered at most every 3
 seconds, and so are its words that it has a build and its fetches of a package that is not
 there. A friend or member has at most 4 requests answered at once, and all together 32; a
-stream past that is closed unread. The publisher
+stream past that is closed unread, and a request that has not arrived whole 10 s after its
+stream came is closed too. An upload that has gone on for a minute at less than 64 KiB/s on
+average ends while a device turned away for want of a place in the last two minutes may be
+waiting (the device cut off goes on from its last whole chunk when it asks again, 45 s
+later); a slow line keeps its place while nobody waits. An ask, a word that a device has a
+build, or a fetch whose stream ends or is reset before any answer is made again, after 0.1,
+0.3 and 1 s, as a file request is: friends that hear of a release at once all ask its
+holder at once, and copies before 0.1.0-beta.9 drop all but one of such a burst (see the
+`stream` behaviour). The publisher
 puts a release into a data folder of his (`fogata release publish`, which checks every byte
 first and refuses a release its own build would let go at its next start: older, too far
 above, expired), and the copy running there gives it like any other.
@@ -4351,6 +4454,8 @@ file name the manifest gives, fetched over HTTPS (rustls, the system's certifica
 authorities) into the same `<platform>.pack.part`, each 1 MiB chunk checked against its hash
 as it arrives, a stopped download going on from the last whole chunk with a range request;
 a damaged chunk ends it, and that release is fetched from friends and members after that.
+A download that brings less than 16 KiB/s over two minutes, or nothing for one, stops and
+goes on two minutes later; the small files must arrive within five minutes.
 The page is used before friends and members when it has the package, which spares their
 uploads; a package from there is given on like any other. A copy that trusts no release key
 does not read the page (nothing could pass), nor do the network lab's copies

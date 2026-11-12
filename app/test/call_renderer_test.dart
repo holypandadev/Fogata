@@ -23,8 +23,9 @@ class _Connection implements RTCPeerConnection {
 }
 
 class _Stream implements MediaStream {
+  _Stream([this.id = 'stream']);
   @override
-  String get id => 'stream';
+  final String id;
 
   @override
   String get ownerTag => 'remote';
@@ -67,6 +68,10 @@ void main() {
   var streamsMade = 0;
   final events = <int, MockStreamHandlerEventSink>{};
   var textures = 0;
+  // Holds a track being added to a stream until completed.
+  Completer<void>? addingTrack;
+  // Holds a renderer being made until completed.
+  Completer<void>? makingRenderer;
 
   setUp(() {
     calls.clear();
@@ -75,12 +80,15 @@ void main() {
     streamsMade = 0;
     events.clear();
     textures = 0;
+    addingTrack = null;
+    makingRenderer = null;
     onWebRtcEventError = (what, error, stack) {};
     messenger.setMockMethodCallHandler(
       const MethodChannel('FlutterWebRTC.Method'),
       (call) async {
         calls.add(call.method);
         if (call.method == 'createVideoRenderer') {
+          await makingRenderer?.future;
           final id = ++textures;
           messenger.setMockStreamHandler(
             EventChannel('FlutterWebRTC/Texture$id'),
@@ -92,6 +100,9 @@ void main() {
         }
         if (call.method == 'createLocalMediaStream') {
           return <String, dynamic>{'streamId': 'made-${++streamsMade}'};
+        }
+        if (call.method == 'mediaStreamAddTrack') {
+          await addingTrack?.future;
         }
         if (call.method == 'streamDispose') {
           streamsDisposed.add((call.arguments as Map)['streamId'] as String);
@@ -113,6 +124,23 @@ void main() {
 
   Future<void> settle() =>
       Future<void>.delayed(const Duration(milliseconds: 50));
+
+  // A new offer, which makes the connection again.
+  Future<void> offerAgain(Call call) async {
+    try {
+      await call.handleSignal(ana, {
+        't': 'offer',
+        'sdp':
+            'v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 opus/48000/2\r\na=mid:0\r\n'
+            'm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\na=mid:1\r\n'
+            'm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 VP8/90000\r\na=mid:2\r\n'
+            'm=audio 9 UDP/TLS/RTP/SAVPF 96\r\na=rtpmap:96 opus/48000/2\r\na=mid:3\r\n',
+        'n': 2,
+      });
+    } catch (_) {
+      // The fake goes no further than making the connection.
+    }
+  }
 
   Future<(Call, CallPeer, _Connection)> arrive({
     required int mid,
@@ -217,6 +245,68 @@ void main() {
     expect(streamsMade, 1);
     expect(streamsDisposed, ['made-1']);
     expect(peer.screen.srcObject, isNull);
+    await call.stop();
+  });
+
+  test('a picture of a connection replaced while it was being shown does not '
+      'take the place of the new connection\'s', () async {
+    final (call, peer, old) = await arrive(mid: 1);
+    // A picture of the old connection, without a stream: the one made to show it waits
+    // for its track.
+    addingTrack = Completer<void>();
+    old.onTrack!(
+      RTCTrackEvent(
+        streams: [],
+        track: _Track(),
+        transceiver: _Transceiver('1'),
+      ),
+    );
+    await settle();
+    // A new offer makes the connection again, whose picture comes at once.
+    final replacing = _Connection();
+    call.connectionsForTests = () async => replacing;
+    await offerAgain(call);
+    expect(peer.connection, same(replacing));
+    replacing.onTrack!(
+      RTCTrackEvent(
+        streams: [_Stream('new')],
+        track: _Track(),
+        transceiver: _Transceiver('1'),
+      ),
+    );
+    await settle();
+    expect(peer.camera.srcObject?.id, 'new');
+    // The old connection's picture goes on only now: it must not be shown.
+    addingTrack!.complete();
+    await settle();
+    expect(peer.camera.srcObject?.id, 'new');
+    await call.stop();
+  });
+
+  test('a picture made again shows the stream its renderer shows by then, '
+      'not one of a connection replaced meanwhile', () async {
+    final (call, peer, _) = await arrive(mid: 1);
+    final failing = peer.camera;
+    makingRenderer = Completer<void>();
+    events[failing.textureId!]!.error(code: 'broken', message: 'lost');
+    await settle();
+    // While the new renderer is made, the connection is made again and its picture
+    // comes, to the renderer still in place.
+    final replacing = _Connection();
+    call.connectionsForTests = () async => replacing;
+    await offerAgain(call);
+    replacing.onTrack!(
+      RTCTrackEvent(
+        streams: [_Stream('new')],
+        track: _Track(),
+        transceiver: _Transceiver('1'),
+      ),
+    );
+    await settle();
+    makingRenderer!.complete();
+    await settle();
+    expect(peer.camera, isNot(same(failing)));
+    expect(peer.camera.srcObject?.id, 'new');
     await call.stop();
   });
 

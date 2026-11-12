@@ -600,7 +600,10 @@ class _Message extends StatelessWidget {
                   const _Pinned(),
                 if (item.text.isNotEmpty) ...[
                   if (row.head) const SizedBox(height: 4),
-                  Text.rich(emojiText(shownText(item.text), tx(c.fg))),
+                  LongText(
+                    emojiText(shownText(item.text), tx(c.fg)),
+                    key: ValueKey(('text', item.id)),
+                  ),
                 ],
                 for (final f in item.files) ...[
                   const SizedBox(height: 4),

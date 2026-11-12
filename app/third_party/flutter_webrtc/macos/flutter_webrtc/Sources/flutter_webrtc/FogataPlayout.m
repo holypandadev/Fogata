@@ -18,11 +18,14 @@ static const int64_t kStuckAgainNs = 500 * NSEC_PER_MSEC;
 // speaker that cannot be opened either does not have it made again forever.
 static const int kMostRecoveries = 3;
 
-// The system's lists of devices and its default input.
+// The system's lists of devices and its default input and output. A new default output
+// (a speaker that woke up, or another one chosen) may let an engine run that could not.
 static const AudioObjectPropertyAddress kWatched[] = {
     {kAudioHardwarePropertyDevices, kAudioObjectPropertyScopeGlobal,
      kAudioObjectPropertyElementMain},
     {kAudioHardwarePropertyDefaultInputDevice, kAudioObjectPropertyScopeGlobal,
+     kAudioObjectPropertyElementMain},
+    {kAudioHardwarePropertyDefaultOutputDevice, kAudioObjectPropertyScopeGlobal,
      kAudioObjectPropertyElementMain},
 };
 
@@ -118,6 +121,10 @@ static NSString* _Nullable WhyNoInput(RTCAudioDeviceModule* module) {
   int _recoveries;
   uint64_t _changes;     // the latest device change, to wait until they settle
   BOOL _checking;        // a look at a stopped engine is due
+  // What the module said of the stops since the last look: whether any came, and whether
+  // any was with the input (its engine meant to record).
+  BOOL _stopSeen;
+  BOOL _stopWithInput;
 }
 
 - (instancetype)initWithModule:(RTCAudioDeviceModule*)module observe:(BOOL)observe {
@@ -203,16 +210,31 @@ static NSString* _Nullable WhyNoInput(RTCAudioDeviceModule* module) {
 }
 
 // On `_queue`: an engine stopped while the module counts itself as playing is made again,
-// without the input. Looked at twice, as the system stops it for a moment by itself.
+// without the input when the input may be the cause. Looked at twice, as the system stops
+// it for a moment by itself.
 - (void)lookAtEngine {
   RTCAudioDeviceModule* module = _module;
-  if (_stopped || module == nil || _checking || !module.isPlaying || module.isEngineRunning) {
+  if (_stopped || module == nil || _checking) return;
+  if (!module.isPlaying || module.isEngineRunning) {
+    // Started again: the stops heard say nothing of a later one.
+    _stopSeen = NO;
+    _stopWithInput = NO;
     return;
   }
   _checking = YES;
   dispatch_after(dispatch_time(DISPATCH_TIME_NOW, kStuckAgainNs), _queue, ^{
     self->_checking = NO;
+    // An engine the module stopped with only the speaker in it (the input not wanted, or
+    // already left out) did not fail for the input: the microphone is left as it is. With
+    // no stop heard (another observer has the module), the input is taken for the cause,
+    // as it is the one thing that fails this way.
+    BOOL inputsFault = !self->_stopSeen || self->_stopWithInput;
+    self->_stopSeen = NO;
+    self->_stopWithInput = NO;
     RTCAudioDeviceModule* module = self->_module;
+    // The module's getters wait for its thread (WebRTC-SDK's RTCAudioDeviceModule calls
+    // it with BlockingCall, on the thread every change of its engine runs on): an engine
+    // still starting is seen once it has started, or failed to.
     if (self->_stopped || module == nil || !module.isPlaying || module.isEngineRunning) return;
     if (self->_recoveries >= kMostRecoveries) {
       NSLog(@"Fogata: the audio engine does not play, and was made again %d times already",
@@ -220,26 +242,33 @@ static NSString* _Nullable WhyNoInput(RTCAudioDeviceModule* module) {
       return;
     }
     self->_recoveries++;
-    self->_inputFailed = YES;
-    // Neither side available releases the engine; the speaker alone makes a new one.
+    if (inputsFault) self->_inputFailed = YES;
+    BOOL input = !inputsFault && self->_inputAvailable;
+    // Neither side available releases the engine; a new one is made with the speaker, and
+    // the input only if it was not the cause.
     [module setEngineAvailability:(RTCAudioEngineAvailability){NO, NO}];
-    NSInteger result = [module setEngineAvailability:(RTCAudioEngineAvailability){NO, YES}];
-    self->_inputAvailable = NO;
-    NSLog(@"Fogata: the audio engine stopped while playing; made again without the microphone"
-          @" (%ld, running %d)",
-          (long)result, module.isEngineRunning);
+    NSInteger result = [module setEngineAvailability:(RTCAudioEngineAvailability){input, YES}];
+    self->_inputAvailable = input;
+    NSLog(@"Fogata: the audio engine stopped while playing; made again %@ (%ld, running %d)",
+          inputsFault ? @"without the microphone" : @"as it was", (long)result,
+          module.isEngineRunning);
   });
 }
 
 #pragma mark - RTCAudioDeviceModuleDelegate
 
 // Called on the module's thread, inside its change: looked at once that change is done.
+// `isRecordingEnabled` is whether the engine the module goes on to make is to record
+// (WebRTC-SDK passes the state it changes to): false when the input is not wanted or not
+// available.
 - (NSInteger)audioDeviceModule:(RTCAudioDeviceModule*)audioDeviceModule
                  didStopEngine:(AVAudioEngine*)engine
               isPlayoutEnabled:(BOOL)isPlayoutEnabled
             isRecordingEnabled:(BOOL)isRecordingEnabled {
   if (isPlayoutEnabled) {
     dispatch_async(_queue, ^{
+      self->_stopSeen = YES;
+      if (isRecordingEnabled) self->_stopWithInput = YES;
       [self lookAtEngine];
     });
   }

@@ -27,6 +27,10 @@
 #            FOGATA_TEST_MIC_SOAK=<n> runs n tests first, logging the memory every 20;
 #            FOGATA_TEST_CALL_SOAK=<n> has a leave and rejoin the call n times first;
 #            FOGATA_TEST_LEAK=open|closed leaks a connection a test, to see the check fail
+#   media    a turns its camera (the made-up one) on and shares the display, b shows both,
+#            and a stops both, twice: the video library must then hold no more streams,
+#            tracks, cameras' capturers or screen stoppers than before, in the call, and
+#            nothing on either copy 5 s after it (a capture left running would show)
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
 #        300 and 1500). Build first as for measure.sh. Prints PASS or FAIL for each and the
 #        run folders; exits non-zero when one failed.
@@ -46,6 +50,7 @@ if [ "${1:-}" = --inside ]; then
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=hang
       ;;
     late) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=late FOGATA_TEST_MIC_LATE=8; lab_copy b 2 off FOGATA_TEST_MIC_CASE=late ;;
+    media) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=media FOGATA_TEST_CAMERA=1; lab_copy b 2 off FOGATA_TEST_MIC_CASE=media ;;
     quit)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=quit
@@ -94,7 +99,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices broken alsa hang quit:0 quit:300 quit:1500)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media broken alsa hang quit:0 quit:300 quit:1500)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }

@@ -105,6 +105,25 @@ class MainFlutterWindow: NSWindow {
       }
     }
 
+    // Whether the person asked for less motion (Reduce motion), which Flutter is not told
+    // on macOS (see lib/src/motion.dart): asked for, and said again when it changes.
+    let motion = FlutterMethodChannel(
+      name: "fogata/motion", binaryMessenger: flutterViewController.engine.binaryMessenger)
+    motion.setMethodCallHandler { call, result in
+      guard call.method == "reduceMotion" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      result(NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    }
+    NSWorkspace.shared.notificationCenter.addObserver(
+      forName: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil,
+      queue: .main
+    ) { _ in
+      motion.invokeMethod(
+        "reduceMotion", arguments: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+    }
+
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     super.awakeFromNib()

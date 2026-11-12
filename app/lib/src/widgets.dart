@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 
 import 'icons.dart';
 import 'l10n.dart';
+import 'motion.dart';
 import 'moving.dart';
 import 'names.dart';
 import 'round.dart';
@@ -174,8 +175,9 @@ class KeyboardFocus {
   }
 }
 
-/// The springy curve of the controls: a little past the target, then back.
-const spring = Curves.easeOutBack;
+/// The springy curve of the controls: a little past the target, then back; at the
+/// target at once for people who asked for less motion ([MotionCurve]).
+const spring = MotionCurve(Curves.easeOutBack);
 const springTime = Duration(milliseconds: 320);
 
 /// Grows a little under the pointer and shrinks while pressed, with a spring. Draws
@@ -836,7 +838,18 @@ class _SkeletonState extends State<Skeleton>
   late final _c = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 1400),
-  )..repeat();
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // With less motion, the shimmer holds still.
+    if (lessMotion(context)) {
+      _c.stop();
+    } else if (!_c.isAnimating) {
+      _c.repeat();
+    }
+  }
 
   @override
   void dispose() {
@@ -1694,7 +1707,7 @@ class CopyButton extends StatefulWidget {
 
   final String text;
 
-  /// "Link", "Code" or "QR", in English: which secret it copies, named in the tooltip in
+  /// "Link", "Code", "QR" or "Key", in English: which secret it copies, named in the tooltip in
   /// the language in use.
   final String what;
 
@@ -1935,6 +1948,79 @@ class RoundedPicture extends StatelessWidget {
     source: SafeMemoryImage(bytes),
     size: size,
     corner: size > 0 ? (radius / size).clamp(0, .5) : .5,
+  );
+}
+
+/// A chat message's text, cut after [shownLines] lines with "Show more" under it, and
+/// whole with "Show less" once opened. A message may be 2000 line breaks and nothing else:
+/// whole, it would be one bubble tens of thousands of pixels tall for everyone who reads
+/// the chat. Only how it is drawn: what is sent, kept and copied is the whole text.
+class LongText extends StatefulWidget {
+  const LongText(this.text, {super.key, this.style});
+
+  /// What it says, drawn as [Text.rich] draws it.
+  final InlineSpan text;
+  final TextStyle? style;
+
+  /// The most lines it shows until "Show more".
+  static const shownLines = 20;
+
+  @override
+  State<LongText> createState() => _LongTextState();
+}
+
+class _LongTextState extends State<LongText> {
+  bool _open = false;
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder: (context, box) {
+      final whole = Text.rich(widget.text, style: widget.style);
+      if (!box.hasBoundedWidth) return whole;
+      final painter = TextPainter(
+        text: TextSpan(
+          style: DefaultTextStyle.of(context).style.merge(widget.style),
+          children: [widget.text],
+        ),
+        textDirection: Directionality.of(context),
+        textScaler: MediaQuery.textScalerOf(context),
+        maxLines: LongText.shownLines,
+      )..layout(maxWidth: box.maxWidth);
+      final long = painter.didExceedMaxLines;
+      painter.dispose();
+      if (!long) return whole;
+      final c = context.fg;
+      final words = _open ? l10n.widgetsShowLess : l10n.widgetsShowMore;
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _open
+              ? whole
+              : Text.rich(
+                  widget.text,
+                  style: widget.style,
+                  maxLines: LongText.shownLines,
+                  overflow: TextOverflow.fade,
+                ),
+          const SizedBox(height: 4),
+          Pressable(
+            onTap: () => setState(() => _open = !_open),
+            expanded: _open,
+            label: words,
+            builder: (context, hovered) => Text(
+              words,
+              style: tx(
+                hovered ? c.fg : c.fg2,
+                size: 12.5,
+                height: 1.45,
+                decoration: TextDecoration.underline,
+              ),
+            ),
+          ),
+        ],
+      );
+    },
   );
 }
 
@@ -2179,8 +2265,9 @@ class _SpeakingBarsState extends State<SpeakingBars> {
     // Bars that would move for as long as the page shows redraw the window 15 times a
     // second for nothing: several processors' worth without a graphics card.
     final still =
-        widget.lasts != null &&
-        (_still || !(ModalRoute.of(context)?.isCurrent ?? true));
+        (widget.lasts != null &&
+            (_still || !(ModalRoute.of(context)?.isCurrent ?? true))) ||
+        lessMotion(context);
     if (still) return _bars(.42, color);
     return SlowPulse(
       period: const Duration(milliseconds: 1100),
@@ -2213,7 +2300,7 @@ class _SpeakingBarsState extends State<SpeakingBars> {
   );
 }
 
-/// Something secret shown on screen (a link, a code, a QR): blurred until the eye button
+/// Something secret shown on screen (a link, a code, a QR, a recovery key): blurred until the eye button
 /// shows it for a few seconds, so nothing leaks when the window is on a shared screen. The
 /// copy button copies it without showing it.
 class SecretBox extends StatefulWidget {
@@ -2224,6 +2311,8 @@ class SecretBox extends StatefulWidget {
     required this.what,
     this.onCopied,
     this.buttonsBelow = false,
+    this.copy = true,
+    this.stays = false,
   });
 
   /// What the copy button copies.
@@ -2232,13 +2321,21 @@ class SecretBox extends StatefulWidget {
   /// How the secret is drawn.
   final Widget child;
 
-  /// "Link", "Code" or "QR", in English: which secret it is, named in the buttons'
+  /// "Link", "Code", "QR" or "Key", in English: which secret it is, named in the buttons'
   /// tooltips in the language in use.
   final String what;
   final VoidCallback? onCopied;
 
   /// The buttons centred under the secret (for the QR) instead of beside it.
   final bool buttonsBelow;
+
+  /// Whether it has a copy button. A recovery key has none: it is written down, not left
+  /// on the clipboard.
+  final bool copy;
+
+  /// Whether it stays shown until the eye button hides it again, rather than for
+  /// [shownFor]: a recovery key is written down by hand, which takes far longer.
+  final bool stays;
 
   /// How long the secret stays shown after the eye button.
   static const shownFor = Duration(seconds: 10);
@@ -2260,7 +2357,7 @@ class _SecretBoxState extends State<SecretBox> {
   void _toggle() {
     _hide?.cancel();
     setState(() => _shown = !_shown);
-    if (_shown) {
+    if (_shown && !widget.stays) {
       _hide = Timer(SecretBox.shownFor, () {
         if (mounted) setState(() => _shown = false);
       });
@@ -2290,13 +2387,15 @@ class _SecretBoxState extends State<SecretBox> {
             : l10n.widgetsShowWhat(widget.what.toLowerCase()),
         onTap: _toggle,
       ),
-      const SizedBox(width: 6),
-      CopyButton(
-        text: widget.text,
-        what: widget.what,
-        label: l10n.commonCopy,
-        onCopied: widget.onCopied,
-      ),
+      if (widget.copy) ...[
+        const SizedBox(width: 6),
+        CopyButton(
+          text: widget.text,
+          what: widget.what,
+          label: l10n.commonCopy,
+          onCopied: widget.onCopied,
+        ),
+      ],
     ];
     if (widget.buttonsBelow) {
       return Column(
@@ -2341,7 +2440,18 @@ class _RingsState extends State<Rings> with SingleTickerProviderStateMixin {
   late final _turn = AnimationController(
     vsync: this,
     duration: const Duration(milliseconds: 2400),
-  )..repeat();
+  );
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // With less motion, the rings hold still where they are.
+    if (lessMotion(context)) {
+      _turn.stop();
+    } else if (!_turn.isAnimating) {
+      _turn.repeat();
+    }
+  }
 
   @override
   void dispose() {

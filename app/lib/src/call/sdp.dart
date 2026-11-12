@@ -252,6 +252,56 @@ String cameraBitrate(String sdp) => _withParam(
   'x-google-start-bitrate=$cameraStartKbps',
 );
 
+/// The highest start of the bandwidth estimate taken from a participant's description, in
+/// kbit/s: twice what copies ask for ([cameraStartKbps]).
+const maxStartKbps = 2 * cameraStartKbps;
+
+/// A participant's description as this device takes it: the format parameters by which
+/// it could set this device's sending (`x-google-min-bitrate`, `x-google-start-bitrate`)
+/// kept within what copies ask for. No copy asks for a lowest bitrate; given one, WebRTC
+/// keeps its bandwidth estimate of that connection above it however congested this
+/// device's network gets, and every voice it sends suffers. A start above
+/// [maxStartKbps] starts at that (one that is not a number goes, as WebRTC would ignore
+/// it). The highest bitrate stays as asked: it only limits what reaches that side, and
+/// [_tune]'s limits of each picture hold anyway. A line without such parameters, as
+/// every copy sends, stays as it is.
+@visibleForTesting
+String peerBitrates(String sdp) {
+  final lines = sdp.split('\r\n');
+  final out = <String>[];
+  for (final line in lines) {
+    final fmtp = RegExp(r'^(a=fmtp:\d+ )(.*)$').firstMatch(line);
+    if (fmtp == null) {
+      out.add(line);
+      continue;
+    }
+    final kept = <String>[];
+    var changed = false;
+    for (final param in fmtp.group(2)!.split(';')) {
+      final name = param.split('=').first.trim().toLowerCase();
+      if (name == 'x-google-min-bitrate') {
+        changed = true;
+        continue;
+      }
+      if (name == 'x-google-start-bitrate') {
+        final kbps = int.tryParse(param.split('=').skip(1).join('=').trim());
+        if (kbps == null || kbps > maxStartKbps) {
+          changed = true;
+          if (kbps != null) kept.add('x-google-start-bitrate=$maxStartKbps');
+          continue;
+        }
+      }
+      kept.add(param);
+    }
+    if (!changed) {
+      out.add(line);
+    } else if (kept.isNotEmpty) {
+      out.add('${fmtp.group(1)}${kept.join(';')}');
+    }
+  }
+  return out.join('\r\n');
+}
+
 /// Lets the other side's voice send next to nothing while it is silent (Opus DTX): in a
 /// large room most people say nothing most of the time.
 @visibleForTesting

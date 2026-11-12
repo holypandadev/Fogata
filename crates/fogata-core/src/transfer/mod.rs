@@ -43,8 +43,8 @@ use anyhow::{Context, Result, bail};
 use base64::Engine as _;
 use fogata_crypto::{DeviceIdentity, at_rest::DataKey};
 use fogata_friends::{
-    CodeProblem, MAX_FAILED_TRANSFER_RUNS, Profile, RunError, TRANSFER_CODE_LIFETIME_MS,
-    TransferCode, run_reply, run_start,
+    CodeProblem, MAX_FAILED_TRANSFER_RUNS, Profile, ReceiverRun, RunError,
+    TRANSFER_CODE_LIFETIME_MS, TransferCode, run_reply, run_start,
 };
 use fogata_net::{NodeConfig, NodeHandle, PeerId};
 use futures::StreamExt as _;
@@ -87,6 +87,13 @@ const RUN_WAIT: Duration = Duration::from_secs(20);
 /// How long the new computer waits for the first message of a run: it is sent as the
 /// connection opens, so a computer that says nothing does not hold the code for long.
 const START_WAIT: Duration = Duration::from_secs(5);
+/// How long the new computer waits for the proof of a run once it answered its start: the
+/// computer typing the code sends it as soon as the answer comes, so a few round trips
+/// over the slowest relay are plenty.
+const PROOF_WAIT: Duration = Duration::from_secs(10);
+/// Most runs of the code the new computer answers at once, each of another computer: a
+/// stranger that learnt the nameplate and stalls holds one of them, not the code.
+const MAX_RUNS: usize = 8;
 /// How long a computer found only over the DHT waits for one on the local network.
 const LAN_FIRST: Duration = Duration::from_secs(5);
 /// A computer that took the protocol but did not answer a run is tried again after this.
@@ -1092,6 +1099,12 @@ async fn receiving(
     let mut failed = 0;
     let expiry = tokio::time::sleep(Duration::from_millis(options.code_lifetime_ms));
     tokio::pin!(expiry);
+    // Each run goes on its own up to the proof it brings, so that one that stalls keeps
+    // neither the others, nor the person's Cancel, nor the code's end waiting. Proofs are
+    // checked here, one at a time, so a stranger gets no more guesses at once than one
+    // after the other.
+    let mut runs = Runs::default();
+    let mut old_runs = Runs::default();
     let end = loop {
         tokio::select! {
             _ = &mut expiry => break TransferEvent::Failed(Failure::Expired),
@@ -1101,10 +1114,14 @@ async fn receiving(
                 }
             }
             stream = old_incoming.next() => {
-                let Some((_, stream)) = stream else {
+                let Some((peer, stream)) = stream else {
                     break TransferEvent::Failed(Failure::NetworkStopped);
                 };
-                if let Some(end) = answer_old_run(&code, stream).await {
+                let code = code.clone();
+                old_runs.start(peer, async move { answer_old_run(&code, stream).await });
+            }
+            Some(end) = old_runs.next() => {
+                if let Some(end) = end {
                     break end;
                 }
             }
@@ -1114,8 +1131,21 @@ async fn receiving(
                 };
                 let lan = is_lan(&node, peer).await;
                 let (local, remote) = (node.local_peer().to_bytes(), peer.to_bytes());
-                match answer_run(&code, &local, &remote, stream).await {
-                    Ok(Some(channel)) => {
+                let code = code.clone();
+                runs.start(peer, async move {
+                    (lan, answer_start(&code, &local, &remote, stream).await)
+                });
+            }
+            Some((lan, started)) = runs.next() => {
+                let answered = match started {
+                    Ok(Some((run, proof, stream))) => answer_proof(run, &proof, stream).await,
+                    Ok(None) => continue,
+                    Err(e) => Err(e),
+                };
+                match answered {
+                    Ok(channel) => {
+                        runs.stop_all();
+                        old_runs.stop_all();
                         if let Err(e) = enter(Phase::Running) {
                             break TransferEvent::Failed(failure_of(e));
                         }
@@ -1124,7 +1154,6 @@ async fn receiving(
                             Err(e) => TransferEvent::Failed(failure_of(e)),
                         };
                     }
-                    Ok(None) => {}
                     Err(RunError::WrongCode) => {
                         failed += 1;
                         let _ = events.send(TransferEvent::WrongCodeTried);
@@ -1137,6 +1166,8 @@ async fn receiving(
             }
         }
     };
+    runs.stop_all();
+    old_runs.stop_all();
     let _ = node.seek(None, None).await;
     let _ = node.shutdown().await;
     Ok(end)
@@ -1191,13 +1222,29 @@ impl std::error::Error for Failure {}
 /// another code, an error otherwise. Only a wrong proof of the code is
 /// [`RunError::WrongCode`], which counts: the answer to a start tells nothing of the code,
 /// so a run that stops before its proof (a stranger that learnt the nameplate and stalls)
-/// was no guess, and costs the code nothing.
+/// was no guess, and costs the code nothing. The new computer runs the two halves apart
+/// ([`answer_start`] in a task of its own, [`answer_proof`] in its loop).
+#[cfg(test)]
 async fn answer_run<S: Link>(
     code: &TransferCode,
     local: &[u8],
     remote: &[u8],
-    mut stream: S,
+    stream: S,
 ) -> Result<Option<Channel<S>>, RunError> {
+    match answer_start(code, local, remote, stream).await? {
+        Some((run, proof, stream)) => answer_proof(run, &proof, stream).await.map(Some),
+        None => Ok(None),
+    }
+}
+
+/// [`answer_run`] up to the proof the other computer sends: the run, that proof and the
+/// stream, to check it on ([`answer_proof`]); `None` for a run of another code.
+async fn answer_start<S: Link>(
+    code: &TransferCode,
+    local: &[u8],
+    remote: &[u8],
+    mut stream: S,
+) -> Result<Option<(ReceiverRun, Vec<u8>, S)>, RunError> {
     let start = within(START_WAIT, wire::read_start(&mut stream))
         .await
         .map_err(|_| RunError::Malformed)?;
@@ -1213,20 +1260,90 @@ async fn answer_run<S: Link>(
     wire::send_reply(&mut stream, Some(&reply))
         .await
         .map_err(|_| RunError::Malformed)?;
-    let proof = within(RUN_WAIT, wire::read_confirm(&mut stream))
+    let proof = within(PROOF_WAIT, wire::read_confirm(&mut stream))
         .await
         .map_err(|_| RunError::Malformed)?;
-    let (keys, answer) = match run.finish(&proof) {
+    Ok(Some((run, proof, stream)))
+}
+
+/// [`answer_run`] from the proof the other computer sent: the channel if it proves the
+/// code. Its answer is one short message, given [`START_WAIT`] to go.
+async fn answer_proof<S: Link>(
+    run: ReceiverRun,
+    proof: &[u8],
+    mut stream: S,
+) -> Result<Channel<S>, RunError> {
+    let (keys, answer) = match run.finish(proof) {
         Ok(done) => done,
         Err(e) => {
-            let _ = wire::send_answer(&mut stream, None).await;
+            let _ = within(START_WAIT, wire::send_answer(&mut stream, None)).await;
             return Err(e);
         }
     };
-    wire::send_answer(&mut stream, Some(&answer))
+    within(START_WAIT, wire::send_answer(&mut stream, Some(&answer)))
         .await
         .map_err(|_| RunError::Malformed)?;
-    Ok(Some(Channel::new(stream, &keys, false)))
+    Ok(Channel::new(stream, &keys, false))
+}
+
+/// Runs of the code being answered, each in a task of its own: one per computer, the
+/// newest stream of a computer in place of the run it had, and at most [`MAX_RUNS`], the
+/// oldest stopped for a new one. A stranger that stalls holds one run until its wait ends;
+/// stopping the oldest rather than turning the newest away means it must keep bringing new
+/// computers faster than a real run ends (two round trips) to keep that one out.
+struct Runs<T> {
+    tasks: tokio::task::JoinSet<T>,
+    /// The computer of each run, oldest first.
+    of: Vec<(PeerId, tokio::task::AbortHandle)>,
+}
+
+impl<T> Default for Runs<T> {
+    fn default() -> Self {
+        Self {
+            tasks: tokio::task::JoinSet::new(),
+            of: Vec::new(),
+        }
+    }
+}
+
+impl<T: Send + 'static> Runs<T> {
+    /// Starts `run`, of `peer`.
+    fn start(&mut self, peer: PeerId, run: impl std::future::Future<Output = T> + Send + 'static) {
+        self.of.retain(|(p, task)| {
+            let same = *p == peer;
+            if same {
+                task.abort();
+            }
+            !same
+        });
+        if self.of.len() >= MAX_RUNS {
+            let (_, oldest) = self.of.remove(0);
+            oldest.abort();
+        }
+        let task = self.tasks.spawn(run);
+        self.of.push((peer, task));
+    }
+
+    /// The next run to end, of those not stopped; `None` when none is left.
+    async fn next(&mut self) -> Option<T> {
+        loop {
+            let ended = self.tasks.join_next_with_id().await?;
+            let id = match &ended {
+                Ok((id, _)) => *id,
+                Err(e) => e.id(),
+            };
+            self.of.retain(|(_, task)| task.id() != id);
+            if let Ok((_, out)) = ended {
+                return Some(out);
+            }
+        }
+    }
+
+    /// Stops every run.
+    fn stop_all(&mut self) {
+        self.tasks.abort_all();
+        self.of.clear();
+    }
 }
 
 /// A start of the first way of running the code (`/fogata/transfer/1`) on `stream`: when
@@ -2658,6 +2775,75 @@ mod tests {
         );
         assert!(matches!(ran, Ran::Untried { other_code: true }));
         assert!(matches!(answered, Ok(None)));
+    }
+
+    /// A stranger that learnt the nameplate and stalls keeps no other run waiting: the run
+    /// of the computer typing the code, started after it, ends while the stranger still
+    /// waits, and the stranger's run ends without a try of the code. A computer has one run
+    /// at a time, its newest stream in place of the one before, and past [`MAX_RUNS`] the
+    /// oldest stops.
+    #[tokio::test]
+    async fn a_stranger_that_stalls_keeps_no_other_run_waiting() {
+        type Started = Result<Option<(ReceiverRun, Vec<u8>, End)>, RunError>;
+        let code = TransferCode::generate().unwrap();
+        let answering = |stream: End| {
+            let code = code.clone();
+            async move { answer_start(&code, b"new", b"old", stream).await }
+        };
+        let mut runs: Runs<Started> = Runs::default();
+
+        // The stranger: a start with the nameplate, then nothing once it has the answer.
+        let (mut stranger, new) = ends();
+        runs.start(PeerId::random(), answering(new));
+        let (_, start) = run_start(&same_place(&code), b"old", b"new");
+        wire::send_start(&mut stranger, &start).await.unwrap();
+        wire::read_reply(&mut stranger).await.unwrap().unwrap();
+        // One that says nothing at all.
+        let (silent, new) = ends();
+        runs.start(PeerId::random(), answering(new));
+
+        let (old, new) = ends();
+        let sender = {
+            let code = code.clone();
+            tokio::spawn(async move {
+                matches!(run_code(&code, b"old", b"new", old).await, Ran::Both(_))
+            })
+        };
+        runs.start(PeerId::random(), answering(new));
+        let Some(Ok(Some((run, proof, stream)))) = runs.next().await else {
+            panic!("the run of the computer typing the code ends first")
+        };
+        assert!(answer_proof(run, &proof, stream).await.is_ok());
+        assert!(sender.await.unwrap());
+        // Then those that stalled, once they go (or their waits end), neither a try.
+        drop((stranger, silent));
+        for _ in 0..2 {
+            assert!(matches!(runs.next().await, Some(Err(RunError::Malformed))));
+        }
+        assert!(runs.next().await.is_none());
+
+        // A second stream of a computer in place of its first; the oldest past the most.
+        let mut quiet = Vec::new();
+        let twice = PeerId::random();
+        for peer in [twice, twice] {
+            let (other, new) = ends();
+            quiet.push(other);
+            runs.start(peer, answering(new));
+        }
+        assert_eq!(runs.of.len(), 1);
+        for _ in 0..MAX_RUNS {
+            let (other, new) = ends();
+            quiet.push(other);
+            runs.start(PeerId::random(), answering(new));
+        }
+        assert_eq!(runs.of.len(), MAX_RUNS);
+        assert!(runs.of.iter().all(|(peer, _)| *peer != twice));
+        drop(quiet);
+        let mut ended = 0;
+        while runs.next().await.is_some() {
+            ended += 1;
+        }
+        assert_eq!(ended, MAX_RUNS);
     }
 
     /// What a new computer of version 0.1.0-beta.7 or before (`/fogata/transfer/1`) does with

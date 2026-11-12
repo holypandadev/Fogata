@@ -43,6 +43,96 @@ String? unfairPicture(List<StatsReport> reports) {
   return null;
 }
 
+/// How fast each channel's pictures arrive on one connection, reading after reading, to
+/// tell a participant who sends far more of them than any copy does: a modified copy could
+/// keep every receiver decoding its camera or its screen at hundreds of frames a second,
+/// within the size [fairPicture] allows, whether anyone watches or not. The limit of each
+/// reading is [room] times what honest copies send, beta.7 on: at most [mostFps] frames a
+/// second on either channel (the camera's step for two people, see [cameraStep], and the
+/// screen's highest quality, [ScreenQuality.rates]), and at most [cameraMaxKbps] or
+/// [screenMaxKbps] (what this device's own description lets each send, which every copy's
+/// encoder keeps to). Older copies judge newer ones by these: a later version that sends
+/// faster must stay well within them. Frames are counted as
+/// decoded: after a stall, WebRTC skips the frames that came late rather than decode them
+/// all, so catching up does not show as a burst. Bytes are counted as received, which a
+/// key frame or a network catching up after a stall can push past the limit for one
+/// reading, never for two in a row.
+@visibleForTesting
+class VideoFlood {
+  /// The most frames a second any copy sends of its camera or its screen.
+  static const mostFps = 60;
+
+  /// How far above what any copy sends a reading may go.
+  static const room = 3;
+
+  /// Readings in a row above it before the sender is kept out.
+  static const readings = 2;
+
+  /// A reading closer than this to the one before is not judged (one taken 1.1 s after
+  /// another for a silent participant is); it counts with the next.
+  static const leastSpan = Duration(milliseconds: 900);
+
+  final _last = <String, ({num frames, num bytes})>{};
+  DateTime? _at;
+  final _over = <int, int>{};
+
+  /// The most kbit/s any copy sends on [channel].
+  static int mostKbps(int channel) =>
+      channel == _camera ? cameraMaxKbps : screenMaxKbps;
+
+  /// Takes the connection's statistics read at [now]: what has arrived above the limits for
+  /// [readings] readings in a row, as words for the log; null otherwise.
+  String? take(List<StatsReport> reports, DateTime now) {
+    final at = _at;
+    if (at != null && now.difference(at) < leastSpan) return null;
+    final seconds = at == null
+        ? 0.0
+        : now.difference(at).inMicroseconds / Duration.microsecondsPerSecond;
+    final frames = <int, num>{};
+    final bytes = <int, num>{};
+    final counts = <String, ({num frames, num bytes})>{};
+    for (final report in reports) {
+      final v = report.values;
+      if (report.type != 'inbound-rtp' || v['kind'] != 'video') continue;
+      // A copy whose statistics name no channel (older WebRTC) is held to the larger
+      // limits, a screen's, as in [unfairPicture].
+      final mid = v['mid'];
+      final channel = mid == null ? _screen : int.tryParse('$mid') ?? -1;
+      final count = (
+        frames: v['framesDecoded'] as num? ?? 0,
+        bytes: v['bytesReceived'] as num? ?? 0,
+      );
+      counts[report.id] = count;
+      final before = _last[report.id];
+      // A stream's counts start again only with a new stream: one that went down is
+      // not judged against the old.
+      if (before == null ||
+          count.frames < before.frames ||
+          count.bytes < before.bytes) {
+        continue;
+      }
+      frames[channel] = (frames[channel] ?? 0) + count.frames - before.frames;
+      bytes[channel] = (bytes[channel] ?? 0) + count.bytes - before.bytes;
+    }
+    _last
+      ..clear()
+      ..addAll(counts);
+    _at = now;
+    if (seconds <= 0) return null;
+    for (final channel in {..._over.keys, ...frames.keys}) {
+      final fps = (frames[channel] ?? 0) / seconds;
+      final kbps = (bytes[channel] ?? 0) * 8 / 1000 / seconds;
+      final over = fps > mostFps * room || kbps > mostKbps(channel) * room;
+      final inRow = _over[channel] = over ? (_over[channel] ?? 0) + 1 : 0;
+      if (inRow >= readings) {
+        return 'video on channel $channel at ${fps.round()} frames a second, '
+            '${kbps.round()} kbit/s';
+      }
+    }
+    return null;
+  }
+}
+
 /// What a connection's statistics say of the shared screen's encoder, for [ScreenLoad]:
 /// whether WebRTC holds it back for the processor, its time spent encoding so far, in
 /// seconds, the frames a second it sends and those the screen is captured at (each null
@@ -91,9 +181,9 @@ extension _Measuring on Call {
     }
   }
 
-  /// Closes the connection with [peer], which sent [what] (see [fairPicture]), and makes
-  /// no other while it stays in the call: a modified copy could keep this device decoding
-  /// pictures of any size. Every picture its renderers get is checked
+  /// Closes the connection with [peer], which sent [what] (see [fairPicture] and
+  /// [VideoFlood]), and makes no other while it stays in the call: a modified copy could
+  /// keep this device decoding pictures of any size, at any rate. Every picture its renderers get is checked
   /// ([pictureArrived]), and every reading of the statistics, every 2 s.
   Future<void> _keepOut(CallPeer peer, String what) async {
     if (peer._keptOut) {
@@ -143,12 +233,13 @@ extension _Measuring on Call {
         continue;
       }
       if (_closed || peers[peer.id] != peer) continue;
-      final unfair = unfairPicture(reports);
+      final now = DateTime.now();
+      final unfair =
+          unfairPicture(reports) ?? peer._pictures.take(reports, now);
       if (unfair != null) {
         await _keepOut(peer, unfair);
         continue;
       }
-      final now = DateTime.now();
       final before = quality.linkOf(peer.id);
       quality.take(peer.id, LinkSample.of(reports, voiceMid: '$_audio'), now);
       _fitScreen(peer, reports, now);
@@ -240,7 +331,7 @@ extension _Measuring on Call {
   }
 
   /// Who talks, every 600 ms. A reading that takes longer (many participants, a busy
-  /// computer: one full statistics report each) is not overtaken by the next one, so
+  /// computer: one report of statistics each) is not overtaken by the next one, so
   /// readings never pile up.
   Future<void> _readLevels() async {
     if (_readingLevels) return;
@@ -277,28 +368,16 @@ extension _Measuring on Call {
       }
       var remote = 0.0;
       try {
-        // The loudest report counts: after the other side stops and starts sending again,
-        // its old silent stream may still be listed beside the new one. This device's own
-        // level is the same on every connection, so it is read from the first one only.
-        // Voices only: the sound of a shared screen is not someone talking.
-        final mic = _micStream?.getAudioTracks().firstOrNull?.id;
-        for (final report in await connection.getStats()) {
-          final level = report.values['audioLevel'];
-          if (level is! num) continue;
-          final values = report.values;
-          if (report.type == 'inbound-rtp' &&
-              (values['mid'] == null || values['mid'] == '$_audio')) {
-            remote = math.max(remote, level.toDouble());
-          }
-          if (!localRead &&
-              report.type == 'media-source' &&
-              (mic == null ||
-                  values['trackIdentifier'] == null ||
-                  values['trackIdentifier'] == mic)) {
-            local = math.max(local, level.toDouble());
-          }
+        // Each level from the statistics of what carries it alone: their voice's receiver,
+        // and this device's microphone where it goes out. This device's own level is the
+        // same on every connection, so it is read from the first one only. A whole report
+        // (every channel, candidate and codec of the connection) is read only when the
+        // narrow one cannot tell: the track not known yet, or nothing of it listed yet.
+        if (peer.mic) remote = await _voiceLevelOf(peer, connection);
+        if (!localRead) {
+          local = await _micLevelOn(connection);
+          localRead = true;
         }
-        localRead = true;
       } catch (_) {
         continue;
       }
@@ -324,4 +403,72 @@ extension _Measuring on Call {
     }
     if (changed) talking.value++;
   }
+
+  /// How loud [peer]'s voice arrives on [connection] ([voiceLevel]): from the statistics
+  /// of its receiver alone (WebRTC filters them by the receiver's own stream), or of the
+  /// whole connection while that one is not known or lists nothing of the voice yet.
+  Future<double> _voiceLevelOf(
+    CallPeer peer,
+    RTCPeerConnection connection,
+  ) async {
+    final voice = peer._voice;
+    if (voice != null && voice.on == connection) {
+      try {
+        final level = voiceLevel(await connection.getStats(voice.track));
+        if (level != null) return level;
+      } catch (_) {
+        // Not found (the connection made again meanwhile): the whole report says.
+      }
+    }
+    return voiceLevel(await connection.getStats()) ?? 0;
+  }
+
+  /// How loud this device's microphone is, read on [connection] ([micLevel]): from the
+  /// statistics of the sender it goes out on alone, or of the whole connection while that
+  /// one tells nothing (it sends nothing yet).
+  Future<double> _micLevelOn(RTCPeerConnection connection) async {
+    final mic = _micStream?.getAudioTracks().firstOrNull;
+    if (mic != null) {
+      try {
+        final level = micLevel(await connection.getStats(mic), mic.id);
+        if (level != null) return level;
+      } catch (_) {
+        // Not on this connection's sender (not put on it yet): the whole report says.
+      }
+    }
+    return micLevel(await connection.getStats(), mic?.id) ?? 0;
+  }
+}
+
+/// How loud a participant's voice arrives, from a connection's statistics or its voice
+/// receiver's; null when they list none. The loudest report counts: after the other side
+/// stops and starts sending again, its old silent stream may still be listed beside the
+/// new one. Voices only: the sound of a shared screen is not someone talking.
+@visibleForTesting
+double? voiceLevel(List<StatsReport> reports) {
+  double? level;
+  for (final report in reports) {
+    final values = report.values;
+    final value = values['audioLevel'];
+    if (value is! num || report.type != 'inbound-rtp') continue;
+    if (values['mid'] != null && values['mid'] != '$_audio') continue;
+    level = math.max(level ?? 0, value.toDouble());
+  }
+  return level;
+}
+
+/// How loud this device's microphone ([mic], its track's id, when known) is, from a
+/// connection's statistics or its microphone sender's; null when they list none.
+@visibleForTesting
+double? micLevel(List<StatsReport> reports, String? mic) {
+  double? level;
+  for (final report in reports) {
+    final values = report.values;
+    final value = values['audioLevel'];
+    if (value is! num || report.type != 'media-source') continue;
+    final track = values['trackIdentifier'];
+    if (mic != null && track != null && track != mic) continue;
+    level = math.max(level ?? 0, value.toDouble());
+  }
+  return level;
 }

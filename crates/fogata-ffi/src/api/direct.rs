@@ -429,7 +429,7 @@ pub async fn fetch_direct_file(device_id: String, file: String) -> Result<()> {
 pub async fn save_direct_file(device_id: String, file: String, dir: String) -> Result<String> {
     let (friend, file) = (device(&device_id)?, file_id(&file)?);
     run(|core| async move {
-        let path = core.save_direct_file(friend, file, Path::new(&dir))?;
+        let path = core.save_direct_file(friend, file, Path::new(&dir)).await?;
         Ok(path.to_string_lossy().into_owned())
     })
     .await

@@ -27,6 +27,7 @@
 		33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC10F02044A3C60003C045 /* AppDelegate.swift */; };
 		7A1C0E5B2F3D4A6B8C9D0E20 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 7A1C0E5B2F3D4A6B8C9D0E1F /* AppIcon.icon */; };
 		33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */ = {isa = PBXBuildFile; fileRef = 33CC10F42044A3C60003C045 /* MainMenu.xib */; };
+		7A1C0E5B2F3D4A6B8C9D0E40 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 7A1C0E5B2F3D4A6B8C9D0E41 /* InfoPlist.strings */; };
 		33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC11122044BFA00003C045 /* MainFlutterWindow.swift */; };
 		62A3FB36072522352D748140 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4B1B84D3F60AE662710D76A2 /* Pods_Runner.framework */; };
 		78A318202AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage in Frameworks */ = {isa = PBXBuildFile; productRef = 78A3181F2AECB46A00862997 /* FlutterGeneratedPluginSwiftPackage */; };
@@ -73,6 +74,15 @@
 		33CC10F02044A3C60003C045 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7A1C0E5B2F3D4A6B8C9D0E1F /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = Runner/AppIcon.icon; sourceTree = "<group>"; };
 		33CC10F52044A3C60003C045 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/MainMenu.xib; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E50 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E51 /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E52 /* pt-BR */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "pt-BR"; path = pt-BR.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E53 /* fr */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = fr; path = fr.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E54 /* de */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = de; path = de.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E55 /* it */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = it; path = it.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E56 /* ru */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ru; path = ru.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E57 /* ja */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = ja; path = ja.lproj/InfoPlist.strings; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E58 /* zh-Hans */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = "zh-Hans"; path = zh-Hans.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		33CC10F72044A3C60003C045 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = Info.plist; path = Runner/Info.plist; sourceTree = "<group>"; };
 		33CC11122044BFA00003C045 /* MainFlutterWindow.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MainFlutterWindow.swift; sourceTree = "<group>"; };
 		33CEB47222A05771004F2AC0 /* Flutter-Debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = "Flutter-Debug.xcconfig"; sourceTree = "<group>"; };
@@ -158,6 +168,7 @@
 			children = (
 				7A1C0E5B2F3D4A6B8C9D0E1F /* AppIcon.icon */,
 				33CC10F42044A3C60003C045 /* MainMenu.xib */,
+				7A1C0E5B2F3D4A6B8C9D0E41 /* InfoPlist.strings */,
 				33CC10F72044A3C60003C045 /* Info.plist */,
 			);
 			name = Resources;
@@ -297,6 +308,14 @@
 			knownRegions = (
 				en,
 				Base,
+				es,
+				"pt-BR",
+				fr,
+				de,
+				it,
+				ru,
+				ja,
+				"zh-Hans",
 			);
 			mainGroup = 33CC10E42044A3C60003C045;
 			packageReferences = (
@@ -327,6 +346,7 @@
 			files = (
 				7A1C0E5B2F3D4A6B8C9D0E20 /* AppIcon.icon in Resources */,
 				33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */,
+				7A1C0E5B2F3D4A6B8C9D0E40 /* InfoPlist.strings in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -475,6 +495,23 @@
 				33CC10F52044A3C60003C045 /* Base */,
 			);
 			name = MainMenu.xib;
+			path = Runner;
+			sourceTree = "<group>";
+		};
+		7A1C0E5B2F3D4A6B8C9D0E41 /* InfoPlist.strings */ = {
+			isa = PBXVariantGroup;
+			children = (
+				7A1C0E5B2F3D4A6B8C9D0E50 /* en */,
+				7A1C0E5B2F3D4A6B8C9D0E51 /* es */,
+				7A1C0E5B2F3D4A6B8C9D0E52 /* pt-BR */,
+				7A1C0E5B2F3D4A6B8C9D0E53 /* fr */,
+				7A1C0E5B2F3D4A6B8C9D0E54 /* de */,
+				7A1C0E5B2F3D4A6B8C9D0E55 /* it */,
+				7A1C0E5B2F3D4A6B8C9D0E56 /* ru */,
+				7A1C0E5B2F3D4A6B8C9D0E57 /* ja */,
+				7A1C0E5B2F3D4A6B8C9D0E58 /* zh-Hans */,
+			);
+			name = InfoPlist.strings;
 			path = Runner;
 			sourceTree = "<group>";
 		};

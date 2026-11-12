@@ -1679,6 +1679,10 @@ class L10nDe extends L10n {
   }
 
   @override
+  String get streamQualitySpared =>
+      'Um deinen Computer zu schonen, bekommen gerade alle Zuschauer ein kleineres oder weniger flüssiges Bild.';
+
+  @override
   String get streamQualityGoingOut => 'WIRD GERADE GESENDET';
 
   @override
@@ -5100,6 +5104,7 @@ class L10nDe extends L10n {
       'qr': 'QR-Code anzeigen',
       'link': 'Link anzeigen',
       'code': 'Code anzeigen',
+      'key': 'Schlüssel anzeigen',
       'other': 'Anzeigen',
     });
     return '$_temp0';
@@ -5107,6 +5112,12 @@ class L10nDe extends L10n {
 
   @override
   String get widgetsHide => 'Verbergen';
+
+  @override
+  String get widgetsShowMore => 'Mehr anzeigen';
+
+  @override
+  String get widgetsShowLess => 'Weniger anzeigen';
 
   @override
   String revealFailed(String path) {

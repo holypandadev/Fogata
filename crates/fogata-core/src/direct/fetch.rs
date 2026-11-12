@@ -170,6 +170,21 @@ pub(super) async fn fetch(
         settle(inner, friend, file, charged, false);
         bail!("files come while you are both online; try again then");
     };
+    // What was asked for holds its room on the disk now, so the person hears at once that
+    // it does not fit; what comes by itself once its turn comes, so those waiting for one
+    // hold none.
+    let room = if asked {
+        match room_on_disk(inner, &attachment, &dest) {
+            Ok(room) => Some(room),
+            Err(e) => {
+                inner.direct.lock().downloads.remove(&(friend, file));
+                settle(inner, friend, file, charged, false);
+                return Err(e);
+            }
+        }
+    } else {
+        None
+    };
     inner.emit(CoreEvent::DirectChanged { friend });
     let weak = Arc::downgrade(inner);
     tokio::spawn(async move {
@@ -182,6 +197,26 @@ pub(super) async fn fetch(
                 Some((mine, all))
             }
             None => None,
+        };
+        // Held until the file is kept or not: it then takes its room itself, or none.
+        let _room = match room {
+            Some(room) => room,
+            None => {
+                let Some(inner) = weak.upgrade() else {
+                    return;
+                };
+                match room_on_disk(&inner, &attachment, &dest) {
+                    Ok(room) => room,
+                    Err(_) => {
+                        tracing::info!("an attachment waits to be asked for: the disk is full");
+                        inner.direct.lock().downloads.remove(&(friend, file));
+                        settle(&inner, friend, file, charged, false);
+                        tried(&inner, friend, file, false);
+                        inner.emit(CoreEvent::DirectChanged { friend });
+                        return;
+                    }
+                }
+            }
         };
         let total = attachment.size;
         let mut last_step = 0;
@@ -377,6 +412,22 @@ fn retry_after(failures: u32) -> Duration {
     Duration::from_secs((30u64 << failures.min(7)).min(3600))
 }
 
+/// Holds room on the disk for `attachment`'s file at `dest`, sealed or not, as room downloads
+/// do: what the disk keeps free is left for the journals, the friend book and the groups'
+/// state, written meanwhile.
+fn room_on_disk(
+    inner: &Arc<Inner>,
+    attachment: &Attachment,
+    dest: &Path,
+) -> Result<crate::shares::Room> {
+    crate::shares::hold_disk(
+        inner,
+        crate::shares::held_for(attachment.size),
+        dest.parent().unwrap_or(dest),
+        "not enough free space for this file",
+    )
+}
+
 /// Notes whether `file` came: one that did not is tried again by itself only after a
 /// while ([`retry_after`]).
 fn tried(inner: &Inner, friend: DevicePublicKey, file: FileId, came: bool) {
@@ -540,7 +591,7 @@ async fn fetched_voice(
     if asked || inner.direct.lock().settings.auto_files {
         fetched_file(inner, friend, &plain, group, dest, !asked);
     } else {
-        let _ = std::fs::remove_file(dest);
+        throw_away(&mut inner.direct.lock(), &friend, attachment, dest);
     }
 }
 
@@ -588,7 +639,7 @@ async fn fetched_picture(
     if asked || inner.direct.lock().settings.auto_files {
         fetched_file(inner, friend, &plain, group, dest, !asked);
     } else {
-        let _ = std::fs::remove_file(dest);
+        throw_away(&mut inner.direct.lock(), &friend, attachment, dest);
     }
 }
 
@@ -648,6 +699,24 @@ fn is_picture(inner: &Inner, friend: &DevicePublicKey, attachment: &Attachment) 
         && looks_like_picture(&start)
 }
 
+/// Removes the file at `dest` of an attachment that came but is not kept; unless a send
+/// uses the same file, found here meanwhile, which keeps it or lets it go as it ends (see
+/// `InUse` in mod.rs).
+fn throw_away(
+    chats: &mut ChatsState,
+    friend: &DevicePublicKey,
+    attachment: &Attachment,
+    dest: &Path,
+) {
+    if chats.copying.uses(friend, &attachment.id) {
+        chats
+            .copying
+            .leave(friend, &attachment.id, [attachment.name.as_str()]);
+    } else {
+        let _ = std::fs::remove_file(dest);
+    }
+}
+
 /// An attachment arrived whole: kept and served, unless its message went meanwhile. Room
 /// is made for it; for one that came `by_itself`, in its own chat only, and when that is
 /// not enough it is not kept and stays to be asked for.
@@ -666,9 +735,8 @@ fn fetched_file(
         && others_usage(&chats, &inner.direct.store, &friend).saturating_add(attachment.size)
             > limit
     {
-        drop(chats);
         tracing::info!("an attachment that came by itself is not kept: no room for it here");
-        let _ = std::fs::remove_file(dest);
+        throw_away(&mut chats, &friend, attachment, dest);
         return;
     }
     let Some(entry) = chats
@@ -676,8 +744,7 @@ fn fetched_file(
         .get_mut(&friend)
         .filter(|e| e.chat.refers_to(&attachment.id))
     else {
-        drop(chats);
-        let _ = std::fs::remove_file(dest);
+        throw_away(&mut chats, &friend, attachment, dest);
         return;
     };
     // Every message with this file shows it under its own name's ending.

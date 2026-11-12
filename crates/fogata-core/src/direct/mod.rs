@@ -31,7 +31,7 @@ mod sending;
 pub mod store;
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -232,9 +232,57 @@ struct ChatsState {
     /// Attachments that did not come by themselves: when they may be tried again by
     /// themselves, and how many times they did not come.
     retry: HashMap<(DevicePublicKey, FileId), (Instant, u32)>,
-    /// Attachments being sent, by how many sends use them: a copy one of them made is not
-    /// removed while another uses it (see `Copies` in sending.rs).
-    copying: HashMap<(DevicePublicKey, FileId), usize>,
+    /// Attachments being sent: a copy in the chat's folder is not removed while a send uses
+    /// it (see `Copies` in sending.rs).
+    copying: InUse,
+}
+
+/// Attachments being sent, by how many sends use them, with the copies a removal left for
+/// them in the meantime.
+#[derive(Default)]
+struct InUse {
+    sends: HashMap<(DevicePublicKey, FileId), usize>,
+    /// The names of the copies of each file in use that a removal left (an earlier message
+    /// with the file deleted, or whose time ran out, the chat's files cleared): the send's
+    /// message keeps them, or they go as it ends.
+    left: HashMap<(DevicePublicKey, FileId), BTreeSet<String>>,
+}
+
+impl InUse {
+    /// Removes the copies of `file` under `names` from the chat's folder, or, while a send
+    /// uses the file, leaves them to it: a message about to be sent with the file found its
+    /// copy here, and would refer to one just gone.
+    fn remove<'a>(
+        &mut self,
+        store: &DirectStore,
+        friend: &DevicePublicKey,
+        file: &FileId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) {
+        if self.uses(friend, file) {
+            self.leave(friend, file, names);
+        } else {
+            store.remove_file(friend, file, names);
+        }
+    }
+
+    /// Leaves the copies of `file`, which a send uses, under `names` to it.
+    fn leave<'a>(
+        &mut self,
+        friend: &DevicePublicKey,
+        file: &FileId,
+        names: impl IntoIterator<Item = &'a str>,
+    ) {
+        tracing::debug!("a copy of a file a send uses stays until it ends");
+        self.left
+            .entry((*friend, *file))
+            .or_default()
+            .extend(names.into_iter().map(str::to_string));
+    }
+
+    fn uses(&self, friend: &DevicePublicKey, file: &FileId) -> bool {
+        self.sends.contains_key(&(*friend, *file))
+    }
 }
 
 /// The chats of this device. What changes in them is written on the files' thread
@@ -308,6 +356,68 @@ impl Chats {
 
     fn lock(&self) -> std::sync::MutexGuard<'_, ChatsState> {
         lock_chats(&self.state)
+    }
+
+    /// Counts `file` as in use by a send to `friend` (see `Copies` in sending.rs).
+    fn start_using(&self, friend: &DevicePublicKey, file: &FileId) {
+        *self
+            .lock()
+            .copying
+            .sends
+            .entry((*friend, *file))
+            .or_default() += 1;
+    }
+
+    /// Ends a send's use of files `using`, of which it copied `made` into the chat's folder.
+    /// A copy it made that no item of the chat keeps and no other send uses goes, and so
+    /// does one a removal left to it meanwhile that no item says is here.
+    fn stop_using(&self, friend: &DevicePublicKey, using: &[FileId], made: &[Attachment]) {
+        let mut chats = self.lock();
+        let ChatsState {
+            chats: entries,
+            copying,
+            ..
+        } = &mut *chats;
+        let mut left = Vec::new();
+        for file in using {
+            let key = (*friend, *file);
+            if let Some(n) = copying.sends.get_mut(&key) {
+                *n -= 1;
+                if *n == 0 {
+                    copying.sends.remove(&key);
+                    left.extend(
+                        copying
+                            .left
+                            .remove(&key)
+                            .into_iter()
+                            .flatten()
+                            .map(|name| (*file, name)),
+                    );
+                }
+            }
+        }
+        let files = || {
+            entries
+                .get(friend)
+                .into_iter()
+                .flat_map(|e| e.chat.items())
+                .flat_map(Item::files)
+        };
+        for (file, name) in left {
+            let here = files().any(|f| f.id == file && f.name == name && f.local == Local::Here);
+            if !here {
+                tracing::debug!("a copy of a file removed while a send used it goes");
+                self.store.remove_file(friend, &file, [name.as_str()]);
+            }
+        }
+        for made in made {
+            let kept = files().any(|f| f.id == made.id && f.name == made.name);
+            if !kept && !copying.uses(friend, &made.id) {
+                tracing::debug!("a copy of a file a send did not keep goes");
+                self.store
+                    .remove_file(friend, &made.id, [made.name.as_str()]);
+            }
+        }
     }
 
     /// Serves an attachment kept here under the chat's group.
@@ -887,7 +997,12 @@ impl Core {
     pub fn clear_direct_files(&self, friend: DevicePublicKey) -> Result<()> {
         let direct = &self.inner.direct;
         let mut chats = direct.lock();
-        let entry = chats.chats.get_mut(&friend).context("no such chat")?;
+        let ChatsState {
+            chats: entries,
+            copying,
+            ..
+        } = &mut *chats;
+        let entry = entries.get_mut(&friend).context("no such chat")?;
         let here: Vec<Attachment> = entry
             .chat
             .items()
@@ -896,7 +1011,7 @@ impl Core {
             .filter(|f| f.local == Local::Here)
             .cloned()
             .collect();
-        direct.remove_files(&self.inner.shared, &friend, entry, &here);
+        direct.remove_files(&self.inner.shared, copying, &friend, entry, &here);
         drop(chats);
         self.inner.emit(CoreEvent::DirectChanged { friend });
         Ok(())
@@ -910,6 +1025,7 @@ impl Core {
         let ChatsState {
             chats: entries,
             sent,
+            copying,
             ..
         } = &mut *chats;
         let entry = entries.get_mut(&friend).context("no such chat")?;
@@ -917,7 +1033,7 @@ impl Core {
             entry.chat.get(&item).is_some_and(Item::is_message),
             "no such message"
         );
-        node_events::remove_items(&self.inner, &friend, entry, sent, &[item]);
+        node_events::remove_items(&self.inner, &friend, entry, sent, copying, &[item]);
         drop(chats);
         self.inner.emit(CoreEvent::DirectChanged { friend });
         Ok(())
@@ -934,6 +1050,7 @@ impl Core {
             let ChatsState {
                 chats: entries,
                 sent,
+                copying,
                 ..
             } = &mut *chats;
             let entry = entries.get_mut(&friend).context("no such chat")?;
@@ -967,7 +1084,7 @@ impl Core {
                 .into_iter()
                 .collect();
             direct.journal(&friend, entry, &records);
-            node_events::remove_items(&self.inner, &friend, entry, sent, &[item]);
+            node_events::remove_items(&self.inner, &friend, entry, sent, copying, &[item]);
         }
         flush(&self.inner, friend).await;
         self.inner.emit(CoreEvent::DirectChanged { friend });
@@ -1001,33 +1118,27 @@ impl Core {
     }
 
     /// Copies an attachment kept here into `dir`, under its own name made safe (as room
-    /// downloads are, see [`crate::saved_name`]), and returns where it went.
-    pub fn save_direct_file(
+    /// downloads are, see [`crate::saved_name`]), and returns where it went. The copy (of up
+    /// to the whole room for direct messages, opened as it goes when sealed) is made off the
+    /// core's own threads, which also keep the connections and calls going.
+    pub async fn save_direct_file(
         &self,
         friend: DevicePublicKey,
         file: FileId,
         dir: &Path,
     ) -> Result<PathBuf> {
-        let attachment = {
-            let chats = self.inner.direct.lock();
-            let entry = chats.chats.get(&friend).context("no such chat")?;
-            entry
-                .chat
-                .items()
-                .iter()
-                .flat_map(Item::files)
-                .find(|f| f.id == file && f.local == Local::Here)
-                .cloned()
-                .context("that file is not on this computer")?
-        };
-        let (mut kept, _) = self
-            .inner
-            .direct
-            .store
-            .open_file(&friend, &attachment)
-            .with_context(|| format!("cannot save {}", attachment.name))?;
-        crate::downloads::save_received(&mut kept, dir, &attachment.name)
-            .with_context(|| format!("cannot save {}", attachment.name))
+        let attachment = self.kept_attachment(friend, file)?;
+        let (inner, dir) = (self.inner.clone(), dir.to_path_buf());
+        tokio::task::spawn_blocking(move || {
+            let (mut kept, _) = inner
+                .direct
+                .store
+                .open_file(&friend, &attachment)
+                .with_context(|| format!("cannot save {}", attachment.name))?;
+            crate::downloads::save_received(&mut kept, &dir, &attachment.name)
+                .with_context(|| format!("cannot save {}", attachment.name))
+        })
+        .await?
     }
 
     /// An attachment kept here, read whole into memory (for a picture on the screen), if it
@@ -1270,6 +1381,7 @@ impl Chats {
     fn remove_files(
         &self,
         shared: &SharedFiles,
+        copying: &mut InUse,
         friend: &DevicePublicKey,
         entry: &mut Entry,
         files: &[Attachment],
@@ -1282,8 +1394,12 @@ impl Chats {
             }
             entry.chat.set_local(&file.id, Local::Removed);
             let names = entry.chat.names_of(&file.id);
-            self.store
-                .remove_file(friend, &file.id, names.iter().map(String::as_str));
+            copying.remove(
+                &self.store,
+                friend,
+                &file.id,
+                names.iter().map(String::as_str),
+            );
             if let Some(group) = entry.group_id() {
                 shared.remove(group, file.id);
             }
@@ -1315,8 +1431,17 @@ impl Chats {
             .map(|(f, e)| (*f, &e.chat, self.store.journal_bytes(f)))
             .collect();
         let gone = model::to_free(&list, limit, keep, only).unwrap_or_default();
+        let ChatsState {
+            chats: entries,
+            copying,
+            ..
+        } = &mut *chats;
         for (friend, file) in gone {
-            let Some(entry) = chats.chats.get_mut(&friend) else {
+            // A file a send uses stays: it is about to be the send's, newest of all.
+            if copying.uses(&friend, &file) {
+                continue;
+            }
+            let Some(entry) = entries.get_mut(&friend) else {
                 continue;
             };
             let attachment = entry
@@ -1328,7 +1453,7 @@ impl Chats {
                 .cloned();
             if let Some(attachment) = attachment {
                 tracing::info!("an old attachment was removed here to free space");
-                self.remove_files(shared, &friend, entry, &[attachment]);
+                self.remove_files(shared, copying, &friend, entry, &[attachment]);
                 changed.insert(friend);
             }
         }
@@ -2283,5 +2408,118 @@ mod tests {
             timer_words(7 * model::DAY_MS),
             "Disappearing messages: 7 days"
         );
+    }
+
+    /// A file a send found kept here (for an earlier message) stays while the send runs,
+    /// whatever removes that earlier message's copy meanwhile: deleting it, its time running
+    /// out, the chat's files cleared, or room made for others. The send's message keeps it
+    /// then; one that is not sent lets it go.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_file_a_send_uses_stays_until_the_send_ends() {
+        let dir = std::env::temp_dir().join(format!("fogata-send-uses-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let options = crate::NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        };
+        let (core, _events) = crate::Core::start(dir.clone(), options).unwrap();
+        let inner = core.inner.clone();
+        let direct = &inner.direct;
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        direct.store.files_dir(&friend).unwrap();
+        let file = |id: u8| Attachment {
+            id: [id; 32],
+            name: format!("photo{id}.jpg"),
+            size: 400,
+            kind: FileKind::Picture,
+            video: None,
+            local: Local::Here,
+            voice: None,
+        };
+        let item = |id: u8, file_id: u8, ttl_ms: u64| Item {
+            id: [id; 16],
+            mine: false,
+            sent_ms: 1,
+            got_ms: 1,
+            seq: u64::from(id),
+            at_ms: 1,
+            body: Body::Message {
+                text: String::new(),
+                files: vec![file(file_id)],
+            },
+            ttl_ms,
+            delivered: true,
+        };
+        let add = |item: Item| {
+            let mut chats = direct.lock();
+            let entry = chats.chats.entry(friend).or_default();
+            for f in item.files() {
+                std::fs::write(direct.store.file_path(&friend, f), [0; 400]).unwrap();
+            }
+            entry.chat.insert(item.clone());
+            direct.journal(&friend, entry, &[Record::Item { item }]);
+        };
+        let here = |id: u8| direct.store.file_path(&friend, &file(id)).exists();
+        let local = |id: u8| {
+            direct.lock().chats[&friend]
+                .chat
+                .items()
+                .iter()
+                .flat_map(Item::files)
+                .find(|f| f.id == [id; 32])
+                .map(|f| f.local)
+        };
+
+        // Deleted while a send uses its file: the copy stays, and the send's message keeps it.
+        add(item(1, 1, 0));
+        direct.start_using(&friend, &[1; 32]);
+        core.delete_direct_message(friend, [1; 16]).unwrap();
+        assert!(
+            here(1),
+            "the copy a send uses went with the earlier message"
+        );
+        add(item(2, 1, 0));
+        direct.stop_using(&friend, &[[1; 32]], &[]);
+        assert!(here(1), "the copy the send's message refers to went");
+
+        // Its time ran out while a send used it, and the send failed: the copy goes then.
+        add(item(3, 3, 1000));
+        direct.start_using(&friend, &[3; 32]);
+        expire(&inner, 10_000);
+        assert!(
+            here(3),
+            "the copy a send uses went with the earlier message"
+        );
+        direct.stop_using(&friend, &[[3; 32]], &[]);
+        assert!(!here(3), "a copy no message keeps stayed");
+
+        // The chat's files cleared while a send used one: it stays until the send ends, and
+        // goes if the send did not keep it.
+        add(item(4, 4, 0));
+        direct.start_using(&friend, &[4; 32]);
+        core.clear_direct_files(friend).unwrap();
+        assert!(here(4) && !here(1));
+        assert_eq!(local(4), Some(Local::Removed));
+        direct.stop_using(&friend, &[[4; 32]], &[]);
+        assert!(!here(4), "a copy no message says is here stayed");
+
+        // Room made for others leaves a file a send uses alone.
+        add(item(5, 5, 0));
+        direct.start_using(&friend, &[5; 32]);
+        direct.lock().settings.limit = Some(1);
+        free_space(&inner, None, None);
+        assert!(here(5));
+        assert_eq!(local(5), Some(Local::Here));
+        direct.stop_using(&friend, &[[5; 32]], &[]);
+        assert!(here(5), "its message still keeps it");
+        free_space(&inner, None, None);
+        assert!(!here(5));
+
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

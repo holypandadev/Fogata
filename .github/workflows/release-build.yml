@@ -23,7 +23,9 @@
 # computer, from builds that tools/beta/ci_builds.py fetches and verifies. No cache is
 # restored, so nothing an earlier run left can get into a release. The token reads only;
 # the attest job alone may mint the token that signs attestations, and runs none of the
-# build's code.
+# build's code. The builds are kept 90 days, the most a public repository may keep them:
+# release.py --ci-builds checks that what it ships is them, and puts them beside the release,
+# where they stay for as long as it does (docs/releasing-beta.md).
 name: Release build
 
 on:
@@ -188,7 +190,7 @@ jobs:
             Fogata-linux-x64-bundle.zip
             toolchain-linux.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   windows:
     needs: source
@@ -265,7 +267,7 @@ jobs:
             Fogata-windows-x64.zip
             toolchain-windows.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   macos:
     needs: source
@@ -360,7 +362,7 @@ jobs:
             Fogata-macos-unsigned.zip
             toolchain-macos.txt
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90
 
   # No checkout and none of the build's code: it takes the three zips from this run, lists
   # their SHA-256 and has GitHub attest each, for this workflow and this commit.
@@ -401,4 +403,4 @@ jobs:
           name: fogata-sha256sums
           path: sums/SHA256SUMS
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 90

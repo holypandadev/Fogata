@@ -12,6 +12,7 @@
 
 #include "flutter_utf8_sanitize.h"
 #include "fogata_denoise_table.h"
+#include "fogata_track_owner.h"
 #include "helper.h"
 #include "rtc_field_trials.h"
 #include "rtc_logging.h"
@@ -318,12 +319,48 @@ scoped_refptr<RTCMediaTrack> FlutterWebRTCBase ::MediaTrackForId(const std::stri
 scoped_refptr<RTCMediaTrack> FlutterWebRTCBase::MediaTrackForId(
     const std::string& id,
     const std::string& owner) {
-  auto it = peerconnection_observers_.find(owner);
-  if (it != peerconnection_observers_.end()) {
-    if (auto received = it->second->MediaTrackForId(id))
+  return TrackOfOwner<scoped_refptr<RTCMediaTrack>>(
+      owner, [&]() { return ReceivedTrackForId(id, owner); },
+      [&]() { return SentTrackForId(id, owner); },
+      [&]() { return MediaTrackForId(id); });
+}
+
+scoped_refptr<RTCMediaTrack> FlutterWebRTCBase::ReceivedTrackForId(
+    const std::string& id,
+    const std::string& owner) {
+  auto observer = peerconnection_observers_.find(owner);
+  if (observer != peerconnection_observers_.end()) {
+    if (auto received = observer->second->MediaTrackForId(id))
       return received;
   }
-  return MediaTrackForId(id);
+  // Not listed by the observer: the connection's own receivers, as macOS looks. Each
+  // receiver->track() is a new wrapper, held only by what this returns.
+  auto connection = peerconnections_.find(owner);
+  if (connection == peerconnections_.end())
+    return nullptr;
+  auto receivers = connection->second->receivers();
+  for (auto receiver : receivers.std_vector()) {
+    auto track = receiver->track();
+    if (track.get() && track->id().std_string() == id)
+      return track;
+  }
+  return nullptr;
+}
+
+scoped_refptr<RTCMediaTrack> FlutterWebRTCBase::SentTrackForId(
+    const std::string& id,
+    const std::string& owner) {
+  // Each sender->track() is a new wrapper, held only by what this returns.
+  auto connection = peerconnections_.find(owner);
+  if (connection == peerconnections_.end())
+    return nullptr;
+  auto senders = connection->second->senders();
+  for (auto sender : senders.std_vector()) {
+    auto track = sender->track();
+    if (track.get() && track->id().std_string() == id)
+      return track;
+  }
+  return nullptr;
 }
 
 void FlutterWebRTCBase::RemoveMediaTrackForId(const std::string& id) {
@@ -365,6 +402,9 @@ scoped_refptr<RTCMediaStream> FlutterWebRTCBase::MediaStreamForId(
           return stream;
         }
       }
+      // Fogata: a stream that connection received, never this device's own of the same
+      // id (see fogata_track_owner.h).
+      return nullptr;
     }
   }
 

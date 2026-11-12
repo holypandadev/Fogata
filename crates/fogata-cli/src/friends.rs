@@ -119,7 +119,16 @@ pub fn find<'a>(
     }
 }
 
+/// Holds the folder's running lock for a command that changes its files itself, without a
+/// node: with the application (or another command) running on the folder, its next save
+/// would write over this change, which would be lost though it was said to be made.
+pub(crate) fn hold_folder(store: &Store) -> Result<std::fs::File> {
+    store.hold_running()
+}
+
 pub fn profile(store: Store, args: ProfileArgs) -> Result<()> {
+    let changes = args.name.is_some() || args.avatar.is_some() || args.photo.is_some();
+    let _running = changes.then(|| hold_folder(&store)).transpose()?;
     let (identity, _) = store.identity()?;
     let avatar = match (args.avatar, args.photo) {
         (Some(n), _) => Some(Avatar::Preset(n)),
@@ -167,9 +176,19 @@ fn show_profile(profile: &Profile) {
 }
 
 pub async fn run(store: Store, command: Option<FriendsCommand>, verbose: bool) -> Result<()> {
+    let command = command.unwrap_or(FriendsCommand::List);
+    // Before the book is read, so a change is made to the book as it is saved.
+    let _running = matches!(
+        command,
+        FriendsCommand::Accept { .. }
+            | FriendsCommand::Decline { .. }
+            | FriendsCommand::Remove { .. }
+    )
+    .then(|| hold_folder(&store))
+    .transpose()?;
     let mut book = store.require_friends()?;
     let now = now_ms();
-    match command.unwrap_or(FriendsCommand::List) {
+    match command {
         FriendsCommand::List => list(&book),
         FriendsCommand::Accept { who } => {
             let device = find(incoming(&book), &who)?;

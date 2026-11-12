@@ -1,5 +1,7 @@
 #include "pipewire_apps_capturer.h"
 
+#include "screen_sound_node.h"
+
 #ifdef HAVE_PIPEWIRE
 
 #include <pipewire/pipewire.h>
@@ -97,11 +99,17 @@ struct Node {
   // Once seen to be this app's own a node stays so: properties that come later
   // and say less never get it linked.
   bool own = false;
+  // Once seen to pass on sound from elsewhere (a loopback, a combined output, an
+  // effect host: see screen_sound_node.h), why; it stays so, like `own`. Such an
+  // output may carry this app's own call, played into a sink it reads from.
+  const char* passed_on = nullptr;
   // Whether it was linked yet, for the trace.
   bool linked = false;
   uint32_t client = SPA_ID_INVALID;
   int pid = 0;
   std::string binary;
+  // node.link-group, for the trace: names the loopback or filter a node belongs to.
+  std::string link_group;
 };
 
 struct Port {
@@ -190,22 +198,26 @@ void Judge(State* s, uint32_t id, Node& node) {
       (client_pid != 0 && client_pid == s->own_pid) ||
       (!binary.empty() && !s->own_binary.empty() && s->own_binary == binary) ||
       (!s->only_from.empty() && s->only_from != binary);
-  const bool was_own = node.own;
+  const bool was_left_out = node.own || node.passed_on != nullptr;
   node.own = node.own || own;
   // The client's process alone does not make a node known: every stream of a
   // PulseAudio application belongs to the one pipewire-pulse client.
   node.known = node.known || node.pid != 0 || !binary.empty() || node.own;
-  if (node.own && !was_own) Unlink(s, id);
+  const bool left_out = node.own || node.passed_on != nullptr;
+  if (left_out && !was_left_out) Unlink(s, id);
   if (Tracing()) {
     std::fprintf(stderr,
                  "[ScreenSound] node %u: pid=%d binary=%s client=%d "
-                 "client_pid=%d own_pid=%d -> %s\n",
+                 "client_pid=%d own_pid=%d link_group=%s -> %s%s\n",
                  id, node.pid, binary.empty() ? "?" : binary.c_str(),
                  node.client == SPA_ID_INVALID ? -1 : int(node.client),
                  client_pid, int(s->own_pid),
-                 node.own     ? "own, not linked"
-                 : node.known ? "taken"
-                              : "unknown, not linked");
+                 node.link_group.empty() ? "-" : node.link_group.c_str(),
+                 node.own                    ? "own, not linked"
+                 : node.passed_on != nullptr ? "passed on, not linked: "
+                 : node.known                ? "taken"
+                                             : "unknown, not linked",
+                 node.own || node.passed_on == nullptr ? "" : node.passed_on);
   }
 }
 
@@ -225,6 +237,13 @@ void OnNodeInfo(void* data, const pw_node_info* info) {
   if (binary != nullptr && *binary != 0) node->second.binary = binary;
   const uint32_t client = IdOf(spa_dict_lookup(info->props, PW_KEY_CLIENT_ID));
   if (client != SPA_ID_INVALID) node->second.client = client;
+  const char* link_group = spa_dict_lookup(info->props, "node.link-group");
+  if (link_group != nullptr && *link_group != 0) node->second.link_group = link_group;
+  if (node->second.passed_on == nullptr) {
+    node->second.passed_on = PassedOnBecause(
+        [&](const char* key) { return spa_dict_lookup(info->props, key); },
+        BinaryName(node->second.binary));
+  }
   Judge(s, w->id, node->second);
   Relink(s);
 }
@@ -242,18 +261,23 @@ void Relink(State* s) {
     if (!port.output) continue;
     auto node = s->nodes.find(port.node);
     if (node == s->nodes.end() || !node->second.app_output ||
-        !node->second.known || node->second.own) {
+        !node->second.known || node->second.own ||
+        node->second.passed_on != nullptr) {
       continue;
     }
     if (!node->second.linked) {
       node->second.linked = true;
       if (Tracing()) {
         std::fprintf(stderr,
-                     "[ScreenSound] linking node %u: pid=%d binary=%s\n",
+                     "[ScreenSound] linking node %u: pid=%d binary=%s "
+                     "link_group=%s\n",
                      port.node, node->second.pid,
                      node->second.binary.empty()
                          ? "?"
-                         : node->second.binary.c_str());
+                         : node->second.binary.c_str(),
+                     node->second.link_group.empty()
+                         ? "-"
+                         : node->second.link_group.c_str());
       }
     }
     std::vector<uint32_t> targets;

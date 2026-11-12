@@ -28,9 +28,11 @@ Future<void> continueUnencryptedIfAsked(
         await Future<void>.delayed(const Duration(milliseconds: 50));
         await tester.pump();
       }
+      seen = true;
+      // It can be gone again by now (the page made it anew): the next turn finds it.
+      if (plain.evaluate().isEmpty) continue;
       await tester.tap(plain.first);
       await tester.pump(const Duration(milliseconds: 300));
-      seen = true;
     } else if (seen && placeholder.evaluate().isEmpty) {
       return;
     }

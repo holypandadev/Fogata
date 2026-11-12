@@ -2,17 +2,25 @@
 
 Every commit pushed is checked first on the computer that pushes it. GitHub runs the same
 checks again on its own computers (`.github/workflows/ci.yml`), for every push to `main`, every
-pull request and by hand: on Linux `tools/ci.sh --full`, whose macOS and Windows legs are the
-workflow's other two jobs, `tools/ci-leg.sh macos` and `tools/ci-leg.ps1` (without the smoke
-test, which needs virtual sound devices), side by side.
+pull request and by hand: on Linux `tools/ci.sh --full`, in two halves on two computers
+(`--split app` in the job `linux`, `--split checks` in the job `linux-checks`), whose macOS and
+Windows legs are the workflow's other two jobs, `tools/ci-leg.sh macos` and
+`tools/ci-leg.ps1` (without the smoke test, which needs virtual sound devices), all four side
+by side. The run passes only when every job passes; `tools/beta/release.py` asks GitHub for
+the run's conclusion, not for any one job.
 
 What GitHub's computers cover, and what they do not:
 
-- Linux: everything of `tools/ci.sh --full`, but of the smoke test's desktops only `x11`
-  (Xvfb) runs there; the KDE ones (`wayland`, `xwayland`, `bare`: the desktop portal's screen
-  sharing) need a GPU render node and are skipped. The job fails unless at least one desktop
-  ran the smoke test and passed. The KDE desktops run only on the computers of the people who
-  push, through the pre-push hook.
+- Linux: everything of `tools/ci.sh --full`, split in two jobs that start together and set up
+  the same system packages, sound server, Flutter and Rust (only `linux-checks` installs the
+  fuzz toolchain): `linux-checks` runs `tools/check.sh` (strict) and builds the fuzz targets;
+  `linux` runs every other step. Each job's own record must show every step of its half run
+  and passed (the record of a half says `split: app` or `split: checks`, the other half's
+  parts `elsewhere`, and never `result: pass`, so the pre-push hook refuses it). Of the
+  smoke test's desktops only `x11` (Xvfb) runs there; the KDE ones (`wayland`, `xwayland`,
+  `bare`: the desktop portal's screen sharing) need a GPU render node and are skipped. The
+  job fails unless at least one desktop ran the smoke test and passed. The KDE desktops run
+  only on the computers of the people who push, through the pre-push hook.
 - macOS: `tools/check.sh --no-advisories --no-codegen`, `dart format`, `flutter analyze` and
   `flutter test`;
   no integration, pair or smoke test; then the application built as a release is
@@ -39,20 +47,24 @@ plugin linking PipeWire and PulseAudio; the Mac app universal, with its updater,
 at the release. Each build job also writes `tools/toolchain.sh` to the run's summary: the
 runner image, Flutter's engine revision, Rust, CMake, and clang and the dev packages (Linux),
 Xcode, its SDK, Swift and CocoaPods (macOS), Visual Studio, the MSVC toolset and the Windows
-SDK the build used (Windows). The macOS and Windows jobs take some 10 to 15 minutes longer than
-with the debug builds they replace (the release profile's whole-program optimisation, twice
-on the Mac); the run still ends with the Linux job, the longest.
+SDK the build used (Windows). Run as one job, the Linux steps took some 56 minutes
+(`check.sh` 23, the pair tests 8, the integration tests 7, the fuzz build 5, flutter test 4);
+split, each half should take about 30 with its setup, so the run ends with the Windows job
+(some 50 minutes), no longer with Linux.
 
 A newer push to a pull request cancels the run of the one before; every push to `main` keeps
-its own run. The Rust builds of the dependencies are cached (`Swatinem/rust-cache`), saved
-only by runs of pushes to `main`, so a pull request reads them and never writes them.
+its own run. The Rust builds of the dependencies are cached (`Swatinem/rust-cache`, a cache
+per job), saved only by runs of pushes to `main`, so a pull request reads them and never
+writes them. That is what keeps them honest: Cargo checks each crate's source against
+`Cargo.lock`, not the compiled builds it finds in the target folder. The release builds
+(`release-build.yml`) use no cache at all.
 `.github/workflows/weekly.yml` runs once a week (and by hand) what no push waits for: see
 "Every week" below. `.github/workflows/release-build.yml` builds a pre-release's three
 applications, by hand or on a pushed `v*` tag, and has GitHub attest them; it signs nothing
 (docs/releasing-beta.md, "A release", step 2).
 
 ```sh
-tools/ci.sh [--full] <commit>          # by default HEAD
+tools/ci.sh [--full] <commit>          # by default HEAD; --split app|checks: half of it
 tools/install-hooks.sh        # once per clone: installs the pre-push hook
 ```
 
@@ -177,7 +189,7 @@ FOGATA_CI_ALLOW_SKIPPED="macos windows" git push
 
 (`integration` names the integration tests, `pairs` the pair tests (not run without `--full`
 as much as skipped), and `macos` or `windows` a leg that came out `incomplete` as well as one
-skipped.)
+skipped.) A record of half a run (`--split`) is refused whatever is named: run it whole.
 
 The record is a plain file any program of the user can write, and a leg is a command the user
 chooses: this is a barrier against oversights (a leg forgotten, a check skipped without anyone
@@ -215,12 +227,18 @@ token that can only read; a failure there is for the maintainers to look at, it 
   your computer and records it; `tools/beta/release.py` takes a release only of a commit
   for which this job, or that record, passed (docs/releasing-beta.md, step 1).
 - `vendor`: `tools/vendor_diff.py`, each vendored crate against the one published on
-  crates.io at the version it records: the files changed, which `FOGATA.md` must name, and
-  whether crates.io has a newer version. The whole diff is the `vendor-diff` artifact. Report
-  only.
+  crates.io at the version it records, and each forked Dart package of `app/third_party`
+  (flutter_webrtc, tray_manager, desktop_drop) against pub.dev at the version its
+  `pubspec.yaml` records: the files changed, which `FOGATA.md` must name, and whether a newer
+  version is out (a Dart fork behind also shows as a warning on the run). The whole diff is
+  the `vendor-diff` artifact. Report only.
 - `webrtc`: `tools/webrtc/check_stable.py`, `tools/webrtc/pins.sh` against the milestone on
   Chrome's Stable channel (chromiumdash): a warning one milestone behind or with newer merges
   on the same branch-head, a failure two milestones behind.
+- `dates`: `tools/beta/deadlines.py --online`, the dates after which something of the
+  pre-releases breaks (the newest release's expiry, read from its `release.json` on GitHub;
+  the Mac signing certificate's, kept in the script): a warning 75 days before, a failure 30
+  days before (docs/releasing-beta.md, "Dates that break things").
 
 Dependencies are updated by hand, not by pull requests a bot opens. The repository's
 Dependabot alerts name the crates and packages with a known vulnerability, and the weekly

@@ -2,8 +2,10 @@
 
 ## The command-line program
 
-Requires Rust 1.91 or newer. `rust-toolchain.toml` names the Rust the application and its
-releases are built with; rustup installs it the first time cargo runs here.
+`rust-toolchain.toml` names the Rust the application and its releases are built with
+(1.99.1); rustup installs it the first time cargo runs here. Only that Rust is tested: the
+workspace's `rust-version` (1.91, in `Cargo.toml`) is the oldest no crate in `Cargo.lock`
+asks more than, not a Rust anything builds with.
 
 ```
 cargo build --release -p fogata
@@ -37,8 +39,8 @@ flutter build linux --release
 ```
 
 The application is `app/build/linux/x64/release/bundle/fogata`. It keeps its data where the
-CLI does; `FOGATA_DATA_DIR` chooses another folder (and `FOGATA_DOWNLOADS` where downloads
-go). After changing `crates/fogata-ffi/src/api/`, run `flutter_rust_bridge_codegen
+CLI does; `FOGATA_DATA_DIR` chooses another folder (and, in a debug build, `FOGATA_DOWNLOADS`
+where downloads go). After changing `crates/fogata-ffi/src/api/`, run `flutter_rust_bridge_codegen
 generate` in `app/`.
 
 Walk through every screen with a fresh folder:

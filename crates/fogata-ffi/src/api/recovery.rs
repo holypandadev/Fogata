@@ -18,7 +18,7 @@ use fogata_core::{
 };
 use zeroize::Zeroizing;
 
-use super::app::{RUNTIME, use_keychain};
+use super::app::{blocking, use_keychain};
 
 /// The recovery key made last and not taken yet: shown to the person once, and kept here
 /// (never on the disk) until they typed two of its groups back and copies are turned on
@@ -184,17 +184,16 @@ fn copy_problem(e: &anyhow::Error) -> Option<UiCopyProblem> {
 /// Where the folder stands with copies.
 pub async fn recovery_state(data_dir: String) -> Result<UiRecoveryState> {
     use_keychain();
-    RUNTIME
-        .spawn_blocking(move || {
-            let dir = Path::new(&data_dir);
-            let on = recovery::is_on(dir);
-            Ok(UiRecoveryState {
-                is_on: on,
-                key_id: if on { recovery::key_id(dir)? } else { None },
-                replaced_kept: recovery::replaced_kept(dir),
-            })
+    blocking(move || {
+        let dir = Path::new(&data_dir);
+        let on = recovery::is_on(dir);
+        Ok(UiRecoveryState {
+            is_on: on,
+            key_id: if on { recovery::key_id(dir)? } else { None },
+            replaced_kept: recovery::replaced_kept(dir),
         })
-        .await?
+    })
+    .await?
 }
 
 /// Makes a new recovery key, to show once. Nothing changes until copies are turned on with
@@ -222,19 +221,18 @@ pub fn recovery_forget_new_key() {
 pub async fn recovery_turn_on(data_dir: String, id: String) -> Result<()> {
     use_keychain();
     let key = take_new_key(&id)?;
-    RUNTIME
-        .spawn_blocking(move || {
-            let turned = recovery::turn_on(Path::new(&data_dir), &key);
-            if turned.is_err() {
-                // Kept for another try, unless a newer key was made meanwhile.
-                let mut held = NEW_KEY.lock().unwrap_or_else(|e| e.into_inner());
-                if held.is_none() {
-                    *held = Some(key);
-                }
+    blocking(move || {
+        let turned = recovery::turn_on(Path::new(&data_dir), &key);
+        if turned.is_err() {
+            // Kept for another try, unless a newer key was made meanwhile.
+            let mut held = NEW_KEY.lock().unwrap_or_else(|e| e.into_inner());
+            if held.is_none() {
+                *held = Some(key);
             }
-            turned
-        })
-        .await?
+        }
+        turned
+    })
+    .await?
 }
 
 /// The key made last, if it is the one named `id`: a key shown before another was made is
@@ -282,8 +280,7 @@ fn in_folder(dir: &Path, path: &Path) -> bool {
 
 /// The bytes the files sent in chats would add to a copy.
 pub async fn recovery_attachments_bytes(data_dir: String) -> Result<i64> {
-    RUNTIME
-        .spawn_blocking(move || recovery::attachments_bytes(Path::new(&data_dir)))
+    blocking(move || recovery::attachments_bytes(Path::new(&data_dir)))
         .await?
         .map(|b| b as i64)
 }
@@ -297,11 +294,9 @@ pub async fn recovery_export(
     attachments: bool,
 ) -> Result<UiExported> {
     use_keychain();
-    let made = RUNTIME
-        .spawn_blocking(move || {
-            recovery::export_into(Path::new(&data_dir), Path::new(&to), attachments)
-        })
-        .await??;
+    let made =
+        blocking(move || recovery::export_into(Path::new(&data_dir), Path::new(&to), attachments))
+            .await??;
     Ok(UiExported {
         files: made.files,
         bytes: made.bytes as i64,
@@ -311,9 +306,7 @@ pub async fn recovery_export(
 /// What the copy at `copy` says before its key is typed.
 pub async fn recovery_inspect(data_dir: String, copy: String) -> Result<UiCopyInfo> {
     use_keychain();
-    let read = RUNTIME
-        .spawn_blocking(move || recovery::inspect(Path::new(&copy), Path::new(&data_dir)))
-        .await?;
+    let read = blocking(move || recovery::inspect(Path::new(&copy), Path::new(&data_dir))).await?;
     match read {
         Ok(info) => Ok(UiCopyInfo {
             made_on: info.made_on,
@@ -348,9 +341,7 @@ pub async fn recovery_open(copy: String, key: String) -> Result<UiCopyOpened> {
             return Ok(opened);
         }
     };
-    let read = RUNTIME
-        .spawn_blocking(move || recovery::open_copy(Path::new(&copy), &key))
-        .await?;
+    let read = blocking(move || recovery::open_copy(Path::new(&copy), &key)).await?;
     match read {
         Ok(s) => {
             opened.summary = Some(UiCopySummary {
@@ -371,9 +362,7 @@ pub async fn recovery_open(copy: String, key: String) -> Result<UiCopyOpened> {
 /// replace.
 pub async fn recovery_account_in(data_dir: String) -> Result<Option<UiAccountHere>> {
     use_keychain();
-    let here = RUNTIME
-        .spawn_blocking(move || recovery::account_in(Path::new(&data_dir)))
-        .await??;
+    let here = blocking(move || recovery::account_in(Path::new(&data_dir))).await??;
     Ok(here.map(|h| UiAccountHere {
         name: h.name,
         fingerprint: h.fingerprint,
@@ -403,11 +392,10 @@ pub async fn recovery_restore(
         }
     };
     let options = restore_options(replace, unencrypted);
-    let restored = RUNTIME
-        .spawn_blocking(move || {
-            recovery::restore(Path::new(&data_dir), &PathBuf::from(copy), &key, &options)
-        })
-        .await?;
+    let restored = blocking(move || {
+        recovery::restore(Path::new(&data_dir), &PathBuf::from(copy), &key, &options)
+    })
+    .await?;
     restore_outcome(restored)
 }
 
@@ -477,14 +465,13 @@ fn restore_outcome(restored: Result<recovery::Restored>) -> Result<UiRestoreOutc
 /// core may run on the folder.
 pub async fn recovery_forget_replaced(data_dir: String) -> Result<bool> {
     use_keychain();
-    RUNTIME
-        .spawn_blocking(move || recovery::forget_replaced(Path::new(&data_dir)))
-        .await?
+    blocking(move || recovery::forget_replaced(Path::new(&data_dir))).await?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::app::RUNTIME;
     use anyhow::Context;
 
     /// The key shown is kept in memory only until copies are turned on with it, and only

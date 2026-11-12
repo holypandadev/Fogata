@@ -8,11 +8,16 @@
 #   previous-release  the command line of the last release tag against this commit
 #                     (crates/fogata-core/tests/previous_release.rs): what this version
 #                     writes to a group, the last release must take in.
-#   vendor            each vendored crate against the one published on crates.io
-#                     (tools/vendor_diff.py), and whether crates.io has a newer one. Report only.
+#   vendor            each vendored crate against the one published on crates.io, and each
+#                     forked Dart package of app/third_party against pub.dev
+#                     (tools/vendor_diff.py), and whether a newer one is out (for a Dart
+#                     fork, a warning in the run's annotations too). Report only.
 #   webrtc            tools/webrtc/pins.sh against Chrome's Stable channel
 #                     (tools/webrtc/check_stable.py): a warning one milestone behind, a
 #                     failure two behind.
+#   dates             tools/beta/deadlines.py --online: the newest release's expiry and the
+#                     dates kept in that script (the Mac signing certificate's): a warning 75
+#                     days before, a failure 30 days before.
 #
 # Nothing here signs, builds a release or writes to the repository: the token can only read.
 name: Weekly
@@ -23,7 +28,7 @@ on:
   workflow_dispatch:
     inputs:
       fuzz_minutes:
-        description: Minutes for each fuzz target (24 targets, 4 at a time)
+        description: Minutes for each fuzz target (25 targets, 4 at a time)
         default: "8"
       old_tag:
         description: Release tag to test against (by default the last one before this commit)
@@ -228,3 +233,16 @@ jobs:
           persist-credentials: false
       - name: tools/webrtc/check_stable.py
         run: python3 -I -B tools/webrtc/check_stable.py | tee -a "$GITHUB_STEP_SUMMARY"
+
+  dates:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reads the releases page through GitHub's API, with the run's own token (read only).
+      - name: tools/beta/deadlines.py --online
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -B tools/beta/deadlines.py --online | tee -a "$GITHUB_STEP_SUMMARY"

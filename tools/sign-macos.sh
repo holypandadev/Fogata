@@ -15,6 +15,9 @@
 # --no-timestamp the signatures stop validating the day the certificate expires, and every
 # tester must install again: only for a test.
 # Run it after `flutter build macos --release` and after any change to the app's Info.plist.
+# Every signature carries the identity's certificate, which anyone can read from the app
+# (`codesign -dv --verbose=4 Fogata.app`): for an Apple Development certificate its subject
+# names the Apple Account's e-mail and, for a personal team, the account holder's name.
 set -euo pipefail
 repo=$(cd "$(dirname "$0")/.." && pwd)
 timestamp=--timestamp

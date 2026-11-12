@@ -1,26 +1,36 @@
-# The checks of docs/ci.md on GitHub's own computers, one job per system, side by side:
+# The checks of docs/ci.md on GitHub's own computers, side by side:
 #
-#   linux    tools/ci.sh --full: the release build, the native tests, tools/check.sh strict
-#            (with the RustSec advisories and the bridge code), the fuzz targets built, the
-#            localizations, flutter analyze and test, the integration and pair tests on Xvfb
-#            with a PipeWire sound server of the job's own, and the smoke test on the
-#            desktops this computer can build: x11 (Xvfb) must run and pass; the KDE ones
-#            (wayland, xwayland, bare) need a GPU render node GitHub's computers lack and are
-#            skipped, as on any other computer without one. Its legs for macOS and Windows
-#            are the two jobs below, so ci.sh records them as skipped; the job passes only
-#            when everything else in the record passed and was checked.
-#   macos    with the Xcode of XCODE_VERSION and the CocoaPods of Podfile.lock:
-#            tools/ci-leg.sh macos, then the release build of the application, universal
-#            (the native plugins, the macOS WebRTC.xcframework, the Rust library for both
-#            Macs) with its updater helper, checked as tools/beta/release.py checks it.
-#   windows  tools/ci-leg.ps1, without the smoke test, which needs virtual sound devices,
-#            then the release build of the application (the native plugins with the
-#            release-only mitigations, the Windows libwebrtc, which flutter test never
-#            compiles), checked as tools/beta/release.py checks it.
+#   linux         tools/ci.sh --full --split app: the release build, the native tests, the
+#                 localizations, flutter analyze and test, the integration and pair tests on
+#                 Xvfb with a PipeWire sound server of the job's own, and the smoke test on
+#                 the desktops this computer can build: x11 (Xvfb) must run and pass; the KDE
+#                 ones (wayland, xwayland, bare) need a GPU render node GitHub's computers
+#                 lack and are skipped, as on any other computer without one.
+#   linux-checks  tools/ci.sh --full --split checks: tools/check.sh strict (formatting,
+#                 clippy, every test, cargo deny with the RustSec advisories, the release
+#                 scripts' tests, THIRD-PARTY-NOTICES, the bridge code) and the fuzz targets
+#                 built.
+#                 The two are the halves of one tools/ci.sh --full run, on two computers so
+#                 that neither waits for the other: between them they run every step of
+#                 ci.sh, each in a clean worktree of the commit, each from the same system
+#                 packages and the same setup. Each judges its own record: every step of its
+#                 half ran and passed. The legs for macOS and Windows are the two jobs below,
+#                 so ci.sh records them as skipped.
+#   macos         with the Xcode of XCODE_VERSION and the CocoaPods of Podfile.lock:
+#                 tools/ci-leg.sh macos, then the release build of the application, universal
+#                 (the native plugins, the macOS WebRTC.xcframework, the Rust library for
+#                 both Macs) with its updater helper, checked as tools/beta/release.py checks
+#                 it.
+#   windows       tools/ci-leg.ps1, without the smoke test, which needs virtual sound
+#                 devices, then the release build of the application (the native plugins
+#                 with the release-only mitigations, the Windows libwebrtc, which flutter
+#                 test never compiles), checked as tools/beta/release.py checks it.
 #
-# The Linux bundle is checked so too, in ci.sh (tools/beta/ci_builds.py check-build): a
-# build release.py would refuse fails here, at the push, not at the release. Each job writes
-# what it built with (tools/toolchain.sh) to the run's summary.
+# The run passes only when every job passed: tools/beta/release.py asks GitHub for the run's
+# own conclusion, whatever the jobs are. The Linux bundle is checked as release.py checks it
+# too, in ci.sh (tools/beta/ci_builds.py check-build): a build release.py would refuse fails
+# here, at the push, not at the release. Each job writes what it built with
+# (tools/toolchain.sh) to the run's summary.
 #
 # Nothing here signs, builds a release or touches the releases page: the job's token can only
 # read the repository.
@@ -56,6 +66,8 @@ env:
   CARGO_FUZZ_VERSION: 0.13.2
 
 jobs:
+  # The half of tools/ci.sh that builds and runs the application. Its setup is the same as
+  # linux-checks' (but the fuzz toolchain, which only that half uses): change both together.
   linux:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
@@ -64,8 +76,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The release build, the debug bundles of the pair tests and the fuzz targets need more
-      # disk than the image leaves free.
+      # The release build and the debug bundles of the pair tests need more disk than the
+      # image leaves free.
       - name: Make room on the disk
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
@@ -125,6 +137,146 @@ jobs:
           channel: stable
           cache: true
 
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2,flutter_rust_bridge_codegen@2.13.0
+
+      # The crates, and the builds of the dependencies (never of the workspace's own crates,
+      # which rust-cache leaves out) in the target folder ci.sh keeps, a cache of this job's
+      # own. Saved only by a push to main: a pull request reads it and never writes it, so
+      # what a pull request's code builds never reaches another run. (Cargo checks every
+      # crate's source against Cargo.lock, but not the builds it finds in the target folder:
+      # what keeps those honest is that only main writes them.)
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> .git/fogata-ci/target
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # The libwebrtc archive, checked by its SHA-256 when it is unpacked.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .git/fogata-ci/downloads
+          key: linux-webrtc-${{ hashFiles('app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
+
+      # ci.sh runs `flutter pub get --offline`: the packages and the crates are fetched here
+      # first.
+      - name: Fetch the Dart packages and the crates
+        run: |
+          (cd app && flutter pub get)
+          cargo fetch
+          git status --porcelain
+
+      - name: Record the toolchain
+        run: |
+          { echo '### Toolchain (linux)'; echo '```'; tools/toolchain.sh linux; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: tools/ci.sh --full --split app
+        id: ci
+        run: tools/ci.sh --full --split app "$GITHUB_SHA"
+        continue-on-error: true
+
+      # ci.sh says `incomplete` here, since half its steps are linux-checks' and the macOS and
+      # Windows legs are the other jobs: every step of this half must have run and passed.
+      - name: Judge the record
+        run: |
+          record=.git/fogata-ci/$GITHUB_SHA
+          cat "$record"
+          ok=1
+          for line in 'split: app' 'linux: pass' 'macos: skipped' 'windows: skipped' \
+              'native: pass' 'integration: pass'; do
+            grep -qx "$line" "$record" || { echo "::error::the record does not say '$line'"; ok=0; }
+          done
+          grep -Eq '^pairs: pass( |$)' "$record" ||
+            { echo "::error::the pair tests did not pass"; ok=0; }
+          # At least one desktop must have run the smoke test and passed (x11, on Xvfb, can be
+          # built here); the KDE desktops (wayland, xwayland, bare) need a GPU render node and
+          # may be skipped. `pass` means some desktop passed and none failed.
+          grep -Eq '^smoke: pass \((wayland|xwayland|bare|x11)[ ;]' "$record" ||
+            { echo "::error::no smoke desktop ran and passed"; ok=0; }
+          grep -qx 'result: fail' "$record" && { echo "::error::ci.sh says fail"; ok=0; }
+          [[ $ok == 1 ]]
+
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-linux
+          path: |
+            .git/fogata-ci/${{ github.sha }}
+            .git/fogata-ci/${{ github.sha }}.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # The other half of tools/ci.sh: tools/check.sh and the fuzz targets' build. The same setup
+  # as the linux job's (system packages, sound server, Flutter, Rust, cargo-deny, the bridge
+  # generator), so that every test check.sh runs finds what it found when one job ran both
+  # halves; and the fuzz toolchain.
+  linux-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tests' builds and the fuzz targets need more disk than the image leaves free.
+      - name: Make room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install the system packages
+        timeout-minutes: 20
+        run: |
+          # As in the linux job: Azure's mirror left out when it does not answer.
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          curl -fsS --max-time 15 -o /dev/null \
+              "http://azure.archive.ubuntu.com/ubuntu/dists/$codename/InRelease" || {
+            [[ ! -f /etc/apt/apt-mirrors.txt ]] ||
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          }
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb dbus-x11 pipewire pipewire-pulse \
+            wireplumber pulseaudio-utils pipewire-alsa libasound2-plugins \
+            gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # As in the linux job: the Rust tests run beside a sound server of the job's own, as
+      # they did when one job ran everything.
+      - name: Start a sound server
+        run: |
+          runtime=$RUNNER_TEMP/xdg-runtime
+          mkdir -p "$runtime" && chmod 700 "$runtime"
+          export XDG_RUNTIME_DIR=$runtime
+          bus=unix:path=$runtime/bus
+          dbus-daemon --session --fork --address="$bus"
+          export DBUS_SESSION_BUS_ADDRESS=$bus
+          nohup pipewire > "$RUNNER_TEMP/pipewire.log" 2>&1 &
+          sleep 1
+          nohup wireplumber > "$RUNNER_TEMP/wireplumber.log" 2>&1 &
+          nohup pipewire-pulse > "$RUNNER_TEMP/pipewire-pulse.log" 2>&1 &
+          for _ in $(seq 30); do pactl info > /dev/null 2>&1 && break; sleep 1; done
+          pactl info
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$bus" >> "$GITHUB_ENV"
+
+      # The bridge generator (check.sh) and `flutter pub get` need Flutter.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
       - name: Install the Rust tools
         run: |
           rustup show active-toolchain || rustup toolchain install
@@ -158,21 +310,13 @@ jobs:
           path: ~/.cache/fogata-cargo-fuzz
           key: ${{ steps.cargo-fuzz.outputs.cache-primary-key }}
 
-      # The crates, and the builds of the dependencies (never of the workspace's own crates,
-      # which rust-cache leaves out) in the target folder ci.sh keeps. Saved only by a push to
-      # main: a pull request reads it and never writes it. Cargo checks every crate against
-      # Cargo.lock, so what is restored cannot change the code that is built from source.
+      # As in the linux job (see there), a cache of this job's own: rust-cache names each
+      # job's cache apart.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: . -> .git/fogata-ci/target
           cache-bin: "false"
           save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-
-      # The libwebrtc archive, checked by its SHA-256 when it is unpacked.
-      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: .git/fogata-ci/downloads
-          key: linux-webrtc-${{ hashFiles('app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
 
       # ci.sh runs `flutter pub get --offline` and cargo deny offline (over the crates of every
       # system): the packages, the crates and the RustSec database are fetched here first.
@@ -186,34 +330,26 @@ jobs:
 
       - name: Record the toolchain
         run: |
-          { echo '### Toolchain (linux)'; echo '```'; tools/toolchain.sh linux; echo '```'; } |
+          { echo '### Toolchain (linux-checks)'; echo '```'; tools/toolchain.sh linux; echo '```'; } |
             tee -a "$GITHUB_STEP_SUMMARY"
 
-      - name: tools/ci.sh --full
+      - name: tools/ci.sh --full --split checks
         id: ci
-        run: tools/ci.sh --full "$GITHUB_SHA"
+        run: tools/ci.sh --full --split checks "$GITHUB_SHA"
         continue-on-error: true
 
-      # ci.sh says `incomplete` here because the macOS and Windows legs are the other jobs:
-      # everything else must have run and passed.
+      # ci.sh says `incomplete` here, since half its steps are the linux job's: every step of
+      # this half must have run and passed, nothing of check.sh left out.
       - name: Judge the record
         run: |
           record=.git/fogata-ci/$GITHUB_SHA
           cat "$record"
           ok=1
-          for line in 'linux: pass' 'macos: skipped' 'windows: skipped' 'native: pass' \
-              'integration: pass' 'codegen: checked' 'notices: checked'; do
+          for line in 'split: checks' 'linux: pass' 'codegen: checked' 'notices: checked'; do
             grep -qx "$line" "$record" || { echo "::error::the record does not say '$line'"; ok=0; }
           done
           grep -q '^advisories: checked' "$record" ||
             { echo "::error::the RustSec advisories were not checked"; ok=0; }
-          grep -Eq '^pairs: pass( |$)' "$record" ||
-            { echo "::error::the pair tests did not pass"; ok=0; }
-          # At least one desktop must have run the smoke test and passed (x11, on Xvfb, can be
-          # built here); the KDE desktops (wayland, xwayland, bare) need a GPU render node and
-          # may be skipped. `pass` means some desktop passed and none failed.
-          grep -Eq '^smoke: pass \((wayland|xwayland|bare|x11)[ ;]' "$record" ||
-            { echo "::error::no smoke desktop ran and passed"; ok=0; }
           grep -qx 'result: fail' "$record" && { echo "::error::ci.sh says fail"; ok=0; }
           [[ $ok == 1 ]]
 
@@ -221,7 +357,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ci-linux
+          name: ci-linux-checks
           path: |
             .git/fogata-ci/${{ github.sha }}
             .git/fogata-ci/${{ github.sha }}.log

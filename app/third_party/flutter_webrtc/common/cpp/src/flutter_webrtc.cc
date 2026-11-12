@@ -1,6 +1,7 @@
 #include "flutter_webrtc.h"
 #include "flutter_data_channel.h"
 #include "flutter_utf8_sanitize.h"
+#include "fogata_track_owner.h"
 #include "task_runner.h"
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
@@ -668,6 +669,12 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string stream_id = findString(params, "streamId");
+    // Fogata: a stream a connection received goes with that connection; its id never
+    // stands for this device's own stream of the same id (fogata_track_owner.h).
+    if (OwnedByConnection(findString(params, "ownerTag"))) {
+      result->Success();
+      return;
+    }
     MediaStreamDispose(stream_id, std::move(result));
   } else if (method_call.method_name().compare("mediaStreamTrackSetEnable") ==
              0) {
@@ -679,8 +686,10 @@ void FlutterWebRTC::HandleMethodCall(
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string track_id = findString(params, "trackId");
     const EncodableValue enable = findEncodableValue(params, "enabled");
-    // Fogata: by its owner, so a local track never stands for a received one.
-    RTCMediaTrack* track =
+    // Fogata: by its owner, so a local track never stands for a received one. Held
+    // while it is used: a track found among the connection's own receivers or senders
+    // is a wrapper made for this lookup, which nothing else keeps.
+    scoped_refptr<RTCMediaTrack> track =
         MediaTrackForId(track_id, findString(params, "peerConnectionId"));
     if (track != nullptr) {
       track->set_enabled(GetValue<bool>(enable));
@@ -694,6 +703,20 @@ void FlutterWebRTC::HandleMethodCall(
     const EncodableMap params =
         GetValue<EncodableMap>(*method_call.arguments());
     const std::string track_id = findString(params, "trackId");
+    // Fogata: by its owner. A track a connection received goes with that connection,
+    // and its id never stops this device's own track of the same id (a camera, a shared
+    // screen); a sender's track, held with its connection's id, is this device's own
+    // and is let go of as before. Decided by where the id is found, not by comparing
+    // the track found with local_tracks_' (a sender's track is a new wrapper each time,
+    // never that object: DisposesLocalTrack, fogata_track_owner.h).
+    const std::string owner = findString(params, "peerConnectionId");
+    if (OwnedByConnection(owner) &&
+        !DisposesLocalTrack(owner,
+                            ReceivedTrackForId(track_id, owner) != nullptr,
+                            SentTrackForId(track_id, owner) != nullptr)) {
+      result->Success();
+      return;
+    }
     MediaStreamTrackDispose(track_id, std::move(result));
   } else if (method_call.method_name().compare("restartIce") == 0) {
     if (!method_call.arguments()) {
@@ -810,9 +833,11 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    // Fogata: by its owner, as for mediaStreamTrackSetEnable.
-    RTCMediaTrack* track =
+    // Fogata: by its owner, and held while it is used, as for
+    // mediaStreamTrackSetEnable.
+    scoped_refptr<RTCMediaTrack> held =
         MediaTrackForId(trackId, findString(params, "peerConnectionId"));
+    RTCMediaTrack* track = held.get();
     if (nullptr == track) {
       result->Error("setVolume", "setVolume() Unable to find provided track");
       return;
@@ -881,13 +906,27 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    scoped_refptr<RTCMediaTrack> track = MediaTracksForId(trackId);
+    // Fogata: by its owner, so a local track never stands for a received one (a stream
+    // made to show a participant's picture holds the track they send). A received one is
+    // noted with its stream, which then never lets go of this device's own track of the
+    // same id (ReceivedInStreams, fogata_track_owner.h).
+    const std::string owner = findString(params, "peerConnectionId");
+    scoped_refptr<RTCMediaTrack> track;
+    bool received = false;
+    if (OwnedByConnection(owner)) {
+      track = ReceivedTrackForId(trackId, owner);
+      received = track != nullptr;
+    }
+    if (track == nullptr)
+      track = MediaTrackForId(trackId, owner);
     if (track == nullptr) {
       result->Error("MediaStreamAddTrack",
                     "MediaStreamAddTrack() track is null");
       return;
     }
 
+    if (received)
+      received_in_streams_.Add(streamId, trackId);
     MediaStreamAddTrack(stream, track, std::move(result));
     std::string kind = track->kind().std_string();
     for (int i = 0; i < renders_.size(); i++) {
@@ -914,13 +953,18 @@ void FlutterWebRTC::HandleMethodCall(
       return;
     }
 
-    scoped_refptr<RTCMediaTrack> track = MediaTracksForId(trackId);
+    // Fogata: by its owner, as for mediaStreamAddTrack.
+    scoped_refptr<RTCMediaTrack> track =
+        MediaTrackForId(trackId, findString(params, "peerConnectionId"));
     if (track == nullptr) {
       result->Error("MediaStreamRemoveTrack",
                     "MediaStreamRemoveTrack() track is null");
       return;
     }
 
+    // Fogata: removed by the native track it wraps (the wrapper is a new one), and no
+    // longer noted with the stream.
+    received_in_streams_.Remove(streamId, trackId);
     MediaStreamRemoveTrack(stream, track, std::move(result));
 
     for (int i = 0; i < renders_.size(); i++) {
@@ -1286,7 +1330,10 @@ void FlutterWebRTC::HandleMethodCall(
     }
 
     const std::string trackId = findString(params, "trackId");
-    RTCMediaTrack* track = MediaTrackForId(trackId);
+    // Fogata: by its owner, as for mediaStreamTrackSetEnable.
+    scoped_refptr<RTCMediaTrack> held =
+        MediaTrackForId(trackId, findString(params, "peerConnectionId"));
+    RTCMediaTrack* track = held.get();
     if (nullptr == track) {
       result->Error("captureFrame", "captureFrame() track is null");
       return;

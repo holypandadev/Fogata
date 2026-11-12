@@ -20,7 +20,7 @@ use fogata_crypto::{
 pub use fogata_friends::fuzzing::friend_sealed;
 use fogata_friends::{
     Animated, Animation, Avatar, Banner, Bio, FriendBook, FriendCode, FriendLink, FriendSecret,
-    Introduction, Profile,
+    Introduction, Profile, RunKeys, TransferCode, run_start,
 };
 pub use fogata_media::fuzzing::{parts, turn};
 use fogata_mls::{ChainLink, Followed, GroupMember};
@@ -35,6 +35,7 @@ use fogata_state::{
     Verdict, payload_digest,
 };
 pub use fogata_voice::fuzzing::{ogg_read, recorder, resample, voice_play, wsola_step};
+use zeroize::Zeroizing;
 
 use crate::{
     direct::{self, model::Chat, store::Record},
@@ -178,6 +179,11 @@ pub const TARGETS: &[Target] = &[
         name: "recorder",
         run: recorder,
         seeds: fogata_voice::fuzzing::recorder_seeds,
+    },
+    Target {
+        name: "transfer_wire",
+        run: transfer_wire,
+        seeds: transfer_wire_seeds,
     },
 ];
 
@@ -431,7 +437,8 @@ fn invite_seeds() -> Vec<Vec<u8>> {
     ]
 }
 
-/// Signed records: a group banner or picture (first byte 0), an animation (1), a profile (2), a
+/// Signed records: a group banner or picture (first byte 0, also read as their stamp alone,
+/// [`GroupBanner::peek`]), an animation (1), a profile (2), a
 /// friend's banner (3), a bio (4), or a whole friends file (5). What reads must write and
 /// read back the same.
 pub fn records(data: &[u8]) {
@@ -440,11 +447,17 @@ pub fn records(data: &[u8]) {
     };
     match kind % 6 {
         0 => {
+            // Read first without its signature checked, as one that may replace a newer
+            // one is: what reads peeks its stamp.
+            let peeked = GroupBanner::peek(rest);
             if let Ok(banner) = GroupBanner::decode(rest) {
+                assert_eq!(peeked, Ok(banner.stamp()));
                 assert_eq!(GroupBanner::decode(&banner.encode()).as_ref(), Ok(&banner));
                 let _ = (banner.verify(), banner.digest(), banner.replaces(&banner));
             }
+            let peeked = GroupPicture::peek(rest);
             if let Ok(picture) = GroupPicture::decode(rest) {
+                assert_eq!(peeked, Ok(picture.stamp()));
                 assert_eq!(
                     GroupPicture::decode(&picture.encode()).as_ref(),
                     Ok(&picture)
@@ -875,6 +888,183 @@ fn mls_seeds() -> Vec<Vec<u8>> {
     seeds
 }
 
+/// The code of the runs' account moves, the same in every run.
+fn move_code() -> TransferCode {
+    "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+        .chars()
+        .find_map(|check| TransferCode::parse(&format!("ABCD-12345{check}")).ok())
+        .expect("some check character fits")
+}
+
+/// The keys of the runs' channels after a run of the code, the same in every run.
+fn move_keys() -> RunKeys {
+    RunKeys {
+        to_receiver: Zeroizing::new([5; 32]),
+        to_sender: Zeroizing::new([6; 32]),
+    }
+}
+
+/// What two computers moving an account send each other (`/fogata/transfer/2`): the run of
+/// the code (first byte 0: a start, answered as the new computer answers it; 1: what the
+/// old computer reads back, a reply, an answer, a reply of the first way; 2: a proof, checked
+/// by the new computer), what comes over the channel after the run (3: frames sealed with
+/// its keys, read by the new computer until one fails; 8, as 3 is plus 5: by the old one),
+/// or a code as people type it (4). Each control message read must write and read back
+/// the same, and a code read must read back from what it shows.
+pub fn transfer_wire(data: &[u8]) {
+    use crate::transfer::wire::{self, Channel, Frame};
+    let Some((&mode, rest)) = data.split_first() else {
+        return;
+    };
+    let code = move_code();
+    futures::executor::block_on(async {
+        let mut io = futures::io::Cursor::new(rest);
+        match mode % 5 {
+            0 => {
+                if let Ok(start) = wire::read_start(&mut io).await {
+                    let _ = code.named_by(&start);
+                    let _ = fogata_friends::run_reply(&code, b"new", b"old", &start);
+                }
+            }
+            1 => {
+                if let Ok(Some(reply)) = wire::read_reply(&mut io).await {
+                    let _ = run_start(&code, b"old", b"new").0.prove(&reply);
+                }
+                let _ = wire::read_answer(&mut futures::io::Cursor::new(rest)).await;
+                let _ = wire::read_old_reply(&mut futures::io::Cursor::new(rest)).await;
+            }
+            2 => {
+                if let Ok(proof) = wire::read_confirm(&mut io).await {
+                    let (_, start) = run_start(&code, b"old", b"new");
+                    if let Ok((run, _)) = fogata_friends::run_reply(&code, b"new", b"old", &start) {
+                        let _ = run.finish(&proof);
+                    }
+                }
+            }
+            3 => {
+                let old = mode % 10 >= 5;
+                let mut channel =
+                    Channel::new(futures::io::Cursor::new(rest.to_vec()), &move_keys(), old);
+                for _ in 0..64 {
+                    let Ok(frame) = channel.recv().await else {
+                        break;
+                    };
+                    if let Frame::Msg(msg) = frame {
+                        let json = serde_json::to_vec(&msg).expect("writes");
+                        assert_eq!(
+                            serde_json::from_slice::<wire::Msg>(&json).ok(),
+                            Some(msg.clone())
+                        );
+                        if let wire::Msg::Active { proof } = &msg {
+                            let key = channel.move_key();
+                            let _ = channel.proves("move", &key, proof);
+                        }
+                    }
+                }
+            }
+            _ => {
+                let text = String::from_utf8_lossy(rest);
+                if let Ok(code) = TransferCode::parse(&text) {
+                    assert_eq!(TransferCode::parse(&code.to_string()), Ok(code.clone()));
+                    let _ = (code.rendezvous(), code.lan_secret());
+                }
+                let _ = crate::transfer::check_code(&text);
+            }
+        }
+    });
+}
+
+fn transfer_wire_seeds() -> Vec<Vec<u8>> {
+    use crate::transfer::wire::{self, Channel, Msg};
+    let code = move_code();
+    futures::executor::block_on(async {
+        let written = |mode: u8, bytes: Vec<u8>| [&[mode][..], &bytes].concat();
+        let mut out = Vec::new();
+        let (sender, start) = run_start(&code, b"old", b"new");
+        let mut io = futures::io::Cursor::new(Vec::new());
+        wire::send_start(&mut io, &start).await.expect("written");
+        out.push(written(0, io.into_inner()));
+        let mut io = futures::io::Cursor::new(Vec::new());
+        let probe = fogata_friends::old_protocol_probe(&code);
+        wire::send_start(&mut io, &probe).await.expect("written");
+        out.push(written(0, io.into_inner()));
+        let (receiver, reply) =
+            fogata_friends::run_reply(&code, b"new", b"old", &start).expect("a reply");
+        for reply in [Some(&reply), None] {
+            let mut io = futures::io::Cursor::new(Vec::new());
+            wire::send_reply(&mut io, reply).await.expect("written");
+            out.push(written(1, io.into_inner()));
+        }
+        let (_, proof) = sender.prove(&reply).expect("proved");
+        let mut io = futures::io::Cursor::new(Vec::new());
+        wire::send_confirm(&mut io, &proof).await.expect("written");
+        out.push(written(2, io.into_inner()));
+        if let Ok((_, answer)) = receiver.finish(&proof) {
+            let mut io = futures::io::Cursor::new(Vec::new());
+            wire::send_answer(&mut io, Some(&answer))
+                .await
+                .expect("written");
+            out.push(written(1, io.into_inner()));
+        }
+        // What the old computer sends the new one, then the other way.
+        let old = [
+            Msg::Offer {
+                transfer: "move".into(),
+                computer: "Desk".into(),
+                device: "ab12".into(),
+                profile: "Ana".into(),
+                friends: 3,
+                groups: 2,
+                chats: 4,
+                files: 10,
+                bytes: 1 << 20,
+            },
+            Msg::Go,
+            Msg::File {
+                path: "friends.json".into(),
+            },
+            Msg::FileEnd {
+                blake3: "00".repeat(32),
+            },
+            Msg::Sent { files: 10 },
+            Msg::Commit,
+            Msg::Moved,
+            Msg::Resume {
+                transfer: "move".into(),
+            },
+            Msg::Fail {
+                reason: "stopped".into(),
+            },
+        ];
+        let new = [
+            Msg::Hello {
+                computer: "Laptop".into(),
+                replaces: Some("Bea".into()),
+            },
+            Msg::Go,
+            Msg::Staged,
+            Msg::Active {
+                proof: "00".repeat(32),
+            },
+            Msg::Unknown,
+        ];
+        for (mode, from_old, msgs) in [(3u8, true, &old[..]), (8, false, &new[..])] {
+            let mut channel =
+                Channel::new(futures::io::Cursor::new(Vec::new()), &move_keys(), from_old);
+            for msg in msgs {
+                channel.send(msg).await.expect("sent");
+                if matches!(msg, Msg::File { .. }) {
+                    channel.send_data(b"a piece of a file").await.expect("sent");
+                }
+            }
+            out.push(written(mode, channel.into_inner().into_inner()));
+        }
+        out.push(written(4, code.to_string().into_bytes()));
+        out.push(written(4, b"abcd 1234 5o".to_vec()));
+        out
+    })
+}
+
 #[cfg(test)]
 mod runs {
     //! Long runs of damaged inputs against each target, ignored by default: `tools/fuzz.sh`
@@ -1112,5 +1302,6 @@ mod runs {
         wsola_step,
         resample,
         recorder,
+        transfer_wire,
     );
 }

@@ -47,47 +47,18 @@ impl Copies {
     }
 
     /// Counts the file as in use by this send, before its copy is looked for: another send
-    /// that fails meanwhile then leaves it.
+    /// that fails meanwhile, or a removal, then leaves it.
     fn using(&mut self, file: &super::model::FileId) {
-        *self
-            .inner
-            .direct
-            .lock()
-            .copying
-            .entry((self.friend, *file))
-            .or_default() += 1;
+        self.inner.direct.start_using(&self.friend, file);
         self.using.push(*file);
     }
 }
 
 impl Drop for Copies {
     fn drop(&mut self) {
-        let mut chats = self.inner.direct.lock();
-        for file in &self.using {
-            let key = (self.friend, *file);
-            if let Some(n) = chats.copying.get_mut(&key) {
-                *n -= 1;
-                if *n == 0 {
-                    chats.copying.remove(&key);
-                }
-            }
-        }
-        for made in &self.made {
-            let kept = chats.chats.get(&self.friend).is_some_and(|e| {
-                e.chat
-                    .items()
-                    .iter()
-                    .flat_map(Item::files)
-                    .any(|f| f.id == made.id && f.name == made.name)
-            });
-            if !kept && !chats.copying.contains_key(&(self.friend, made.id)) {
-                tracing::debug!("a copy of a file a send did not keep goes");
-                self.inner
-                    .direct
-                    .store
-                    .remove_file(&self.friend, &made.id, [made.name.as_str()]);
-            }
-        }
+        self.inner
+            .direct
+            .stop_using(&self.friend, &self.using, &self.made);
     }
 }
 
@@ -265,10 +236,24 @@ impl Core {
                     .chats
                     .get(&friend)
                     .and_then(|e| e.chat.kept(&file.id).cloned());
+                // A copy leaves the disk the room the core's own files need, as a room
+                // download does (a second name for a file kept here is a link to it).
+                let room = match here {
+                    Some(_) => None,
+                    None => Some(crate::shares::hold_disk(
+                        &self.inner,
+                        crate::shares::held_for(size),
+                        &dir,
+                        "not enough free space for this file",
+                    )?),
+                };
                 let (inner, from, kept) = (self.inner.clone(), out.path.clone(), file.clone());
-                tokio::task::spawn_blocking(move || match here {
-                    Some(here) => inner.direct.store.link_copy(&friend, &here, &kept),
-                    None => inner.direct.store.keep_copy(&friend, &kept, &from),
+                tokio::task::spawn_blocking(move || {
+                    let _room = room;
+                    match here {
+                        Some(here) => inner.direct.store.link_copy(&friend, &here, &kept),
+                        None => inner.direct.store.keep_copy(&friend, &kept, &from),
+                    }
                 })
                 .await?
                 .with_context(|| format!("cannot keep a copy of {}", file.name))?;

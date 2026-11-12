@@ -426,8 +426,12 @@ IAudioClient* ApplicationLoopbackCapturer::TryInitApplicationLoopback() {
   });
 
   WaitForSingleObject(done_event, 7000);
-  CloseHandle(done_event);
+  // Fogata: the worker is waited for before its event is closed. Closed first, a worker
+  // still going after 7 s (the audio service slow to answer) set an event by a handle
+  // value Windows may have given to another object of the process meanwhile. join()
+  // waits for it however long it takes, as it did before.
   worker.join();
+  if (done_event != nullptr) CloseHandle(done_event);
 
   if (!result.client) return nullptr;
   mix_format_ = result.fmt;
