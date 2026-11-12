@@ -364,18 +364,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             ..
         } => handle_member_connected(inner, group, device, path).await,
         NodeEvent::MemberDisconnected { group, device, .. } => {
-            if direct::on_member_disconnected(inner, group, device) {
-                return;
-            }
-            {
-                let mut state = inner.lock();
-                if let Some(online) = state.online.get_mut(&group) {
-                    online.remove(&device);
-                }
-                state.forget_away_if_gone(&device);
-            }
-            inner.emit(CoreEvent::MemberDisconnected { group, device });
-            inner.emit(CoreEvent::GroupsChanged);
+            handle_member_disconnected(inner, group, device)
         }
         NodeEvent::Room {
             group,
@@ -874,6 +863,22 @@ async fn handle_member_connected(
         device,
         path,
     });
+    inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// A member of a group is no longer connected.
+fn handle_member_disconnected(inner: &Arc<Inner>, group: GroupId, device: DevicePublicKey) {
+    if direct::on_member_disconnected(inner, group, device) {
+        return;
+    }
+    {
+        let mut state = inner.lock();
+        if let Some(online) = state.online.get_mut(&group) {
+            online.remove(&device);
+        }
+        state.forget_away_if_gone(&device);
+    }
+    inner.emit(CoreEvent::MemberDisconnected { group, device });
     inner.emit(CoreEvent::GroupsChanged);
 }
 
