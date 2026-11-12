@@ -242,39 +242,7 @@ impl Node {
             } => self.on_roster_request(peer, group_id, heads, banner, picture),
             MemberRequest::Sync { group_id, have } => self.on_sync_request(peer, group_id, have),
             MemberRequest::GroupBanner { group_id, banner } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                if !slot.members.contains(&peer) {
-                    return MemberResponse::Refused;
-                }
-                slot.banner_peers.insert(peer);
-                // Past the member's budget it is not looked at, but not refused either: an
-                // earlier version that hears a refusal would not send this banner again
-                // while connected. It comes again with the next roster that differs.
-                if !self.take_group_record(peer, banner.len()) {
-                    return MemberResponse::Ack;
-                }
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                // Only a newer one is taken: an older one is dropped before its signature is
-                // checked over up to half a megabyte, which reading its date does not cost.
-                match slot.ctx.banner_may_be_newer(&banner) {
-                    Err(_) => return MemberResponse::Refused,
-                    Ok(false) => return MemberResponse::Ack,
-                    Ok(true) => {}
-                }
-                let Ok(banner) = fogata_state::GroupBanner::decode(&banner) else {
-                    return MemberResponse::Refused;
-                };
-                if slot.ctx.take_banner(banner) {
-                    self.banner_changed(group, Some(peer));
-                }
-                MemberResponse::Ack
+                self.on_group_banner_request(peer, group_id, banner)
             }
             MemberRequest::GroupPicture { group_id, picture } => {
                 let Some(group) = group_of(&group_id) else {
@@ -910,6 +878,48 @@ impl Node {
                 .collect(),
             want: bytes(want),
         }
+    }
+
+    /// Takes a group's banner record a member sends.
+    fn on_group_banner_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        banner: Vec<u8>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        if !slot.members.contains(&peer) {
+            return MemberResponse::Refused;
+        }
+        slot.banner_peers.insert(peer);
+        // Past the member's budget it is not looked at, but not refused either: an
+        // earlier version that hears a refusal would not send this banner again
+        // while connected. It comes again with the next roster that differs.
+        if !self.take_group_record(peer, banner.len()) {
+            return MemberResponse::Ack;
+        }
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        // Only a newer one is taken: an older one is dropped before its signature is
+        // checked over up to half a megabyte, which reading its date does not cost.
+        match slot.ctx.banner_may_be_newer(&banner) {
+            Err(_) => return MemberResponse::Refused,
+            Ok(false) => return MemberResponse::Ack,
+            Ok(true) => {}
+        }
+        let Ok(banner) = fogata_state::GroupBanner::decode(&banner) else {
+            return MemberResponse::Refused;
+        };
+        if slot.ctx.take_banner(banner) {
+            self.banner_changed(group, Some(peer));
+        }
+        MemberResponse::Ack
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
