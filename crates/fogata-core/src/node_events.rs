@@ -393,12 +393,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             device,
             name,
         }),
-        NodeEvent::UpdateToJoin { group } => {
-            let Some(name) = inner.lock().joining.get(&group).cloned() else {
-                return;
-            };
-            inner.emit(CoreEvent::UpdateToJoin { group, name });
-        }
+        NodeEvent::UpdateToJoin { group } => handle_update_to_join(inner, group),
         NodeEvent::JoinExpired { group } => {
             let Some(name) = inner.lock().joining.remove(&group) else {
                 return;
@@ -905,6 +900,14 @@ async fn handle_join_declined(inner: &Arc<Inner>, group: GroupId) {
     inner.forget_join(group);
     let _ = inner.node.drop_group(group).await;
     inner.emit(CoreEvent::JoinDeclined { group, name });
+}
+
+/// This copy must be updated before the group it joins lets it in.
+fn handle_update_to_join(inner: &Arc<Inner>, group: GroupId) {
+    let Some(name) = inner.lock().joining.get(&group).cloned() else {
+        return;
+    };
+    inner.emit(CoreEvent::UpdateToJoin { group, name });
 }
 
 #[cfg(test)]
