@@ -1100,26 +1100,7 @@ impl Node {
                 self.on_friend_accept_request(peer, local, remote, now, mac, sealed)
             }
             FriendRequest::Profile { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_profile_update(
-                    &self.identity,
-                    &device,
-                    &local,
-                    &remote,
-                    &sealed,
-                ) {
-                    Ok(profile) => {
-                        self.friend_update(FriendUpdate::Profile(profile));
-                        FriendResponse::Ack
-                    }
-                    Err(_) => FriendResponse::Refused,
-                }
+                self.on_friend_profile_request(peer, local, remote, sealed)
             }
             FriendRequest::Group {
                 entries,
@@ -1667,6 +1648,31 @@ impl Node {
         // A new friend has only our request secret: send our friend secret back.
         self.contact(peer);
         FriendResponse::Ack
+    }
+
+    /// Takes a friend's profile.
+    fn on_friend_profile_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_profile_update(&self.identity, &device, &local, &remote, &sealed)
+        {
+            Ok(profile) => {
+                self.friend_update(FriendUpdate::Profile(profile));
+                FriendResponse::Ack
+            }
+            Err(_) => FriendResponse::Refused,
+        }
     }
 
     /// Records a checked friend request that came from `peer`.
