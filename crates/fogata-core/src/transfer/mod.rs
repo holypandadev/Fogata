@@ -3400,6 +3400,12 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// How many times a test looks, every 50 ms, for a move being put in place to be done
+    /// (ten minutes): the tests are about what the folder holds in the end, not how soon,
+    /// and moving their tens of thousands of files takes over a minute on a slow disk (a
+    /// build server's, with every new file scanned).
+    const DONE_WITHIN: usize = 12_000;
+
     /// A folder with a profile of its own (`own-N` files) and a move staged at `Commit`
     /// (`new-N` files and the account's identity), as when the old computer's Commit came.
     fn committed(name: &str, own: usize, new: usize) -> (PathBuf, Incoming) {
@@ -3460,7 +3466,7 @@ mod tests {
         let busy = dir.join(INCOMING_DIR).exists();
         assert!(!(busy && lock.is_ok()), "the folder was let go of half way");
         drop(lock);
-        for _ in 0..1200 {
+        for _ in 0..DONE_WITHIN {
             if !dir.join(INCOMING_DIR).exists() {
                 break;
             }
@@ -3473,7 +3479,7 @@ mod tests {
         );
         // It lets go once done.
         let mut free = false;
-        for _ in 0..1200 {
+        for _ in 0..DONE_WITHIN {
             if Store::open(dir.clone()).unwrap().hold_running().is_ok() {
                 free = true;
                 break;
@@ -3501,7 +3507,7 @@ mod tests {
             // (it may still be removing `replaced/`).
             let store = Store::open(dir.clone()).unwrap();
             let mut running = None;
-            for _ in 0..1200 {
+            for _ in 0..DONE_WITHIN {
                 if let Ok(lock) = store.hold_running() {
                     running = Some(lock);
                     break;
