@@ -119,12 +119,66 @@ passphrase is asked on the terminal and not shown; on Windows the command refuse
 `~/.config/fogata-release/ssh/`: it never replaces these keys, and `fogata release keygen`
 refuses a folder that holds any key already.
 
+## Checks before a release
+
+Required before every release, on the commit that will be released, beside the checks of
+every push (docs/ci.md). No workflow runs them: each needs a real sound server, a second
+system or an hour, and each is here because it found a fault that every push check had
+passed. A release waits until all of them pass; one that cannot be run is said so, by
+name, in the release's notes for the maintainers, never passed over in silence.
+
+1. **The push checks, whole**: `tools/ci.sh` says `result: pass` here, and GitHub's `CI`
+   run of the commit is green in its four jobs (`linux`, `linux-checks`, `macos`,
+   `windows`).
+2. **Linux, the optimised build, in calls.** A build made for debugging did not crash
+   where the optimised one did, so calls are run with a profile or release build:
+   - a clean release build (`rm -rf app/build/flutter_assets` first in a tree that held a
+     debug build, then `flutter build linux --release`) that passes
+     `python3 -I -B tools/beta/ci_builds.py check-build linux app/build/linux/x64/release/bundle`;
+   - the video plugin's native tests, ThreadSanitizer's among them:
+     `app/third_party/flutter_webrtc/common/cpp/test/run_tests.sh`;
+   - every microphone check of the call lab, `tools/call-lab/mic.sh`, on a debug build of
+     the call test (`flutter build linux --debug -t integration_test/call_test.dart`;
+     `media` needs that build's made-up camera);
+   - calls with a camera and with a shared screen on a profile build
+     (`flutter build linux --profile -t integration_test/call_test.dart`, then
+     `BUNDLE=<that bundle>/fogata tools/call-lab/measure.sh 4 screen 90`, and again with
+     6 copies; `measure.sh 4 camera 60` on the debug build): every copy's result says
+     `passed`, no copy was kept out, and `coredumpctl list --since <the start>` shows no
+     crash of `fogata`.
+3. **The network.** `tools/netlab/netlab.sh`, every scenario (about 70 minutes). And on
+   the real internet, the release build of the command line must log "this device's
+   public address confirmed" within seconds:
+   `RUST_LOG=warn,fogata_net::node::network=debug target/release/fogata --data-dir $(mktemp -d) network`.
+4. **Windows, a real call.** The push checks passed while a call on Windows carried no
+   sound at all. On a Windows computer (a virtual one will do, with a virtual sound
+   cable for its microphone): the call test built there and run against a copy on the
+   Linux computer (`integration_test/call_test.dart`, `FOGATA_TEST_MIC=system`, the
+   input chosen by name with `FOGATA_TEST_INPUT`), both results `passed`;
+   `tools/smoke-windows.ps1`; and, once the builds of the release exist (step 2 of "A
+   release"), the attested Windows build opened there on a data folder of its own.
+5. **macOS, a real call.** `tools/ci-leg.sh macos` on a Mac, and the call test between a
+   copy on the Mac and one on the Linux computer. Once the builds exist, the universal
+   application started under Rosetta as well
+   (`arch -x86_64 Fogata.app/Contents/MacOS/Fogata`, with a `FOGATA_DATA_DIR` of its
+   own): the Intel half runs nowhere else before testers have it. That is the Intel code
+   under translation, not an Intel Mac; say so.
+6. **What is on a tester's disk.** A copy of a data folder written by the last release
+   opens with this build, with everything in it, and the test against the last release
+   passes (`tools/previous-release.sh`, step 1 of "A release"), or the change that breaks
+   it tells old copies to update (`release.py --min-build`, the group level notices).
+
+A call between two real networks cannot be made from one local network: the network lab
+and the public-address check of 3 stand in for it, and the notes of the release say that
+it was not tried for real.
+
 ## A release
 
 1. In `crates/fogata-update/src/lib.rs` raise `THIS_BUILD` by one and set `THIS_VERSION`
    (`0.1.0-beta.2`) and the number in `BUILD_MARKER`; in `app/pubspec.yaml` set `version` to
    the version without its `-beta...` part, `+`, and the build (`0.1.0+2`). Tests check that
-   they all agree. Commit, and run `tools/ci.sh` on that commit (docs/ci.md): it must say
+   they all agree. Commit, run the checks of "Checks before a release" above on that
+   commit, and `tools/ci.sh` (docs/ci.md): it must say
    `result: pass`, with the macOS and Windows legs run, or checked by hand on those systems
    at that very commit (the same commit the builds below come from: copy it there with
    `git bundle` or a push, never by copying files). Every build of the release comes from

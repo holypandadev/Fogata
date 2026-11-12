@@ -9,6 +9,11 @@ Windows legs are the workflow's other two jobs, `tools/ci-leg.sh macos` and
 by side. The run passes only when every job passes; `tools/beta/release.py` asks GitHub for
 the run's conclusion, not for any one job.
 
+None of this is enough for a release: calls with an optimised build, the network lab, a
+real call on Windows and on macOS, and a data folder of the last release are checked by
+hand before each one (docs/releasing-beta.md, "Checks before a release"); the push checks
+passed with a fault in each of them.
+
 What GitHub's computers cover, and what they do not:
 
 - Linux: everything of `tools/ci.sh --full`, split in two jobs that start together and set up
