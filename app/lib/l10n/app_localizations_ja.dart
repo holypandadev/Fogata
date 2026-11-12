@@ -385,6 +385,11 @@ class L10nJa extends L10n {
   String get errDiskFull => 'ディスクがいっぱいです。空き容量を確保してから、もう一度お試しください。';
 
   @override
+  String errDataFolder(String folder) {
+    return 'Fogataはこのパソコン上の自分のフォルダ（$folder）に書き込めません。書き込みができること、ディスクがいっぱいでないことを確認してから、Fogataをもう一度開いてください。';
+  }
+
+  @override
   String get errTooManyChanges =>
       'このデバイスによるグループの変更で、他のメンバーにまだ取り込まれていないものが多すぎます。グループの他の誰かが変更を行ってから、もう一度お試しください。';
 

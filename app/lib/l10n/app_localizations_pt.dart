@@ -441,6 +441,11 @@ class L10nPt extends L10n {
       'O disco está cheio. Libere espaço e tente de novo.';
 
   @override
+  String errDataFolder(String folder) {
+    return 'O Fogata não consegue gravar na pasta dele neste computador ($folder). Verifique se você pode gravar nela e se o disco não está cheio, depois abra o Fogata de novo.';
+  }
+
+  @override
   String get errTooManyChanges =>
       'Este dispositivo fez mudanças demais no grupo que nenhum outro membro recebeu ainda. Tente de novo depois que outra pessoa do grupo fizer uma mudança.';
 

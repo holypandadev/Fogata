@@ -433,6 +433,11 @@ class L10nIt extends L10n {
   String get errDiskFull => 'Il disco è pieno. Libera spazio e riprova.';
 
   @override
+  String errDataFolder(String folder) {
+    return 'Fogata non riesce a scrivere nella sua cartella su questo computer ($folder). Controlla di poterci scrivere e che il disco non sia pieno, poi riapri Fogata.';
+  }
+
+  @override
   String get errTooManyChanges =>
       'Questo dispositivo ha fatto troppe modifiche al gruppo che nessun altro membro ha ancora ricevuto. Riprova dopo che qualcun altro del gruppo avrà fatto una modifica.';
 

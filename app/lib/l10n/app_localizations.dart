@@ -681,6 +681,12 @@ abstract class L10n {
   /// **'The disk is full. Free some space and try again.'**
   String get errDiskFull;
 
+  /// Shown in the window, in place of everything else, when Fogata starts and cannot create or write its own folder (no permission, a read-only disk). {folder} is the folder's path.
+  ///
+  /// In en, this message translates to:
+  /// **'Fogata cannot write to its folder on this computer ({folder}). Check that you can write there and that the disk is not full, then open Fogata again.'**
+  String errDataFolder(String folder);
+
   /// Error message. A limit on changes to a group by one device.
   ///
   /// In en, this message translates to:

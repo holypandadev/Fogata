@@ -95,6 +95,7 @@
   "errRoomNotEmpty": "Há pessoas nessa sala de voz: exclua-a quando ela estiver vazia.",
   "errTooManyFiles": "Você já compartilha o máximo de arquivos que uma sala aceita por pessoa. Pare de compartilhar alguns primeiro.",
   "errDiskFull": "O disco está cheio. Libere espaço e tente de novo.",
+  "errDataFolder": "O Fogata não consegue gravar na pasta dele neste computador ({folder}). Verifique se você pode gravar nela e se o disco não está cheio, depois abra o Fogata de novo.",
   "errTooManyChanges": "Este dispositivo fez mudanças demais no grupo que nenhum outro membro recebeu ainda. Tente de novo depois que outra pessoa do grupo fizer uma mudança.",
   "errSomething": "Algo deu errado.",
   "errRoomFull": "Essa sala de voz está cheia: ela aceita no máximo {n} pessoas.",

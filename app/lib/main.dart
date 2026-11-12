@@ -42,10 +42,7 @@ Future<void> main([List<String> args = const []]) async {
     dataDir = Platform.environment['FOGATA_DATA_DIR'] ?? api.defaultDataDir();
   } catch (e) {
     // Nowhere to keep its data: the window says why, and nothing starts.
-    final state = AppState('')..startError = explain(e);
-    state.splash.showing = false;
-    await becomeMainWindow();
-    runApp(FogataApp(state: state));
+    await _cannotStart(explain(e));
     return;
   }
   _noteErrors(dataDir);
@@ -59,7 +56,21 @@ Future<void> main([List<String> args = const []]) async {
   // A copy that started this one again is still quitting.
   await readRestart(dataDir);
   final wait = startedByRestart ? const Duration(seconds: 30) : Duration.zero;
-  if (!await onlyCopy(dataDir, wait: wait)) exit(0);
+  final bool only;
+  try {
+    only = await onlyCopy(dataDir, wait: wait);
+  } on FileSystemException catch (e) {
+    // The data folder cannot be written (not this user's, a disk that only reads, a full
+    // one): the window says so. Left uncaught, this ended the start with the application
+    // running and no window at all.
+    await _cannotStart(
+      '$e'.contains('No space left on device')
+          ? l10n.errDiskFull
+          : l10n.errDataFolder(dataDir),
+    );
+    return;
+  }
+  if (!only) exit(0);
   final state = AppState(dataDir);
   // The window's errors written to the log lose the names it knows, as the core's do.
   appErrorNames = () => reportNames(state);
@@ -83,6 +94,15 @@ Future<void> main([List<String> args = const []]) async {
     say: state.say,
     nameOf: (device) => state.contacts.friendPerson(device)?.name,
   );
+}
+
+/// Fogata cannot start, and never will as things are: the window says [why], and nothing
+/// else starts.
+Future<void> _cannotStart(String why) async {
+  final state = AppState('')..startError = why;
+  state.splash.showing = false;
+  await becomeMainWindow();
+  runApp(FogataApp(state: state));
 }
 
 /// Notes the window's errors in the day's log, for problem reports, as well as where they
@@ -223,10 +243,15 @@ class _App extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              state.startError!,
-              textAlign: TextAlign.center,
-              style: tx(c.red),
+            // A long reason (one that names a folder) reads as a paragraph, not as one
+            // line from edge to edge of a wide window.
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 560),
+              child: Text(
+                state.startError!,
+                textAlign: TextAlign.center,
+                style: tx(c.red),
+              ),
             ),
             if (state.dataDir.isNotEmpty) ...[
               const SizedBox(height: 16),

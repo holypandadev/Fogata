@@ -441,6 +441,11 @@ class L10nDe extends L10n {
       'Der Datenträger ist voll. Gib etwas Speicherplatz frei und versuch es erneut.';
 
   @override
+  String errDataFolder(String folder) {
+    return 'Fogata kann nicht in seinen Ordner auf diesem Computer schreiben ($folder). Prüf, ob du dort schreiben darfst und der Datenträger nicht voll ist, und öffne Fogata dann erneut.';
+  }
+
+  @override
   String get errTooManyChanges =>
       'Dieses Gerät hat zu viele Änderungen an der Gruppe gemacht, die noch kein anderes Mitglied übernommen hat. Versuch es erneut, nachdem jemand anderes in der Gruppe etwas geändert hat.';
 

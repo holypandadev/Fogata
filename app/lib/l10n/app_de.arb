@@ -95,6 +95,7 @@
   "errRoomNotEmpty": "In diesem Sprachraum sind Leute: Entferne ihn erst, wenn er leer ist.",
   "errTooManyFiles": "Du teilst schon so viele Dateien, wie ein Raum pro Person erlaubt. Hör zuerst auf, einige zu teilen.",
   "errDiskFull": "Der Datenträger ist voll. Gib etwas Speicherplatz frei und versuch es erneut.",
+  "errDataFolder": "Fogata kann nicht in seinen Ordner auf diesem Computer schreiben ({folder}). Prüf, ob du dort schreiben darfst und der Datenträger nicht voll ist, und öffne Fogata dann erneut.",
   "errTooManyChanges": "Dieses Gerät hat zu viele Änderungen an der Gruppe gemacht, die noch kein anderes Mitglied übernommen hat. Versuch es erneut, nachdem jemand anderes in der Gruppe etwas geändert hat.",
   "errSomething": "Etwas ist schiefgelaufen.",
   "errRoomFull": "Dieser Sprachraum ist voll: Er fasst höchstens {n} Personen.",

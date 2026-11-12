@@ -531,6 +531,15 @@
   "@errDiskFull": {
     "description": "Error message. The computer's disk has no free space."
   },
+  "errDataFolder": "Fogata cannot write to its folder on this computer ({folder}). Check that you can write there and that the disk is not full, then open Fogata again.",
+  "@errDataFolder": {
+    "description": "Shown in the window, in place of everything else, when Fogata starts and cannot create or write its own folder (no permission, a read-only disk). {folder} is the folder's path.",
+    "placeholders": {
+      "folder": {
+        "type": "String"
+      }
+    }
+  },
   "errTooManyChanges": "This device has made too many changes to the group that no other member has taken in yet. Try again after someone else in the group makes a change.",
   "@errTooManyChanges": {
     "description": "Error message. A limit on changes to a group by one device."

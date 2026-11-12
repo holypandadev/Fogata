@@ -374,6 +374,11 @@ class L10nZh extends L10n {
   String get errDiskFull => '磁盘已满。请释放一些空间后重试。';
 
   @override
+  String errDataFolder(String folder) {
+    return 'Fogata 无法写入它在这台电脑上的文件夹（$folder）。请确认你可以写入该文件夹且磁盘未满，然后重新打开 Fogata。';
+  }
+
+  @override
   String get errTooManyChanges => '这台设备对群组所做的更改过多，其他成员都还没有同步。请等群组中其他人做出更改后再试。';
 
   @override

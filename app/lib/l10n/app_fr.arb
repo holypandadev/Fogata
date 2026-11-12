@@ -95,6 +95,7 @@
   "errRoomNotEmpty": "Il y a du monde dans ce salon vocal : supprime-le une fois qu’il sera vide.",
   "errTooManyFiles": "Tu partages déjà autant de fichiers qu’un salon en accepte par personne. Arrête d’en partager quelques-uns d’abord.",
   "errDiskFull": "Le disque est plein. Libère de l’espace et réessaie.",
+  "errDataFolder": "Fogata ne peut pas écrire dans son dossier sur cet ordinateur ({folder}). Vérifie que tu peux y écrire et que le disque n’est pas plein, puis rouvre Fogata.",
   "errTooManyChanges": "Cet appareil a fait trop de modifications au groupe qu’aucun autre membre n’a encore reçues. Réessaie après qu’un autre membre du groupe aura fait une modification.",
   "errSomething": "Une erreur s’est produite.",
   "errRoomFull": "Ce salon vocal est plein : il accueille {n} personnes au plus.",

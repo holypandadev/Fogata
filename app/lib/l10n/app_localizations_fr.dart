@@ -438,6 +438,11 @@ class L10nFr extends L10n {
       'Le disque est plein. Libère de l’espace et réessaie.';
 
   @override
+  String errDataFolder(String folder) {
+    return 'Fogata ne peut pas écrire dans son dossier sur cet ordinateur ($folder). Vérifie que tu peux y écrire et que le disque n’est pas plein, puis rouvre Fogata.';
+  }
+
+  @override
   String get errTooManyChanges =>
       'Cet appareil a fait trop de modifications au groupe qu’aucun autre membre n’a encore reçues. Réessaie après qu’un autre membre du groupe aura fait une modification.';
 

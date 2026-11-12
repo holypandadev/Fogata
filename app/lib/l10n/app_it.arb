@@ -95,6 +95,7 @@
   "errRoomNotEmpty": "Ci sono persone in quella stanza vocale: eliminala quando è vuota.",
   "errTooManyFiles": "Stai già condividendo il numero massimo di file consentito per persona in una stanza. Smetti prima di condividerne qualcuno.",
   "errDiskFull": "Il disco è pieno. Libera spazio e riprova.",
+  "errDataFolder": "Fogata non riesce a scrivere nella sua cartella su questo computer ({folder}). Controlla di poterci scrivere e che il disco non sia pieno, poi riapri Fogata.",
   "errTooManyChanges": "Questo dispositivo ha fatto troppe modifiche al gruppo che nessun altro membro ha ancora ricevuto. Riprova dopo che qualcun altro del gruppo avrà fatto una modifica.",
   "errSomething": "Qualcosa è andato storto.",
   "errRoomFull": "Quella stanza vocale è piena: ospita al massimo {n} persone.",
