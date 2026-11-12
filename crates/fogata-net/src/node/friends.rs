@@ -1079,11 +1079,15 @@ impl Node {
         let remote = peer.to_bytes();
         let now = now_ms();
         let hidden = self.hidden;
-        let Some(f) = self.friends.as_mut() else {
+        if self.friends.is_none() {
             return FriendResponse::Refused;
-        };
+        }
         match request {
             FriendRequest::Probe { nonce } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 if !(16..=32).contains(&nonce.len()) {
                     return FriendResponse::Refused;
                 }
@@ -1094,6 +1098,10 @@ impl Node {
                 }
             }
             FriendRequest::Hello { mac, sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 // A friend online already says hello once per connection: one saying it
                 // again and again is answered only so often (see limits.rs).
                 if let Some(device) = f.online.get(&peer).copied()
@@ -1157,6 +1165,10 @@ impl Node {
                 FriendResponse::HelloReply { sealed: reply }
             }
             FriendRequest::LinkRequest { mac, sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(link) = f.link.as_ref().filter(|l| !l.is_expired(now)) else {
                     return FriendResponse::Refused;
                 };
@@ -1180,6 +1192,10 @@ impl Node {
                 }
             }
             FriendRequest::CodeStart { gate, spake } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let identity = self.identity.clone();
                 let profile = f.book.profile.clone();
                 let Some(code) = f.code.as_mut().filter(|c| now <= c.expires_ms) else {
@@ -1230,6 +1246,10 @@ impl Node {
                 }
             }
             FriendRequest::CodeFinish { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some((inviter, _)) = f.inviting.remove(&peer) else {
                     return FriendResponse::Refused;
                 };
@@ -1250,6 +1270,10 @@ impl Node {
                 }
             }
             FriendRequest::Accept { mac, sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 // Keyed by the secret shared with a friend (sending its new secret) or with a
                 // device a request went to.
                 let devices: Vec<DevicePublicKey> = f
@@ -1292,6 +1316,10 @@ impl Node {
                 FriendResponse::Ack
             }
             FriendRequest::Profile { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1314,6 +1342,10 @@ impl Node {
                 declined,
                 part,
             } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(by) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1340,6 +1372,10 @@ impl Node {
                 }
             }
             FriendRequest::Call { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1352,6 +1388,10 @@ impl Node {
                 }
             }
             FriendRequest::Status { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1373,6 +1413,10 @@ impl Node {
                 }
             }
             FriendRequest::Banner { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1391,6 +1435,10 @@ impl Node {
                 }
             }
             FriendRequest::Bio { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1412,6 +1460,10 @@ impl Node {
                 }
             }
             FriendRequest::Animation { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1436,6 +1488,10 @@ impl Node {
                 }
             }
             FriendRequest::Unfriend { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let device =
                     match fogata_friends::open_unfriend(&self.identity, &local, &remote, &sealed) {
                         Ok(device) => device,
@@ -1489,6 +1545,10 @@ impl Node {
                 FriendResponse::Unfriended { sealed: ack }
             }
             FriendRequest::Mutual { sealed } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(device) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1533,6 +1593,10 @@ impl Node {
                 }
             }
             FriendRequest::Direct { entries } => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 let Some(by) = f.online.get(&peer).copied() else {
                     return FriendResponse::Refused;
                 };
@@ -1542,6 +1606,10 @@ impl Node {
                 self.on_direct_offer(peer, by, entries)
             }
             FriendRequest::Heartbeat => {
+                // Kept, as checked above.
+                let Some(f) = self.friends.as_mut() else {
+                    return FriendResponse::Refused;
+                };
                 if f.online.contains_key(&peer) {
                     FriendResponse::Ack
                 } else {
