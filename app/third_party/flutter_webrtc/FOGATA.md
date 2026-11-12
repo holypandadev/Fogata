@@ -732,9 +732,8 @@ sends one, at once, where the statistics read every 2 s show only the last frame
   takes that size as the frame's, so the stand-in is dropped and told like any frame too
   large. A peer sending such pictures costs no more memory than an ordinary call.
   `common/cpp/test/video_renderer_test.cc` checks the event for a stand-in.
-- `FlutterRTCVideoRenderer.m` (the three copies, identical; macOS): `renderFrame:` drops
-  such frames and tells the first of a track, and `setSize:` makes no pixel buffer for
-  such a size. With Fogata's own WebRTC framework (`tools/webrtc/MACOS.md`), whose VP8
+- `FlutterRTCVideoRenderer.m` (both copies, identical; macOS): `renderFrame:` drops
+  such frames, keeps none for `copyPixelBuffer`, and tells the first of a track. With Fogata's own WebRTC framework (`tools/webrtc/MACOS.md`), whose VP8
   decoder refuses such keyframes before decoding them, a stand-in's buffer gives the size
   refused (`refusedSize`, read by name so WebRTC-SDK's builds, which lack it, still work):
   it is taken as the frame's size, so the stand-in is dropped and told the same way.
@@ -768,23 +767,49 @@ be reading the one `CopyPixelBuffer` had just returned (a stream shown in place 
   rejected but still in the group, the offer is refused. It reaches the sound server, as
   libwebrtc's audio module needs one at start, but adds no track.
 
-## The newest frame drawn (macOS)
+## The newest frame drawn, converted only when drawn (macOS)
 
 The renderer wrote every frame into one `CVPixelBuffer`, under its lock, and dropped any
 frame that came before Flutter had taken the last one: whenever Flutter drew late, the
-newest frame was lost and an older one stayed on screen.
+newest frame was lost and an older one stayed on screen. Every frame was also converted as
+it came, on the thread it came on, whether Flutter drew it or not: a tile off screen, a
+window hidden, this device's own screen while it is shared and not shown (its renderer
+gets every captured frame, for its size), frames faster than the display.
 
-- `FlutterRTCVideoRenderer.m` (both copies, identical): `setSize:` makes a
-  `CVPixelBufferPool` of the size; `renderFrame:` converts each frame into a buffer of its
-  own, outside the lock, and puts it in place of the one before, drawn or not. A buffer
-  Flutter may still draw from is never written again. A buffer of a size since replaced,
-  or converted while the renderer was disposed, is let go.
-- `FlutterRTCVideoRenderer.m` (both copies, identical): a frame not turned (rotation 0,
-  every frame a computer sends) goes from its I420 buffer straight into the pixel buffer;
-  the package turned it by 0 first, a full copy of every frame. What is left: a frame
-  decoded into a `CVPixelBuffer` (NV12) is still copied into I420 before it is turned into
-  BGRA, and every frame is converted as it comes, on the decoder's thread, drawn or not
-  (Linux converts only the newest when Flutter asks for it).
+- `FlutterRTCVideoRenderer.m` (both copies, identical): `renderFrame:` keeps only the
+  newest frame, as it came (one buffer of the decoder or the capture held per renderer),
+  in place of the one before, tells Flutter a frame is there, and still sends the size,
+  rotation and first-frame events for every frame, drawn or not, as the application
+  watches them. `copyPixelBuffer` (Flutter's raster thread, when it draws the texture)
+  converts that frame into a buffer of its own from a `CVPixelBufferPool` of the frame's
+  size (turned), outside the lock frames take, and answers that picture again until a
+  newer frame comes: a frame is converted once at most, and one never drawn never. A
+  buffer Flutter may still draw from is never written again. A renderer disposed answers
+  no picture and keeps no frame nor picture, also one disposed during a conversion.
+  `setSize:` does nothing.
+- `FogataFrameConvert.{h,m}` (new, built copy only): the conversion. The others' cameras
+  and screens come decoded by libvpx (VP8 alone, the framework has no VideoToolbox
+  decoder) as I420 buffers, converted with libyuv's `I420ToARGB` as before (`toI420` gives the
+  buffer itself, no copy; a frame turned is turned first). This device's
+  own camera and screen come as NV12 `CVPixelBuffer`s (the camera's '420v' or '420f',
+  ScreenCaptureKit's '420f'), which were copied whole into I420 first: their luma is now
+  read in place and only the chroma is split into U and V, in a buffer the renderer keeps,
+  then the same `I420ToARGB` (libyuv's `NV12ToARGB` is not exported by the framework, and
+  `RTCYUVHelper` has none). The picture is the same to the bit, with the same colour
+  matrix and range as always (BT.601, video range, also for '420f'). A frame turned,
+  scaled, cropped at an odd place, or in another format goes the way it went.
+- `macos/test/run_tests.sh` (new, in `tools/check.sh` on a Mac): `frame_convert_test.m`
+  converts every kind of frame both ways and compares them byte for byte (`--measure` also
+  times them); `video_renderer_test.m` runs the renderer itself, with the FlutterMacOS
+  framework but no engine, under ThreadSanitizer: frames given but not drawn are not
+  converted and still told, the newest is drawn and converted once, sizes and turns, a
+  frame too large, a dispose with a frame waiting, and frames, pictures asked for and a
+  dispose on three threads.
+- Measured on an Apple silicon Mac (`--measure`, -Os as a release build, the same frame
+  again and again, so the caches flatter the copies made before): an I420 frame takes the
+  same as before (0.17 ms at 1280x720, 0.67 ms at 2560x1440); an NV12 frame 0.19 ms instead
+  of 0.21 at 1280x720 and 0.76 instead of 0.83 at 2560x1440, and allocates nothing instead
+  of 1.4 MB and 5.5 MB a frame. The larger saving is in the frames not converted at all.
 
 ## A texture before its first frame (Linux)
 

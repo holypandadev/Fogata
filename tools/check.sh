@@ -220,6 +220,8 @@ if [[ $(uname) == Darwin ]]; then
         app/third_party/flutter_webrtc/macos/test/capture_size_test.c -o "$capture_test"
     "$capture_test"
     rm -f "${capture_test:?}"
+    # The video renderer's conversion and its threads, with ThreadSanitizer.
+    app/third_party/flutter_webrtc/macos/test/run_tests.sh
 fi
 if [[ $notices == 1 ]]; then
     python3 -I -B tools/third_party_notices.py --check ||

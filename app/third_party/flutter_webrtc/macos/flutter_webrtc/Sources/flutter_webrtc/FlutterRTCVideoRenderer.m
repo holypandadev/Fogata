@@ -9,6 +9,7 @@
 #import <objc/runtime.h>
 
 #import "FlutterWebRTCPlugin.h"
+#import "FogataFrameConvert.h"
 #import <os/lock.h>
 
 // The largest picture drawn from a video track: 8K (7680 by 4320 pixels, the largest
@@ -22,16 +23,25 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
 }
 
 @implementation FlutterRTCVideoRenderer {
-  CGSize _frameSize;
   CGSize _renderSize;
-  // The newest frame converted, which copyPixelBuffer hands to Flutter.
+  // Fogata: the newest frame, kept as it came, converted only when Flutter asks for it
+  // (copyPixelBuffer, on its raster thread), and once: frames Flutter does not draw (a
+  // tile not on screen, a window hidden, frames faster than the display) cost nothing.
+  // Holding it holds one buffer of the decoder or the capture per renderer.
+  RTCVideoFrame* _frame;
+  // The picture of the newest frame converted, which copyPixelBuffer hands to Flutter.
   CVPixelBufferRef _pixelBufferRef;
-  // Fogata: buffers of the current size, a new one for each frame (see renderFrame:).
+  bool _disposed;
+  // Used under _convertLock alone (copyPixelBuffer, and dispose to let them go): buffers
+  // of the size of the frames drawn, a new one for each frame converted (a buffer Flutter
+  // may still draw from is never written again), and the chroma of an NV12 frame.
   CVPixelBufferPoolRef _pool;
+  CGSize _poolSize;
+  FogataScratch _scratch;
+  os_unfair_lock _convertLock;
   RTCVideoRotation _rotation;
   FlutterEventChannel* _eventChannel;
   bool _isFirstFrameRendered;
-  bool _frameAvailable;
   bool _toldTooLarge;
   bool _loggedTooLarge;
   os_unfair_lock _lock;
@@ -47,11 +57,10 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
   self = [super init];
   if (self) {
     _lock = OS_UNFAIR_LOCK_INIT;
+    _convertLock = OS_UNFAIR_LOCK_INIT;
     _isFirstFrameRendered = false;
-    _frameAvailable = false;
-    _frameSize = CGSizeZero;
     _renderSize = CGSizeZero;
-    _rotation = -1;
+    _poolSize = CGSizeZero;
     _registry = registry;
     _pixelBufferRef = nil;
     _eventSink = nil;
@@ -66,38 +75,102 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
   return self;
 }
 
+// Called by Flutter on its raster thread when it draws the texture, after
+// textureFrameAvailable, and again whenever it needs the picture (it may draw it more
+// than once, or never). Answers a buffer retained for Flutter, or nil before any frame.
 - (CVPixelBufferRef)copyPixelBuffer {
-  CVPixelBufferRef buffer = nil;
+  os_unfair_lock_lock(&_convertLock);
   os_unfair_lock_lock(&_lock);
-  if (_pixelBufferRef != nil && _frameAvailable) {
-    buffer = CVBufferRetain(_pixelBufferRef);
-    _frameAvailable = false;
+  RTCVideoFrame* frame = _frame;
+  _frame = nil;
+  CVPixelBufferRef shown = _disposed || _pixelBufferRef == nil ? nil
+                                                               : CVBufferRetain(_pixelBufferRef);
+  const bool disposed = _disposed;
+  os_unfair_lock_unlock(&_lock);
+  if (frame == nil || disposed) {
+    os_unfair_lock_unlock(&_convertLock);
+    return shown;
+  }
+  // The newest frame, converted outside _lock: frames go on coming meanwhile, and the
+  // next one waits as the newest.
+  const CGSize size = FogataFrameDrawnSize(frame);
+  if (_pool == NULL || !CGSizeEqualToSize(size, _poolSize)) {
+    if (_pool) CVPixelBufferPoolRelease(_pool);
+    _pool = NULL;
+    _poolSize = size;
+    @autoreleasepool {
+      NSDictionary* pixelAttributes = @{
+        (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
+        (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
+        (id)kCVPixelBufferWidthKey : @((int)size.width),
+        (id)kCVPixelBufferHeightKey : @((int)size.height),
+      };
+      CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
+                              (__bridge CFDictionaryRef)(pixelAttributes), &_pool);
+    }
+  }
+  CVPixelBufferRef buffer = NULL;
+  BOOL converted = NO;
+  // What a conversion autoreleases (toI420's copy, for a frame not read in place) goes
+  // as soon as it is done, and the frame with it, not when the raster thread's task ends.
+  @autoreleasepool {
+    converted = _pool != NULL &&
+                CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, _pool, &buffer) ==
+                    kCVReturnSuccess &&
+                buffer != NULL && FogataFrameToBGRA(frame, buffer, &_scratch);
+    frame = nil;
+  }
+  if (!converted) {
+    if (buffer) CVBufferRelease(buffer);
+    os_unfair_lock_unlock(&_convertLock);
+    return shown;
+  }
+  os_unfair_lock_lock(&_lock);
+  CVPixelBufferRef older = nil;
+  if (!_disposed) {
+    older = _pixelBufferRef;
+    _pixelBufferRef = CVBufferRetain(buffer);
   }
   os_unfair_lock_unlock(&_lock);
+  os_unfair_lock_unlock(&_convertLock);
+  if (older) CVBufferRelease(older);
+  if (shown) CVBufferRelease(shown);
   return buffer;
 }
 
 - (void)dealloc {
   if (_pixelBufferRef) CVBufferRelease(_pixelBufferRef);
   if (_pool) CVPixelBufferPoolRelease(_pool);
+  FogataScratchFree(&_scratch);
 }
 
 - (void)dispose {
   [_eventChannel setStreamHandler:nil];
   _eventChannel = nil;
-  os_unfair_lock_lock(&_lock);
-  [_registry unregisterTexture:_textureId];
-  _textureId = -1;
-  if (_pixelBufferRef) {
-    CVBufferRelease(_pixelBufferRef);
+  CVPixelBufferRef picture = nil;
+  {
+    // Let go of at the end of this block, after the lock: a frame may hold the last
+    // reference to a decoder's or a capture's buffer.
+    __unused NS_VALID_UNTIL_END_OF_SCOPE RTCVideoFrame* frame;
+    os_unfair_lock_lock(&_lock);
+    [_registry unregisterTexture:_textureId];
+    _textureId = -1;
+    _disposed = true;
+    picture = _pixelBufferRef;
     _pixelBufferRef = nil;
+    frame = _frame;
+    _frame = nil;
+    os_unfair_lock_unlock(&_lock);
   }
+  if (picture) CVBufferRelease(picture);
+  // The pool's free buffers too; a conversion under way ends first.
+  os_unfair_lock_lock(&_convertLock);
   if (_pool) {
     CVPixelBufferPoolRelease(_pool);
     _pool = NULL;
   }
-  _frameAvailable = false;
-  os_unfair_lock_unlock(&_lock);
+  FogataScratchFree(&_scratch);
+  os_unfair_lock_unlock(&_convertLock);
 }
 
 - (void)setVideoTrack:(RTCVideoTrack*)videoTrack {
@@ -111,115 +184,12 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
     if (oldValue) {
       [oldValue removeRenderer:self];
     }
-    _frameSize = CGSizeZero;
     _renderSize = CGSizeZero;
     _rotation = -1;
     if (videoTrack) {
       [videoTrack addRenderer:self];
     }
   }
-}
-
-- (id<RTCI420Buffer>)correctRotation:(const id<RTCI420Buffer>)src
-                        withRotation:(RTCVideoRotation)rotation {
-  int rotated_width = src.width;
-  int rotated_height = src.height;
-
-  if (rotation == RTCVideoRotation_90 || rotation == RTCVideoRotation_270) {
-    int temp = rotated_width;
-    rotated_width = rotated_height;
-    rotated_height = temp;
-  }
-
-  id<RTCI420Buffer> buffer = [[RTCI420Buffer alloc] initWithWidth:rotated_width
-                                                           height:rotated_height];
-
-  [RTCYUVHelper I420Rotate:src.dataY
-                srcStrideY:src.strideY
-                      srcU:src.dataU
-                srcStrideU:src.strideU
-                      srcV:src.dataV
-                srcStrideV:src.strideV
-                      dstY:(uint8_t*)buffer.dataY
-                dstStrideY:buffer.strideY
-                      dstU:(uint8_t*)buffer.dataU
-                dstStrideU:buffer.strideU
-                      dstV:(uint8_t*)buffer.dataV
-                dstStrideV:buffer.strideV
-                     width:src.width
-                    height:src.height
-                      mode:rotation];
-
-  return buffer;
-}
-
-- (void)copyI420ToCVPixelBuffer:(CVPixelBufferRef)outputPixelBuffer
-                      withFrame:(RTCVideoFrame*)frame {
-  id<RTCI420Buffer> i420Buffer = [frame.buffer toI420];
-  // Fogata: turned only when the frame is turned. Turning by 0 made a full copy of every
-  // frame (libyuv's I420Rotate copies the planes then), the same pixels at the same size;
-  // the buffer from toI420 is held here until the conversion below is done.
-  if (frame.rotation != RTCVideoRotation_0) {
-    i420Buffer = [self correctRotation:i420Buffer withRotation:frame.rotation];
-  }
-  CVPixelBufferLockBaseAddress(outputPixelBuffer, 0);
-
-  const OSType pixelFormat = CVPixelBufferGetPixelFormatType(outputPixelBuffer);
-  if (pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange ||
-      pixelFormat == kCVPixelFormatType_420YpCbCr8BiPlanarFullRange) {
-    // NV12
-    uint8_t* dstY = CVPixelBufferGetBaseAddressOfPlane(outputPixelBuffer, 0);
-    const size_t dstYStride = CVPixelBufferGetBytesPerRowOfPlane(outputPixelBuffer, 0);
-    uint8_t* dstUV = CVPixelBufferGetBaseAddressOfPlane(outputPixelBuffer, 1);
-    const size_t dstUVStride = CVPixelBufferGetBytesPerRowOfPlane(outputPixelBuffer, 1);
-
-    [RTCYUVHelper I420ToNV12:i420Buffer.dataY
-                  srcStrideY:i420Buffer.strideY
-                        srcU:i420Buffer.dataU
-                  srcStrideU:i420Buffer.strideU
-                        srcV:i420Buffer.dataV
-                  srcStrideV:i420Buffer.strideV
-                        dstY:dstY
-                  dstStrideY:(int)dstYStride
-                       dstUV:dstUV
-                 dstStrideUV:(int)dstUVStride
-                       width:i420Buffer.width
-                      height:i420Buffer.height];
-
-  } else {
-    uint8_t* dst = CVPixelBufferGetBaseAddress(outputPixelBuffer);
-    const size_t bytesPerRow = CVPixelBufferGetBytesPerRow(outputPixelBuffer);
-
-    if (pixelFormat == kCVPixelFormatType_32BGRA) {
-      // Corresponds to libyuv::FOURCC_ARGB
-
-      [RTCYUVHelper I420ToARGB:i420Buffer.dataY
-                    srcStrideY:i420Buffer.strideY
-                          srcU:i420Buffer.dataU
-                    srcStrideU:i420Buffer.strideU
-                          srcV:i420Buffer.dataV
-                    srcStrideV:i420Buffer.strideV
-                       dstARGB:dst
-                 dstStrideARGB:(int)bytesPerRow
-                         width:i420Buffer.width
-                        height:i420Buffer.height];
-
-    } else if (pixelFormat == kCVPixelFormatType_32ARGB) {
-      // Corresponds to libyuv::FOURCC_BGRA
-      [RTCYUVHelper I420ToBGRA:i420Buffer.dataY
-                    srcStrideY:i420Buffer.strideY
-                          srcU:i420Buffer.dataU
-                    srcStrideU:i420Buffer.strideU
-                          srcV:i420Buffer.dataV
-                    srcStrideV:i420Buffer.strideV
-                       dstBGRA:dst
-                 dstStrideBGRA:(int)bytesPerRow
-                         width:i420Buffer.width
-                        height:i420Buffer.height];
-    }
-  }
-
-  CVPixelBufferUnlockBaseAddress(outputPixelBuffer, 0);
 }
 
 #pragma mark - RTCVideoRenderer methods
@@ -268,39 +238,26 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
     return;
   }
 
-  // Fogata: every frame goes into a buffer of its own, converted outside the lock, and
-  // takes the place of the one before even when Flutter has not drawn that yet. Frames
-  // were written into one buffer, and one that came before Flutter took the last was
-  // dropped: whenever Flutter drew late, the newest frame was lost and an older one
-  // stayed on screen. A buffer Flutter may still draw from is never written again: the
-  // pool gives another.
-  os_unfair_lock_lock(&_lock);
-  if(_videoTrack == nil || _pool == NULL) {
-    os_unfair_lock_unlock(&_lock);
-    return;
-  }
-  CVPixelBufferPoolRef pool = CVPixelBufferPoolRetain(_pool);
-  os_unfair_lock_unlock(&_lock);
-  CVPixelBufferRef buffer = NULL;
-  if (CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &buffer) ==
-          kCVReturnSuccess &&
-      buffer != NULL) {
-    [self copyI420ToCVPixelBuffer:buffer withFrame:frame];
+  // Fogata: only the newest frame is kept, in place of the one before, drawn or not;
+  // copyPixelBuffer converts it if Flutter draws it. Its size, rotation and first frame
+  // are still told below as each frame comes: the application watches them for every
+  // picture, drawn or not.
+  {
+    // Let go of at the end of this block, after the lock: it may hold the last reference
+    // to a decoder's or a capture's buffer.
+    __unused NS_VALID_UNTIL_END_OF_SCOPE RTCVideoFrame* older;
     os_unfair_lock_lock(&_lock);
-    // Kept only while its size is still the one asked (and the renderer not disposed).
-    if (_pool == pool) {
-      CVPixelBufferRef older = _pixelBufferRef;
-      _pixelBufferRef = buffer;
-      buffer = older;
-      if(_textureId != -1) {
-        [_registry textureFrameAvailable:_textureId];
-      }
-      _frameAvailable = true;
+    if (_videoTrack == nil || _disposed) {
+      os_unfair_lock_unlock(&_lock);
+      return;
+    }
+    older = _frame;
+    _frame = frame;
+    if (_textureId != -1) {
+      [_registry textureFrameAvailable:_textureId];
     }
     os_unfair_lock_unlock(&_lock);
-    if (buffer != NULL) CVBufferRelease(buffer);
   }
-  CVPixelBufferPoolRelease(pool);
 
   __weak FlutterRTCVideoRenderer* weakSelf = self;
   if (_renderSize.width != frame.width || _renderSize.height != frame.height) {
@@ -354,35 +311,12 @@ static BOOL FrameSizeAllowed(CGFloat width, CGFloat height) {
 /**
  * Sets the size of the video frame to render.
  *
+ * Fogata: nothing to do here. copyPixelBuffer makes its buffers of the size of the frame
+ * it converts; renderFrame: keeps no frame too large to draw.
+ *
  * @param size The size of the video frame to render.
  */
 - (void)setSize:(CGSize)size {
-  os_unfair_lock_lock(&_lock);
-  if (size.width != _frameSize.width || size.height != _frameSize.height) {
-    if (_pixelBufferRef) {
-      CVBufferRelease(_pixelBufferRef);
-      _pixelBufferRef = nil;
-    }
-    if (_pool) {
-      CVPixelBufferPoolRelease(_pool);
-      _pool = NULL;
-    }
-    _frameAvailable = false;
-    _frameSize = size;
-    if (!FrameSizeAllowed(size.width, size.height)) {
-      os_unfair_lock_unlock(&_lock);
-      return;
-    }
-    NSDictionary* pixelAttributes = @{
-      (id)kCVPixelBufferIOSurfacePropertiesKey : @{},
-      (id)kCVPixelBufferPixelFormatTypeKey : @(kCVPixelFormatType_32BGRA),
-      (id)kCVPixelBufferWidthKey : @((int)size.width),
-      (id)kCVPixelBufferHeightKey : @((int)size.height),
-    };
-    CVPixelBufferPoolCreate(kCFAllocatorDefault, NULL,
-                            (__bridge CFDictionaryRef)(pixelAttributes), &_pool);
-  }
-  os_unfair_lock_unlock(&_lock);
 }
 
 #pragma mark - FlutterStreamHandler methods
