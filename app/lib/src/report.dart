@@ -474,9 +474,17 @@ Future<void> _appended = Future.value();
 /// moment is written at once, off the window's thread; those that follow wait for the next
 /// second, and one that repeats is written once with how many times it came, so an error
 /// every frame costs one small write a second.
-void noteAppError(String dataDir, Object error, StackTrace? stack) {
+void noteAppError(String dataDir, Object error, StackTrace? stack) =>
+    _note(dataDir, 'ERROR app: $error\n${stack == null ? '' : '$stack\n'}');
+
+/// Notes [line], something the window or a library printed, in the day's log as
+/// [noteAppError] notes an error: a release build writes there, scrubbed, what it would
+/// have printed as it is (see console.dart).
+void noteAppLine(String dataDir, String line) =>
+    _note(dataDir, 'INFO app: $line\n');
+
+void _note(String dataDir, String text) {
   if (dataDir.isEmpty) return;
-  final text = 'ERROR app: $error\n${stack == null ? '' : '$stack\n'}';
   final waiting = _noted.putIfAbsent(dataDir, () => {});
   waiting[text] = (waiting[text] ?? 0) + 1;
   if (_quiet == null) _writeNoted();

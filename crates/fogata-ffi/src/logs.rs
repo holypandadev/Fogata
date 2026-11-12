@@ -775,11 +775,16 @@ mod tests {
         }
     }
 
+    /// The tests that set the process's panic hook, one at a time: one setting it while
+    /// another's panic is reported would take that report.
+    static HOOK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// A panic's message goes to the log scrubbed, and standard error is told only where in
     /// the code it happened.
     #[test]
     fn a_panic_tells_standard_error_only_where_it_happened() {
         use tracing_subscriber::prelude::*;
+        let _hook = HOOK.lock().unwrap_or_else(|e| e.into_inner());
         let (log, err) = (Sink::default(), Sink::default());
         let (writer, stderr) = (log.clone(), err.clone());
         let subscriber = tracing_subscriber::registry().with(scrubbed_layer(
@@ -805,6 +810,55 @@ mod tests {
             "{log}"
         );
         assert!(!log.contains(PEER), "{log}");
+    }
+
+    /// A panic in a task the core waits for is written to the log scrubbed, as any panic is,
+    /// and nothing of what it said is in the error the screens get of it: as fogata-net
+    /// words it, or as the bridge scrubs one that holds tokio's words for it.
+    #[test]
+    fn a_panicking_task_tells_neither_the_log_nor_the_screens_what_it_said() {
+        use tracing_subscriber::prelude::*;
+        let _hook = HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        let (log, err) = (Sink::default(), Sink::default());
+        let (writer, stderr) = (log.clone(), err.clone());
+        let subscriber = tracing_subscriber::registry().with(scrubbed_layer(
+            move || writer.clone(),
+            EnvFilter::new("error"),
+            false,
+        ));
+        // Tasks run on this thread, which logs to the subscriber above.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let before = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            report_panic(info, &mut stderr.clone());
+        }));
+        let (worded, held) = tracing::subscriber::with_default(subscriber, || {
+            runtime.block_on(async {
+                let task = || {
+                    tokio::spawn(async { panic!("cannot open /home/marta/notes.txt for {PEER}") })
+                };
+                let worded = fogata_net::task_failed(task().await.unwrap_err()).to_string();
+                let held = crate::bridge::told(format!(
+                    "the file did not come: {}",
+                    task().await.unwrap_err()
+                ));
+                (worded, held)
+            })
+        });
+        std::panic::set_hook(before);
+        for said in [&worded, &held] {
+            assert!(!said.contains(PEER) && !said.contains("marta"), "{said}");
+        }
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        assert!(
+            log.contains("panicked at") && log.contains("cannot open"),
+            "{log}"
+        );
+        assert!(!log.contains(PEER) && !log.contains("marta"), "{log}");
+        let err = String::from_utf8(err.0.lock().unwrap().clone()).unwrap();
+        assert!(!err.contains("cannot open") && !err.contains(PEER), "{err}");
     }
 
     fn fp_full() -> &'static str {

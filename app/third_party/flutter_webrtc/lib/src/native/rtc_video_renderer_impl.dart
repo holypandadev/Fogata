@@ -39,7 +39,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
           try {
             await _releaseTexture(textureId);
           } catch (e) {
-            print('letting go of a late renderer texture: $e');
+            debugPrint('letting go of a late renderer texture: $e');
           }
         }
         return;
@@ -105,7 +105,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
           ? RTCVideoValue.empty
           : value.copyWith(renderVideo: renderVideo);
     }).catchError((e) {
-      print('Got exception for RTCVideoRenderer::setSrcObject: ${e.message}');
+      debugPrint('Got exception for RTCVideoRenderer::setSrcObject: ${e.message}');
     }, test: (e) => e is PlatformException);
   }
 
@@ -229,7 +229,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
     try {
       await Helper.selectAudioOutput(deviceId);
     } catch (e) {
-      print('Helper.selectAudioOutput ${e.toString()}');
+      debugPrint('Helper.selectAudioOutput ${e.toString()}');
       return false;
     }
     return true;
@@ -245,7 +245,7 @@ class RTCVideoRenderer extends ValueNotifier<RTCVideoValue>
         await Helper.setVolume(value, track);
       }
     } catch (e) {
-      print('Helper.setVolume ${e.toString()}');
+      debugPrint('Helper.setVolume ${e.toString()}');
     }
   }
 }

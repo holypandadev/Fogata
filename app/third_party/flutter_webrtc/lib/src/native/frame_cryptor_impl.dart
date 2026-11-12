@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:core';
 
+import 'package:flutter/foundation.dart' show debugPrint;
 import 'package:flutter/services.dart';
 
 import 'package:webrtc_interface/webrtc_interface.dart';
@@ -330,7 +331,7 @@ class FrameCryptorImpl extends FrameCryptor {
         'frameCryptorId': _frameCryptorId,
       });
       var res = response['result'];
-      print('res $res');
+      debugPrint('res $res');
     } on PlatformException catch (e) {
       throw 'Unable to RTCRtpSenderNative::dispose: ${e.message}';
     }

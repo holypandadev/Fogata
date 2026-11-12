@@ -4326,9 +4326,19 @@ which a desktop session may keep in its journal, is scrubbed the same way at any
 `RUST_LOG` asks for; only a debug build with `FOGATA_RAW_LOGS` set leaves the values as they
 are. A panic of the Rust side goes to the log as a scrubbed line, and standard error is
 told only where in the code it happened (`logs::report_panics`), not what it said. A panic
-in a call of the screens, or in a task one waits for, reaches the window with what it said
-scrubbed the same way (`bridge.rs`), since the window may print it. The
-window scrubs its errors before writing them. A report is a
+in a call of the screens (from the reading of its arguments, which the bridge does before
+the call runs, to the writing of its result), or in a task one waits for, reaches the window
+with what it said scrubbed the same way (`bridge.rs`), since the window may print it; so does
+any text of the core's for the window (why a download failed, a note, an update's or a
+move's failure) that tells of a task's panic, however it was put into words (`bridge::told`).
+The core's own errors for a task that panicked say only that (`fogata_net::task_failed`), and
+the window says of any of them only that something went wrong (`explain`). The
+window scrubs its errors before writing them. In a release build its console takes no
+message either (`app/lib/src/console.dart`): an error the window did not catch (Flutter's,
+or one that reached the root zone, which the engine would print whole) writes one line of its
+kind and the place in the code, and goes to the day's log scrubbed; what the window and its
+libraries print with `debugPrint` (the video library's `print`s too, the fork's `FOGATA.md`)
+goes to the day's log alone. A debug build prints as Flutter does. A report is a
 zip (`app/lib/src/report.dart`, at most 5 MB, the oldest lines going first): `report.txt`
 (what was written, version and build, system and its version, language) and the log files
 of the last 48 hours, scrubbed again line by line with the same rules and the names the

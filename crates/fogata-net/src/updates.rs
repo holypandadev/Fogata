@@ -388,7 +388,7 @@ impl Server {
         let path = path.clone();
         let mut file = tokio::task::spawn_blocking(move || std::fs::File::open(path))
             .await
-            .map_err(io::Error::other)??;
+            .map_err(crate::task_failed)??;
         file.seek(SeekFrom::Start(first * CHUNK))?;
         idle(stream.write_all(&[DATA])).await?;
         let mut buf = vec![0u8; CHUNK as usize];
@@ -706,7 +706,7 @@ pub async fn resume(
         Ok((file, whole, good))
     })
     .await
-    .map_err(io::Error::other)??;
+    .map_err(crate::task_failed)??;
     Ok((tokio::fs::File::from_std(file), whole, good))
 }
 
@@ -779,7 +779,7 @@ async fn blocking<T: Send + 'static, R: Send + 'static>(
         (value, r)
     })
     .await
-    .map_err(io::Error::other)
+    .map_err(crate::task_failed)
 }
 
 fn put_name(out: &mut Vec<u8>, name: &str) {

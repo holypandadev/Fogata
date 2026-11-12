@@ -84,7 +84,7 @@ fn view(status: UpdateStatus) -> UiUpdate {
         done,
         total,
         failure_kind: failure.as_ref().map(|(kind, _)| *kind),
-        failure: failure.map(|(_, message)| message),
+        failure: failure.map(|(_, message)| crate::bridge::told(message)),
         release_build: status.release.as_ref().map(|r| r.build as i64),
         release_version: status.release.as_ref().map(|r| r.version.clone()),
         release_notes: status.release.map(|r| r.notes),

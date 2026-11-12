@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart' show debugPrint;
+
 /// Fogata: where the errors of the platform's event channels go. The package rethrew them
 /// from a stream listener, where nothing could catch them and the resource went on as if
 /// nothing had happened. Now each one is reported here, to whoever owns the call, and the
@@ -14,8 +16,7 @@ WebRtcEventErrorCallback? onWebRtcEventError;
 void reportWebRtcEventError(String resource, Object error, StackTrace? stack) {
   final report = onWebRtcEventError;
   if (report == null) {
-    // ignore: avoid_print
-    print('WebRTC event channel of $resource failed: $error');
+    debugPrint('WebRTC event channel of $resource failed: $error');
     return;
   }
   report(resource, error, stack);

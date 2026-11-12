@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show debugPrint;
+
 import '../desktop_capturer.dart';
 import 'event_channel.dart';
 import 'utils.dart';
@@ -120,7 +122,7 @@ class DesktopCapturerNative extends DesktopCapturer {
             _onThumbnailChanged.add(source);
             source.onThumbnailChanged.add(source.thumbnail!);
           } catch (e) {
-            print('desktopSourceThumbnailChanged: $e');
+            debugPrint('desktopSourceThumbnailChanged: $e');
           }
         }
         break;

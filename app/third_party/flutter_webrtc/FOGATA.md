@@ -894,6 +894,16 @@ error again; either way it reached the zone as an uncaught error. The shared cha
 own errors now go on to its listeners, each of which logs them. Tested by
 `app/test/webrtc_events_test.dart`.
 
+## What the Dart side prints (Dart)
+
+The package printed some errors with `print`, which a release build writes as they are to
+standard output (on Linux, where a desktop starts applications in a scope of systemd, into
+the system's journal); they can name a device or a source. They go through `debugPrint`
+instead (`rtc_video_renderer_impl.dart`, `rtc_video_platform_view_controller.dart`,
+`desktop_capturer_impl.dart`, `frame_cryptor_impl.dart`, `event_errors.dart`), which the
+application's release build sends to its day's log, scrubbed, and not to the console
+(`lib/src/console.dart`).
+
 ## A renderer freed once the engine is done with it (Linux)
 
 The engine copies a texture's pixels on its raster thread without holding a reference,

@@ -261,7 +261,7 @@ fn ui_event(event: TransferEvent) -> UiMoveEvent {
                     Failure::Interrupted(why)
                     | Failure::Declined(why)
                     | Failure::Later(why)
-                    | Failure::Other(why) => Some(why),
+                    | Failure::Other(why) => Some(crate::bridge::told(why)),
                     _ => None,
                 };
             }

@@ -1036,7 +1036,7 @@ async fn is_lan(node: &NodeHandle, peer: PeerId) -> bool {
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f)
         .await
-        .context("a task stopped")?
+        .map_err(fogata_net::task_failed)?
 }
 
 // ----- The new computer -----

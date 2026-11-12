@@ -1523,6 +1523,18 @@ fn unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// A task waited for that did not end well, as an I/O error that says only that: tokio's
+/// error for a panicked task carries what the panic said (a path, a value), which the panic
+/// hook already wrote, scrubbed, with where it happened; this error goes on to the screens
+/// (why a download failed, say), where nothing scrubs it.
+pub fn task_failed(e: tokio::task::JoinError) -> std::io::Error {
+    std::io::Error::other(if e.is_panic() {
+        "an internal error stopped the work (the log says where)"
+    } else {
+        "the work was stopped"
+    })
+}
+
 /// Short printable form of a peer id (its last 8 characters).
 pub fn short_peer(peer: &PeerId) -> String {
     let text = peer.to_base58();

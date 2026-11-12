@@ -18,6 +18,17 @@ void main() {
     );
   });
 
+  test('a panic of the core says only that something went wrong', () {
+    for (final error in [
+      PanicException('cannot open ‹path› for ‹peer 1›'),
+      AnyhowException('a task panicked: no answer from ‹peer 1›'),
+      'the file did not come: task 12 panicked with message "‹path›"',
+      'the file did not come: an internal error stopped the work (the log says where)',
+    ]) {
+      expect(explain(error), 'Something went wrong.', reason: '$error');
+    }
+  });
+
   test('a full disk and a room with all the files one shares say so', () {
     expect(
       explain('No space left on device (os error 28)'),

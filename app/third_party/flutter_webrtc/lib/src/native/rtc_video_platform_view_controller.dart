@@ -67,7 +67,7 @@ class RTCVideoPlatformViewController extends ValueNotifier<RTCVideoValue>
           ? RTCVideoValue.empty
           : value.copyWith(renderVideo: renderVideo);
     }).catchError((e) {
-      print(
+      debugPrint(
           'Got exception for RTCVideoPlatformController::setSrcObject: ${e.message}');
     }, test: (e) => e is PlatformException);
   }
@@ -173,7 +173,7 @@ class RTCVideoPlatformViewController extends ValueNotifier<RTCVideoValue>
     try {
       await Helper.selectAudioOutput(deviceId);
     } catch (e) {
-      print('Helper.selectAudioOutput ${e.toString()}');
+      debugPrint('Helper.selectAudioOutput ${e.toString()}');
       return false;
     }
     return true;
@@ -189,7 +189,7 @@ class RTCVideoPlatformViewController extends ValueNotifier<RTCVideoValue>
         await Helper.setVolume(value, track);
       }
     } catch (e) {
-      print('Helper.setVolume ${e.toString()}');
+      debugPrint('Helper.setVolume ${e.toString()}');
     }
   }
 }

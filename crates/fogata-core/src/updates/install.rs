@@ -116,7 +116,8 @@ pub(crate) async fn install(data: &Path, manifest: &Manifest, platform: &str) ->
     let checked = {
         let package = package.clone();
         tokio::task::spawn_blocking(move || fogata_net::updates::check_package(&package, &artifact))
-            .await??
+            .await
+            .map_err(fogata_net::task_failed)??
     };
     if !checked {
         let _ = fs::remove_file(&package);
@@ -217,7 +218,9 @@ mod flatpak {
             .max()
             .unwrap_or(0)
             .saturating_mul(8);
-        tokio::task::spawn_blocking(move || super::unpack(&package2, &repo2, max)).await??;
+        tokio::task::spawn_blocking(move || super::unpack(&package2, &repo2, max))
+            .await
+            .map_err(fogata_net::task_failed)??;
         if !repo.join("config").is_file() {
             bail!("the update's package holds no Flatpak repository");
         }
@@ -689,7 +692,10 @@ exit [int]($code | Select-Object -Last 1)
         let (package2, new2) = (package.to_path_buf(), new.clone());
         let unpacked =
             tokio::task::spawn_blocking(move || super::unpack(&package2, &new2, max)).await;
-        if let Err(e) = unpacked.map_err(anyhow::Error::from).and_then(|r| r) {
+        if let Err(e) = unpacked
+            .map_err(|e| anyhow::Error::from(fogata_net::task_failed(e)))
+            .and_then(|r| r)
+        {
             let _ = std::fs::remove_file(&lock);
             return Err(e);
         }
@@ -895,7 +901,9 @@ mod macos {
             .unwrap_or(0)
             .saturating_mul(8);
         let (package2, staged2) = (package.to_path_buf(), staged.clone());
-        tokio::task::spawn_blocking(move || super::unpack(&package2, &staged2, max)).await??;
+        tokio::task::spawn_blocking(move || super::unpack(&package2, &staged2, max))
+            .await
+            .map_err(fogata_net::task_failed)??;
         if !staged.join("Contents/Info.plist").is_file() {
             let _ = super::remove_tree(&staged);
             bail!("the update's package holds no application bundle");

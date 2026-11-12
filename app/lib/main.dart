@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
@@ -9,6 +8,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart'
     show WebRTC, onWebRtcEventError;
 
 import 'src/app_state.dart';
+import 'src/console.dart' show keepConsoleClean;
 import 'src/format.dart' show explain;
 import 'src/icons.dart';
 import 'src/l10n.dart';
@@ -105,14 +105,10 @@ Future<void> _cannotStart(String why) async {
   runApp(FogataApp(state: state));
 }
 
-/// Notes the window's errors in the day's log, for problem reports, as well as where they
-/// went before.
+/// Notes the window's errors in the day's log, for problem reports; in a release build the
+/// console is told only their kind and where they happened (console.dart).
 void _noteErrors(String dataDir) {
-  final flutter = FlutterError.onError;
-  FlutterError.onError = (details) {
-    noteAppError(dataDir, details.exception, details.stack);
-    flutter?.call(details);
-  };
+  keepConsoleClean(dataDir);
   // What the video library's event channels fail with: noted here; the connection or
   // renderer that it came from fails by itself (the fork's FOGATA.md).
   onWebRtcEventError = (what, error, stack) => noteAppError(
@@ -120,11 +116,6 @@ void _noteErrors(String dataDir) {
     'WebRTC event channel of $what failed: $error',
     stack,
   );
-  final platform = PlatformDispatcher.instance.onError;
-  PlatformDispatcher.instance.onError = (error, stack) {
-    noteAppError(dataDir, error, stack);
-    return platform?.call(error, stack) ?? false;
-  };
 }
 
 /// On macOS the Rust library is linked into the bridge plugin's framework, which is named

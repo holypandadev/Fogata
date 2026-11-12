@@ -571,7 +571,7 @@ async fn blocking<T: Send + 'static, R: Send + 'static>(
         (value, r)
     })
     .await
-    .map_err(io::Error::other)
+    .map_err(crate::task_failed)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1349,7 +1349,7 @@ async fn rename_part(part: PathBuf, dest: &Path, writing: Writing) -> io::Result
         std::fs::rename(&part, &dest)
     })
     .await
-    .map_err(io::Error::other)?
+    .map_err(crate::task_failed)?
 }
 
 /// [`fetch`] into a folder people use (their downloads): a file already at `dest`, or one
@@ -1371,7 +1371,7 @@ pub async fn fetch_new(
         place_new(&part, &dest)
     })
     .await
-    .map_err(io::Error::other)??)
+    .map_err(crate::task_failed)??)
 }
 
 /// The `.part` files downloads in this process write now, and a word each time one is let
@@ -1444,7 +1444,7 @@ async fn remove_held(part: &Path, writing: Writing) -> io::Result<()> {
         }
     })
     .await
-    .map_err(io::Error::other)?
+    .map_err(crate::task_failed)?
 }
 
 /// Downloads into the `.part` file beside `dest`, sealed with `key` when there is one, and
@@ -1516,7 +1516,7 @@ async fn fetch_part(
                 SealWriter::new(&key, &context, file)
             })
             .await
-            .map_err(io::Error::other)??;
+            .map_err(crate::task_failed)??;
             Out::Sealed(Box::new(writer))
         }
     };
@@ -1571,7 +1571,7 @@ async fn fetch_part(
                 file.seek(io::SeekFrom::End(0))
             })
             .await
-            .map_err(io::Error::other)??
+            .map_err(crate::task_failed)??
         }
         Out::Sealed(_) => 0,
     };
@@ -1620,7 +1620,7 @@ async fn open_earlier(part: &Path, append: bool) -> io::Result<Option<tokio::fs:
     let part = part.to_path_buf();
     let file = tokio::task::spawn_blocking(move || open_earlier_now(&part, append))
         .await
-        .map_err(io::Error::other)??;
+        .map_err(crate::task_failed)??;
     Ok(file.map(tokio::fs::File::from_std))
 }
 
@@ -1706,7 +1706,7 @@ async fn resume_sealed_part(
     let mut told = 0;
     loop {
         tokio::select! {
-            resumed = &mut resuming => return resumed.map_err(io::Error::other)?,
+            resumed = &mut resuming => return resumed.map_err(crate::task_failed)?,
             () = tokio::time::sleep(KEPT_EVERY) => {
                 let now = kept.load(std::sync::atomic::Ordering::Relaxed);
                 if now > told {
@@ -1764,7 +1764,7 @@ async fn create_held(part: &Path, writing: &Writing) -> io::Result<std::fs::File
         options.open(part)
     })
     .await
-    .map_err(io::Error::other)?
+    .map_err(crate::task_failed)?
 }
 
 /// A new `.part` file, made where nothing is (not even a link), readable by its owner only.
@@ -1888,6 +1888,28 @@ fn numbered(dest: &Path, n: u32) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Work done off the async threads that panics fails the fetch with an error that says
+    /// only that: what the panic said (a path, a value) goes to the log, scrubbed, by the
+    /// panic hook, and never into the error, which reaches the screens as why the file did
+    /// not come.
+    #[tokio::test]
+    async fn work_that_panics_fails_without_what_it_said() {
+        let failed = blocking((), |_| -> () {
+            panic!("cannot open /home/marta/holiday.mp4 from 203.0.113.7:4001")
+        })
+        .await
+        .unwrap_err();
+        let said = failed.to_string();
+        for gone in ["marta", "holiday", "203.0.113.7", "panicked"] {
+            assert!(!said.contains(gone), "{said}");
+        }
+        assert!(said.contains("internal error"), "{said}");
+        let stopped = tokio::task::spawn(std::future::pending::<()>());
+        stopped.abort();
+        let stopped = crate::task_failed(stopped.await.unwrap_err()).to_string();
+        assert_eq!(stopped, "the work was stopped");
+    }
 
     /// A device of someone's.
     fn device() -> Asker {

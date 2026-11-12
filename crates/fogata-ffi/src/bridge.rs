@@ -9,8 +9,11 @@
 //!
 //! A panic in a call reaches the screens with what it said scrubbed, as the log has it
 //! ([`crate::logs::scrubbed_panic`]): the bridge hands the screens the message as it is,
-//! and they may write it where no scrubbing reaches. So does a panic in a task a call waits
-//! for ([`joined`], [`scrub_panicked`]): tokio's error for it carries what it said.
+//! and they may write it where no scrubbing reaches. That holds from the reading of the
+//! call's arguments on, which the bridge does before the call runs ([`Scrubbed`]), to the
+//! writing of its result. So does a panic in a task a call waits for ([`joined`],
+//! [`scrub_panicked`]): tokio's error for it carries what it said, and so does any text of
+//! the core's that tells of one, wherever it was put into words ([`told`]).
 
 use std::{
     future::Future,
@@ -20,20 +23,18 @@ use std::{
 };
 
 use flutter_rust_bridge::{
-    BaseAsyncRuntime, BaseCodec, BaseThreadPool, JoinHandle,
+    BaseAsyncRuntime, BaseCodec, BaseThreadPool, Dart2RustMessageSse, DartAbi, DartFnFuture,
+    DartOpaque, JoinHandle, Rust2DartMessageTrait,
     for_generated::{
-        Executor, NoOpErrorListener, SimpleExecutor, SimpleHandler, TaskContext, TaskInfo,
-        TaskRetFutTrait,
+        ErrorListener, Executor, NoOpErrorListener, SimpleExecutor, SimpleHandler, TaskContext,
+        TaskInfo, TaskRetFutTrait,
     },
 };
 
 use crate::api::app::RUNTIME;
 
 /// The bridge's handler.
-pub type Handler = SimpleHandler<
-    ScrubbedPanics<SimpleExecutor<NoOpErrorListener, Blocking, OnCore>>,
-    NoOpErrorListener,
->;
+pub type Handler = Scrubbed<NoOpErrorListener>;
 
 /// Makes the handler, once, on the first call of the screens.
 pub fn handler() -> Handler {
@@ -43,10 +44,85 @@ pub fn handler() -> Handler {
         flutter_rust_bridge::for_generated::FLUTTER_RUST_BRIDGE_RUNTIME_VERSION,
         "the bridge's generated code and its library are of different versions"
     );
-    SimpleHandler::new(
-        ScrubbedPanics(SimpleExecutor::new(NoOpErrorListener, Blocking, OnCore)),
-        NoOpErrorListener,
-    )
+    scrubbed_handler(NoOpErrorListener)
+}
+
+fn scrubbed_handler<L: ErrorListener + Sync>(listener: L) -> Scrubbed<L> {
+    Scrubbed(SimpleHandler::new(
+        ScrubbedPanics(SimpleExecutor::new(listener, Blocking, OnCore)),
+        listener,
+    ))
+}
+
+/// The bridge's own handler, its calls run by [`ScrubbedPanics`], and the reading of each
+/// call's arguments [`scrubbed`] too: the bridge reads them (`prepare`) before the executor
+/// has the call, and a panic there (a value from the screens that does not read as what it
+/// should, whose message may then hold it) reached the screens with what it said. A call run
+/// on the window's thread reads its arguments within the call, which the executor runs.
+pub struct Scrubbed<L: ErrorListener + Sync>(
+    SimpleHandler<ScrubbedPanics<SimpleExecutor<L, Blocking, OnCore>>, L>,
+);
+
+impl<L: ErrorListener + Sync> std::fmt::Debug for Scrubbed<L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Scrubbed")
+    }
+}
+
+impl<L: ErrorListener + Sync> flutter_rust_bridge::Handler for Scrubbed<L> {
+    fn wrap_normal<Rust2DartCodec, PrepareFn, TaskFn>(
+        &self,
+        task_info: TaskInfo,
+        prepare: PrepareFn,
+    ) where
+        PrepareFn: FnOnce() -> TaskFn,
+        TaskFn: FnOnce(TaskContext) -> Result<Rust2DartCodec::Message, Rust2DartCodec::Message>
+            + Send
+            + 'static,
+        Rust2DartCodec: BaseCodec,
+    {
+        self.0
+            .wrap_normal::<Rust2DartCodec, _, _>(task_info, move || scrubbed(prepare));
+    }
+
+    fn wrap_sync<Rust2DartCodec, SyncTaskFn>(
+        &self,
+        task_info: TaskInfo,
+        sync_task: SyncTaskFn,
+    ) -> <Rust2DartCodec::Message as Rust2DartMessageTrait>::WireSyncRust2DartType
+    where
+        SyncTaskFn: FnOnce() -> Result<Rust2DartCodec::Message, Rust2DartCodec::Message>,
+        Rust2DartCodec: BaseCodec,
+    {
+        self.0.wrap_sync::<Rust2DartCodec, _>(task_info, sync_task)
+    }
+
+    fn wrap_async<Rust2DartCodec, PrepareFn, TaskFn, TaskRetFut>(
+        &self,
+        task_info: TaskInfo,
+        prepare: PrepareFn,
+    ) where
+        PrepareFn: FnOnce() -> TaskFn,
+        TaskFn: FnOnce(TaskContext) -> TaskRetFut + Send + 'static,
+        TaskRetFut: Future<Output = Result<Rust2DartCodec::Message, Rust2DartCodec::Message>>
+            + TaskRetFutTrait,
+        Rust2DartCodec: BaseCodec,
+    {
+        self.0
+            .wrap_async::<Rust2DartCodec, _, _, _>(task_info, move || scrubbed(prepare));
+    }
+
+    fn dart_fn_invoke(
+        &self,
+        dart_fn: DartOpaque,
+        args: Vec<DartAbi>,
+    ) -> DartFnFuture<Dart2RustMessageSse> {
+        self.0.dart_fn_invoke(dart_fn, args)
+    }
+
+    fn dart_fn_handle_output(&self, call_id: i32, message: Dart2RustMessageSse) {
+        self.0.dart_fn_handle_output(call_id, message);
+    }
 }
 
 /// Async calls run on the core's runtime.
@@ -116,19 +192,39 @@ pub(crate) fn joined<T>(result: Result<T, tokio::task::JoinError>) -> anyhow::Re
 }
 
 /// `error` scrubbed whole when a panic of a task waited for is among its causes (tokio's
-/// error for it carries what the panic said); else as it is, since the screens read the
-/// core's words in it.
+/// error for it carries what the panic said), or its words tell of one (put into words on
+/// the way, in an error of another kind: see [`told`]); else as it is, since the screens
+/// read the core's words in it.
 pub(crate) fn scrub_panicked(error: anyhow::Error) -> anyhow::Error {
     let panicked = error.chain().any(|cause| {
         cause
             .downcast_ref::<tokio::task::JoinError>()
             .is_some_and(tokio::task::JoinError::is_panic)
     });
-    if panicked {
-        anyhow::anyhow!(crate::logs::scrubbed(&format!("{error:#}")))
+    let text = format!("{error:#}");
+    if panicked || tells_of_panic(&text) {
+        anyhow::anyhow!(crate::logs::scrubbed(&text))
     } else {
         error
     }
+}
+
+/// A text of the core's for the screens (why a download failed, a note), scrubbed whole when
+/// it tells of a task's panic: an error that held tokio's for it (which carries what the
+/// panic said) may have been put into words anywhere on its way here. Any other text stays
+/// as the core wrote it, since the screens read its words.
+pub(crate) fn told(text: String) -> String {
+    if tells_of_panic(&text) {
+        crate::logs::scrubbed(&text)
+    } else {
+        text
+    }
+}
+
+/// Whether `text` holds tokio's words for a task that panicked (`task 12 panicked with
+/// message "..."`), or a panic's as Rust says it.
+fn tells_of_panic(text: &str) -> bool {
+    text.contains(" panicked")
 }
 
 /// A call's future, each poll [`scrubbed`].
@@ -292,6 +388,94 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(!blocking.contains(PEER), "{blocking}");
+    }
+
+    /// What the bridge's handler tells of a panic (its error listener hears what the screens
+    /// are sent).
+    static HEARD: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+    #[derive(Clone, Copy)]
+    struct Hears;
+
+    impl ErrorListener for Hears {
+        fn on_error(&self, error: flutter_rust_bridge::for_generated::HandlerError) {
+            HEARD
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(error.message());
+        }
+    }
+
+    /// A panic while the bridge reads a call's arguments, before the call runs (a value
+    /// from the screens that does not read as what it should, whose message may hold it),
+    /// reaches the screens scrubbed as one in the call does.
+    #[test]
+    fn a_panic_reading_a_calls_arguments_goes_on_scrubbed() {
+        use flutter_rust_bridge::Handler as _;
+        type Message = <SseCodec as BaseCodec>::Message;
+        let handler = scrubbed_handler(Hears);
+        let info = |name| TaskInfo {
+            debug_name: name,
+            port: Some(Default::default()),
+            mode: FfiCallMode::Normal,
+        };
+        let heard = |name: &str| {
+            HEARD
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .iter()
+                .find(|h| h.contains(name))
+                .cloned()
+        };
+        handler.wrap_async::<SseCodec, _, _, _>(
+            info("async"),
+            || -> fn(TaskContext) -> std::future::Ready<Result<Message, Message>> {
+                panic!("async: not text: {PEER}")
+            },
+        );
+        handler.wrap_normal::<SseCodec, _, _>(
+            info("blocking"),
+            || -> fn(TaskContext) -> Result<Message, Message> {
+                panic!("blocking: not text: {PEER}")
+            },
+        );
+        for name in ["async", "blocking"] {
+            let told = heard(name).unwrap_or_else(|| panic!("{name}: nothing heard"));
+            assert!(!told.contains(PEER), "{told}");
+        }
+    }
+
+    /// Text of the core's that tells of a task's panic is scrubbed whole on its way to the
+    /// screens, however it was put into words: tokio's error inside an I/O error (whose
+    /// causes skip it) or already in a string (why a download failed, a note). Other text
+    /// stays as the core wrote it.
+    #[test]
+    fn text_that_tells_of_a_panic_is_scrubbed_on_its_way_to_the_screens() {
+        let panicked = || {
+            RUNTIME
+                .block_on(async {
+                    RUNTIME
+                        .spawn(async { panic!("cannot open /home/marta/notes.txt for {PEER}") })
+                        .await
+                })
+                .unwrap_err()
+        };
+        let hidden = scrub_panicked(
+            anyhow::Error::from(std::io::Error::other(panicked())).context("the file did not come"),
+        );
+        let hidden = format!("{hidden:#}");
+        assert!(hidden.contains("did not come"), "{hidden}");
+        assert!(
+            !hidden.contains(PEER) && !hidden.contains("marta"),
+            "{hidden}"
+        );
+        let worded = told(format!("the file did not come: {}", panicked()));
+        assert!(
+            !worded.contains(PEER) && !worded.contains("marta"),
+            "{worded}"
+        );
+        let words = "you left the room".to_string();
+        assert_eq!(told(words.clone()), words);
     }
 
     /// The bridge starts no runtime nor threads of its own: async calls run on the core's

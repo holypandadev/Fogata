@@ -508,7 +508,7 @@ impl Updater {
         let platform = self.platform().to_string();
         let loaded = tokio::task::spawn_blocking(move || load(&dir, &options, &platform))
             .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
+            .unwrap_or_else(|e| Err(fogata_net::task_failed(e).into()));
         {
             let mut phase = self.lock();
             phase.loaded = true;
@@ -578,7 +578,7 @@ impl Updater {
         let (dir, to_keep) = (self.dir.clone(), signed.clone());
         let kept = tokio::task::spawn_blocking(move || store::keep(&dir, &to_keep))
             .await
-            .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
+            .unwrap_or_else(|e| Err(fogata_net::task_failed(e).into()));
         if let Err(e) = kept {
             let mut phase = self.lock();
             phase.taking = false;

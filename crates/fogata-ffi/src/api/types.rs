@@ -1349,7 +1349,7 @@ pub(crate) fn event(event: CoreEvent, me: &DevicePublicKey) -> UiEvent {
         }
         CoreEvent::FriendRequestFailed(reason) => {
             out.kind = UiEventKind::FriendRequestFailed;
-            out.text = Some(reason);
+            out.text = Some(crate::bridge::told(reason));
         }
         CoreEvent::FriendAdded { profile } => {
             out.kind = UiEventKind::FriendAdded;
@@ -1438,7 +1438,7 @@ pub(crate) fn event(event: CoreEvent, me: &DevicePublicKey) -> UiEvent {
             out.kind = UiEventKind::DownloadFailed;
             out.group = id(group.as_bytes());
             out.file = id(&file);
-            out.text = Some(reason);
+            out.text = Some(crate::bridge::told(reason));
         }
         CoreEvent::Address(address) => {
             out.kind = UiEventKind::Address;
@@ -1462,7 +1462,7 @@ pub(crate) fn event(event: CoreEvent, me: &DevicePublicKey) -> UiEvent {
         }
         CoreEvent::Info(text) => {
             out.kind = UiEventKind::Info;
-            out.text = Some(text);
+            out.text = Some(crate::bridge::told(text));
         }
         CoreEvent::Stopped => {
             out.kind = UiEventKind::Stopped;
@@ -1470,7 +1470,7 @@ pub(crate) fn event(event: CoreEvent, me: &DevicePublicKey) -> UiEvent {
         }
         CoreEvent::Notice(text) => {
             out.kind = UiEventKind::Notice;
-            out.text = Some(text);
+            out.text = Some(crate::bridge::told(text));
         }
         CoreEvent::OtherSession => {
             out.kind = UiEventKind::OtherSession;
@@ -1566,7 +1566,7 @@ pub(crate) fn event(event: CoreEvent, me: &DevicePublicKey) -> UiEvent {
             out.kind = UiEventKind::DirectDownloadFailed;
             out.device = id(friend.as_bytes());
             out.file = id(&file);
-            out.text = Some(reason);
+            out.text = Some(crate::bridge::told(reason));
         }
     }
     out

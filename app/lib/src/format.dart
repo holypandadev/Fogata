@@ -201,10 +201,18 @@ String ordinal(int n) {
 }
 
 /// What went wrong, in words for people. The core says it in English: its known
-/// messages are found by a part of their words, which stay as the core writes them.
+/// messages are found by a part of their words, which stay as the core writes them. A
+/// panic of the core's, or a task of it that ended in one, says only that something went
+/// wrong: its words (scrubbed, see crates/fogata-ffi/src/bridge.rs) are for the log, and
+/// tell people nothing.
 String explain(Object error) {
+  if (error is PanicException) return l10n.errSomething;
   var text = error is AnyhowException ? error.message : error.toString();
   text = text.split('\n').first.trim();
+  if (text.contains(' panicked') ||
+      text.contains('an internal error stopped the work')) {
+    return l10n.errSomething;
+  }
   final known = <String, String Function()>{
     'this link has expired': () => l10n.errLinkExpired,
     'this is a group invite': () => l10n.errGroupInvite,
