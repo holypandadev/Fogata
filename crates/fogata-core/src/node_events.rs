@@ -382,15 +382,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             inner.lock().join_asks.remove(&(group, device));
             inner.emit(CoreEvent::JoinAsksChanged);
         }
-        NodeEvent::JoinWaiting { group } => {
-            let name = inner
-                .lock()
-                .joining
-                .get(&group)
-                .cloned()
-                .unwrap_or_default();
-            inner.emit(CoreEvent::JoinWaiting { group, name });
-        }
+        NodeEvent::JoinWaiting { group } => handle_join_waiting(inner, group),
         NodeEvent::JoinDeclined { group } => {
             let Some(name) = inner.lock().joining.remove(&group) else {
                 return;
@@ -899,6 +891,17 @@ fn handle_join_asked(
         device,
         name,
     });
+}
+
+/// A manager asks its person about this device's join.
+fn handle_join_waiting(inner: &Arc<Inner>, group: GroupId) {
+    let name = inner
+        .lock()
+        .joining
+        .get(&group)
+        .cloned()
+        .unwrap_or_default();
+    inner.emit(CoreEvent::JoinWaiting { group, name });
 }
 
 #[cfg(test)]
