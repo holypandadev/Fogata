@@ -1108,20 +1108,7 @@ impl Node {
                 part,
             } => self.on_friend_group_request(peer, entries, declined, part),
             FriendRequest::Call { sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(device) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                match fogata_friends::open_call_message(&self.identity, &local, &remote, &sealed) {
-                    Ok(message) => {
-                        self.on_call_step(peer, device, message);
-                        FriendResponse::Ack
-                    }
-                    Err(_) => FriendResponse::Refused,
-                }
+                self.on_friend_call_request(peer, local, remote, sealed)
             }
             FriendRequest::Status { sealed } => {
                 // Kept, as checked above.
@@ -1681,6 +1668,30 @@ impl Node {
             OfferPart::Kept => FriendResponse::Ack,
             OfferPart::Refused => FriendResponse::Refused,
             OfferPart::Whole(entries) => self.on_group_offer(peer, by, entries, declined),
+        }
+    }
+
+    /// Takes a step of a friend's call.
+    fn on_friend_call_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(device) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        match fogata_friends::open_call_message(&self.identity, &local, &remote, &sealed) {
+            Ok(message) => {
+                self.on_call_step(peer, device, message);
+                FriendResponse::Ack
+            }
+            Err(_) => FriendResponse::Refused,
         }
     }
 
