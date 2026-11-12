@@ -384,6 +384,11 @@ const maxSdpSections = 4;
 /// answers have its channels and no others ([callSections]).
 @visibleForTesting
 bool fairSignal(Map<String, dynamic> message) {
+  // The sender's call (see Call's `_callId`): 16 hexadecimal digits from this version on.
+  final call = message['c'];
+  if (call != null && (call is! String || call.length > maxCallIdChars)) {
+    return false;
+  }
   if (message['t'] == 'ice') return _fairCandidate(message);
   final sdp = message['sdp'];
   if (sdp == null) return true;
@@ -393,6 +398,9 @@ bool fairSignal(Map<String, dynamic> message) {
   return '\nm='.allMatches(sdp).length + (sdp.startsWith('m=') ? 1 : 0) <=
       maxSdpSections;
 }
+
+/// Longest call id taken in a signal.
+const maxCallIdChars = 32;
 
 /// Longest candidate taken from a participant: one names an address, a port and a few
 /// words about them, some 200 bytes. This device sends its candidates inside its

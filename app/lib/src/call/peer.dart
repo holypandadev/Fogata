@@ -62,6 +62,16 @@ class CallPeer {
   /// When [connection] was made.
   DateTime? _madeAt;
 
+  /// The call of theirs this connection is with, as their signals name it, and the ones
+  /// of theirs that ended since this participant came in (see [Call._theirCall]).
+  String? _theirCall;
+  final List<String> _endedCalls = [];
+  static const endedCallsKept = 8;
+
+  /// Their call, as their signals name it, for tests.
+  @visibleForTesting
+  String? get theirCall => _theirCall;
+
   /// [connection]'s offer or answer went while the link to them was down, or it was left
   /// waiting to be agreed when the link went ([Call.memberGone]): its signals went nowhere,
   /// and it is tried anew once the link is back ([Call.memberBack]).

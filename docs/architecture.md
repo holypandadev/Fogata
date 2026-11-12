@@ -1844,7 +1844,13 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   it went, is tried again at once (the smaller id offers, the other asks), rather than
   after its tries ran out; one made after the link came back is not, so the two sides'
   tries do not undo each other, and a whole network coming back tries each participant
-  once. Only the room's participants get a connection: a signal
+  once. A participant that leaves and enters again at once may be named in every list of
+  participants the application reads meanwhile: the room's own event that it left lets
+  its connection go at once, and each call has an id of its own, named in its offers,
+  answers and askings, so a participant whose signals name another call than its
+  connection was made with (it left and came back, or its application started again
+  faster than WebRTC finds a connection dead) gets a new connection at once, and what its
+  ended call still sends is dropped. Only the room's participants get a connection: a signal
   from a member that is not in the room is dropped, and one that arrives before the room
   says its sender is in it, or before this device's call has made its connection with the
   sender, waits for that (the last 4 of each sender): those already in a room offer as soon

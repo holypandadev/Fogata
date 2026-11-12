@@ -334,6 +334,19 @@ class Call extends ChangeNotifier {
   bool _closed = false;
   final _early = EarlySignals();
 
+  /// This call's own id, named in what starts or agrees a connection (see `_theirCall` in
+  /// signalling.dart): another call of this device, after it left the room and
+  /// entered again or started again, has another.
+  final String _callId = _newCallId();
+
+  static String _newCallId() {
+    final random = math.Random.secure();
+    return [
+      for (var i = 0; i < 8; i++)
+        random.nextInt(256).toRadixString(16).padLeft(2, '0'),
+    ].join();
+  }
+
   /// Signals waiting for their sender's connection here (see [EarlySignals]), for tests.
   @visibleForTesting
   int get signalsWaiting => _early.waiting;
@@ -1260,21 +1273,7 @@ class Call extends ChangeNotifier {
         peers.remove(id)!,
     ];
     _voiceless.removeWhere((id) => !others.contains(id));
-    // All together, so that several leaving at once hold the call up for one at most;
-    // known to [stop] until they are done, so the voice engine waits for them.
-    await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
-    for (final gone in left.map((peer) => peer.id)) {
-      _showScreenOut(gone, null);
-      final until = DateTime.now().add(_backWithin);
-      if (watching == gone) {
-        watching = null;
-        _watchBack = (id: gone, until: until);
-      }
-      if (focused == gone) {
-        focused = null;
-        _focusBack = (id: gone, until: until);
-      }
-    }
+    await _letGoOf(left);
     if (_bridge == null) return;
     quality.keep(others);
     _trace(
@@ -1383,6 +1382,41 @@ class Call extends ChangeNotifier {
   /// nowhere, and its connection will not come up ([memberBack] tries again).
   void _sentWhileGone(CallPeer peer) {
     peer._blind = _unreachable.contains(peer.id);
+  }
+
+  /// Lets go of participants that left: all together, so that several leaving at once hold
+  /// the call up for one at most; known to [stop] until they are done, so the voice engine
+  /// waits for them.
+  Future<void> _letGoOf(List<CallPeer> left) async {
+    await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
+    for (final gone in left.map((peer) => peer.id)) {
+      _showScreenOut(gone, null);
+      final until = DateTime.now().add(_backWithin);
+      if (watching == gone) {
+        watching = null;
+        _watchBack = (id: gone, until: until);
+      }
+      if (focused == gone) {
+        focused = null;
+        _focusBack = (id: gone, until: until);
+      }
+    }
+  }
+
+  /// The room says [id] left, by its own event: its connection goes now, before the
+  /// participants are read anew ([setParticipants]). Someone who leaves and enters again
+  /// at once is named in every list read meanwhile, and its connection with the call that
+  /// ended there would be kept, still counted up until WebRTC finds it dead, with nobody
+  /// offering a new one. Its signals waiting here go too: they were for that call. The
+  /// next list that names it makes its connection anew, as for anyone who comes in.
+  Future<void> participantLeft(String id) async {
+    if (_closed || id == me) return;
+    _early.forget(id);
+    final peer = peers.remove(id);
+    if (peer == null) return;
+    _trace('${id.substring(0, 8)} left');
+    await _letGoOf([peer]);
+    notifyListeners();
   }
 
   /// The signal a device in the room without a call sends (see [AppState]'s refused call):

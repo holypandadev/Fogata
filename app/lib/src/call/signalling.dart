@@ -31,6 +31,9 @@ class EarlySignals {
     if (list.length > perDevice) list.removeAt(0);
   }
 
+  /// Forgets the signals waiting from `from`.
+  void forget(String from) => _waiting.remove(from);
+
   /// The signals waiting from `from`, in order; they are forgotten.
   List<Map<String, dynamic>> take(String from) =>
       _waiting.remove(from) ?? const [];
@@ -118,6 +121,7 @@ extension _Signalling on Call {
     String from,
     Map<String, dynamic> message,
   ) async {
+    if (!await _theirCall(peer, from, message)) return;
     switch (message['t']) {
       case 'offer':
         // Only the device with the smaller id offers (see [_offer] and [_renegotiate]),
@@ -255,7 +259,64 @@ extension _Signalling on Call {
     }
   }
 
+  /// Follows which call of [from]'s device [message] comes from (its `c`, on what starts or
+  /// agrees a connection): whether it is still taken. One from a call of theirs that ended
+  /// is not. One from a call not seen before, when another was, says their call is a new
+  /// one, which the room may never have shown (they left and entered again at once, or
+  /// their application started again faster than WebRTC finds a connection dead): the
+  /// connection with the one that ended is dropped at once, and the first connection is
+  /// made as for someone who just came in, with no wait for that connection to be given
+  /// up on. Only for a participant whose connection is here already: a call's id alone
+  /// makes no connection with anyone.
+  Future<bool> _theirCall(
+    CallPeer peer,
+    String from,
+    Map<String, dynamic> message,
+  ) async {
+    final theirs = message['c'];
+    if (theirs is! String) return true;
+    if (peer._endedCalls.contains(theirs)) {
+      _trace(
+        '${message['t']} from an ended call of ${from.substring(0, 8)}: dropped',
+      );
+      return false;
+    }
+    final before = peer._theirCall;
+    peer._theirCall = theirs;
+    if (before == null || before == theirs) return true;
+    peer._endedCalls.add(before);
+    if (peer._endedCalls.length > CallPeer.endedCallsKept) {
+      peer._endedCalls.removeAt(0);
+    }
+    _trace('${from.substring(0, 8)} has a new call; connecting anew');
+    // An answer of their new call answers an offer of this side made since it started:
+    // its connection is the right one.
+    if (message['t'] == 'answer') return true;
+    await peer._close();
+    peer._madeAt = null;
+    peer._attempt = 0;
+    peer._waits = 0;
+    peer._blind = false;
+    _watch(peer);
+    // An offer is answered and an asking offered to as they are; anything else from the
+    // new call starts the first connection now.
+    if (message['t'] != 'offer' && message['t'] != 'again') {
+      if (me.compareTo(from) < 0) {
+        await _offer(peer);
+      } else {
+        _signal(from, {'t': 'again'});
+      }
+    }
+    // What shows them connected follows once the signal is handled ([onSignal]).
+    return true;
+  }
+
   void _signal(String to, Map<String, dynamic> message) {
+    // What starts or agrees a connection says which call of this device it is from (see
+    // [_theirCall]); copies that do not know the field leave it.
+    if (const {'offer', 'answer', 'again'}.contains(message['t'])) {
+      message = {...message, 'c': _callId};
+    }
     if (signalsBetweenForTests case final sent?) {
       sent(me, to, message);
       return;

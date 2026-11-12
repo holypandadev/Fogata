@@ -220,7 +220,15 @@ void main() {
 
     /// [leaves] leaves the room [stays] stays in and enters it again: how long until the
     /// two are connected again, from the moment it entered.
-    Future<Duration> rejoin(String stays, String leaves) async {
+    ///
+    /// Unless [heardLeaving], the room never says it left: its leaving and entering again
+    /// reach the one that stays as one list naming it throughout, and the connection with
+    /// the call that ended still counts as up there.
+    Future<Duration> rejoin(
+      String stays,
+      String leaves, {
+      bool heardLeaving = true,
+    }) async {
       final stayer = net.add(
         Call(group: 'g', me: stays)..bridgeForTests = _bridge,
       );
@@ -237,9 +245,10 @@ void main() {
             before.peers[stays]?.connected == true,
         what: 'connected at first',
       );
-      // It leaves: nothing reaches it until it is in the room again.
+      // It leaves: nothing reaches it until it is in the room again, and its call ends.
       net.calls.remove(leaves);
-      await stayer.setParticipants([stays]);
+      await before.peers[stays]!.connection!.close();
+      if (heardLeaving) await stayer.setParticipants([stays]);
       final entered = DateTime.now();
       final back = net.add(Call(group: 'g', me: leaves));
       unawaited(
@@ -278,6 +287,112 @@ void main() {
     test('the call is back soon when the one that comes back offers', () async {
       final took = await rejoin('e100000000000000', '1100000000000000');
       expect(took, lessThan(within));
+    });
+
+    test(
+      'the room says nothing of the leave: the one that stays still reconnects '
+      'within the first try, when it offers',
+      () async {
+        final took = await rejoin(
+          '1200000000000000',
+          'e200000000000000',
+          heardLeaving: false,
+        );
+        expect(took, lessThan(within));
+      },
+    );
+
+    test(
+      'the room says nothing of the leave: the one that stays still reconnects '
+      'within the first try, when the other offers',
+      () async {
+        final took = await rejoin(
+          'e300000000000000',
+          '1300000000000000',
+          heardLeaving: false,
+        );
+        expect(took, lessThan(within));
+      },
+    );
+  });
+
+  group("another call of someone's device", () {
+    late FakeNet net;
+    setUp(() => net = FakeNet()..install());
+    tearDown(() => net.uninstall());
+
+    // This device has the smaller id: it offers to both.
+    const me = '0400000000000000';
+    const ana = 'a400000000000000';
+    const bea = 'b400000000000000';
+
+    test(
+      'replaces only its connection, and what its ended call sends is dropped',
+      () async {
+        final call = net.add(
+          Call(group: 'g', me: me)..bridgeForTests = _bridge,
+        );
+        await call.setParticipants([me, ana, bea]);
+        // Both connections count as up, as a connection with a call that ended does until
+        // WebRTC finds it dead.
+        for (final id in [ana, bea]) {
+          call.peers[id]!.connected = true;
+        }
+        final beas = call.peers[bea]!.connection;
+        await call.handleSignal(ana, {'t': 'again', 'c': 'first'});
+        final made = net.madeBy(me).length;
+        // Asked by the call it is connected with: nothing to do.
+        expect(made, 2);
+        expect(call.peers[ana]!.theirCall, 'first');
+        // Asked by another call of Ana's device: offered to at once.
+        await call.handleSignal(ana, {'t': 'again', 'c': 'second'});
+        expect(net.madeBy(me).length, made + 1);
+        expect(call.peers[ana]!.theirCall, 'second');
+        expect(call.peers[ana]!.connected, isFalse);
+        // The ended call's answer, late: dropped.
+        final connection = call.peers[ana]!.connection! as FakeConnection;
+        await call.handleSignal(ana, {
+          't': 'answer',
+          'sdp': connection.local,
+          'n': call.offerNumberTo(ana),
+          'c': 'first',
+        });
+        expect(connection.remote, isNull);
+        // Bea's connection is not touched.
+        expect(call.peers[bea]!.connection, beas);
+        expect(call.peers[bea]!.connected, isTrue);
+      },
+    );
+
+    test('the room telling it left lets its connection go at once', () async {
+      final call = net.add(Call(group: 'g', me: me)..bridgeForTests = _bridge);
+      await call.setParticipants([me, ana, bea]);
+      final events = StreamController<UiEvent>();
+      AppState('/nonexistent/fogata-rejoin-test')
+        ..callState.call = call
+        ..listenTo(events.stream);
+      events.add(
+        const UiEvent(
+          kind: UiEventKind.room,
+          group: 'g',
+          voice: AppState.firstRoom,
+          room: UiRoomChange(
+            kind: UiRoomChangeKind.left,
+            device: ana,
+            onPurpose: true,
+            fileSize: 0,
+            startedMs: 0,
+          ),
+          received: 0,
+          total: 0,
+        ),
+      );
+      await until(() => !call.peers.containsKey(ana), what: 'Ana let go');
+      expect(call.peers.keys.toList(), [bea]);
+      // The next list naming her makes her connection anew.
+      await call.setParticipants([me, ana, bea]);
+      expect(call.peers.keys.toSet(), {ana, bea});
+      await events.close();
     });
   });
 }

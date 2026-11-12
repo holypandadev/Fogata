@@ -310,6 +310,11 @@ extension _Events on AppState {
           );
         }
       case UiRoomChangeKind.left:
+        // Its call's connection goes now: its leaving and entering again at once would
+        // otherwise reach the call as one list of participants naming it throughout.
+        if (call case final call? when call.group == group) {
+          unawaited(call.participantLeft(change.device!));
+        }
         if (memory != null && change.device != contacts.profile?.person.id) {
           memory.addNote(
             RoomNote.left(now, change.device, _nameIn(group, change.device)),
