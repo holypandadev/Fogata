@@ -309,6 +309,7 @@ pub(crate) fn start_with(
         swarm,
         last_sealed_ms: 0,
         groups: BTreeMap::new(),
+        shown_pictures: Default::default(),
         friends: config.friends.map(FriendContext::new),
         lan_seen: HashSet::new(),
         #[cfg(test)]
@@ -568,8 +569,8 @@ struct RecentEvent {
     id: [u8; 16],
     at: Instant,
     /// The event itself while it fits among the latest kept (see room.rs); past that, only
-    /// its id is kept, to name.
-    wire: Option<WireMessage>,
+    /// its id is kept, to name. The same message the room keeps as its record, not a copy.
+    wire: Option<Arc<WireMessage>>,
 }
 
 /// A long log on its way to a device let in: the parts still to send, the number of the
@@ -641,7 +642,7 @@ impl RecordSent {
 struct GroupSlot {
     ctx: GroupContext,
     /// The voice rooms heard of so far, each with its own people, chat and files.
-    rooms: BTreeMap<VoiceRoomId, RoomTracker<WireMessage>>,
+    rooms: BTreeMap<VoiceRoomId, RoomTracker<Arc<WireMessage>>>,
     /// This device, and when the node started running the group: its own joins from
     /// before then are an earlier session's.
     me: DevicePublicKey,
@@ -858,17 +859,20 @@ impl GroupSlot {
     }
 
     /// A voice room's tracker, made the first time the room is heard of.
-    fn tracker(&mut self, voice: VoiceRoomId) -> &mut RoomTracker<WireMessage> {
+    fn tracker(&mut self, voice: VoiceRoomId) -> &mut RoomTracker<Arc<WireMessage>> {
         let (me, since) = (self.me, self.since_ms);
         self.rooms.entry(voice).or_insert_with(|| {
             RoomTracker::new(me)
                 .since(since)
-                .weighing(crate::group::room_record_weight)
+                .weighing(|record: &Arc<WireMessage>| crate::group::room_record_weight(record))
+                // A video's first picture is read from its share's record when the room is
+                // shown (see `Node::room_pictures`), not kept twice.
+                .keeping_pictures(false)
         })
     }
 
     /// The voice room this device is in, if any.
-    fn joined(&self) -> Option<(VoiceRoomId, &RoomTracker<WireMessage>)> {
+    fn joined(&self) -> Option<(VoiceRoomId, &RoomTracker<Arc<WireMessage>>)> {
         self.rooms
             .iter()
             .find(|(_, tracker)| tracker.joined())
@@ -904,6 +908,9 @@ struct Node {
     /// The time the last message this device sealed carries (see [`Node::seal_time`]).
     last_sealed_ms: u64,
     groups: BTreeMap<GroupId, GroupSlot>,
+    /// The first pictures of the videos of the room the screens showed last, read from their
+    /// shares' records (see room.rs): only that room's are kept read.
+    shown_pictures: room::ShownPictures,
     friends: Option<FriendContext>,
     /// Fogata devices found on the local network.
     lan_seen: HashSet<PeerId>,

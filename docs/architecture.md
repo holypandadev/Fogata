@@ -1142,12 +1142,22 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   `devices_keeping_less_chat_still_agree_on_the_room`); only how far back the chat goes
   differs. The shares stay bounded by group, the same on every member: a device cannot
   let go of shares the others list, or it would answer a member that asks with another
-  room. Measured (`measure_device_room_memory_*`, ten groups each with eight devices of a
-  flooding member in all ten rooms, macOS release build): 633 MiB of chat and 200 MiB of
-  shares as counted, 1.2 GB resident, with each group's bounds alone; 127 MiB of chat and
-  the same shares, 0.74 GB resident, within the bound of all the chat. What is left grows
-  with the groups by their shares: each kept as the message sent and again as the picture
-  it shows.
+  room. What a device keeps of the shares is the same set, held once: each event as the
+  message sent, which the voice room's latest events (named in presences, given to a
+  member that asks for them by id) share rather than copy, and a video's first picture in
+  that message only. The rooms list a video with an empty picture
+  (`RoomTracker::keeping_pictures`); the screens get the room they show with every picture
+  read again from its share's message, opened with the key of its epoch (some 9 ms for 47
+  of the largest pictures, a person's whole part of a one-room group, in a release build on
+  a Mac; at that rate about 75 ms for a whole room's 24 MiB), and the pictures of that room alone stay
+  read, until another is shown (`ShownPictures`). A file of the room shared on from here
+  goes with that picture. Measured (`measure_device_room_memory_*`, ten groups each with
+  eight devices of a flooding member in all ten rooms, macOS release build): 633 MiB of
+  chat and 200 MiB of shares as counted, 1.28 GB resident, with each group's bounds alone;
+  127 MiB of chat and the same shares, 0.78 GB resident, within the bound of all the chat
+  with the pictures kept read and the latest events copied as before; 0.55 GB resident
+  with both kept once. What is left grows with the groups by their shares as sent, bounded
+  per group, the same on every member.
 - Another member fetches it over a stream (`/fogata/file/1`) from any participant that has
   it: the request names the id and an offset, so an interrupted download resumes from its
   `.part` file (named after the file's id too, so two files of one name never mix). The connection's own encryption covers the transfer end to end, also when a

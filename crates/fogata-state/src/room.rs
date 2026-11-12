@@ -323,6 +323,9 @@ pub struct RoomTracker<S> {
     /// The room and participant parts the room's shares were last fitted to (see
     /// [`Self::fit_shares`]).
     fitted: (usize, usize),
+    /// Whether a video's first picture is kept in [`Room::files`] as well as in its share's
+    /// record (see [`Self::keeping_pictures`]).
+    pictures: bool,
 }
 
 impl<S: Clone> RoomTracker<S> {
@@ -340,7 +343,36 @@ impl<S: Clone> RoomTracker<S> {
             room_for: usize::from(crate::state::MAX_IN_ROOM),
             rooms: 1,
             fitted: (usize::from(crate::state::MAX_IN_ROOM), 1),
+            pictures: true,
         }
+    }
+
+    /// The same tracker, keeping a video's first picture in its share's record only (with
+    /// `keep` false): [`Room::files`] and the changes then list the video with an empty
+    /// picture, which whoever shows the room reads from the record ([`Self::share_record`])
+    /// when it shows it. The picture is otherwise kept twice, sent and read: up to 64 KiB
+    /// more for each share, of every room of every group, on screen or not. What the room
+    /// takes, keeps and answers is the same either way: a share's cost counts its picture
+    /// as sent, and its record is what is handed on.
+    pub fn keeping_pictures(mut self, keep: bool) -> Self {
+        self.pictures = keep;
+        self
+    }
+
+    /// The record of a share of file `id` the room lists: its first sharer's while it has
+    /// it, else another holder's.
+    pub fn share_record(&self, id: &[u8; 32]) -> Option<&S> {
+        let room = self.room.as_ref()?;
+        let file = room.files.get(id)?;
+        room.share_records
+            .get(&(*id, file.shared_by))
+            .or_else(|| {
+                room.share_records
+                    .iter()
+                    .find(|((file, _), _)| file == id)
+                    .map(|(_, record)| record)
+            })
+            .map(|(_, _, record)| record)
     }
 
     /// The same tracker, with `weigh` telling what each record it keeps weighs as sent: a
@@ -689,6 +721,12 @@ impl<S: Clone> RoomTracker<S> {
                 }
                 room.share_records
                     .insert((info.id, sender), (event.timestamp_ms, cost, record));
+                // Read again from the record when shown (see `keeping_pictures`).
+                if !self.pictures
+                    && let Some(video) = info.video.as_mut()
+                {
+                    video.thumb = Vec::new();
+                }
                 match room.files.get_mut(&info.id) {
                     Some(file) => {
                         file.holders.insert(sender);
@@ -1524,6 +1562,77 @@ mod tests {
         let c = t.apply(event(late, bea, 7, chat("hi")), 3, 7);
         assert!(matches!(c[0], RoomChange::Chat(_)));
         assert_eq!(t.room_to_join([0; 16], 8), (early, 5));
+    }
+
+    /// A tracker that keeps a video's first picture in its share's record only answers with
+    /// the same records as one that keeps it read as well, and a member asking either gets
+    /// the same room, pictures and all. It lists the videos with an empty picture, which
+    /// the record its `share_record` gives still holds.
+    #[test]
+    fn a_room_kept_without_its_pictures_answers_the_same() {
+        let (ana, bea, cid, dee) = (key(), key(), key(), key());
+        let room = [7; 16];
+        let mut events = vec![
+            event(room, ana, 0, join("Ana", 0)),
+            event(room, bea, 0, join("Bea", 0)),
+        ];
+        for i in 0..5u8 {
+            let info = FileInfo {
+                id: [i; 32],
+                name: format!("clip{i}.mp4"),
+                size: 100,
+                video: Some(VideoPreview {
+                    thumb: vec![i; 2048],
+                    width: 4,
+                    height: 3,
+                    duration_ms: 1000,
+                }),
+            };
+            let by = if i % 2 == 0 { ana } else { bea };
+            events.push(event(room, by, 1 + u64::from(i), RoomInput::Share(info)));
+        }
+        let replay = |t: &mut RoomTracker<usize>, records: &[usize]| {
+            for &r in records {
+                t.apply(events[r].clone(), r, 10);
+            }
+        };
+        let all: Vec<usize> = (0..events.len()).collect();
+        let mut kept = RoomTracker::new(cid);
+        let mut lean = RoomTracker::new(cid).keeping_pictures(false);
+        replay(&mut kept, &all);
+        replay(&mut lean, &all);
+        assert_eq!(kept.snapshot(), lean.snapshot());
+        let files = |t: &RoomTracker<usize>| t.room().unwrap().files.clone();
+        assert_eq!(files(&lean).len(), 5);
+        for (id, file) in files(&lean) {
+            assert!(file.info.video.as_ref().unwrap().thumb.is_empty());
+            let record = *lean.share_record(&id).unwrap();
+            let RoomInput::Share(sent) = &events[record].input else {
+                panic!("not a share's record");
+            };
+            assert_eq!(sent, &files(&kept)[&id].info);
+        }
+        // A member that comes online asks either: the same room.
+        let mut from_kept = RoomTracker::new(dee);
+        let mut from_lean = RoomTracker::new(dee);
+        replay(&mut from_kept, &kept.snapshot());
+        replay(&mut from_lean, &lean.snapshot());
+        assert_eq!(files(&from_lean), files(&from_kept));
+        assert_eq!(files(&from_lean), files(&kept));
+        assert_eq!(
+            from_lean
+                .room()
+                .unwrap()
+                .participants
+                .keys()
+                .collect::<Vec<_>>(),
+            from_kept
+                .room()
+                .unwrap()
+                .participants
+                .keys()
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

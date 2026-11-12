@@ -5,7 +5,8 @@
 //! the way arrives within a presence or two.
 
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -112,8 +113,8 @@ impl Node {
 /// still keeps more than they do; the others' lines go only once every sender keeps as
 /// little as they do. What is kept for the room's other members does not change: each
 /// member answers with what it keeps. Returns how many lines went.
-fn fit_chat<'a>(
-    trackers: impl Iterator<Item = &'a mut fogata_state::RoomTracker<WireMessage>>,
+fn fit_chat<'a, S: Clone + 'a>(
+    trackers: impl Iterator<Item = &'a mut fogata_state::RoomTracker<S>>,
     budget: usize,
 ) -> usize {
     use std::collections::{BinaryHeap, HashMap};
@@ -381,11 +382,15 @@ impl Node {
                 let _ = reply.send(sent);
             }
             Command::Room(group, voice, reply) => {
-                let view = self
+                // Asked for the screens, which show the videos' first pictures.
+                let mut view = self
                     .groups
                     .get(&group)
                     .and_then(|slot| slot.rooms.get(&voice))
                     .and_then(room_view);
+                if let Some(view) = view.as_mut() {
+                    self.show_pictures(group, voice, &mut view.files);
+                }
                 let _ = reply.send(view);
             }
             Command::Rooms(group, reply) => {
@@ -429,11 +434,23 @@ impl Node {
                     self.send_payload(group, GroupPayload::RoomUnshare { voice, room, id });
                 }
             }
-            Command::ShareFile { group, file, reply } => {
+            Command::ShareFile {
+                group,
+                mut file,
+                reply,
+            } => {
                 let Some((voice, room)) = self.joined_room(&group) else {
                     let _ = reply.send(Err("join the room first".into()));
                     return;
                 };
+                // A file of the room shared on from here (downloaded) goes with the picture
+                // its share in the room has, which the room lists without it.
+                if let Some(video) = file.video.as_mut()
+                    && video.thumb.is_empty()
+                    && let Some(thumb) = self.room_picture(group, &file.id)
+                {
+                    video.thumb = thumb.to_vec();
+                }
                 let sent = self.try_send_payload(
                     group,
                     GroupPayload::RoomShare {
@@ -503,6 +520,9 @@ impl Node {
         let Some((voice, room, input)) = room_input(payload) else {
             return;
         };
+        // Kept once: the room's record and its place among the latest events are the same
+        // message.
+        let wire = Arc::new(wire);
         let in_room_before = self.in_a_room();
         let Some(slot) = self.groups.get_mut(&group) else {
             return;
@@ -961,7 +981,7 @@ impl Node {
             joins.extend(j);
             rest.extend(r);
         }
-        let all: Vec<&WireMessage> = joins.into_iter().chain(rest).collect();
+        let all: Vec<&WireMessage> = joins.into_iter().chain(rest).map(|w| &**w).collect();
         room_part(&all, from)
     }
 
@@ -1068,7 +1088,7 @@ impl Node {
             .values()
             .flatten()
             .filter(|e| wanted.contains(&e.id))
-            .filter_map(|e| e.wire.as_ref())
+            .filter_map(|e| e.wire.as_deref())
             .collect();
         room_part(&found, 0).0
     }
@@ -1085,9 +1105,83 @@ impl Node {
     }
 }
 
+/// The first pictures of the videos of the room the screens showed last, read from their
+/// shares' records: the rooms keep a share's picture in its record only (see
+/// `RoomTracker::keeping_pictures`), so a room nobody looks at holds it once, as sent, and
+/// the room shown holds it read as well, until another is shown.
+#[derive(Default)]
+pub(super) struct ShownPictures {
+    room: Option<(GroupId, VoiceRoomId)>,
+    pictures: HashMap<[u8; 32], Arc<[u8]>>,
+}
+
+impl Node {
+    /// Puts in `files`, of `group`'s voice room `voice` shown now, the first pictures of
+    /// its videos: those read already, and the others read from their shares' records.
+    fn show_pictures(&mut self, group: GroupId, voice: VoiceRoomId, files: &mut [crate::RoomFile]) {
+        if self.shown_pictures.room != Some((group, voice)) {
+            self.shown_pictures = ShownPictures {
+                room: Some((group, voice)),
+                pictures: HashMap::new(),
+            };
+        }
+        // Those of files no longer listed go.
+        self.shown_pictures
+            .pictures
+            .retain(|id, _| files.iter().any(|f| f.info.id == *id));
+        for file in files {
+            let id = file.info.id;
+            let Some(video) = file.info.video.as_mut().filter(|v| v.thumb.is_empty()) else {
+                continue;
+            };
+            let picture = match self.shown_pictures.pictures.get(&id) {
+                Some(picture) => picture.clone(),
+                None => {
+                    let Some(picture) = self.read_picture(group, voice, &id) else {
+                        continue;
+                    };
+                    self.shown_pictures.pictures.insert(id, picture.clone());
+                    picture
+                }
+            };
+            video.thumb = picture.to_vec();
+        }
+    }
+
+    /// The first picture of video `id` as a share of it in one of `group`'s rooms has it.
+    fn room_picture(&self, group: GroupId, id: &[u8; 32]) -> Option<Arc<[u8]>> {
+        let voices: Vec<VoiceRoomId> = self.groups.get(&group)?.rooms.keys().copied().collect();
+        voices
+            .into_iter()
+            .find_map(|voice| self.read_picture(group, voice, id))
+    }
+
+    /// Reads the first picture of video `id` from the record of its share in `group`'s
+    /// voice room `voice`: opened again with the key of its epoch, which the group keeps
+    /// while its log does.
+    fn read_picture(&self, group: GroupId, voice: VoiceRoomId, id: &[u8; 32]) -> Option<Arc<[u8]>> {
+        let slot = self.groups.get(&group)?;
+        let record = slot.rooms.get(&voice)?.share_record(id)?;
+        let sealed = SealedMessage::try_from(&**record).ok()?;
+        let keys = slot.ctx.keys(sealed.header.epoch)?;
+        let payload = sealed.open(keys).ok()?;
+        match GroupPayload::decode(&payload).ok()? {
+            GroupPayload::RoomShare {
+                video: Some(video), ..
+            } => Some(video.thumb.into()),
+            _ => None,
+        }
+    }
+}
+
 /// Keeps a room event among a voice room's latest (see [`RECENT`]), once: whole while the
 /// newest fit [`RECENT_BYTES`] (the newest one always), by id past that.
-fn keep_recent(events: &mut VecDeque<RecentEvent>, room: RoomId, id: [u8; 16], wire: &WireMessage) {
+fn keep_recent(
+    events: &mut VecDeque<RecentEvent>,
+    room: RoomId,
+    id: [u8; 16],
+    wire: &Arc<WireMessage>,
+) {
     if events.iter().any(|e| e.id == id) {
         return;
     }
@@ -1102,7 +1196,7 @@ fn keep_recent(events: &mut VecDeque<RecentEvent>, room: RoomId, id: [u8; 16], w
     });
     let mut bytes = 0;
     for (newer, event) in events.iter_mut().rev().enumerate() {
-        bytes += event.wire.as_ref().map_or(0, wire_size);
+        bytes += event.wire.as_deref().map_or(0, wire_size);
         if newer > 0 && bytes > RECENT_BYTES {
             event.wire = None;
         }
@@ -1110,7 +1204,7 @@ fn keep_recent(events: &mut VecDeque<RecentEvent>, room: RoomId, id: [u8; 16], w
 }
 
 /// What a voice room shows, if a room is open in it.
-fn room_view(tracker: &fogata_state::RoomTracker<WireMessage>) -> Option<RoomView> {
+fn room_view(tracker: &fogata_state::RoomTracker<Arc<WireMessage>>) -> Option<RoomView> {
     tracker.room().map(|room| RoomView {
         started_ms: room.started_ms,
         participants: room
@@ -1219,12 +1313,17 @@ mod tests {
         let room = [1; 16];
         let mut events = VecDeque::new();
         for id in 0..RECENT as u8 {
-            keep_recent(&mut events, room, [id; 16], &record(id, 192 * 1024));
+            keep_recent(
+                &mut events,
+                room,
+                [id; 16],
+                &Arc::new(record(id, 192 * 1024)),
+            );
         }
         let whole: Vec<&RecentEvent> = events.iter().filter(|e| e.wire.is_some()).collect();
         let bytes: usize = whole
             .iter()
-            .filter_map(|e| e.wire.as_ref())
+            .filter_map(|e| e.wire.as_deref())
             .map(wire_size)
             .sum();
         assert!(bytes <= RECENT_BYTES, "{bytes} bytes kept");
@@ -1235,11 +1334,16 @@ mod tests {
         let given: usize = events
             .iter()
             .filter(|e| ids.as_chunks::<16>().0.contains(&e.id))
-            .filter_map(|e| e.wire.as_ref())
+            .filter_map(|e| e.wire.as_deref())
             .count();
         assert_eq!(given, whole.len());
         // One larger than all of that is still kept whole, alone.
-        keep_recent(&mut events, room, [99; 16], &record(99, 2 * RECENT_BYTES));
+        keep_recent(
+            &mut events,
+            room,
+            [99; 16],
+            &Arc::new(record(99, 2 * RECENT_BYTES)),
+        );
         let whole: Vec<[u8; 16]> = events
             .iter()
             .filter(|e| e.wire.is_some())
@@ -1249,7 +1353,7 @@ mod tests {
         // Small ones are all kept whole.
         let mut small = VecDeque::new();
         for id in 0..RECENT as u8 {
-            keep_recent(&mut small, room, [id; 16], &record(id, 1024));
+            keep_recent(&mut small, room, [id; 16], &Arc::new(record(id, 1024)));
         }
         assert!(small.iter().all(|e| e.wire.is_some()));
     }
@@ -1616,6 +1720,125 @@ mod tests {
         })
         .await;
         assert!(asked_again, "the room was not asked for again");
+        drop(events);
+        node.shutdown().await.unwrap();
+    }
+
+    /// The rooms keep a video's first picture once, in its share's record: the room lists it
+    /// with an empty picture, the screens get it read from the record, those of the room
+    /// shown last alone are kept read, and what the room answers a member that asks is the
+    /// records as they were sent, pictures and all. A file shared on from here goes with
+    /// the room's picture. Prints how long reading a full room's pictures takes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rooms_pictures_are_kept_once_and_read_for_the_room_shown() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let log = GroupLog::create(&ana, "g", 1).unwrap();
+        let group = log.group_id();
+        let (node, events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let checked = inspect(&node, move |n| {
+            let voice = fogata_state::FIRST_ROOM;
+            n.on_room_command(Command::JoinRoom {
+                group,
+                voice,
+                nick: "Ana".into(),
+            });
+            let picture = |i: u8| vec![i; fogata_state::MAX_THUMB_BYTES];
+            let video = |i: u8| FileInfo {
+                id: [i; 32],
+                name: format!("clip {i}.mp4"),
+                size: 1_000_000,
+                video: Some(VideoPreview {
+                    thumb: picture(i),
+                    width: 640,
+                    height: 360,
+                    duration_ms: 10_000,
+                }),
+            };
+            // As many as one person's part of a room takes.
+            let mut shared = 0;
+            for i in 0..60u8 {
+                let (reply, _) = tokio::sync::oneshot::channel();
+                n.on_room_command(Command::ShareFile {
+                    group,
+                    file: video(i),
+                    reply,
+                });
+                let listed = n.groups[&group].rooms[&voice].room().unwrap().files.len();
+                if listed == shared {
+                    break;
+                }
+                shared = listed;
+            }
+            assert!(shared > 30, "{shared} shared");
+            let tracker = &n.groups[&group].rooms[&voice];
+            let room = tracker.room().unwrap();
+            assert!(
+                room.files
+                    .values()
+                    .all(|f| f.info.video.as_ref().unwrap().thumb.is_empty())
+            );
+            // Shown: every picture read from its record.
+            let mut files = room_view(tracker).unwrap().files;
+            let started = Instant::now();
+            n.show_pictures(group, voice, &mut files);
+            let took = started.elapsed();
+            println!(
+                "{shared} pictures of {} KiB read in {took:?}",
+                picture(0).len() >> 10
+            );
+            for f in &files {
+                assert_eq!(f.info.video.as_ref().unwrap().thumb, picture(f.info.id[0]));
+            }
+            assert_eq!(n.shown_pictures.pictures.len(), shared);
+            // What a member that asks gets: the records as sent, each with its picture, in
+            // as many parts as it takes.
+            let mut answer = Vec::new();
+            let mut from = Some(0);
+            while let Some(at) = from {
+                let (part, next) = n.room_snapshot(group, at);
+                answer.extend(part);
+                from = next;
+            }
+            let keys = n.groups[&group].ctx.current().cloned().unwrap();
+            let with_pictures = answer
+                .iter()
+                .filter_map(|wire| {
+                    let sealed = SealedMessage::try_from(wire).ok()?;
+                    match GroupPayload::decode(&sealed.open(&keys).ok()?).ok()? {
+                        GroupPayload::RoomShare {
+                            id, video: Some(v), ..
+                        } => Some(v.thumb == picture(id[0])),
+                        _ => None,
+                    }
+                })
+                .filter(|whole| *whole)
+                .count();
+            assert_eq!(with_pictures, shared);
+            // The room's picture of a file, for sharing it on.
+            assert_eq!(
+                n.room_picture(group, &[3; 32]).as_deref(),
+                Some(&picture(3)[..])
+            );
+            // Another room shown: the first one's pictures are no longer kept read.
+            let other: VoiceRoomId = [5; 8];
+            n.show_pictures(group, other, &mut []);
+            n.shown_pictures.pictures.is_empty()
+        })
+        .await;
+        assert!(checked);
         drop(events);
         node.shutdown().await.unwrap();
     }
@@ -2019,10 +2242,16 @@ mod tests {
         assert_eq!(room(&small), room(&large));
     }
 
+    /// A room as a device keeps it, with its latest events.
+    type FloodedRoom = (RoomTracker<Arc<WireMessage>>, Vec<Arc<WireMessage>>);
+
     /// The ten rooms of a group whose every room has eight devices of a member that floods
     /// it: each device shares as many videos with the biggest picture as the room takes from
-    /// it, and one says 500 of the heaviest lines; numbered on from `n`.
-    fn flooded_group(n: &mut u32) -> Vec<RoomTracker<WireMessage>> {
+    /// it, and one says 500 of the heaviest lines; numbered on from `n`. With `lean`, kept as
+    /// the node keeps them now: each record once, shared with the room's latest events, and
+    /// a share's picture in its record only; else as before, the latest events copied and
+    /// each picture kept read as well. Each room's latest events go with it.
+    fn flooded_group(n: &mut u32, lean: bool) -> Vec<FloodedRoom> {
         use fogata_state::{
             EVENT_SLACK_BYTES, MAX_CHAT_CHARS, MAX_IN_ROOM, MAX_SHARES_EACH, MAX_THUMB_BYTES,
         };
@@ -2033,15 +2262,27 @@ mod tests {
         let thumb = vec![9; MAX_THUMB_BYTES];
         (0..10u8)
             .map(|v| {
-                let mut t = RoomTracker::new(me).weighing(crate::group::room_record_weight);
+                let mut t = RoomTracker::new(me)
+                    .weighing(|record: &Arc<WireMessage>| crate::group::room_record_weight(record))
+                    .keeping_pictures(!lean);
                 t.set_room_for(MAX_IN_ROOM, 10);
-                let mut send = |t: &mut RoomTracker<WireMessage>, sender, input, weight| {
+                let mut recent: VecDeque<RecentEvent> = VecDeque::new();
+                let mut send = |t: &mut RoomTracker<Arc<WireMessage>>, sender, input, weight| {
                     *n += 1;
                     let mut message_id = [0u8; 16];
                     message_id[..4].copy_from_slice(&n.to_be_bytes());
                     let mut wire = record(0, 0);
                     wire.message_id = message_id.to_vec();
                     wire.ciphertext = vec![5; weight - crate::group::room_record_weight(&wire)];
+                    let wire = Arc::new(wire);
+                    // As apply_room keeps it among the latest: the same message, or before a
+                    // copy of it.
+                    let kept = if lean {
+                        wire.clone()
+                    } else {
+                        Arc::new((*wire).clone())
+                    };
+                    keep_recent(&mut recent, [v; 16], message_id, &kept);
                     let event = RoomEvent {
                         room: [v; 16],
                         sender,
@@ -2083,7 +2324,8 @@ mod tests {
                     let weight = 6 * MAX_CHAT_CHARS + 1 + EVENT_SLACK_BYTES;
                     send(&mut t, devices[0], chat, weight);
                 }
-                t
+                let recent = recent.into_iter().filter_map(|e| e.wire).collect();
+                (t, recent)
             })
             .collect()
     }
@@ -2110,46 +2352,62 @@ mod tests {
     /// What the rooms of ten groups, each flooded as [`flooded_group`] does, make a device
     /// keep: with every group's own bounds only (`bounded` false), or also within the bound
     /// on the chat of all its rooms ([`fit_chat`], every slot of the node, here after each
-    /// group came). Linux and macOS, one at a time:
-    /// `cargo test -p fogata-net --lib device_room_memory -- --ignored --nocapture`.
-    fn measure_device_room_memory(bounded: bool) {
+    /// group came); kept `lean` as the node does now, or as before. Linux and macOS, one at
+    /// a time, in a release build:
+    /// `cargo test --release -p fogata-net --lib device_room_memory -- --ignored --nocapture`.
+    fn measure_device_room_memory(bounded: bool, lean: bool) {
         let before = resident();
         let mut n = 0;
-        let mut trackers = Vec::new();
+        let mut rooms = Vec::new();
         for _ in 0..10 {
-            trackers.extend(flooded_group(&mut n));
+            rooms.extend(flooded_group(&mut n, lean));
             if bounded {
-                fit_chat(trackers.iter_mut(), ROOM_CHAT_BYTES);
+                fit_chat(rooms.iter_mut().map(|(t, _)| t), ROOM_CHAT_BYTES);
             }
         }
         let after = resident();
-        let chat: usize = trackers
+        let chat: usize = rooms
             .iter()
-            .flat_map(|t| t.chat_weights())
+            .flat_map(|(t, _)| t.chat_weights())
             .map(|l| l.3)
             .sum();
-        let shares: usize = trackers.iter().map(RoomTracker::share_bytes).sum();
-        let records: usize = trackers.iter().map(|t| t.snapshot().len()).sum();
+        let shares: usize = rooms.iter().map(|(t, _)| t.share_bytes()).sum();
+        let records: usize = rooms.iter().map(|(t, _)| t.snapshot().len()).sum();
+        let pictures: usize = rooms
+            .iter()
+            .filter_map(|(t, _)| t.room())
+            .flat_map(|r| r.files.values())
+            .filter_map(|f| f.info.video.as_ref())
+            .map(|v| v.thumb.len())
+            .sum();
         println!(
-            "10 groups{}: {records} records kept; chat {} MiB, shares {} MiB as counted; {} MiB \
-             resident",
+            "10 groups{}{}: {records} records kept; chat {} MiB, shares {} MiB as counted, \
+             pictures read {} MiB; {} MiB resident",
             if bounded { ", chat bounded" } else { "" },
+            if lean { ", kept once" } else { "" },
             chat >> 20,
             shares >> 20,
+            pictures >> 20,
             after.saturating_sub(before) >> 20
         );
     }
 
     #[test]
     #[ignore]
+    fn measure_device_room_memory_lean() {
+        measure_device_room_memory(true, true);
+    }
+
+    #[test]
+    #[ignore]
     fn measure_device_room_memory_bounded() {
-        measure_device_room_memory(true);
+        measure_device_room_memory(true, false);
     }
 
     #[test]
     #[ignore]
     fn measure_device_room_memory_per_group_only() {
-        measure_device_room_memory(false);
+        measure_device_room_memory(false, false);
     }
 
     /// A busy device in many groups, every room of each full of honest chat (500 lines of
