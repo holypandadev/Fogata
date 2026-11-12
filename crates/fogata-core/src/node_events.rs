@@ -383,14 +383,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             inner.emit(CoreEvent::JoinAsksChanged);
         }
         NodeEvent::JoinWaiting { group } => handle_join_waiting(inner, group),
-        NodeEvent::JoinDeclined { group } => {
-            let Some(name) = inner.lock().joining.remove(&group) else {
-                return;
-            };
-            inner.forget_join(group);
-            let _ = inner.node.drop_group(group).await;
-            inner.emit(CoreEvent::JoinDeclined { group, name });
-        }
+        NodeEvent::JoinDeclined { group } => handle_join_declined(inner, group).await,
         NodeEvent::MustUpdateToJoin {
             group,
             device,
@@ -902,6 +895,16 @@ fn handle_join_waiting(inner: &Arc<Inner>, group: GroupId) {
         .cloned()
         .unwrap_or_default();
     inner.emit(CoreEvent::JoinWaiting { group, name });
+}
+
+/// A manager said no to this device's join.
+async fn handle_join_declined(inner: &Arc<Inner>, group: GroupId) {
+    let Some(name) = inner.lock().joining.remove(&group) else {
+        return;
+    };
+    inner.forget_join(group);
+    let _ = inner.node.drop_group(group).await;
+    inner.emit(CoreEvent::JoinDeclined { group, name });
 }
 
 #[cfg(test)]
