@@ -255,18 +255,7 @@ impl Node {
                 self.on_join_commit_request(peer, entry, binding)
             }
             MemberRequest::RoomSync { group_id, from } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                if !self.is_member_of(&group, &peer) {
-                    return MemberResponse::Refused;
-                }
-                let Some(device) = self.may_serve(peer) else {
-                    return MemberResponse::Refused;
-                };
-                let (messages, more) = self.room_snapshot(group, from);
-                self.charge_served(device, messages.iter().map(wire_bytes).sum());
-                MemberResponse::RoomLog { messages, more }
+                self.on_room_sync_request(peer, group_id, from)
             }
             MemberRequest::Addresses { addresses } => {
                 // Kept for a peer that may still be proving its membership (both ends verify
@@ -950,6 +939,27 @@ impl Node {
             });
         }
         MemberResponse::JoinWaiting
+    }
+
+    /// Answers a member's ask for a group's rooms, from part `from` on.
+    fn on_room_sync_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        from: u32,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        if !self.is_member_of(&group, &peer) {
+            return MemberResponse::Refused;
+        }
+        let Some(device) = self.may_serve(peer) else {
+            return MemberResponse::Refused;
+        };
+        let (messages, more) = self.room_snapshot(group, from);
+        self.charge_served(device, messages.iter().map(wire_bytes).sum());
+        MemberResponse::RoomLog { messages, more }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
