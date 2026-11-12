@@ -1172,7 +1172,24 @@ impl Node {
             (Pending::Presence(sent), response) => {
                 self.presence_done(peer, sent, matches!(response, MemberResponse::Ack))
             }
-            _ => {}
+            // Every other answer leaves nothing to do. Each kind is named, with no wildcard:
+            // a kind added to `Pending` is placed here on purpose.
+            (
+                Pending::Deliver
+                | Pending::Push
+                | Pending::Profile
+                | Pending::Signal
+                | Pending::Addresses
+                | Pending::Direct
+                | Pending::KeyProblem
+                | Pending::Roster(_)
+                | Pending::Sync(_)
+                | Pending::Join(_)
+                | Pending::JoinCommit(_)
+                | Pending::RoomEvents(_)
+                | Pending::Leave(_),
+                _,
+            ) => {}
         }
     }
 
