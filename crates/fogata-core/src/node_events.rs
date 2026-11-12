@@ -356,14 +356,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::SignalsLost { group, from } => {
             inner.emit(CoreEvent::SignalsLost { group, from })
         }
-        NodeEvent::LevelSeen { device, level } => {
-            let store = inner.store.clone();
-            inner.writer.after(move || {
-                if let Err(e) = store.note_level(&device, level) {
-                    tracing::warn!("cannot keep a capability level: {e:#}");
-                }
-            });
-        }
+        NodeEvent::LevelSeen { device, level } => handle_level_seen(inner, device, level),
         NodeEvent::MemberConnected {
             group,
             device,
@@ -864,6 +857,16 @@ fn handle_reached(inner: &Arc<Inner>, address: fogata_net::Multiaddr, device: De
         now_ms(),
     );
     inner.save_meta();
+}
+
+/// Keeps the capability level a device's copy said it judges at.
+fn handle_level_seen(inner: &Arc<Inner>, device: DevicePublicKey, level: u32) {
+    let store = inner.store.clone();
+    inner.writer.after(move || {
+        if let Err(e) = store.note_level(&device, level) {
+            tracing::warn!("cannot keep a capability level: {e:#}");
+        }
+    });
 }
 
 #[cfg(test)]
