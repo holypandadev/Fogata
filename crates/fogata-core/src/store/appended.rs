@@ -244,7 +244,10 @@ impl Store {
             // it would not read. Should that fail too, the file is written whole at the next
             // change (it is no longer known), and read up to the part until then.
             if let Err(e) = file.set_len(known.stamp.len) {
-                tracing::warn!("cannot cut {} back after a failed write: {e}", path.display());
+                tracing::warn!(
+                    "cannot cut {} back after a failed write: {e}",
+                    path.display()
+                );
             }
         }
         written.with_context(|| format!("cannot write {}", path.display()))?;
@@ -298,10 +301,8 @@ mod tests {
     };
 
     fn folder(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "fogata-appended-{name}-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("fogata-appended-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         dir
     }
@@ -414,7 +415,10 @@ mod tests {
                     let judging = judging_from_nothing(&path);
                     let (again, took) = counted(|| store.load_log_of(&id).unwrap());
                     assert_same(&again, expected);
-                    assert!(cheaper(took, judging), "cut at {cut}: {took:?}, {judging:?}");
+                    assert!(
+                        cheaper(took, judging),
+                        "cut at {cut}: {took:?}, {judging:?}"
+                    );
                     assert!(Verdicts::decode(&fs::read(&judged).unwrap()).is_ok() || sealed);
                     // Never a part an entry is to follow.
                     let mut next = back.clone();
@@ -640,8 +644,7 @@ mod tests {
                     }
                     6 => {
                         level += 1;
-                        let raise =
-                            Entry::sign(&me, id, log.heads(), time, Body::Level { level });
+                        let raise = Entry::sign(&me, id, log.heads(), time, Body::Level { level });
                         assert!(log.insert(raise).is_err());
                     }
                     7 => {

@@ -498,7 +498,9 @@ pub(crate) mod tests {
                         store.forget_files();
                     }
                     times.0.push(timed(|| store.store_log(&log).unwrap()).1);
-                    times.1.push(timed(|| write_judged(key, &judged, &context, &log)).1);
+                    times
+                        .1
+                        .push(timed(|| write_judged(key, &judged, &context, &log)).1);
                 }
                 times.0.sort();
                 times.1.sort();

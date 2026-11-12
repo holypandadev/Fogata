@@ -1044,7 +1044,11 @@ mod tests {
         let (page, more) = page_by_time(lines, |l| *l, vec![9_990u64], |s| *s, 10, 5);
         assert!(more);
         assert_eq!(page.len(), 5);
-        assert!(looked.get() <= 10 + 5 + 2, "{} lines looked at", looked.get());
+        assert!(
+            looked.get() <= 10 + 5 + 2,
+            "{} lines looked at",
+            looked.get()
+        );
     }
 
     /// A record goes before the first line not newer than it, even among lines whose
