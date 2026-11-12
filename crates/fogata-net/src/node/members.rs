@@ -240,38 +240,7 @@ impl Node {
                 banner,
                 picture,
             } => self.on_roster_request(peer, group_id, heads, banner, picture),
-            MemberRequest::Sync { group_id, have } => {
-                let Some(slot) = group_of(&group_id).and_then(|g| self.groups.get(&g)) else {
-                    return MemberResponse::Refused;
-                };
-                if !slot.members.contains(&peer) {
-                    return MemberResponse::Refused;
-                }
-                let Some(device) = self.may_serve(peer) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = group_of(&group_id).and_then(|g| self.groups.get(&g)) else {
-                    return MemberResponse::Refused;
-                };
-                let have = hashes(&have);
-                if let Some(leave) = slot.leaving
-                    && have.contains(&leave)
-                {
-                    let group = slot.ctx.group_id();
-                    self.leave_taken(group);
-                    return MemberResponse::Refused;
-                }
-                let (entries, want) = slot.ctx.diff(&have);
-                let served = entries.iter().map(|e| e.len()).sum::<usize>() + want.len() * 32;
-                self.charge_served(device, served);
-                MemberResponse::SyncReply {
-                    entries: entries
-                        .into_iter()
-                        .map(serde_bytes::ByteBuf::from)
-                        .collect(),
-                    want: bytes(want),
-                }
-            }
+            MemberRequest::Sync { group_id, have } => self.on_sync_request(peer, group_id, have),
             MemberRequest::GroupBanner { group_id, banner } => {
                 let Some(group) = group_of(&group_id) else {
                     return MemberResponse::Refused;
@@ -902,6 +871,45 @@ impl Node {
         served += peers.iter().map(|p| p.len()).sum::<usize>();
         self.charge_served(device, served);
         MemberResponse::Roster { peers }
+    }
+
+    /// Answers a member's ask for what a group's log has that it lacks.
+    fn on_sync_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        have: Vec<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        let Some(slot) = group_of(&group_id).and_then(|g| self.groups.get(&g)) else {
+            return MemberResponse::Refused;
+        };
+        if !slot.members.contains(&peer) {
+            return MemberResponse::Refused;
+        }
+        let Some(device) = self.may_serve(peer) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = group_of(&group_id).and_then(|g| self.groups.get(&g)) else {
+            return MemberResponse::Refused;
+        };
+        let have = hashes(&have);
+        if let Some(leave) = slot.leaving
+            && have.contains(&leave)
+        {
+            let group = slot.ctx.group_id();
+            self.leave_taken(group);
+            return MemberResponse::Refused;
+        }
+        let (entries, want) = slot.ctx.diff(&have);
+        let served = entries.iter().map(|e| e.len()).sum::<usize>() + want.len() * 32;
+        self.charge_served(device, served);
+        MemberResponse::SyncReply {
+            entries: entries
+                .into_iter()
+                .map(serde_bytes::ByteBuf::from)
+                .collect(),
+            want: bytes(want),
+        }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
