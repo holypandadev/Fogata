@@ -1097,50 +1097,7 @@ impl Node {
                 self.on_friend_code_finish_request(peer, sealed)
             }
             FriendRequest::Accept { mac, sealed } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                // Keyed by the secret shared with a friend (sending its new secret) or with a
-                // device a request went to.
-                let devices: Vec<DevicePublicKey> = f
-                    .book
-                    .friends
-                    .keys()
-                    .chain(f.book.outgoing.keys())
-                    .copied()
-                    .collect();
-                let intro = devices.into_iter().find_map(|device| {
-                    let pair = f.pair(&self.identity, &device)?;
-                    fogata_friends::open_accept(
-                        &self.identity,
-                        &pair,
-                        &local,
-                        &remote,
-                        &mac,
-                        &sealed,
-                    )
-                    .ok()
-                    .filter(|intro| intro.profile.device == device)
-                });
-                let Some(intro) = intro else {
-                    tracing::debug!("refused an acceptance from {peer}");
-                    return FriendResponse::Refused;
-                };
-                let profile = intro.profile.clone();
-                let device = profile.device;
-                let new = !f.book.friends.contains_key(&device);
-                if !f.book.accept_received(intro, now) {
-                    return FriendResponse::Refused;
-                }
-                f.targets.insert(peer, Target::Friend(device));
-                self.changed();
-                if new {
-                    self.emit(NodeEvent::FriendAdded { profile });
-                }
-                // A new friend has only our request secret: send our friend secret back.
-                self.contact(peer);
-                FriendResponse::Ack
+                self.on_friend_accept_request(peer, local, remote, now, mac, sealed)
             }
             FriendRequest::Profile { sealed } => {
                 // Kept, as checked above.
@@ -1661,6 +1618,55 @@ impl Node {
                 FriendResponse::Refused
             }
         }
+    }
+
+    /// Takes a friend's acceptance, or its new friend secret.
+    fn on_friend_accept_request(
+        &mut self,
+        peer: PeerId,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        now: u64,
+        mac: Vec<u8>,
+        sealed: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        // Keyed by the secret shared with a friend (sending its new secret) or with a
+        // device a request went to.
+        let devices: Vec<DevicePublicKey> = f
+            .book
+            .friends
+            .keys()
+            .chain(f.book.outgoing.keys())
+            .copied()
+            .collect();
+        let intro = devices.into_iter().find_map(|device| {
+            let pair = f.pair(&self.identity, &device)?;
+            fogata_friends::open_accept(&self.identity, &pair, &local, &remote, &mac, &sealed)
+                .ok()
+                .filter(|intro| intro.profile.device == device)
+        });
+        let Some(intro) = intro else {
+            tracing::debug!("refused an acceptance from {peer}");
+            return FriendResponse::Refused;
+        };
+        let profile = intro.profile.clone();
+        let device = profile.device;
+        let new = !f.book.friends.contains_key(&device);
+        if !f.book.accept_received(intro, now) {
+            return FriendResponse::Refused;
+        }
+        f.targets.insert(peer, Target::Friend(device));
+        self.changed();
+        if new {
+            self.emit(NodeEvent::FriendAdded { profile });
+        }
+        // A new friend has only our request secret: send our friend secret back.
+        self.contact(peer);
+        FriendResponse::Ack
     }
 
     /// Records a checked friend request that came from `peer`.
