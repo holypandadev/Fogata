@@ -397,24 +397,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
         NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
         NodeEvent::Removed { group, log } => handle_removed(inner, group, log).await,
-        NodeEvent::MemberProfile { profile } => {
-            let newer = {
-                let mut state = inner.lock();
-                let newer = state
-                    .profiles
-                    .get(&profile.device)
-                    .is_none_or(|p| p.version_ms < profile.version_ms);
-                if newer {
-                    state.profiles.insert(profile.device, profile);
-                }
-                newer
-            };
-            if newer {
-                // Kept for the next start: shown while the member is away too.
-                save_profiles_soon(inner);
-                inner.emit(CoreEvent::GroupsChanged);
-            }
-        }
+        NodeEvent::MemberProfile { profile } => handle_member_profile(inner, profile),
         NodeEvent::Animation { animation } => {
             if animation.device == inner.identity.public_key() {
                 return;
@@ -917,6 +900,26 @@ async fn handle_removed(inner: &Arc<Inner>, group: GroupId, log: fogata_state::G
     inner.lock().online.remove(&group);
     inner.emit(CoreEvent::Removed { group, name });
     inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// A member's profile.
+fn handle_member_profile(inner: &Arc<Inner>, profile: Profile) {
+    let newer = {
+        let mut state = inner.lock();
+        let newer = state
+            .profiles
+            .get(&profile.device)
+            .is_none_or(|p| p.version_ms < profile.version_ms);
+        if newer {
+            state.profiles.insert(profile.device, profile);
+        }
+        newer
+    };
+    if newer {
+        // Kept for the next start: shown while the member is away too.
+        save_profiles_soon(inner);
+        inner.emit(CoreEvent::GroupsChanged);
+    }
 }
 
 #[cfg(test)]
