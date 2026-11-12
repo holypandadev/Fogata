@@ -1620,6 +1620,78 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// Someone left the room and came back, and the join that said so did not reach this
+    /// device (or not yet): its call signals do. The room is asked of it at once, not at its
+    /// next presence, and the signals still reach the application, which keeps them until
+    /// the room says it is in. However many it sends, the room is asked of it once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_signal_from_someone_not_seen_in_the_room_has_the_room_asked() {
+        fn room_asks(n: &Node, peer: PeerId) -> usize {
+            n.pending
+                .values()
+                .filter(|(p, kind)| *p == peer && matches!(kind, Pending::RoomSync(..)))
+                .count()
+        }
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = DeviceIdentity::generate().unwrap();
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "Bea", 2).unwrap();
+        let group = log.group_id();
+        let (node, mut events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+        })
+        .unwrap();
+        let bea_key = bea.public_key();
+        let asks = inspect(&node, move |n| {
+            let peer = PeerId::random();
+            add_member(n, group, peer);
+            n.members.get_mut(&peer).unwrap().device = bea_key;
+            n.on_room_command(Command::JoinRoom {
+                group,
+                voice: fogata_state::FIRST_ROOM,
+                nick: "Ana".into(),
+            });
+            // Asked of Bea long ago, when she connected.
+            n.groups
+                .get_mut(&group)
+                .unwrap()
+                .room_asked
+                .insert(peer, Instant::now() - Duration::from_secs(60));
+            let signal = || MemberRequest::Signal {
+                group_id: group.as_bytes().to_vec(),
+                payload: br#"{"t":"again"}"#.to_vec(),
+            };
+            let before = room_asks(n, peer);
+            let mut taken = 0;
+            let mut asks = Vec::new();
+            for _ in 0..3 {
+                taken += usize::from(matches!(n.on_request(peer, signal()), MemberResponse::Ack));
+                asks.push(room_asks(n, peer) - before);
+            }
+            (taken, asks)
+        })
+        .await;
+        assert_eq!(asks.1, [1, 1, 1], "the room asked of Bea: {:?}", asks.1);
+        assert_eq!(asks.0, 3, "signals of hers taken");
+        let mut signals = 0;
+        while let Ok(event) = events.try_recv() {
+            signals +=
+                usize::from(matches!(event, NodeEvent::Signal { from, .. } if from == bea_key));
+        }
+        assert_eq!(signals, 3);
+        node.shutdown().await.unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_room_is_asked_again_after_stall_after_stall() {
         use fogata_proto::MemberResponse;

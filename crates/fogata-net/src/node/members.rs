@@ -712,7 +712,18 @@ impl Node {
                 let now = Instant::now();
                 if payload.len() > limits::MAX_SIGNAL_BYTES
                     || self.kept_out_of_my_room(&group, &from)
-                    || !self.limits.take_signal(peer, now)
+                {
+                    tracing::debug!(%peer, bytes = payload.len(), "call signal dropped");
+                    return MemberResponse::Refused;
+                }
+                // A call is set up after its sender entered the room, so its join is late or
+                // was lost on the way: the room is asked of the sender now, rather than heard
+                // at its next presence, up to 20 s on, with the call waiting for it. Once
+                // every 15 s at most (see `ask_room`), however many it sends.
+                if !in_my_room {
+                    self.ask_room(group, peer);
+                }
+                if !self.limits.take_signal(peer, now)
                     || (!in_my_room && !self.limits.take_early_signal(peer, now))
                 {
                     tracing::debug!(%peer, bytes = payload.len(), "call signal dropped");
