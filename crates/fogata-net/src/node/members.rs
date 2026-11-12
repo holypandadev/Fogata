@@ -1078,30 +1078,7 @@ impl Node {
                 self.drop_early_unless_asked(peer);
             }
             (Pending::Roster(group), MemberResponse::Roster { peers }) => {
-                let listed: HashSet<PeerId> = peers
-                    .iter()
-                    .take(MAX_ROSTER)
-                    .filter_map(|bytes| PeerId::from_bytes(bytes).ok())
-                    .collect();
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return;
-                };
-                // Only a member's list counts, and only so many new peers of it are tried
-                // at once: each is a dial through that member, which it could answer slowly.
-                if !slot.members.contains(&peer) {
-                    return;
-                }
-                slot.rosters.insert(peer, (listed.clone(), Instant::now()));
-                let mut dials = 0;
-                for other in listed {
-                    if !self.swarm.is_connected(&other) {
-                        if dials == MAX_ROSTER_DIALS {
-                            continue;
-                        }
-                        dials += 1;
-                    }
-                    self.reach_through(peer, other, group);
-                }
+                self.on_roster_answer(peer, group, peers)
             }
             (Pending::Sync(group), MemberResponse::SyncReply { entries, want }) => {
                 if !self.groups.contains_key(&group) {
@@ -1298,6 +1275,34 @@ impl Node {
                 self.presence_done(peer, sent, matches!(response, MemberResponse::Ack))
             }
             _ => {}
+        }
+    }
+
+    /// Takes a member's roster of a group: the members it reaches.
+    fn on_roster_answer(&mut self, peer: PeerId, group: GroupId, peers: Vec<serde_bytes::ByteBuf>) {
+        let listed: HashSet<PeerId> = peers
+            .iter()
+            .take(MAX_ROSTER)
+            .filter_map(|bytes| PeerId::from_bytes(bytes).ok())
+            .collect();
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return;
+        };
+        // Only a member's list counts, and only so many new peers of it are tried
+        // at once: each is a dial through that member, which it could answer slowly.
+        if !slot.members.contains(&peer) {
+            return;
+        }
+        slot.rosters.insert(peer, (listed.clone(), Instant::now()));
+        let mut dials = 0;
+        for other in listed {
+            if !self.swarm.is_connected(&other) {
+                if dials == MAX_ROSTER_DIALS {
+                    continue;
+                }
+                dials += 1;
+            }
+            self.reach_through(peer, other, group);
         }
     }
 }
