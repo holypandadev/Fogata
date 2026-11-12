@@ -265,28 +265,7 @@ impl Node {
                 group_id,
                 entries,
                 part,
-            } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self
-                    .groups
-                    .get_mut(&group)
-                    .filter(|s| s.ctx.joining().is_some() && s.join_committed.contains(&peer))
-                else {
-                    return MemberResponse::Refused;
-                };
-                let Some((index, count)) = part else {
-                    slot.parts_in.remove(&peer);
-                    self.on_admitted(group, peer, entries);
-                    return MemberResponse::Ack;
-                };
-                if self.take_admitted_part(group, peer, index, count, entries) {
-                    MemberResponse::Ack
-                } else {
-                    MemberResponse::Refused
-                }
-            }
+            } => self.on_admitted_request(peer, group_id, entries, part),
             MemberRequest::JoinDeclined { group_id, revoke } => {
                 let Some(group) = group_of(&group_id) else {
                     return MemberResponse::Refused;
@@ -975,6 +954,36 @@ impl Node {
             payload,
         });
         MemberResponse::Ack
+    }
+
+    /// Takes the log, or a part of it, from a manager that let this device in.
+    fn on_admitted_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        entries: Vec<serde_bytes::ByteBuf>,
+        part: Option<(u32, u32)>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self
+            .groups
+            .get_mut(&group)
+            .filter(|s| s.ctx.joining().is_some() && s.join_committed.contains(&peer))
+        else {
+            return MemberResponse::Refused;
+        };
+        let Some((index, count)) = part else {
+            slot.parts_in.remove(&peer);
+            self.on_admitted(group, peer, entries);
+            return MemberResponse::Ack;
+        };
+        if self.take_admitted_part(group, peer, index, count, entries) {
+            MemberResponse::Ack
+        } else {
+            MemberResponse::Refused
+        }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
