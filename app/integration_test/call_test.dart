@@ -23,7 +23,11 @@
 // virtual one with no phone). With a tone on copy a, the others also see it
 // mute and change microphone. FOGATA_TEST_CAMERA=1 turns the camera on.
 // FOGATA_TEST_SCREEN=1 shares the first screen, best on a virtual display since the others
-// receive what it shows; FOGATA_TEST_SCREEN=window shares the app's own window. With
+// receive what it shows; FOGATA_TEST_SCREEN=window shares the app's own window. Each
+// start and stop of the share logs the longest the platform thread took to answer
+// meanwhile (a share whose start holds it freezes the window), and
+// FOGATA_TEST_SCREEN_AGAIN=<n> has that copy share and stop n times first, then, on
+// Windows, ask for two captures with sound at once; see _shareAgain. With
 // FOGATA_SHOTS set to a folder, a copy that watches a screen saves pictures of it there:
 // its controls shown, the connection's quality, and the controls hidden after a while.
 // FOGATA_TEST_WATCH=<seconds> measures instead how a shared screen and the voice come
@@ -2163,6 +2167,86 @@ Future<void> _cameras(WidgetTester tester, AppState state) async {
   await _hear(tester, state, ['camera done']);
 }
 
+/// Runs [work] while asking the platform thread for the video library's counts, one
+/// question after the other, and logs the longest wait for an answer: a start or stop
+/// that holds the platform thread (the window frozen meanwhile) shows as a long one.
+Future<T> _whileAnswering<T>(String what, Future<T> Function() work) async {
+  var longest = Duration.zero;
+  var asked = 0;
+  var done = false;
+  final asking = () async {
+    while (!done) {
+      final wait = Stopwatch()..start();
+      await _held();
+      if (wait.elapsed > longest) longest = wait.elapsed;
+      asked++;
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+    }
+  }();
+  final took = Stopwatch()..start();
+  try {
+    return await work();
+  } finally {
+    done = true;
+    await asking;
+    _log(
+      '$what in ${took.elapsedMilliseconds} ms; the platform thread answered '
+      '$asked times, the longest after ${longest.inMilliseconds} ms',
+    );
+  }
+}
+
+/// The copy that shares shares [source] and stops [times] times, each start and stop
+/// timed by the platform thread's answers. On Windows it then asks for two captures
+/// with sound at once, as a second share asked for while the first one's sound still
+/// starts: both must be answered (the first may go without its sound), and letting go
+/// of both must leave no track behind.
+Future<void> _shareAgain(
+  Call call,
+  DesktopCapturerSource source,
+  int times,
+) async {
+  for (var i = 1; i <= times; i++) {
+    await _whileAnswering('share $i started', () => call.shareScreen(source));
+    if (!call.sharing) {
+      throw StateError('share $i: not sharing: ${call.problem}');
+    }
+    _log('share $i: sound ${call.canShareSound}');
+    await _whileAnswering('share $i stopped', () => call.stopSharing());
+  }
+  if (!Platform.isWindows) return;
+  final before = await _held();
+  final constraints = {
+    'audio': true,
+    'video': {
+      'deviceId': {'exact': source.id},
+      'mandatory': {'frameRate': 30.0},
+    },
+  };
+  final both = await _whileAnswering(
+    'two shares at once',
+    () => Future.wait([
+      navigator.mediaDevices.getDisplayMedia(constraints),
+      navigator.mediaDevices.getDisplayMedia(constraints),
+    ]),
+  );
+  _log(
+    'two shares at once: sound tracks '
+    '${both.map((s) => s.getAudioTracks().length).join(' and ')}',
+  );
+  for (final stream in both) {
+    for (final track in stream.getTracks()) {
+      await track.stop();
+    }
+    await stream.dispose();
+  }
+  final after = await _held();
+  _log('held before $before, after $after');
+  if ((after['tracks'] ?? 0) > (before['tracks'] ?? 0)) {
+    throw StateError('two shares at once left tracks behind');
+  }
+}
+
 /// Copies that share their screen do; the others see it come and go.
 Future<void> _screens(WidgetTester tester, AppState state) async {
   final call = state.callState.call!;
@@ -2171,16 +2255,18 @@ Future<void> _screens(WidgetTester tester, AppState state) async {
     _log(
       'screens: ${sources.map((s) => '${s.type.name}:${s.name}').join(' | ')}',
     );
-    await call.shareScreen(
-      sources.firstWhere(
-        (s) => _share == 'window'
-            ? s.type == SourceType.Window &&
-                  s.name.toLowerCase().contains('fogata')
-            : s.type == SourceType.Screen,
-        orElse: () => throw StateError('nothing to share for $_share'),
-      ),
+    final source = sources.firstWhere(
+      (s) => _share == 'window'
+          ? s.type == SourceType.Window &&
+                s.name.toLowerCase().contains('fogata')
+          : s.type == SourceType.Screen,
+      orElse: () => throw StateError('nothing to share for $_share'),
     );
+    final again = int.tryParse(_env['FOGATA_TEST_SCREEN_AGAIN'] ?? '');
+    if (again != null) await _shareAgain(call, source, again);
+    await _whileAnswering('share started', () => call.shareScreen(source));
     if (!call.sharing) throw StateError('not sharing: ${call.problem}');
+    _log('share: sound ${call.canShareSound}');
   }
   await _say(state, _share != null ? 'screen' : 'no screen');
   final sharers = [
@@ -2287,7 +2373,10 @@ Future<void> _screens(WidgetTester tester, AppState state) async {
     );
     await _wait(tester, const Duration(seconds: 2));
     call.showOwnScreen(false);
-    await _tap(tester, find.byTooltip('Stop sharing the screen'));
+    await _whileAnswering(
+      'share stopped',
+      () => _tap(tester, find.byTooltip('Stop sharing the screen')),
+    );
     if (call.sharing) throw StateError('still sharing');
     await _say(state, 'stopped sharing');
   } else {
