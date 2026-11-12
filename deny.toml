@@ -45,22 +45,97 @@ allow-git = []
 wildcards = "deny"
 allow-wildcard-paths = true
 # Two versions of one crate are reported, not refused: many come from libp2p and the WebRTC
-# crates and cannot be unified from here. Among them, two generations of the RustCrypto and
-# dalek crates: Fogata's own code is on the new one (curve25519-dalek 5, sha2 0.11, hkdf 0.13,
-# chacha20poly1305 0.11, rand 0.10); the old one (curve25519-dalek 4, sha2/digest/hmac 0.10
-# and 0.12, hkdf 0.12, chacha20poly1305/aead 0.10, blake2 0.10, rand_core 0.6) comes from
-# two places only:
-#   - snow 0.10 (libp2p's Noise handshake, through libp2p-noise 0.47; with aes-gcm 0.10 and
-#     blake2 0.10), whose newest release is still on it: it goes when libp2p takes a snow on
-#     the new crates;
-#   - the vendored spake2 0.4.0 (vendor/spake2), alone in pulling curve25519-dalek 4, hkdf 0.12
-#     and rand_core 0.6: only spake2 0.5.0-pre.0 (a pre-release) is on the new crates. Moving
-#     the fork to it, or porting the fork, changes the code that runs every friend and move
-#     code: done on its own, with the tests of crates/fogata-friends against beta.8's
-#     handshakes, never as a lockfile bump.
-# (rand 0.9 is the WebRTC crates' own: stun, webrtc-util and the vendored turn.)
-# `cargo tree -d` lists them, `cargo tree -i <crate>@<version>` says what pulls each.
+# crates and cannot be unified from here (`cargo tree -d` lists them, `cargo tree -i
+# <crate>@<version>` says what pulls each).
 multiple-versions = "warn"
+
+# The RustCrypto and dalek crates, and the random number crates under them, are refused in two
+# versions: two generations of the crypto code would be twice the code to audit and keep
+# patched, and an advisory may name only one of them. Fogata's own code and the vendored
+# spake2 are on the new generation (curve25519-dalek 5, sha2 0.11, hkdf/hmac 0.13,
+# chacha20poly1305 0.11, rand 0.10). What still holds a crate of the old one, which no newer
+# release of its holder leaves, is skipped below by its exact version, so that a third version
+# fails; and the old ones are banned but for the crates that take them today (`wrappers`: every
+# crate taking one directly must be among them), so that nothing else brings them back.
+deny = [
+    { crate = "aead", deny-multiple-versions = true },
+    { crate = "aes", deny-multiple-versions = true },
+    { crate = "aes-gcm", deny-multiple-versions = true },
+    { crate = "argon2", deny-multiple-versions = true },
+    { crate = "blake2", deny-multiple-versions = true },
+    { crate = "block-buffer", deny-multiple-versions = true },
+    { crate = "chacha20", deny-multiple-versions = true },
+    { crate = "chacha20poly1305", deny-multiple-versions = true },
+    { crate = "cipher", deny-multiple-versions = true },
+    { crate = "crypto-common", deny-multiple-versions = true },
+    { crate = "ctr", deny-multiple-versions = true },
+    { crate = "curve25519-dalek", deny-multiple-versions = true },
+    { crate = "digest", deny-multiple-versions = true },
+    { crate = "ed25519", deny-multiple-versions = true },
+    { crate = "ed25519-dalek", deny-multiple-versions = true },
+    { crate = "fiat-crypto", deny-multiple-versions = true },
+    { crate = "getrandom", deny-multiple-versions = true },
+    { crate = "ghash", deny-multiple-versions = true },
+    { crate = "hkdf", deny-multiple-versions = true },
+    { crate = "hmac", deny-multiple-versions = true },
+    { crate = "hpke", deny-multiple-versions = true },
+    { crate = "inout", deny-multiple-versions = true },
+    { crate = "md-5", deny-multiple-versions = true },
+    { crate = "password-hash", deny-multiple-versions = true },
+    { crate = "poly1305", deny-multiple-versions = true },
+    { crate = "polyval", deny-multiple-versions = true },
+    { crate = "rand", deny-multiple-versions = true },
+    { crate = "rand_chacha", deny-multiple-versions = true },
+    { crate = "rand_core", deny-multiple-versions = true },
+    { crate = "sha2", deny-multiple-versions = true },
+    { crate = "signature", deny-multiple-versions = true },
+    { crate = "spake2", deny-multiple-versions = true },
+    { crate = "universal-hash", deny-multiple-versions = true },
+    { crate = "x25519-dalek", deny-multiple-versions = true },
+    { crate = "curve25519-dalek@4", wrappers = ["snow"], reason = "the old generation: snow 0.10 only" },
+    { crate = "sha2@0.10", wrappers = ["snow"], reason = "the old generation: snow 0.10 only" },
+    { crate = "blake2@0.10", wrappers = ["snow"], reason = "the old generation: snow 0.10 only" },
+    { crate = "chacha20poly1305@0.10", wrappers = ["snow"], reason = "the old generation: snow 0.10 only" },
+    { crate = "aes-gcm@0.10", wrappers = ["snow"], reason = "the old generation: snow 0.10 only" },
+    { crate = "digest@0.10", wrappers = ["blake2", "md-5", "sha2"], reason = "the old generation: blake2/sha2 0.10 and md-5 0.10 only" },
+    { crate = "rand@0.9", wrappers = ["stun", "turn", "webrtc-util"], reason = "the WebRTC crates only" },
+    { crate = "getrandom@0.2", wrappers = ["ring"], reason = "ring 0.17 only" },
+    { crate = "getrandom@0.3", wrappers = ["libp2p-noise", "rand_core", "snow"], reason = "libp2p-noise 0.47, snow 0.10 and rand_core 0.9 only" },
+]
+skip = [
+    # snow 0.10 (libp2p's Noise handshake, through libp2p-noise 0.47; its newest release) is on
+    # the old generation. libp2p-noise has it hash and encrypt with ring everywhere but
+    # WebAssembly, where it takes snow's own crypto: these are compiled for WebAssembly only,
+    # never for a program Fogata ships. They go when libp2p takes a snow on the new crates.
+    { crate = "curve25519-dalek@4.1.3", reason = "snow 0.10, for WebAssembly only" },
+    { crate = "fiat-crypto@0.2.9", reason = "curve25519-dalek 4 (snow 0.10), WebAssembly only" },
+    { crate = "chacha20poly1305@0.10.1", reason = "snow 0.10, for WebAssembly only" },
+    { crate = "chacha20@0.9.1", reason = "chacha20poly1305 0.10 (snow 0.10), WebAssembly only" },
+    { crate = "poly1305@0.8.0", reason = "chacha20poly1305 0.10 (snow 0.10), WebAssembly only" },
+    { crate = "universal-hash@0.5.1", reason = "poly1305 0.8 and polyval 0.6 (snow 0.10), WebAssembly only" },
+    { crate = "aead@0.5.2", reason = "chacha20poly1305 0.10 and aes-gcm 0.10 (snow 0.10), WebAssembly only" },
+    { crate = "aes@0.8.4", reason = "aes-gcm 0.10 (snow 0.10), WebAssembly only" },
+    { crate = "cipher@0.4.4", reason = "chacha20 0.9 and aes 0.8 (snow 0.10), WebAssembly only" },
+    { crate = "inout@0.1.4", reason = "cipher 0.4 (snow 0.10), WebAssembly only" },
+    # Built everywhere, though not run outside WebAssembly: snow's `std` feature names
+    # `blake2/std` and `sha2/std`, which turns both on whatever its other features.
+    { crate = "sha2@0.10.9", reason = "snow 0.10 (its std feature turns it on)" },
+    { crate = "blake2@0.10.6", reason = "snow 0.10 (its std feature turns it on)" },
+    # digest 0.10 also under md-5 0.10, which stun 0.17, the vendored turn 0.17 and
+    # flutter_rust_bridge_macros 2.13 take: no release of theirs takes md-5 0.11.
+    { crate = "digest@0.10.7", reason = "sha2/blake2 0.10 (snow 0.10) and md-5 0.10 (stun, turn, flutter_rust_bridge_macros)" },
+    { crate = "block-buffer@0.10.4", reason = "digest 0.10" },
+    { crate = "crypto-common@0.1.7", reason = "digest 0.10 and cipher 0.4" },
+    # rand 0.9: the WebRTC crates' own (stun, webrtc-util and the vendored turn: no release of
+    # theirs takes rand 0.10).
+    { crate = "rand@0.9.5", reason = "stun, webrtc-util and the vendored turn 0.17" },
+    { crate = "rand_core@0.9.5", reason = "rand 0.9 and rand_chacha 0.9" },
+    # getrandom 0.2 under ring 0.17 (libp2p's TLS and QUIC, rcgen, the WebRTC crates) and
+    # getrandom 0.3 under libp2p-noise 0.47, snow 0.10 and rand_core 0.9: no release of theirs
+    # takes getrandom 0.4.
+    { crate = "getrandom@0.2.17", reason = "ring 0.17" },
+    { crate = "getrandom@0.3.4", reason = "libp2p-noise 0.47, snow 0.10 and rand_core 0.9" },
+]
 
 # Known vulnerabilities, from the RustSec advisory database kept on this computer. It is
 # fetched by hand (`cargo deny fetch db`); the checks never go online for it.
