@@ -479,49 +479,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::InvitationDeclined { group, device } => {
             handle_invitation_declined(inner, group, device).await
         }
-        NodeEvent::GroupOffered { log, by } => {
-            let group = log.group_id();
-            let name = log.state().name;
-            // Being joined with an invite: only the log a manager sends counts.
-            if inner.lock().joining.contains_key(&group) {
-                tracing::info!("a friend offered a group this device is joining; ignored");
-                return;
-            }
-            match inner.store.save_offered_group(&log, &by) {
-                // Listed with the others either way; announced once a minute at most.
-                Ok(Offered::Pending(_)) if inner.offer_noticed(by, now) => {
-                    inner.emit(CoreEvent::GroupInvited { group, name, by })
-                }
-                Ok(Offered::Pending(_)) => {}
-                // Already accepted here (an older copy of the log): nothing to ask.
-                Ok(Offered::Accepted(_)) => {}
-                // Its removal here was undone: it never stopped being a member, and runs the
-                // group again at once.
-                Ok(Offered::Restored(name)) => match inner.store.load_log_of(&group) {
-                    Ok(log) => {
-                        if let Err(e) = inner.node.add_group(GroupSetup::Member(log)).await {
-                            tracing::warn!("cannot run group {group:?} again: {e:#}");
-                            return;
-                        }
-                        inner.emit(CoreEvent::Joined { group, name });
-                    }
-                    Err(e) => tracing::warn!("cannot read group {group:?}: {e:#}"),
-                },
-                // Declined here: the friend gets the leave, so it stops offering the group.
-                Ok(Offered::Declined(leave)) => {
-                    if let Some(leave) = leave {
-                        let DeclineLeave { leave, admission } = *leave;
-                        let _ = inner
-                            .node
-                            .give_entries(vec![by], vec![leave], Some(admission))
-                            .await;
-                    }
-                    return;
-                }
-                Err(e) => tracing::warn!("cannot save group {group:?}: {e:#}"),
-            }
-            inner.emit(CoreEvent::GroupsChanged);
-        }
+        NodeEvent::GroupOffered { log, by } => handle_group_offered(inner, now, log, by).await,
     }
 }
 
@@ -966,6 +924,56 @@ async fn handle_invitation_declined(inner: &Arc<Inner>, group: GroupId, device: 
         device,
         who,
     });
+}
+
+/// A friend offered a group's log.
+async fn handle_group_offered(
+    inner: &Arc<Inner>,
+    now: u64,
+    log: fogata_state::GroupLog,
+    by: DevicePublicKey,
+) {
+    let group = log.group_id();
+    let name = log.state().name;
+    // Being joined with an invite: only the log a manager sends counts.
+    if inner.lock().joining.contains_key(&group) {
+        tracing::info!("a friend offered a group this device is joining; ignored");
+        return;
+    }
+    match inner.store.save_offered_group(&log, &by) {
+        // Listed with the others either way; announced once a minute at most.
+        Ok(Offered::Pending(_)) if inner.offer_noticed(by, now) => {
+            inner.emit(CoreEvent::GroupInvited { group, name, by })
+        }
+        Ok(Offered::Pending(_)) => {}
+        // Already accepted here (an older copy of the log): nothing to ask.
+        Ok(Offered::Accepted(_)) => {}
+        // Its removal here was undone: it never stopped being a member, and runs the
+        // group again at once.
+        Ok(Offered::Restored(name)) => match inner.store.load_log_of(&group) {
+            Ok(log) => {
+                if let Err(e) = inner.node.add_group(GroupSetup::Member(log)).await {
+                    tracing::warn!("cannot run group {group:?} again: {e:#}");
+                    return;
+                }
+                inner.emit(CoreEvent::Joined { group, name });
+            }
+            Err(e) => tracing::warn!("cannot read group {group:?}: {e:#}"),
+        },
+        // Declined here: the friend gets the leave, so it stops offering the group.
+        Ok(Offered::Declined(leave)) => {
+            if let Some(leave) = leave {
+                let DeclineLeave { leave, admission } = *leave;
+                let _ = inner
+                    .node
+                    .give_entries(vec![by], vec![leave], Some(admission))
+                    .await;
+            }
+            return;
+        }
+        Err(e) => tracing::warn!("cannot save group {group:?}: {e:#}"),
+    }
+    inner.emit(CoreEvent::GroupsChanged);
 }
 
 #[cfg(test)]
