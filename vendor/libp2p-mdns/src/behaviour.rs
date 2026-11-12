@@ -348,9 +348,14 @@ where
             // Those that made room for others are told of as expired.
             let mut expired = Vec::new();
 
-            while let Poll::Ready(Some((peer, addr, expiration, from))) =
-                self.query_response_receiver.poll_next_unpin(cx)
+            // Fogata: a few at a time, each lot handed on before the next is taken (see
+            // `found::MAX_PEERS_PER_SOURCE`).
+            let mut taken = 0;
+            while taken < found::MAX_PEERS_PER_SOURCE
+                && let Poll::Ready(Some((peer, addr, expiration, from))) =
+                    self.query_response_receiver.poll_next_unpin(cx)
             {
+                taken += 1;
                 let (new, dropped) =
                     self.discovered_nodes
                         .insert(peer, addr.clone(), expiration, from);
@@ -380,7 +385,7 @@ where
                     .push_front(ToSwarm::GenerateEvent(event));
                 continue;
             }
-            if !self.pending_events.is_empty() {
+            if !self.pending_events.is_empty() || taken == found::MAX_PEERS_PER_SOURCE {
                 continue;
             }
             // Emit expired event.
@@ -422,12 +427,106 @@ pub enum Event {
 
 #[cfg(all(test, feature = "tokio"))]
 mod tests {
-    use std::net::IpAddr;
+    use std::{
+        future::Future,
+        io,
+        net::IpAddr,
+        task::{Context, Poll},
+        time::{Duration, Instant},
+    };
 
+    use if_watch::IfEvent;
+    use libp2p_core::Multiaddr;
     use libp2p_identity::PeerId;
+    use libp2p_swarm::{NetworkBehaviour, ToSwarm};
 
-    use super::tokio::Behaviour as TokioMdns;
+    use super::{Behaviour, Event, Provider, tokio::Behaviour as TokioMdns};
     use crate::Config;
+
+    /// Tokio, with no interface ever coming up: what the behaviour does with what its
+    /// interfaces told, without a socket on the network.
+    enum NoInterfaces {}
+
+    impl Provider for NoInterfaces {
+        type Socket = crate::behaviour::socket::tokio::TokioUdpSocket;
+        type Timer = crate::behaviour::timer::tokio::TokioTimer;
+        type Watcher = futures::stream::Pending<io::Result<IfEvent>>;
+        type TaskHandle = ::tokio::task::JoinHandle<()>;
+
+        fn new_watcher() -> io::Result<Self::Watcher> {
+            Ok(futures::stream::pending())
+        }
+
+        fn spawn(task: impl Future<Output = ()> + Send + 'static) -> Self::TaskHandle {
+            ::tokio::spawn(task)
+        }
+    }
+
+    /// Copies on one computer, more than its share, answer every query at once. One that
+    /// starts and answers first is told of, and is still known when that is handed on, so
+    /// that the node can ask who told of it (`Behaviour::told_by`), though the answers that
+    /// came right after it push it out (see `found::MAX_PEERS_PER_SOURCE`).
+    #[::tokio::test]
+    async fn a_peer_told_of_is_known_when_that_is_handed_on() {
+        let mut behaviour =
+            Behaviour::<NoInterfaces>::new(Config::default(), PeerId::random()).expect("mdns");
+        let computer = IpAddr::from([192, 168, 1, 20]);
+        let address = |i: usize, peer: PeerId| -> Multiaddr {
+            format!("/ip4/192.168.1.20/udp/{}/quic-v1/p2p/{peer}", 4000 + i)
+                .parse()
+                .unwrap()
+        };
+        let copies: Vec<(PeerId, Multiaddr)> = (0..20)
+            .map(|i| {
+                let peer = PeerId::random();
+                (peer, address(i, peer))
+            })
+            .collect();
+        let newcomer = PeerId::random();
+        let newcomer_at = address(99, newcomer);
+        // What the interfaces told of in the meantime, all at once (each answer read at its
+        // own moment).
+        let tell = |behaviour: &mut Behaviour<NoInterfaces>, told: &[(PeerId, Multiaddr)]| {
+            let at = Instant::now();
+            for (i, (peer, address)) in told.iter().enumerate() {
+                let expires = at + Duration::from_secs(60) + Duration::from_millis(i as u64);
+                behaviour
+                    .query_response_sender
+                    .clone()
+                    .try_send((*peer, address.clone(), expires, computer))
+                    .expect("room");
+            }
+        };
+        let mut cx = Context::from_waker(futures::task::noop_waker_ref());
+        // The first query: the copies answer; the first four make room for the last four.
+        tell(&mut behaviour, &copies);
+        while behaviour.poll(&mut cx).is_ready() {}
+        // The next: the newcomer answers first, then the copies kept, then the four left out,
+        // the first of which now takes the newcomer's place.
+        let mut next = vec![(newcomer, newcomer_at.clone())];
+        next.extend(copies[5..].iter().cloned());
+        next.extend(copies[..5].iter().cloned());
+        tell(&mut behaviour, &next);
+        let Poll::Ready(ToSwarm::GenerateEvent(Event::Discovered(found))) = behaviour.poll(&mut cx)
+        else {
+            panic!("nothing told of");
+        };
+        assert!(found.contains(&(newcomer, newcomer_at.clone())));
+        assert_eq!(
+            behaviour.told_by(&newcomer, &newcomer_at),
+            Some(computer),
+            "pushed out before the node could ask who told of it"
+        );
+        // Pushed out a moment later, it is told of again at its next answer.
+        while behaviour.poll(&mut cx).is_ready() {}
+        assert_eq!(behaviour.told_by(&newcomer, &newcomer_at), None);
+        tell(&mut behaviour, &[(newcomer, newcomer_at.clone())]);
+        let Poll::Ready(ToSwarm::GenerateEvent(Event::Discovered(found))) = behaviour.poll(&mut cx)
+        else {
+            panic!("not told of again");
+        };
+        assert_eq!(found, vec![(newcomer, newcomer_at)]);
+    }
 
     /// The tasks of the interfaces end when the behaviour goes.
     #[tokio::test]

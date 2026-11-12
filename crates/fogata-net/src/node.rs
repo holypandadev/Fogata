@@ -79,7 +79,7 @@ use self::candidates::Budget;
 use self::dht::LanNames;
 use self::dial::MAX_REMEMBERED;
 use self::friends::FriendContext;
-use self::mdns_dials::{MdnsDials, MdnsRetry};
+use self::mdns_dials::{MdnsDials, MdnsRetry, MdnsTold};
 use self::run::Answer;
 #[cfg(debug_assertions)]
 use self::run::TestPanic;
@@ -307,6 +307,7 @@ pub(crate) fn start(config: NodeConfig) -> Result<(NodeHandle, crate::NodeEvents
         pushed: HashMap::new(),
         mdns_dialling: HashMap::new(),
         mdns_retry: HashMap::new(),
+        mdns_waiting: VecDeque::new(),
         quic_tried: HashSet::new(),
         quic_dialled: HashMap::new(),
         lan_redialled: HashMap::new(),
@@ -908,6 +909,9 @@ struct Node {
     /// Peers mDNS found whose dials all failed, to dial again (see `MDNS_RETRIES` in
     /// mdns_dials.rs).
     mdns_retry: HashMap<PeerId, MdnsRetry>,
+    /// Peers mDNS told of that no share of new peers could take yet, the first told of
+    /// first, with what told of them (see `MAX_MDNS_WAITING` in mdns_dials.rs).
+    mdns_waiting: VecDeque<(PeerId, MdnsTold)>,
     /// Members this node already tried to reach over QUIC because their only connection
     /// could not carry datagrams (media needs them).
     quic_tried: HashSet<PeerId>,

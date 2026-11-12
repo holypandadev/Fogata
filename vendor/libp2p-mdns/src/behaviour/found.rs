@@ -7,8 +7,16 @@ use libp2p_core::{Multiaddr, multiaddr::Protocol};
 use libp2p_identity::PeerId;
 
 /// Peers kept at once in all, and from the responses of one address.
+///
+/// Past its share, a new peer of an address takes the place of that address's peer that
+/// expires first: one told of a moment ago becomes that one once every other of its address
+/// was heard again after it, and the next new one would then push it out before the node
+/// had asked who told of it (`Behaviour::told_by`), had the behaviour taken all those
+/// answers in one go: copies on one computer, more than its share, all answer every query
+/// at once. So the behaviour takes at most this many addresses before it hands on what
+/// they told: a peer cannot be told of and pushed out in one lot.
 const MAX_PEERS: usize = 128;
-const MAX_PEERS_PER_SOURCE: usize = 16;
+pub(crate) const MAX_PEERS_PER_SOURCE: usize = 16;
 /// Addresses kept for one peer: a computer with a few interfaces, each with IPv4 and IPv6
 /// over QUIC and TCP, has fewer.
 const MAX_ADDRESSES: usize = 8;

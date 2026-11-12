@@ -462,7 +462,14 @@ Discovery is layered; every layer runs in parallel and none is required.
    response's, not those it names, which are whatever its sender likes; a peer counts for
    the first response that lets it in, what looks like its own answer, sent from an
    address it names, first), 32 in all, are dialled at once, then 8 and 32 a minute (not
-   counting copies on this same computer). A peer is dialled once, at the addresses every
+   counting copies on this same computer). The others wait, in the order they were told
+   of, at most 128 (as many as mDNS keeps; one it no longer keeps leaves), and are dialled
+   as those shares fill again: mDNS tells of a peer once, and one that keeps answering is
+   never told of again, so a member turned away while a crowd of devices on the network, or
+   a neighbour making up peers from a few addresses, had spent the shares was never
+   dialled. The behaviour hands on what its interfaces told at most 16 addresses at a time,
+   so that a peer told of is still known when the node asks who told of it (copies on one
+   computer past its 16 would otherwise push a new one out in the same go). A peer is dialled once, at the addresses every
    response gave, each response's first before any one's second, so that a neighbour's
    dial at made-up addresses cannot hold the swarm from dialling the real one. Responses
    that come in a later event, while that dial is still going, are dialled at once beside
@@ -470,7 +477,8 @@ Discovery is layered; every layer runs in parallel and none is required.
    peer's at once, and what comes past that is dialled when those dials have all failed.
    A peer whose dials all failed is dialled again twice, 2 s after each failure
    (`MDNS_RETRIES`), at the addresses its own answers gave (sent from them), each try on
-   that answer's share of new peers and never for an address not heard now: a first
+   that answer's share of new peers (waiting for it when it is spent) and never for an
+   address not heard now nor one mDNS no longer keeps: a first
    attempt lost while macOS's firewall checked the new sender would otherwise wait a
    minute, until mDNS told of it again, and a neighbour cannot make this device dial
    anyone else more than once. The tasks

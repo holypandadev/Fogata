@@ -495,8 +495,9 @@ impl Node {
             },
             BehaviourEvent::Mdns(mdns::Event::Expired(gone)) => {
                 // Gone from the local network: only counted while there.
-                for (peer, _) in gone {
+                for (peer, address) in gone {
                     self.lan_seen.remove(&peer);
+                    self.mdns_gone(peer, &address);
                 }
             }
             BehaviourEvent::Mdns(mdns::Event::Discovered(found)) => {

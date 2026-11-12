@@ -93,5 +93,17 @@ crate by `[patch.crates-io]` in the workspace's Cargo.toml. Only these changes:
    `a_peer_mdns_found_whose_dials_failed_is_dialled_again_a_few_times` and
    `retries_are_only_for_a_peer_s_own_answer_and_end`).
 
+7. `src/behaviour.rs`: what the interfaces told is taken at most 16 addresses at a time
+   (`found::MAX_PEERS_PER_SOURCE`), and what it told of is handed on before the next lot is
+   taken. A new peer past its address's share takes the place of that address's peer that
+   expires first, and a peer told of a moment ago is that one once every other of its
+   address was heard again after it: copies on one computer, more than 16, all answer each
+   query at once, and taken all in one go the answers right after a new one pushed it out
+   before the node asked who told of it (`Behaviour::told_by`), which then dialled it not
+   at all until its next answer. Test: `a_peer_told_of_is_known_when_that_is_handed_on`
+   (with a provider whose interfaces never come up, so no socket is opened).
+   Beside it, fogata-net lets the peers that no share of new peers could take wait for one,
+   in turn (`MAX_MDNS_WAITING` in node/mdns_dials.rs): a peer is told of only once.
+
 The crate is not a workspace member: `tools/check.sh` runs its tests with
 `cargo test -p libp2p-mdns --lib`.
