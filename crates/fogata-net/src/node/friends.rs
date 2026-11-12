@@ -1083,20 +1083,7 @@ impl Node {
             return FriendResponse::Refused;
         }
         match request {
-            FriendRequest::Probe { nonce } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                if !(16..=32).contains(&nonce.len()) {
-                    return FriendResponse::Refused;
-                }
-                // Under the current secret only: a former friend knows the earlier ones and
-                // could tell this device by them.
-                FriendResponse::ProbeReply {
-                    tag: f.book.secret.probe_tag(&nonce, &local, &remote).to_vec(),
-                }
-            }
+            FriendRequest::Probe { nonce } => self.on_friend_probe_request(local, remote, nonce),
             FriendRequest::Hello { mac, sealed } => {
                 // Kept, as checked above.
                 let Some(f) = self.friends.as_mut() else {
@@ -1616,6 +1603,27 @@ impl Node {
                     FriendResponse::Refused
                 }
             }
+        }
+    }
+
+    /// Answers a probe for this device's friend tag, whoever asks.
+    fn on_friend_probe_request(
+        &mut self,
+        local: Vec<u8>,
+        remote: Vec<u8>,
+        nonce: Vec<u8>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        if !(16..=32).contains(&nonce.len()) {
+            return FriendResponse::Refused;
+        }
+        // Under the current secret only: a former friend knows the earlier ones and
+        // could tell this device by them.
+        FriendResponse::ProbeReply {
+            tag: f.book.secret.probe_tag(&nonce, &local, &remote).to_vec(),
         }
     }
 
