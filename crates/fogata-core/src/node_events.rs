@@ -377,17 +377,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             group,
             device,
             name,
-        } => {
-            inner
-                .lock()
-                .join_asks
-                .insert((group, device), (name.clone(), now));
-            inner.emit(CoreEvent::JoinAsked {
-                group,
-                device,
-                name,
-            });
-        }
+        } => handle_join_asked(inner, now, group, device, name),
         NodeEvent::JoinAnswered { group, device } => {
             inner.lock().join_asks.remove(&(group, device));
             inner.emit(CoreEvent::JoinAsksChanged);
@@ -890,6 +880,25 @@ async fn handle_group_changed(inner: &Arc<Inner>, group: GroupId) {
     // A member may have gone.
     forget_gone_soon(inner);
     inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// A device asks a manager here to be let in with an invite.
+fn handle_join_asked(
+    inner: &Arc<Inner>,
+    now: u64,
+    group: GroupId,
+    device: DevicePublicKey,
+    name: String,
+) {
+    inner
+        .lock()
+        .join_asks
+        .insert((group, device), (name.clone(), now));
+    inner.emit(CoreEvent::JoinAsked {
+        group,
+        device,
+        name,
+    });
 }
 
 #[cfg(test)]
