@@ -533,6 +533,8 @@ Future<void> _call(WidgetTester tester) async {
   // it: what they hear must not depend on which comes first.
   final late = int.tryParse(_env['FOGATA_TEST_MIC_LATE'] ?? '');
   if (late != null) micOpensAfter = Duration(seconds: late);
+  // A shared screen's sound in one channel, to compare (mic.sh echo, ECHO_MONO=1).
+  if (_env['FOGATA_TEST_SCREEN_SOUND_MONO'] == '1') screenSoundInStereo = false;
   // Copy b enters only once a has been alone in the call a while (see below).
   if (_env['FOGATA_TEST_MIC_CASE'] == 'alone' && _role == 'b') {
     await _until(
@@ -4392,13 +4394,13 @@ Future<void> _rejoin(WidgetTester tester, AppState state) async {
 /// shared screen's sound. Copy a shares its screen with the other applications' sound
 /// (the lab plays a tone of its own as another application), and copy b watches it,
 /// leaves the room, enters it again and only then watches it again, once for each pause
-/// of FOGATA_TEST_ECHO_PAUSES ("1 6" when left out: the seconds out of the room). Each
+/// of FOGATA_TEST_ECHO_PAUSES ("1 10" when left out: the seconds out of the room). Each
 /// copy plays what it hears into a silent output of its own, which mic.sh records for
 /// every stretch b marks (`mark-b-<stretch>-start` and `-end`):
 ///
 /// - before: b watches, before leaving;
 /// - gone<n>: b out of the room for the n-th time, with a alone in the call (its own level
-///   read through a loop of its own meanwhile), when the pause is 4 s or more;
+///   read through a loop of its own meanwhile), the pause less 2 s, when it is 6 s or more;
 /// - between<n>: b back in the call, not watching yet;
 /// - after<n>: b watching again.
 ///
@@ -4435,7 +4437,7 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
     await _hear(tester, state, ['echo done'], seconds: 900);
     return;
   }
-  final pauses = (_env['FOGATA_TEST_ECHO_PAUSES'] ?? '1 6')
+  final pauses = (_env['FOGATA_TEST_ECHO_PAUSES'] ?? '1 10')
       .split(' ')
       .where((p) => p.isNotEmpty)
       .map(int.parse)
@@ -4482,7 +4484,7 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
   for (var round = 1; round <= pauses.length; round++) {
     final pause = pauses[round - 1];
     await state.leaveRoom();
-    if (pause >= 4) {
+    if (pause >= 6) {
       await _wait(tester, const Duration(seconds: 1));
       await stretch('gone$round', pause - 2);
       await _wait(tester, const Duration(seconds: 1));

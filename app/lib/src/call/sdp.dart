@@ -316,12 +316,21 @@ String voiceDtx(String sdp) => _withParam(sdp, _audio, 'opus', 'usedtx=1');
 /// checks read no format parameters), sending two channels where it captures them. The
 /// voice stays in one channel.
 @visibleForTesting
-String screenSoundStereo(String sdp, int mid) => _withParam(
-  _withParam(sdp, mid, 'opus', 'stereo=1'),
-  mid,
-  'opus',
-  'sprop-stereo=1',
-);
+String screenSoundStereo(String sdp, int mid) {
+  if (!screenSoundInStereo) return sdp;
+  return _withParam(
+    _withParam(sdp, mid, 'opus', 'stereo=1'),
+    mid,
+    'opus',
+    'sprop-stereo=1',
+  );
+}
+
+/// Whether a shared screen's sound is asked for in two channels ([screenSoundStereo]);
+/// tests turn it off, to compare what the sharer's microphone goes through either way
+/// (tools/call-lab/mic.sh echo with ECHO_MONO=1).
+@visibleForTesting
+bool screenSoundInStereo = true;
 
 /// Adds `param` (`name=value`) to the format parameters of every `codec` type in the
 /// section with `mid`, unless they have one with that name already.

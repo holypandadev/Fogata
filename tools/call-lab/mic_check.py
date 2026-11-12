@@ -238,37 +238,78 @@ elif check == "echo":
     def db(value):
         return f"{20 * math.log10(value):.0f}" if value > 0 else "-inf"
 
+    # An echo of a copy's voice is that voice played back to it about as loud as the
+    # other copy plays it: what carries the other's playout on (a loopback, a program
+    # that records the speakers, the deliberate one of ECHO_PROOF) brings it at 0 to +5
+    # dB of that level (measured: ECHO_PROOF, -1, -1 and +5 dB). Echo cancellers leave
+    # weaker traces of the voice they hear in what they send, with these synthetic tones
+    # and microphones with no echo at all: -11 to -56 dB in the runs of 2026-11-12. One
+    # within ECHO_WITHIN of it is an echo; a weaker one is told, not judged.
+    ECHO_WITHIN = 6.0
+    # a's voice as b plays it, while a's screen's sound goes out to b and while it does
+    # not: more than this apart, a's microphone is processed otherwise while it goes out
+    # (measured in the same runs: 12 dB weaker; 1 to 2 dB from one stretch to the next).
+    VOICE_KEPT = 4.0
+
+    def decibels(value):
+        return 20 * math.log10(value) if value > 0 else -999.0
+
     stretches = sorted(
         {p.name[len("mark-b-") : -len("-start")] for p in meet.glob("mark-b-*-start")},
         key=lambda name: moment(f"mark-b-{name}-start"),
     )
     if "before" not in stretches or not any(n.startswith("after") for n in stretches):
         problems.append(f"b did not get through the steps: {result('b')}")
+    measured = {}
     for name in stretches:
-        watching = name == "before" or name.startswith("after")
-        b_in_call = not name.startswith("gone")
         for role in ("a", "b"):
             signal = windowed(run / "played" / f"{name}-{role}.raw")
             if signal is None:
                 problems.append(f"{name}: too little of what {role} played was recorded")
                 continue
             other = "b" if role == "a" else "a"
-            own = level(signal, VOICE[role])
-            voice = level(signal, VOICE[other])
-            screen = level(signal, SCREEN)
+            measured[(name, role)] = (
+                level(signal, VOICE[role]),
+                level(signal, VOICE[other]),
+                level(signal, SCREEN),
+            )
+    a_voice = {True: [], False: []}
+    for name in stretches:
+        watching = name == "before" or name.startswith("after")
+        b_in_call = not name.startswith("gone")
+        for role in ("a", "b"):
+            if (name, role) not in measured:
+                continue
+            own, voice, screen = measured[(name, role)]
+            other = "b" if role == "a" else "a"
             notes.append(
                 f"{name}, {role} played (dBFS, around): own voice {db(own[0])} ({db(own[1])}), "
                 f"{other}'s voice {db(voice[0])} ({db(voice[1])}), "
                 f"screen's sound {db(screen[0])} ({db(screen[1])})"
             )
             if there(own):
-                problems.append(
-                    f"{name}: {role} hears itself, its own voice at {db(own[0])} dBFS "
-                    f"in what it played"
-                )
+                # How loud the other copy plays this one's voice, in the same stretch.
+                theirs = measured.get((name, other))
+                if theirs is not None and theirs[1][0] > 0:
+                    below = decibels(own[0]) - decibels(theirs[1][0])
+                    if below >= -ECHO_WITHIN:
+                        problems.append(
+                            f"{name}: {role} hears itself, its own voice at {db(own[0])} dBFS, "
+                            f"{below:+.0f} dB from {other}'s playing of it"
+                        )
+                    else:
+                        notes.append(
+                            f"{name}: a trace of {role}'s own voice comes back {below:+.0f} dB "
+                            f"below {other}'s playing of it (an echo canceller's, not an echo)"
+                        )
+                else:
+                    problems.append(
+                        f"{name}: {role} hears itself, its own voice at {db(own[0])} dBFS"
+                    )
             if not b_in_call:
                 continue
             if role == "b":
+                a_voice[watching].append(decibels(voice[0]))
                 if voice[0] < HEARD:
                     problems.append(f"{name}: b does not hear a ({db(voice[0])} dBFS)")
                 if watching and (screen[0] < HEARD or not there(screen)):
@@ -282,6 +323,25 @@ elif check == "echo":
                     )
             elif voice[0] < HEARD:
                 problems.append(f"{name}: a does not hear b ({db(voice[0])} dBFS)")
+    if a_voice[True] and a_voice[False]:
+        out = sum(a_voice[True]) / len(a_voice[True])
+        apart = sum(a_voice[False]) / len(a_voice[False])
+        line = (
+            f"a's voice at b: {out:.0f} dBFS while a's screen's sound goes out to b, "
+            f"{apart:.0f} dBFS while it does not"
+        )
+        if apart - out > VOICE_KEPT:
+            problems.append(f"{line}: a's microphone is processed otherwise while it goes out")
+        else:
+            notes.append(line)
+    # How a's WebRTC set its sound processing as channels started sending (its log, with
+    # FOGATA_WEBRTC_LOG=info): each change of options or of the channels it records in.
+    processing = re.findall(
+        r"[^\n]*(?:ApplyOptions|AudioProcessingImpl|apm_config|Capture channels|"
+        r"num_capture_channels|send_num_channels|UpdateAudioSenders|aec: [0-9])[^\n]*",
+        (run / "a.out").read_text(errors="replace"),
+    )
+    notes += [f"a's WebRTC: {line.strip()[:200]}" for line in processing[:12]]
     settings = (run / "settings.txt").read_text().splitlines()
     notes += settings[1:]
     inputs = run / "sink-inputs.json"

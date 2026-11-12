@@ -38,12 +38,16 @@
 #            entered until the other's voice reaches them again: any over 6 s fails
 #   echo     a shares its screen with the other applications' sound (a tone of the lab's
 #            own, 880 Hz, from pw-cat), b watches it, leaves the room, enters it again and
-#            watches it again (ECHO_PAUSES, default "1 6": the seconds out of the room each
-#            time; 4 or more also measures a alone meanwhile); both talk all along, each
-#            with a tone of its own pitch (a 330 Hz, b 385 Hz). What each copy plays is
-#            recorded for every stretch b marks, and judged by the energy at each pitch:
-#            a copy that plays its own pitch hears itself, and fails; b must hear a and
-#            the screen's sound while it watches, and not while it does not. ECHO_FROM
+#            watches it again (ECHO_PAUSES, default "1 10": the seconds out of the room
+#            each time; 6 or more also measures a alone meanwhile); both talk all along,
+#            each with a tone of its own pitch (a 330 Hz, b 385 Hz). What each copy plays
+#            is recorded for every stretch b marks, and judged by the energy at each pitch:
+#            a copy that plays its own voice about as loud as the other plays it (within
+#            6 dB) hears itself, and fails; a weaker trace (an echo canceller's) is told;
+#            b must hear a and the screen's sound while it watches, and not while it does
+#            not; and a's voice must not go out weaker while its screen's sound goes out
+#            (more than 4 dB: its microphone is then processed otherwise). ECHO_MONO=1
+#            has the screen's sound go in one channel, to compare. ECHO_FROM
 #            names the program whose sound a's screen takes (pw-cat when unset; set and
 #            empty, every application's, as on a desktop); CALL_LAB_LOOPBACK=1 adds a
 #            loopback of what a plays into another output and a combined output (with
@@ -80,9 +84,13 @@ if [ "${1:-}" = --inside ]; then
     echo)
       lab_apps_tone
       [ "${ECHO_PROOF:-}" = 1 ] && lab_echo_proof
-      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 6}" \
-        FOGATA_SCREEN_SOUND_FROM="${ECHO_FROM-pw-cat}"
-      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 6}"
+      # a's WebRTC log tells how its microphone is processed as channels start sending.
+      mono=()
+      [ "${ECHO_MONO:-}" = 1 ] && mono=(FOGATA_TEST_SCREEN_SOUND_MONO=1)
+      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
+        FOGATA_SCREEN_SOUND_FROM="${ECHO_FROM-pw-cat}" FOGATA_WEBRTC_LOG=info "${mono[@]}"
+      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
+        "${mono[@]}"
       lab_phase_recorder b "a b"
       ;;
     quit)
@@ -152,7 +160,7 @@ for check in "${checks[@]}"; do
   export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/mic-${check/:/-}-$(date +%m%d-%H%M%S)
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
-  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_PAUSES=${ECHO_PAUSES:-1 6}" >> "$RUN/settings.txt"
+  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10}" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1
   CALL_LAB_ALSA=$alsa "$HERE/session.sh" "$RUN/session" "$0" --inside "$name"
