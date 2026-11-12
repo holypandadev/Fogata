@@ -281,42 +281,7 @@ impl Node {
                 self.on_presence_request(peer, hidden, away)
             }
             MemberRequest::Profile { profile, animation } => {
-                let Some(member) = self.members.get(&peer) else {
-                    // Checked now: only what can count waits, within a bound in all.
-                    let held = self
-                        .early
-                        .iter()
-                        .filter(|(p, _)| **p != peer)
-                        .map(|(_, e)| e.bytes())
-                        .sum();
-                    let Some(profile) = early_profile(profile, animation, held) else {
-                        return MemberResponse::Refused;
-                    };
-                    return self.keep_early(peer, |e| e.profile = Some(profile));
-                };
-                let device = member.device;
-                match fogata_friends::Profile::decode(&profile) {
-                    Ok(profile) if profile.device == device => {
-                        // At most one every few seconds from each (see limits.rs).
-                        if let Some(profile) = self.limits.member_profile(profile, Instant::now()) {
-                            self.emit(NodeEvent::MemberProfile { profile });
-                        }
-                        // Its picture's animation, signed by the same device; a bad one
-                        // leaves the still picture.
-                        if let Some(animation) = animation
-                            .and_then(|a| fogata_friends::Animation::decode(&a).ok())
-                            .filter(|a| {
-                                a.device == device && a.of == fogata_friends::Animated::Photo
-                            })
-                            && let Some(animation) =
-                                self.limits.animation(animation, Instant::now())
-                        {
-                            self.emit(NodeEvent::Animation { animation });
-                        }
-                        MemberResponse::Ack
-                    }
-                    _ => MemberResponse::Refused,
-                }
+                self.on_profile_request(peer, profile, animation)
             }
         }
     }
@@ -1009,6 +974,48 @@ impl Node {
             away,
         });
         MemberResponse::Ack
+    }
+
+    /// Takes a peer's profile and its picture's animation.
+    fn on_profile_request(
+        &mut self,
+        peer: PeerId,
+        profile: Vec<u8>,
+        animation: Option<serde_bytes::ByteBuf>,
+    ) -> MemberResponse {
+        let Some(member) = self.members.get(&peer) else {
+            // Checked now: only what can count waits, within a bound in all.
+            let held = self
+                .early
+                .iter()
+                .filter(|(p, _)| **p != peer)
+                .map(|(_, e)| e.bytes())
+                .sum();
+            let Some(profile) = early_profile(profile, animation, held) else {
+                return MemberResponse::Refused;
+            };
+            return self.keep_early(peer, |e| e.profile = Some(profile));
+        };
+        let device = member.device;
+        match fogata_friends::Profile::decode(&profile) {
+            Ok(profile) if profile.device == device => {
+                // At most one every few seconds from each (see limits.rs).
+                if let Some(profile) = self.limits.member_profile(profile, Instant::now()) {
+                    self.emit(NodeEvent::MemberProfile { profile });
+                }
+                // Its picture's animation, signed by the same device; a bad one
+                // leaves the still picture.
+                if let Some(animation) = animation
+                    .and_then(|a| fogata_friends::Animation::decode(&a).ok())
+                    .filter(|a| a.device == device && a.of == fogata_friends::Animated::Photo)
+                    && let Some(animation) = self.limits.animation(animation, Instant::now())
+                {
+                    self.emit(NodeEvent::Animation { animation });
+                }
+                MemberResponse::Ack
+            }
+            _ => MemberResponse::Refused,
+        }
     }
 
     pub(super) fn on_response(&mut self, peer: PeerId, kind: Pending, response: MemberResponse) {
