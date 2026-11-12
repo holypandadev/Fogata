@@ -1128,19 +1128,7 @@ impl Node {
             FriendRequest::Mutual { sealed } => {
                 self.on_friend_mutual_request(peer, local, remote, sealed)
             }
-            FriendRequest::Direct { entries } => {
-                // Kept, as checked above.
-                let Some(f) = self.friends.as_mut() else {
-                    return FriendResponse::Refused;
-                };
-                let Some(by) = f.online.get(&peer).copied() else {
-                    return FriendResponse::Refused;
-                };
-                if !self.limits.take_friend_offer(by, Instant::now()) {
-                    return FriendResponse::Refused;
-                }
-                self.on_direct_offer(peer, by, entries)
-            }
+            FriendRequest::Direct { entries } => self.on_friend_direct_request(peer, entries),
             FriendRequest::Heartbeat => {
                 // Kept, as checked above.
                 let Some(f) = self.friends.as_mut() else {
@@ -1746,6 +1734,25 @@ impl Node {
                 FriendResponse::Refused
             }
         }
+    }
+
+    /// Takes a direct chat's log a friend offers.
+    fn on_friend_direct_request(
+        &mut self,
+        peer: PeerId,
+        entries: Vec<serde_bytes::ByteBuf>,
+    ) -> FriendResponse {
+        // Kept, as checked above.
+        let Some(f) = self.friends.as_mut() else {
+            return FriendResponse::Refused;
+        };
+        let Some(by) = f.online.get(&peer).copied() else {
+            return FriendResponse::Refused;
+        };
+        if !self.limits.take_friend_offer(by, Instant::now()) {
+            return FriendResponse::Refused;
+        }
+        self.on_direct_offer(peer, by, entries)
     }
 
     /// Records a checked friend request that came from `peer`.
