@@ -11,7 +11,10 @@ crate's FOGATA.md, which must name it (a change no note explains is reported), a
 version crates.io has, so a fork that fell behind is seen. Without crates named, the same for
 each package of app/third_party (flutter_webrtc, tray_manager, desktop_drop), against pub.dev
 at the version its pubspec.yaml records, a fork that fell behind also as a warning in the
-run's annotations. --diff writes the whole diff (`diff -ruN`) there. It only reports: the
+run's annotations. A fork whose FOGATA.md has a line "Reviewed against <name> <version>"
+was read against that newer version (what it brings taken or left out, each said there):
+while it is the newest one, the fork is reported as reviewed, not behind, and gives no
+warning. --diff writes the whole diff (`diff -ruN`) there. It only reports: the
 exit status is 0 unless a package cannot be compared at all (the registry unreachable, a
 checksum that does not match, an archive that is not one).
 
@@ -102,6 +105,30 @@ def unpack(data, into, prefix):
             target.write_bytes(archive.extractfile(member).read())
 
 
+def reviewed(folder, name):
+    """The newer version of `name` the fork in `folder` was read against, as its FOGATA.md
+    says ("Reviewed against <name> <version>" at the start of a line; the last one), or
+    None."""
+    notes = folder / "FOGATA.md"
+    if not notes.is_file():
+        return None
+    line = rf"^Reviewed against {re.escape(name)} (\d[\w.+-]*\w)"
+    found = re.findall(line, notes.read_text(), re.M)
+    return found[-1] if found else None
+
+
+def behind(registry, version, newest, seen):
+    """What the report says of a fork of `version` when `registry` has `newest` and the fork
+    was read against `seen` (or None), and whether that is worth a warning: a newer version
+    than the fork's that nobody read the fork against."""
+    if newest in (None, version):
+        return "", False
+    if newest == seen:
+        return f"; {registry} has {newest}, reviewed against it (FOGATA.md)", False
+    also = f", reviewed against {seen} only" if seen else ""
+    return f"; {registry} has {newest}{also}", True
+
+
 def files(folder):
     return {p.relative_to(folder).as_posix() for p in folder.rglob("*")
             if p.is_file() and p.name not in IGNORED}
@@ -122,8 +149,8 @@ def compare(name, folder, out):
     with tempfile.TemporaryDirectory(prefix="fogata-vendor-") as tmp:
         upstream = pathlib.Path(tmp) / "upstream"
         unpack(data, upstream, f"{vendored_name}-{version}")
-        behind = "" if newest in (None, version) else f"; crates.io has {newest}"
-        return report(f"vendor/{name}", f"{vendored_name} {version}{behind}", folder, upstream,
+        late, _ = behind("crates.io", version, newest, reviewed(folder, vendored_name))
+        return report(f"vendor/{name}", f"{vendored_name} {version}{late}", folder, upstream,
                       out, "src/")
 
 
@@ -197,15 +224,16 @@ def compare_pub(folder, out):
         raise SystemExit(f"vendor_diff.py: {name} {version} does not match the checksum "
                          "pub.dev records")
     where = folder.relative_to(ROOT).as_posix()
-    if newest not in (None, version):
+    late, warn = behind("pub.dev", version, newest, reviewed(folder, name))
+    if warn:
         # Seen in the run's annotations too, not only in its log.
-        print(f"::warning::{where} is a fork of {name} {version}; pub.dev has {newest}: "
-              "read its changes for fixes to take (FOGATA.md lists what Fogata changed)")
+        print(f"::warning::{where} is a fork of {name} {version}{late}: read its changes for "
+              "fixes to take (FOGATA.md lists what Fogata changed), and say in FOGATA.md "
+              f'"Reviewed against {name} {newest}" once read')
     with tempfile.TemporaryDirectory(prefix="fogata-vendor-") as tmp:
         upstream = pathlib.Path(tmp) / "upstream"
         unpack(data, upstream, None)
-        behind = "" if newest in (None, version) else f"; pub.dev has {newest}"
-        return report(where, f"{name} {version}{behind}", folder, upstream, out, "lib/")
+        return report(where, f"{name} {version}{late}", folder, upstream, out, "lib/")
 
 
 def main():

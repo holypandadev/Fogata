@@ -235,8 +235,10 @@ token that can only read; a failure there is for the maintainers to look at, it 
   crates.io at the version it records, and each forked Dart package of `app/third_party`
   (flutter_webrtc, tray_manager, desktop_drop) against pub.dev at the version its
   `pubspec.yaml` records: the files changed, which `FOGATA.md` must name, and whether a newer
-  version is out (a Dart fork behind also shows as a warning on the run). The whole diff is
-  the `vendor-diff` artifact. Report only.
+  version is out (a Dart fork behind also shows as a warning on the run). A fork whose
+  `FOGATA.md` has a line "Reviewed against <name> <version>" was read against that newer
+  version, what it brings taken or left out there: while that is the newest, the fork shows
+  as reviewed, without a warning. The whole diff is the `vendor-diff` artifact. Report only.
 - `webrtc`: `tools/webrtc/check_stable.py`, `tools/webrtc/pins.sh` against the milestone on
   Chrome's Stable channel (chromiumdash): a warning one milestone behind or with newer merges
   on the same branch-head, a failure two milestones behind.

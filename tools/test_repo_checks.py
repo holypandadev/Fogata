@@ -241,6 +241,40 @@ class VendorDiff(unittest.TestCase):
         self.assertEqual(versions, {"1.6.2+hotfix.4": ("u1", "a"), "1.6.3": ("u2", None)})
         self.assertEqual(newest, "1.6.3")
 
+    def test_a_fork_read_against_a_newer_version_says_so(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = pathlib.Path(tmp)
+            self.assertIsNone(vendor_diff.reviewed(folder, "flutter_webrtc"))
+            (folder / "FOGATA.md").write_text(
+                "This is flutter_webrtc 1.6.2+hotfix.4.\n"
+                "Not at a line's start: Reviewed against flutter_webrtc 9.9.9.\n"
+                "Reviewed against flutter_webrtc_web 2.0.0.\n")
+            self.assertIsNone(vendor_diff.reviewed(folder, "flutter_webrtc"))
+            with (folder / "FOGATA.md").open("a") as notes:
+                notes.write("Reviewed against flutter_webrtc 1.6.3 (2026-11-12): taken...\n"
+                            "Reviewed against flutter_webrtc 1.7.0+hotfix.1.\n")
+            self.assertEqual(vendor_diff.reviewed(folder, "flutter_webrtc"), "1.7.0+hotfix.1")
+        # Up to date, reviewed against the newest, behind with nothing read, behind the read.
+        cases = [("1.6.3", None, "", False), ("1.6.3", "1.6.3", "", False),
+                 ("1.7.0", "1.7.0", "; pub.dev has 1.7.0, reviewed against it (FOGATA.md)",
+                  False),
+                 ("1.7.0", None, "; pub.dev has 1.7.0", True),
+                 ("1.8.0", "1.7.0", "; pub.dev has 1.8.0, reviewed against 1.7.0 only", True)]
+        for newest, seen, text, warn in cases:
+            with self.subTest(newest=newest, seen=seen):
+                self.assertEqual(vendor_diff.behind("pub.dev", "1.6.3", newest, seen),
+                                 (text, warn))
+        self.assertEqual(vendor_diff.behind("pub.dev", "1.6.3", None, None), ("", False))
+
+    def test_each_dart_fork_read_against_a_version_names_a_newer_one(self):
+        for folder in sorted((TOOLS.parent / "app/third_party").iterdir()):
+            if not (folder / "pubspec.yaml").is_file():
+                continue
+            with self.subTest(fork=folder.name):
+                name, version = vendor_diff.pub_recorded(folder)
+                seen = vendor_diff.reviewed(folder, name)
+                self.assertNotEqual(seen, version)
+
 
 class WebrtcStable(unittest.TestCase):
     BRANCHES = {158: "8127", 157: "8103", 156: "8078", 155: "8059"}

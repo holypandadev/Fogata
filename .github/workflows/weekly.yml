@@ -11,7 +11,8 @@
 #   vendor            each vendored crate against the one published on crates.io, and each
 #                     forked Dart package of app/third_party against pub.dev
 #                     (tools/vendor_diff.py), and whether a newer one is out (for a Dart
-#                     fork, a warning in the run's annotations too). Report only.
+#                     fork, a warning in the run's annotations too, unless its FOGATA.md
+#                     says it was reviewed against that one). Report only.
 #   webrtc            tools/webrtc/pins.sh against Chrome's Stable channel
 #                     (tools/webrtc/check_stable.py): a warning one milestone behind, a
 #                     failure two behind.
