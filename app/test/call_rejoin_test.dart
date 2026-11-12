@@ -181,6 +181,8 @@ void main() {
           ],
           room: summary,
           openInvites: 0,
+          needsUpdate: false,
+          raiseAnyway: false,
         ),
       ];
       events.add(
