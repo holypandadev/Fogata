@@ -149,6 +149,13 @@ void FlutterVideoRenderer::SetVideoTrack(scoped_refptr<RTCVideoTrack> track) {
   if (track_) track_->AddRenderer(this);
 }
 
+void FlutterVideoRenderer::Dispose() {
+  // RemoveRenderer takes the track's broadcaster lock: once SetVideoTrack returns,
+  // OnFrame is not running and will not run again, so nothing sends on the channel.
+  SetVideoTrack(nullptr);
+  event_channel_.reset();
+}
+
 bool FlutterVideoRenderer::CheckMediaStream(std::string mediaId) {
   if (0 == mediaId.size() || 0 == media_stream_id.size()) {
     return false;
@@ -223,16 +230,25 @@ void FlutterVideoRendererManager::VideoRendererDispose(
     std::unique_ptr<MethodResultProxy> result) {
   auto it = renderers_.find(texture_id);
   if (it != renderers_.end()) {
-    it->second->SetVideoTrack(nullptr);
+    // Fogata (taken from upstream 1.6.3): out of the map at once, on the platform
+    // thread, and its event channel closed now, while the texture id is still its own:
+    // the id may go to a new renderer once the engine lets go of the texture (on
+    // Windows it is the texture's address), and closing the channel later cleared the
+    // new renderer's handler. On Windows the map was changed from the engine's
+    // callback, on the raster thread, and a second dispose of the same texture before
+    // that callback erased the same entry twice.
+    scoped_refptr<FlutterVideoRenderer> renderer = it->second;
+    renderers_.erase(it);
+    renderer->Dispose();
 #if defined(_WINDOWS)
-    base_->textures_->UnregisterTexture(texture_id,
-                                        [&, it] { renderers_.erase(it); });
+    // The engine may call CopyPixelBuffer on the raster thread until it has let go
+    // of the texture, and runs this callback after that: the renderer lives until then.
+    base_->textures_->UnregisterTexture(
+        texture_id, [renderer]() mutable { renderer = nullptr; });
 #else
     // Fogata: the engine may still be copying this renderer's pixels on its raster
     // thread, and reads its buffer after the copy returns: the renderer goes once
     // the engine has moved on (UnregisterTextureLater), not now.
-    scoped_refptr<FlutterVideoRenderer> renderer = it->second;
-    renderers_.erase(it);
     base_->textures_->UnregisterTextureLater(
         texture_id, [renderer]() mutable { renderer = nullptr; });
 #endif

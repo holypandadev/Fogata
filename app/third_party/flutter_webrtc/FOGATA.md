@@ -1051,6 +1051,23 @@ had the raster thread read freed memory.
   no picture kept the last renderer and its picture (up to 132 MB at 8K) indefinitely.
   Tested with ThreadSanitizer by `common/cpp/test/retired_textures_test.cc`.
 
+## A renderer's dispose (Linux, Windows)
+
+Taken from upstream 1.6.3 (its "stop VideoRendererDispose from releasing a renderer
+twice"):
+
+- `common/cpp/src/flutter_video_renderer.cc`, `common/cpp/include/flutter_video_renderer.h`:
+  `videoRendererDispose` takes the renderer out of the manager's map at once, on the
+  platform thread, and `FlutterVideoRenderer::Dispose` stops its frames and closes its
+  event channel then, while the texture id is still its own. The renderer itself still
+  lives until the engine has let go of its texture (above, and on Windows the engine's
+  own callback). On Windows the map entry went in that callback, on the raster thread,
+  while the platform thread used the map, and a second dispose of the same texture
+  before it erased the same entry twice. Everywhere the event channel went only with
+  the renderer: an id given again meanwhile to a new renderer's texture (the id is the
+  texture's address: the engine's on Windows, the plugin's proxy on Linux) had its
+  channel's handler cleared by the old renderer's going.
+
 ## A connection freed after its close (Linux, Windows)
 
 `peerConnectionClose` lets go of the connection but not of its observer (which holds it,

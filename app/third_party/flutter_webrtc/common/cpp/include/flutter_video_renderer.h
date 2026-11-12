@@ -47,6 +47,11 @@ class FlutterVideoRenderer
 
   void SetVideoTrack(scoped_refptr<RTCVideoTrack> track);
 
+  // Fogata (taken from upstream 1.6.3): stops its frames and closes its event channel,
+  // on the platform thread when its texture is disposed; the renderer itself may live
+  // on until the engine has let go of the texture.
+  void Dispose();
+
   int64_t texture_id() { return texture_id_; }
 
   bool CheckMediaStream(std::string mediaId);
