@@ -1999,11 +1999,11 @@ fn at_level_four_every_copy_applies_the_same_whatever_came_first() {
 /// follow no raise to four are kept alike, and what applies is the same until either a raise
 /// to four applies or a rotation or removal that a raise to four did not see does not. (Its
 /// raises to four, which copies of level three refused and nobody signed on, are each
-/// outranked by a later loss of their author: kept, they apply nowhere, and still hold to
-/// level four what they did not see.)
+/// outranked by a later loss of their author: kept, they apply nowhere, and so hold nothing
+/// to level four: the corpus is judged as level three judged it.)
 #[test]
 fn the_corpus_of_level_three_is_judged_alike_until_a_raise_to_four() {
-    let mut held_back = 0;
+    let mut kept_raises = 0;
     for (w, world) in corpus_of(CORPUS_THREE).iter().enumerate() {
         let corpus = world.with_variants();
         let order: Vec<&Entry> = corpus.iter().collect();
@@ -2035,7 +2035,14 @@ fn the_corpus_of_level_three_is_judged_alike_until_a_raise_to_four() {
                 .collect()
         };
         assert_eq!(kept(&now), kept(&then), "world {w}");
-        let held = now.held_to_four(&now.ordered());
+        kept_raises += fours.iter().filter(|h| now.get(h).is_some()).count();
+        let held = now.settled_cache().held.clone();
+        if now.level() < Level::Four {
+            assert!(
+                held.is_empty(),
+                "world {w}: held by a raise that does not apply"
+            );
+        }
         let (now, then) = (now.state(), then.state());
         let apart = (now.applied.iter())
             .zip(&then.applied)
@@ -2050,16 +2057,185 @@ fn the_corpus_of_level_three_is_judged_alike_until_a_raise_to_four() {
                 "world {w}: apart at {apart}"
             );
         }
-        held_back += (now.rejected.iter())
-            .filter(|(h, why)| {
-                held.contains(h)
-                    && [
-                        crate::state::ROTATE_LEAVES_OUT,
-                        crate::state::REMOVE_LEAVES_OUT,
-                    ]
-                    .contains(why)
-            })
-            .count();
     }
-    assert!(held_back > 0, "nothing was held to level four");
+    assert!(kept_raises > 0, "no raise to four was kept");
+}
+
+/// Whether entry `hash` of `log` is one a raise past level two judges otherwise wherever it
+/// goes after the raise, as level three does since it came: a `Level` entry, and the note
+/// of an invite that names nobody, which applies no more from level three (it lets nobody
+/// in by itself: a device joins with its ticket and a manager's `Welcome`).
+fn judged_by_level(log: &GroupLog, hash: &EntryHash) -> bool {
+    matches!(
+        log.entries[hash].body,
+        Body::Level { .. } | Body::Invite { .. }
+    )
+}
+
+/// What applied of `log` and the group it makes, its level and what [`judged_by_level`]
+/// aside: what a raise to four must not change of honest history.
+fn group_apart_from_level(log: &GroupLog) -> String {
+    let state = log.state();
+    let applied: Vec<&EntryHash> = (state.applied.iter())
+        .filter(|h| !judged_by_level(log, h))
+        .collect();
+    let epochs: Vec<_> = state.epochs.iter().map(|e| e.id).collect();
+    format!(
+        "{applied:?}\n{:?}\n{:?} {:?}\n{epochs:?}\n{:?}",
+        state.members, state.ladder, state.managers, state.used_tickets
+    )
+}
+
+/// Raises to four on old parents: one by each device of `devices` that managed the group
+/// just after entry `at`, for points `at` taken every `every` entries of the common order
+/// of `log`; a former manager's as well as a current one's (as the author's view judges
+/// it, so every copy keeps them).
+fn stale_raises(log: &GroupLog, devices: &[DeviceIdentity], every: usize) -> Vec<Entry> {
+    let order = log.ordered();
+    let mut out = Vec::new();
+    for at in order.iter().step_by(every.max(1)) {
+        let mut upto = log.ancestors(at);
+        upto.insert(*at);
+        let then = log.state_of(upto.into_iter().collect());
+        if then.level >= Level::Four {
+            continue;
+        }
+        for d in devices {
+            if then.is_manager(&d.public_key()) {
+                let time = log.entries[at].time_ms + 1;
+                let raise = Body::Level { level: 4 };
+                out.push(Entry::sign(d, log.group_id(), vec![*at], time, raise));
+            }
+        }
+    }
+    out
+}
+
+/// A raise to four signed on old parents, by a manager of then that may have lost its
+/// rights since (removed, moved down, left out of the managers, gone) or by one that still
+/// manages, changes nothing of what honest history applied, but the notes of invites that
+/// name nobody (which any raise past two judges as level three does, as a raise to three
+/// already did): honest devices of every version give a new key to every member they saw,
+/// so nothing it holds to four leaves anyone out. Random honest histories, with rotations
+/// and removals written the way releases before this one wrote them too (sealed to the
+/// members of the whole log).
+#[test]
+fn a_raise_to_four_on_old_parents_changes_nothing_of_honest_history() {
+    let seeds = std::env::var("FOGATA_LADDER_SEEDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(4u64);
+    let (mut raises, mut former, mut applied) = (0, 0, 0);
+    for seed in 1..=seeds {
+        let mut world = LadderWorld::new(2 * seed, 6);
+        for i in 0..150 {
+            world.step();
+            if i % 7 == 3 {
+                // A rotation and a removal the way earlier releases wrote them.
+                let n = world.devices.len();
+                let k = world.below(n);
+                let me = world.devices[k].key();
+                let state = world.logs[k].state();
+                let members: Vec<DevicePublicKey> = state.members.keys().copied().collect();
+                let group = world.logs[k].group_id();
+                let body = match state.below(&me).first() {
+                    Some(below) if i % 2 == 0 => Body::Remove {
+                        member: *below,
+                        rotation: Rotation::new(
+                            &group,
+                            members.iter().filter(|m| *m != below).copied(),
+                        )
+                        .unwrap()
+                        .0,
+                    },
+                    _ if state.is_manager(&me) => Body::Rotate {
+                        rotation: Rotation::new(&group, members).unwrap().0,
+                    },
+                    _ => continue,
+                };
+                let time = world.time;
+                let _ = world.logs[k].append(&world.devices[k].id, body, time);
+            }
+        }
+        world.sync_all();
+        let log = &world.logs[0];
+        if log.level() >= Level::Four {
+            continue;
+        }
+        let before = group_apart_from_level(log);
+        let now = log.state();
+        let ids: Vec<DeviceIdentity> = (world.devices.iter())
+            .map(|d| DeviceIdentity::from_secret_bytes(&d.id.secret_bytes()))
+            .collect();
+        for raise in stale_raises(log, &ids, 9) {
+            let mut copy = log.clone();
+            assert_eq!(copy.insert(raise.clone()), Ok(true), "seed {seed}: kept");
+            raises += 1;
+            former += usize::from(!now.is_manager(&raise.author));
+            applied += usize::from(copy.state().applied.contains(&raise.hash()));
+            assert_eq!(group_apart_from_level(&copy), before, "seed {seed}");
+            // And worked out from nothing, as a copy given the entries at once.
+            let mut fresh = world.empty_log();
+            fresh.insert_all(copy.entries().cloned());
+            assert_eq!(group_apart_from_level(&fresh), before, "seed {seed}: fresh");
+        }
+    }
+    eprintln!("{raises} raises, {former} by former managers, {applied} applied");
+    assert!(raises > 0 && former > 0 && applied > 0);
+}
+
+/// The same over the saved corpora of levels two and three, whose worlds hold hostile
+/// entries too: a raise to four on old parents, by a manager of then, changes what applies
+/// (but the notes of invites that name nobody, as any raise past two) only by holding back
+/// a rotation or removal that leaves out a member its author saw, which no honest device
+/// writes.
+#[test]
+fn a_raise_to_four_on_old_parents_holds_back_only_what_leaves_members_out() {
+    let mut raises = 0;
+    for (name, bytes) in [("two", CORPUS), ("three", CORPUS_THREE)] {
+        for (w, world) in corpus_of(bytes).iter().enumerate() {
+            let corpus = world.with_variants();
+            let order: Vec<&Entry> = corpus.iter().collect();
+            // Worlds where a run is small aside: there any entry more of an author, a raise
+            // or a rename alike, may put a later one of the same author past its run.
+            if world.run != RUN_ROOM.entries {
+                continue;
+            }
+            let log = given(&corpus, &order, world.run);
+            if log.level() >= Level::Four {
+                continue;
+            }
+            let before = log.state();
+            let every = (log.ordered().len() / 6).max(1);
+            for raise in stale_raises(&log, &world.devices, every) {
+                let mut copy = log.clone();
+                if copy.insert(raise.clone()) != Ok(true) {
+                    // Past its author's run, in a world where a run is small.
+                    continue;
+                }
+                raises += 1;
+                let after = copy.state();
+                let held = copy.settled_cache().held.clone();
+                let (a, b): (Vec<_>, Vec<_>) = (
+                    (after.applied.iter())
+                        .filter(|h| !judged_by_level(&copy, h))
+                        .collect(),
+                    (before.applied.iter())
+                        .filter(|h| !judged_by_level(&log, h))
+                        .collect(),
+                );
+                if let Some(apart) = a.iter().zip(&b).position(|(x, y)| x != y) {
+                    let what = [a[apart], b[apart]];
+                    assert!(
+                        what.iter()
+                            .any(|h| held.contains(*h) && leaves_out_its_view(&copy, h)),
+                        "corpus {name}, world {w}: apart at {apart}"
+                    );
+                } else {
+                    assert_eq!(a.len(), b.len(), "corpus {name}, world {w}");
+                }
+            }
+        }
+    }
+    assert!(raises > 0);
 }

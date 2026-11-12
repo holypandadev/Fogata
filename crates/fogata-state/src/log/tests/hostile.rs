@@ -2893,3 +2893,79 @@ fn a_log_judged_elsewhere_is_taken_without_judging_it_again() {
     all.insert_all(apart);
     assert_same_log(&copy, &all);
 }
+
+/// What level four costs on a log of the size a long history reaches (about 3 MB: twenty
+/// members and a thousand rotations, among other entries): judged whole from its entries
+/// (what the first start after an update does, the verdicts of the version before counting
+/// for nothing), read back with its verdicts, and worked out again after a raise to four
+/// signed on old parents (a current manager's, which applies, and holds what came after),
+/// alone and with a rotation for its author alone signed on old parents too, which has the
+/// group worked out twice. Run with `cargo test --release -p fogata-state -- --ignored
+/// measure_level_four_costs --nocapture`.
+#[test]
+#[ignore]
+fn measure_level_four_costs() {
+    let ana = Device::new();
+    let others: Vec<Device> = (0..19).map(|_| Device::new()).collect();
+    let mut log = GroupLog::create(&ana.id, "g", 1).unwrap();
+    for (i, d) in others.iter().enumerate() {
+        log.add(&ana.id, d.key(), "m", 2 + i as u64).unwrap();
+    }
+    let early = log.heads();
+    for i in 0..1000u64 {
+        log.rotate(&ana.id, 100 + 3 * i).unwrap();
+        let by = &others[i as usize % others.len()];
+        let body = Body::SetIcon {
+            icon: (i % 7) as u8,
+        };
+        let _ = log.append(&by.id, body, 101 + 3 * i);
+        let _ = log.append(
+            &ana.id,
+            Body::Rename {
+                name: format!("g{i}"),
+            },
+            102 + 3 * i,
+        );
+    }
+    let group = log.group_id();
+    let stored: Vec<Entry> = log.entries_in_order().into_iter().cloned().collect();
+    let bytes: usize = stored.iter().map(|e| e.encode().len()).sum();
+    let (judged, whole) = timed(|| {
+        let mut judged = GroupLog::empty(group);
+        judged.insert_all(stored.clone());
+        drop(judged.state());
+        judged
+    });
+    let verdicts = judged.verdicts(judged.hashes().copied());
+    let ((), with_verdicts) = timed(|| {
+        let (back, anew) = GroupLog::read_judged(group, stored.clone(), Some(&verdicts), true);
+        assert!(anew.is_none());
+        drop(back.state());
+    });
+    let raise = Entry::sign(&ana.id, group, early.clone(), 50, Body::Level { level: 4 });
+    let mut raised = judged.clone();
+    let ((), after_raise) = timed(|| {
+        assert_eq!(raised.insert(raise.clone()), Ok(true));
+        drop(raised.state());
+    });
+    assert_eq!(raised.level(), Level::Four);
+    let alone = Rotation::new(&group, [others[0].key()]).unwrap().0;
+    let stale = Entry::sign(
+        &others[0].id,
+        group,
+        early,
+        60,
+        Body::Rotate { rotation: alone },
+    );
+    let ((), twice) = timed(|| {
+        assert_eq!(raised.insert(stale.clone()), Ok(true));
+        drop(raised.state());
+    });
+    assert!(!raised.state().applied.contains(&stale.hash()));
+    println!(
+        "{} entries, {bytes} bytes: judged whole in {whole:?}; read back with its verdicts in \
+         {with_verdicts:?}; a raise to four on old parents taken and the group worked out \
+         again in {after_raise:?}; a held rotation then, worked out twice, in {twice:?}",
+        stored.len()
+    );
+}

@@ -87,9 +87,10 @@ pub(crate) struct Seen {
     /// and keys nothing can be sealed to).
     pub(crate) for_all: bool,
     /// Whether level four holds it to `for_all` where it is judged: kept, where its author
-    /// saw the group at level four; applied, where the log holds a raise to level four
-    /// that it is not before (that raise's author did not see it), wherever it is in the
-    /// order (see [`Level::Four`]). Not part of what its author saw: set where it is used.
+    /// saw the group at level four; applied, where a raise to level four applies (in the
+    /// group worked out holding nothing) that it is not before (that raise's author did not
+    /// see it), wherever it is in the order (see [`Level::Four`]). Not part of what its
+    /// author saw: set where it is used.
     pub(crate) bound: bool,
 }
 
@@ -133,10 +134,14 @@ pub enum Level {
     /// Level three, and (see the architecture document, 5.1): a `Rotate` gives the new
     /// key to every member its author saw, and a `Remove` its new epoch to every member its
     /// author saw but the one removed (keys nothing can be sealed to aside). One that leaves
-    /// some out is not kept where its author saw the group at level four; and, in a log that
-    /// holds a raise to level four, one that raise did not see (written apart from it, or
-    /// after it) does not apply, wherever it goes in the order: one signed on entries from
-    /// before the raise may go before it, and would otherwise apply by the rules before.
+    /// some out is not kept where its author saw the group at level four; and, where a raise
+    /// to level four applies, one that raise did not see (written apart from it, or after
+    /// it) does not apply, wherever it goes in the order: one signed on entries from before
+    /// the raise may go before it, and would otherwise apply by the rules before. Which
+    /// raise applies is taken from the group worked out holding nothing, so that what the
+    /// rule refuses never decides whether it holds; a raise by a manager since removed,
+    /// demoted or gone, signed on entries from when it managed, is outranked by that loss
+    /// and holds nothing.
     ///
     /// Judged on the group its author saw ([`Seen`]), once per entry, and on which entries
     /// the raise is signed on: every copy comes to the same answer whatever order the

@@ -88,6 +88,8 @@ pub(crate) struct Settled {
     /// Whether the rounds reached one that changed nothing (they stop after a round per loss
     /// otherwise): only then does an entry signed on everything apply on top.
     pub(crate) still: bool,
+    /// The rotations and removals held to level four (see [`GroupLog::held_to_four`]).
+    pub(crate) held: Arc<BTreeSet<EntryHash>>,
 }
 
 /// Where each room rule of the common order not past its author's run stands from the
@@ -429,10 +431,19 @@ impl GroupLog {
         // outranks it nor does it, if a loss, outrank any of them: then every round of the
         // losses comes out as before, with it applied last.
         // A raise to level four goes on top only signed on every entry: otherwise entries
-        // before it that it did not see are held to it, whatever applied of them.
+        // before it that it did not see are held to it, whatever applied of them. And a
+        // rotation or removal does only where every raise to four kept applies: one that
+        // does not may have applied in the group worked out holding nothing, which decides
+        // what is held (see `settle`).
+        let raise_unsure = matches!(entry.body, Body::Rotate { .. } | Body::Remove { .. })
+            && settled.as_ref().is_some_and(|s| {
+                (f.order.hashes.iter())
+                    .any(|h| raises_to_four(&self.entries[h]) && !s.state.applied.contains(h))
+            });
         if last
             && (on_top || self.outranks_nothing_new(&f.order, &hash))
             && (on_top || !raises_to_four(entry))
+            && !raise_unsure
             && let Some(mut settled) = settled.filter(|s| s.still)
         {
             let s = Arc::make_mut(&mut settled);
@@ -446,13 +457,16 @@ impl GroupLog {
             if budget.over.contains(&hash) {
                 state.refuse(hash, PAST_RUN);
             } else {
-                // Placed last, it is before nothing: a raise to level four in the log did
+                // Placed last, it is before nothing: a raise to level four that applied did
                 // not see it (see `held_to_four`).
                 let bound = matches!(entry.body, Body::Rotate { .. } | Body::Remove { .. })
-                    && f.order
-                        .hashes
+                    && state
+                        .applied
                         .iter()
                         .any(|h| raises_to_four(&self.entries[h]));
+                if bound {
+                    Arc::make_mut(&mut s.held).insert(hash);
+                }
                 let needed = (bound || state.rotation_to_judge(entry)).then(|| {
                     let seen = if on_top {
                         // The group as it saw it is the group now.
@@ -709,13 +723,42 @@ impl GroupLog {
     /// The group without its room rules after the entries of `order`, the common order (see
     /// [`GroupLog::state`]): the rules in it apply later, on top, and no loss outranks them.
     /// `over` are the entries of `order` past their author's run, which never apply.
+    ///
+    /// Level four holds some rotations and removals to every member their authors saw, those
+    /// a raise to four that applies was not signed on ([`GroupLog::held_to_four`]): which
+    /// raises apply is taken from the group worked out holding none, so that what the rule
+    /// refuses (a removal of the raise's author, say) never decides whether it holds. The
+    /// group is worked out again holding them only when one of them leaves someone out.
     fn settle(&self, order: &Order, over: &Entries) -> Settled {
+        let free = self.settle_holding(order, over, Arc::default());
+        let raises: Vec<&EntryHash> = (free.state.applied.iter())
+            .filter(|h| raises_to_four(&self.entries[*h]))
+            .collect();
+        if raises.is_empty() {
+            return free;
+        }
+        let held = self.held_to_four(&order.hashes, &raises);
+        if held.iter().all(|h| self.rotation_needed(h).for_all) {
+            return Settled {
+                held: Arc::new(held),
+                ..free
+            };
+        }
+        self.settle_holding(order, over, Arc::new(held))
+    }
+
+    /// [`Self::settle`] holding to level four the rotations and removals in `held`.
+    fn settle_holding(
+        &self,
+        order: &Order,
+        over: &Entries,
+        held: Arc<BTreeSet<EntryHash>>,
+    ) -> Settled {
         #[cfg(any(test, feature = "counts"))]
         crate::work::settled();
         let hashes = &order.hashes;
         let graph = OnceCell::new();
         let mut outranked = BTreeMap::new();
-        let held = self.held_to_four(hashes);
         let mut state = self.apply_in_order(order, &outranked, over, &held);
         // Losses come from what applied, and what applies depends on what was refused: go on
         // until nothing changes. A loss is only ever signed by someone above, so that comes
@@ -744,6 +787,7 @@ impl GroupLog {
             state: Arc::new(state),
             outranked,
             still,
+            held,
         }
     }
 

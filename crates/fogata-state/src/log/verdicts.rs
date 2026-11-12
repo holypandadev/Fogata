@@ -245,3 +245,59 @@ impl GroupLog {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use fogata_crypto::DeviceIdentity;
+
+    use super::*;
+    use crate::entry::Body;
+
+    /// What was judged of a log kept by 0.1.0-beta.9 (format 1, judged at level three, no
+    /// record of what authors saw), as it wrote it, for `entries` of `group_id`: refused and
+    /// waiting none.
+    fn as_beta_nine_kept(group_id: GroupId, entries: &[Entry]) -> Vec<u8> {
+        let read: BTreeSet<EntryHash> = entries.iter().map(Entry::hash).collect();
+        let mut w = Writer::default();
+        w.raw(MAGIC)
+            .u8(1)
+            .u32(3)
+            .u32(JUDGING)
+            .group(&group_id)
+            .raw(&digest(group_id, &read))
+            .u32(0)
+            .u32(0);
+        w.into_bytes()
+    }
+
+    /// A log kept by the version before, with what it judged of it in its own form, reads
+    /// back whole: those verdicts count for nothing here (another form, another level), the
+    /// entries are judged once as they come, and the verdicts this version keeps in their
+    /// place are returned.
+    #[test]
+    fn what_the_version_before_judged_counts_for_nothing_and_the_log_reads_whole() {
+        let ana = DeviceIdentity::generate().unwrap();
+        let bea = DeviceIdentity::generate().unwrap();
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+        log.rotate(&ana, 3).unwrap();
+        log.remove(&ana, bea.public_key(), 4).unwrap();
+        log.append(&ana, Body::Rename { name: "h".into() }, 5)
+            .unwrap();
+        let group = log.group_id();
+        let stored: Vec<Entry> = log.entries_in_order().into_iter().cloned().collect();
+        let before = as_beta_nine_kept(group, &stored);
+        assert!(Verdicts::decode(&before).is_err());
+        let old = Verdicts::decode(&before).ok();
+        let (back, anew) = GroupLog::read_judged(group, stored.clone(), old.as_ref(), true);
+        assert_eq!(back.hashes_in_order(), log.hashes_in_order());
+        assert_eq!(back.state().applied, log.state().applied);
+        assert_eq!(back.state().name, "h");
+        let anew = anew.expect("judged anew");
+        // Kept now with what the rotation's and the removal's authors saw.
+        assert_eq!(anew.seen.len(), 2);
+        let (again, none) = GroupLog::read_judged(group, stored, Some(&anew), true);
+        assert!(none.is_none());
+        assert_eq!(again.state().applied, log.state().applied);
+    }
+}

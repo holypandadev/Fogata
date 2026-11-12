@@ -1457,14 +1457,19 @@ impl GroupLog {
     }
 
     /// The `Rotate` and `Remove` entries of `hashes` (entries of the log, with every entry
-    /// before each) that a raise to level four or a later level among them is not signed on,
-    /// directly or not: those its author did not see, written apart from it or after it.
-    /// Level four holds them to every member their authors saw wherever they go in the
-    /// order, before the raise too (see [`Level::Four`]). Which entries a raise is signed on
-    /// is fixed by its hash, so every copy with the same entries holds the same.
-    pub(crate) fn held_to_four(&self, hashes: &[EntryHash]) -> BTreeSet<EntryHash> {
+    /// before each) that one of `raises`, raises to level four or a later level that apply,
+    /// is not signed on, directly or not: those its author did not see, written apart from
+    /// it or after it. Level four holds them to every member their authors saw wherever they
+    /// go in the order, before the raise too (see [`Level::Four`]). Which entries a raise is
+    /// signed on is fixed by its hash, so every copy with the same entries holds the same.
+    /// Only one raise to four applies (any other is not above the group's level then).
+    pub(crate) fn held_to_four(
+        &self,
+        hashes: &[EntryHash],
+        raises: &[&EntryHash],
+    ) -> BTreeSet<EntryHash> {
         let mut held = BTreeSet::new();
-        for raise in hashes.iter().filter(|h| raises_to_four(&self.entries[*h])) {
+        for raise in raises {
             let seen = self.ancestors(raise);
             held.extend(hashes.iter().filter(|h| {
                 matches!(
@@ -6335,7 +6340,7 @@ mod tests {
             .map(|(h, _)| *h)
             .collect();
         let over = &log.full().budget.over;
-        let held = log.held_to_four(&log.ordered());
+        let held = log.settled_cache().held.clone();
         let mut state = GroupState::default();
         for hash in log.ordered() {
             let entry = &log.entries[&hash];

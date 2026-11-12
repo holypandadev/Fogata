@@ -2679,9 +2679,9 @@ that has it sends it to the members that lack it (`welcome_lacking`). Level four
 - a `Remove` gives its new epoch to every member its author saw but the one removed (the
   same keys aside).
 
-One that leaves some out is not kept where its author saw the group at level four; and, in a
-log that holds a raise to four, one that the raise did not see does not apply (a `Remove`
-then removes nobody, and its epoch does not start), wherever it goes in the order.
+One that leaves some out is not kept where its author saw the group at level four; and, where
+a raise to four applies, one that the raise did not see does not apply (a `Remove` then
+removes nobody, and its epoch does not start), wherever it goes in the order.
 
 *What is judged, and on which view.* Whether the new epoch reaches every member is judged
 once per entry, on the group its author saw: the state of the log made of the entry's
@@ -2694,27 +2694,42 @@ does not work the views out again. Where it holds:
 - *kept*: an entry is judged, as every entry, on its author's view at that view's level; at
   four a `Remove` that leaves out a member its author saw is refused (a `Rotate` already is
   from level three), so neither is kept nor passed on, and what is signed on it waits;
-- *applied*: the `Rotate` and `Remove` entries that a raise to four kept in the log is not
-  signed on, directly or not (`GroupLog::held_to_four`: those its author did not see,
-  written apart from it or after it), are held to the rule where they apply, whatever level
-  the group is at there. Holding only those placed after the raise would not do: an entry
-  signed on entries from before the raise is placed among them, and goes before the raise
-  when its author came in after the authors of the entries it is placed among (5.1's
-  order), so a member could still sign a rotation for a few on old entries at any time and
-  have it apply by the rules before. Entries the raise is signed on, the raiser saw, as
-  history kept and applied by the rules of their time, are not judged again.
+- *applied*: the group is worked out holding nothing back; if a raise to four applies there,
+  the `Rotate` and `Remove` entries it is not signed on, directly or not
+  (`GroupLog::held_to_four`: those its author did not see, written apart from it or after
+  it), are held to the rule where they apply, whatever level the group is at there, and the
+  group is worked out again holding them, when one of them leaves someone out. Holding only
+  those placed after the raise would not do: an entry signed on entries from before the
+  raise is placed among them, and goes before the raise when its author came in after the
+  authors of the entries it is placed among (5.1's order), so a member could still sign a
+  rotation for a few on old entries at any time and have it apply by the rules before.
+  Entries the raise is signed on, the raiser saw, as history kept and applied by the rules
+  of their time, are not judged again.
 
-The raise holds them whether or not it applies (it may lose to a loss of its author written
-apart from it): that a manager raised the group on a view where it managed is enough, and
-it keeps the rule from depending on what it changes (a removal of the raiser that the rule
-refuses would otherwise decide whether the rule holds). It only ever refuses entries that
-leave out members their authors saw, which honest devices never write: `rotate` and
-`remove` give the key to every member of the group they are signed on.
+Which raise applies is taken from the group worked out holding nothing, so what the rule
+refuses (a removal of the raiser, say) never decides whether it holds, and only a raise that
+applies holds anything: one by a manager since removed, moved down or gone, signed on
+entries from when it managed, is outranked by that loss (as any entry signed apart from it)
+and holds nothing; once the group is at four, a second raise is not above its level and
+applies nowhere either. A raise on old entries by a manager that still manages (or one that
+stopped managing without a loss of its own, the managers set to fewer) does hold what came
+after them: that changes nothing of honest history, since every released writer gives the
+new key to every member of the group as its copy has it, and its copy has what the entry is
+signed on (A raise past two also judges at level three the notes of invites that name nobody
+placed after it, as a raise to three always did: they let nobody in by themselves). The only
+honest entries that could leave out a member of their view are those signed on more heads
+than an entry names (64), which a member must write dozens of entries apart to make, and of
+which a member removed or gone in an entry left unnamed is then left out; this version signs
+a rotation and a removal on the members of the group its parents make, so it never does.
+Tests add raises on old parents, by every manager of then, current and former, at points
+through random honest histories (with rotations and removals written as earlier releases
+wrote them) and through the saved corpora, and check that honest history applies the same.
 
 *Why every copy agrees.* What applies depends on three things only: the entry's view, fixed
-by its ancestors; the raises to four the log keeps, which every copy with the same entries
-keeps alike (what is kept depends on nothing but an entry and those before it); and which
-entries each raise is signed on, fixed by its hash. None depends on the order the entries came
+by its ancestors; which raise to four applies in the group worked out holding nothing, which
+is the judgment every copy with the same entries already makes alike (what is kept depends
+on nothing but an entry and those before it, and what applies on the entries kept); and
+which entries that raise is signed on, fixed by its hash. None depends on the order the entries came
 in, nor on what else a copy has: two copies given the same entries in any order keep and
 apply the same. A property test checks it with random histories raised to three and then to
 four, members writing rotations and removals for a few on entries from before each raise and
@@ -2725,7 +2740,8 @@ entry by entry is the one worked out again from nothing. The probes of level thr
 (a member's rotation for itself on entries from before the raise, with and without a
 manager's rotation between the leave and the raise) are kept as checks of level four. A raise
 signed on every entry goes on top of the group worked out so far (every entry before it is
-one it saw); one signed on fewer has the group worked out again.
+one it saw); one signed on fewer has the group worked out again, as any entry on old parents
+does, and twice only when a rotation or removal it holds leaves someone out.
 
 *What an older copy sees.* A copy of level three refuses the `Level` entry naming four, and
 waits on everything signed after it, as for any level it does not judge at: the group stays

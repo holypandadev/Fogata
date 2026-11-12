@@ -177,7 +177,7 @@ impl GroupLog {
         // taken from the group as it goes, not from a copy of it at each entry, which would
         // cost the length of the log at every entry.
         let over = &self.full().budget.over;
-        let held = self.held_to_four(&self.ordered());
+        let held = self.settled_cache().held.clone();
         let place = &self.full().order.place;
         let mut state = GroupState::default();
         for hash in self.ordered() {
@@ -307,7 +307,7 @@ impl GroupLog {
         // The main entries, step by step, each against the group just before it: the same
         // steps as `settled`, which they are checked against.
         let over = &self.full().budget.over;
-        let held = self.held_to_four(&self.ordered());
+        let held = self.settled_cache().held.clone();
         let mut state = GroupState::default();
         for hash in self.ordered() {
             let entry = self.get(&hash).expect("ordered entries are in the log");

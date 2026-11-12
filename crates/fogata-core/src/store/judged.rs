@@ -241,6 +241,57 @@ pub(crate) mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A data folder as 0.1.0-beta.9 left it opens: its groups list and screen times without
+    /// what this version adds to them, and what it judged of a log in its own form (format 1,
+    /// level three), which counts for nothing here: the log is judged once from its file,
+    /// which is only read (a stop half way leaves it as it was), and what this version
+    /// judged is kept in its place for the next start.
+    #[test]
+    fn a_folder_of_the_version_before_opens_and_its_logs_are_judged_once() {
+        let dir = folder("beta9");
+        let store = Store::open_with(dir.clone(), Keychain::Off).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let (log, _) = costly_log(&me, 40);
+        let id = log.group_id();
+        store.save_log("Home", &log).unwrap();
+        let file = fs::read(store.log_path(&id)).unwrap();
+        // What beta.9 kept beside it: its magic, format 1, level three, way of judging 1.
+        let mut old = b"fgjudged".to_vec();
+        old.push(1);
+        old.extend(3u32.to_be_bytes());
+        old.extend(1u32.to_be_bytes());
+        old.extend(id.as_bytes());
+        old.extend([0u8; 32]);
+        old.extend(0u32.to_be_bytes());
+        old.extend(0u32.to_be_bytes());
+        fs::write(store.judged_path(&id), &old).unwrap();
+        // Its screen times, without the waits this version notes.
+        fs::write(
+            dir.join("meta.json"),
+            br#"{"last_seen":{},"last_room":{},"port":39756,"reached":{}}"#,
+        )
+        .unwrap();
+        drop(store);
+        let again = Store::open_with(dir.clone(), Keychain::Off).unwrap();
+        again.identity().unwrap();
+        assert_eq!(again.meta().port, Some(39756));
+        assert!(again.meta().level_wait.is_empty());
+        let (back, judging) = counted(|| again.load_log_of(&id).unwrap());
+        assert_same(&back, &log);
+        assert!(judging.viewed > 0, "judged from its entries: {judging:?}");
+        assert_eq!(
+            fs::read(again.log_path(&id)).unwrap(),
+            file,
+            "the log is only read"
+        );
+        let kept = fs::read(again.judged_path(&id)).unwrap();
+        assert_ne!(kept, old);
+        assert!(Verdicts::decode(&kept).is_ok());
+        let (_, took) = counted(|| drop(again.load_log_of(&id).unwrap().state()));
+        assert_eq!(took.viewed, 0, "judged once: {took:?}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// What was judged of a log counts only for the very same entries, and in a sealed folder
     /// only sealed with its key for that log: a log changed or cut short since, verdicts
     /// left plain, sealed with another key or for another group, or damaged, count for
