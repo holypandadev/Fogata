@@ -2611,10 +2611,11 @@ author is not counted as writing what it could not. A level of judgment comes wi
 capability level of its number, so the capability level a device lists also says the levels
 it judges at; the one place a group's level goes up (`Core::raise_group_level`, which
 `GroupLog::raise_level` serves, `append` writing no `Level` entry) checks that every other
-member was seen at it. A manager's device raises its group by itself, at a heartbeat, once
-every other member was seen at the level this version judges at (`raise_level_when_all_judge`
-in fogata-net, the manager above it going first when connected): a group with a member on an
-older copy stays where it is, under the old rules, until that member updates. The group's
+member was seen at it. A manager's device raises its group by itself, at a heartbeat, to the
+highest level of judgment this version knows that every other member was seen at
+(`raise_level_when_all_judge` in fogata-net, the manager above it going first when
+connected): a group with a member on an older copy goes as far as that copy judges, and no
+further, under the older rules, until that member updates. The group's
 settings show its managers that the group waits, and which members have not updated
 (`GroupView::level_behind`). One such member could otherwise keep the group under the old
 rules for ever (one that stopped using Fogata, cannot update, or connects listing a lower

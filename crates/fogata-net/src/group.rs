@@ -1003,34 +1003,41 @@ impl GroupContext {
         }
     }
 
-    /// Managers: raises the group to the highest level of judgment this version knows
-    /// (`fogata_state::Level::CURRENT`) once every other member's copy was seen judging at
-    /// it: `seen` gives the highest capability level each device was seen at (see
-    /// [`crate::caps`]), which says the levels it judges at. A copy below it would refuse
-    /// the `Level` entry and wait on everything signed after it, so one member never seen at
-    /// that level keeps the group where it is. While a manager above this one is connected
-    /// (`one_above`), that one raises it. Returns the new entry.
+    /// Managers: raises the group to the highest level of judgment this version knows that
+    /// every other member's copy was seen judging at (up to `fogata_state::Level::CURRENT`):
+    /// `seen` gives the highest capability level each device was seen at (see
+    /// [`crate::caps`]), which says the levels it judges at. A copy below a level would
+    /// refuse the `Level` entry and wait on everything signed after it, so one member never
+    /// seen at a level keeps the group below it; a group whose members all judge at a level
+    /// before this version's still goes up to that one. While a manager above this one is
+    /// connected (`one_above`), that one raises it. Returns the new entry.
     pub(crate) fn raise_level_when_all_judge(
         &mut self,
         now_ms: u64,
         one_above: bool,
         seen: impl Fn(&DevicePublicKey) -> u32,
     ) -> Vec<EntryHash> {
-        let level = fogata_state::Level::CURRENT;
-        if one_above || self.joining.is_some() || !self.i_am_manager() || self.log.level() >= level
-        {
+        if one_above || self.joining.is_some() || !self.i_am_manager() {
             return Vec::new();
         }
         let me = self.identity.public_key();
-        let all = self
-            .state
-            .members
-            .keys()
+        let others: Vec<u32> = (self.state.members.keys())
             .filter(|device| **device != me)
-            .all(|device| crate::caps::judges_at(seen(device), level));
-        if !all {
+            .map(&seen)
+            .collect();
+        let judged_by_all = |level: &fogata_state::Level| {
+            others
+                .iter()
+                .all(|seen| crate::caps::judges_at(*seen, *level))
+        };
+        let Some(level) = (crate::caps::FIRST_LEVEL..=fogata_state::Level::CURRENT.number())
+            .rev()
+            .filter_map(fogata_state::Level::numbered)
+            .find(judged_by_all)
+            .filter(|level| *level > self.log.level())
+        else {
             return Vec::new();
-        }
+        };
         match self.log.raise_level(&self.identity, level, now_ms) {
             Ok(entry) => {
                 tracing::info!(
@@ -2120,8 +2127,9 @@ mod tests {
     }
 
     /// A manager raises the group to this version's level of judgment once every other
-    /// member was seen at it, never before, and only once; one with a manager above it
-    /// connected leaves it to that one.
+    /// member was seen at it, never before, and only once; to the level before it while
+    /// a member was seen at that one only; one with a manager above it connected leaves it
+    /// to that one.
     #[test]
     fn a_group_goes_up_a_level_once_every_member_judges_at_it() {
         let ana = Arc::new(DeviceIdentity::generate().unwrap());
@@ -2129,9 +2137,23 @@ mod tests {
         let mut log = GroupLog::create(&ana, "g", 1).unwrap();
         log.add(&ana, luis.public_key(), "luis", 2).unwrap();
         let level = fogata_state::Level::CURRENT;
+        let before = fogata_state::Level::numbered(level.number() - 1).unwrap();
         let mut at_ana = ctx(&ana, &log);
         let luis_key = luis.public_key();
         let seen_at = |n: u32| move |d: &DevicePublicKey| if *d == luis_key { n } else { 0 };
+        // Never seen saying a level: the group stays where it is.
+        assert!(
+            at_ana
+                .raise_level_when_all_judge(3, false, |_| 0)
+                .is_empty()
+        );
+        assert_eq!(
+            at_ana
+                .raise_level_when_all_judge(3, false, seen_at(level.number() - 1))
+                .len(),
+            1
+        );
+        assert_eq!(at_ana.log().level(), before);
         assert!(
             at_ana
                 .raise_level_when_all_judge(3, false, seen_at(level.number() - 1))
