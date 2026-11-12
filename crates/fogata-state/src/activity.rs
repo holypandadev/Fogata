@@ -4,6 +4,8 @@
 //! [`GroupLog::state`]) was done and then undone, and says by which loss. Entries refused for
 //! any other reason never happened, and neither do keys handed out or rotations.
 
+use std::sync::Arc;
+
 use fogata_crypto::DevicePublicKey;
 
 use crate::{
@@ -120,6 +122,15 @@ pub struct Activity {
 }
 
 impl GroupLog {
+    /// [`Self::activity`], worked out once until the log changes, and shared with its
+    /// copies: the screens ask for it a page at a time.
+    pub fn shared_activity(&self) -> Arc<Vec<Activity>> {
+        self.cache
+            .activity
+            .get_or_init(|| Arc::new(self.activity()))
+            .clone()
+    }
+
     /// What the members did, in the common order, the oldest first (see
     /// [`crate::activity`]).
     pub fn activity(&self) -> Vec<Activity> {
@@ -703,5 +714,31 @@ mod tests {
             "{work:?} for {entries} entries"
         );
         assert_eq!(known.activity(), known.activity_by_copies());
+    }
+
+    /// The activity the screens ask for a page at a time is worked out once for the log as
+    /// it is, shared with its copies, and anew once it changes.
+    #[test]
+    fn the_activity_is_worked_out_once_until_the_log_changes() {
+        let d = ids(2);
+        let mut log = GroupLog::create(&d[0], "Sundays", 1).unwrap();
+        log.add(&d[0], d[1].public_key(), "Leo", 2).unwrap();
+        for i in 0..50 {
+            let body = Body::Rename {
+                name: format!("Sundays {i}"),
+            };
+            log.append(&d[i % 2], body, 10 + i as u64).unwrap();
+        }
+        let lines = log.shared_activity();
+        assert_eq!(*lines, log.activity());
+        crate::work::Work::start();
+        let again = log.clone().shared_activity();
+        assert_eq!(crate::work::Work::done().applied, 0, "worked out again");
+        assert!(Arc::ptr_eq(&lines, &again));
+        log.append(&d[0], Body::Rename { name: "h".into() }, 99)
+            .unwrap();
+        let changed = log.shared_activity();
+        assert_eq!(changed.len(), lines.len() + 1);
+        assert_eq!(*changed, log.activity());
     }
 }

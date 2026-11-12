@@ -123,6 +123,8 @@ pub(crate) struct Cache {
     pub(crate) heads: OnceLock<Vec<EntryHash>>,
     /// The entries of the common order that are not spare (see [`GroupLog::spare`]).
     needed: OnceLock<Arc<Needed>>,
+    /// Who did what (see [`GroupLog::shared_activity`]).
+    pub(crate) activity: OnceLock<Arc<Vec<crate::activity::Activity>>>,
     /// What the author of each `Rotate` and `Remove` judged so far saw (see
     /// [`GroupLog::rotation_needed`]). That depends only on the entry and what came before
     /// it, which its hash fixes, so it is kept when the log changes, and shared with copies.
@@ -319,6 +321,7 @@ impl GroupLog {
         match self.cache.full.get_mut() {
             Some(full) if full.waiting.contains(hash) => {
                 Arc::make_mut(full).waiting.remove(hash);
+                self.cache.activity.take();
             }
             _ => self.work_out_again(),
         }
@@ -328,6 +331,7 @@ impl GroupLog {
     /// carried forward is dropped, to be worked out again when asked for.
     pub(crate) fn note_new(&mut self, hash: EntryHash) {
         self.cache.needed.take();
+        self.cache.activity.take();
         let heads = self.cache.heads.take();
         let state = self.cache.state.take();
         let settled = self.cache.settled.take();

@@ -34,9 +34,9 @@ enum Slot<L, S> {
 /// The page `skip..skip + take` of `lines` (the newest first) with `seen` (in any order)
 /// put among them by time, and whether more follow: a record goes before the first line
 /// that is not newer than it, and records of the same time keep their order. Nothing is
-/// made of the slots outside the page.
+/// made of the slots outside the page, and no line past it is looked at.
 fn page_by_time<L, S>(
-    lines: Vec<L>,
+    lines: impl IntoIterator<Item = L>,
     line_ms: impl Fn(&L) -> u64,
     mut seen: Vec<S>,
     seen_ms: impl Fn(&S) -> u64,
@@ -44,18 +44,23 @@ fn page_by_time<L, S>(
     take: usize,
 ) -> (Vec<Slot<L, S>>, bool) {
     seen.sort_by_key(|s| std::cmp::Reverse(seen_ms(s)));
-    let mut all = Vec::with_capacity(lines.len() + seen.len());
     let mut seen = seen.into_iter().peekable();
-    for line in lines {
-        let at = line_ms(&line);
-        while let Some(record) = seen.next_if(|r| seen_ms(r) >= at) {
-            all.push(Slot::Seen(record));
+    let mut lines = lines.into_iter().peekable();
+    let all = std::iter::from_fn(|| match lines.peek() {
+        Some(line) => {
+            let at = line_ms(line);
+            match seen.next_if(|r| seen_ms(r) >= at) {
+                Some(record) => Some(Slot::Seen(record)),
+                None => lines.next().map(Slot::Line),
+            }
         }
-        all.push(Slot::Line(line));
-    }
-    all.extend(seen.map(Slot::Seen));
-    let more = all.len() > skip.saturating_add(take);
-    (all.into_iter().skip(skip).take(take).collect(), more)
+        None => seen.next().map(Slot::Seen),
+    });
+    // One past the page tells whether more follow.
+    let mut page: Vec<Slot<L, S>> = all.skip(skip).take(take.saturating_add(1)).collect();
+    let more = page.len() > take;
+    page.truncate(take);
+    (page, more)
 }
 
 impl Core {
@@ -305,9 +310,18 @@ impl Core {
                 Some((author, r))
             })
             .collect();
-        let lines = log.activity().into_iter().rev().collect();
-        let (page, more) = page_by_time(lines, |a| a.time_ms, seen, |(_, r)| r.time_ms, skip, take);
-        let view = |slot: Slot<fogata_state::Activity, (DevicePublicKey, store::RecordSeen)>| {
+        // Worked out once for each change of the log (each line is told from the group
+        // before it), and read from its end: only the page's lines are copied.
+        let lines = log.shared_activity();
+        let (page, more) = page_by_time(
+            lines.iter().rev(),
+            |a| a.time_ms,
+            seen,
+            |(_, r)| r.time_ms,
+            skip,
+            take,
+        );
+        let view = |slot: Slot<&fogata_state::Activity, (DevicePublicKey, store::RecordSeen)>| {
             let a = match slot {
                 Slot::Seen((author, r)) => {
                     let taken_away = r.taken_away;
@@ -322,7 +336,7 @@ impl Core {
                         seen_here: true,
                     };
                 }
-                Slot::Line(a) => a,
+                Slot::Line(a) => a.clone(),
             };
             let what = match a.did {
                 Did::Created { name } => ActivityWhat::Created { name },
@@ -1018,6 +1032,19 @@ mod tests {
             })
             .collect();
         (names, more)
+    }
+
+    /// A page of a long activity looks at the lines up to it and one past it, no further.
+    #[test]
+    fn a_page_looks_at_no_line_past_it() {
+        let looked = std::cell::Cell::new(0);
+        let lines = (0..10_000u64)
+            .rev()
+            .inspect(|_| looked.set(looked.get() + 1));
+        let (page, more) = page_by_time(lines, |l| *l, vec![9_990u64], |s| *s, 10, 5);
+        assert!(more);
+        assert_eq!(page.len(), 5);
+        assert!(looked.get() <= 10 + 5 + 2, "{} lines looked at", looked.get());
     }
 
     /// A record goes before the first line not newer than it, even among lines whose
