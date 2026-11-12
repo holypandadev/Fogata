@@ -245,36 +245,7 @@ impl Node {
                 self.on_group_banner_request(peer, group_id, banner)
             }
             MemberRequest::GroupPicture { group_id, picture } => {
-                let Some(group) = group_of(&group_id) else {
-                    return MemberResponse::Refused;
-                };
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                if !slot.members.contains(&peer) {
-                    return MemberResponse::Refused;
-                }
-                slot.picture_peers.insert(peer);
-                // As a banner past the budget is.
-                if !self.take_group_record(peer, picture.len()) {
-                    return MemberResponse::Ack;
-                }
-                let Some(slot) = self.groups.get_mut(&group) else {
-                    return MemberResponse::Refused;
-                };
-                // As an older banner is.
-                match slot.ctx.picture_may_be_newer(&picture) {
-                    Err(_) => return MemberResponse::Refused,
-                    Ok(false) => return MemberResponse::Ack,
-                    Ok(true) => {}
-                }
-                let Ok(picture) = fogata_state::GroupPicture::decode(&picture) else {
-                    return MemberResponse::Refused;
-                };
-                if slot.ctx.take_picture(picture) {
-                    self.picture_changed(group, Some(peer));
-                }
-                MemberResponse::Ack
+                self.on_group_picture_request(peer, group_id, picture)
             }
             MemberRequest::Push { group_id, entries } => {
                 let Some(group) = group_of(&group_id) else {
@@ -918,6 +889,45 @@ impl Node {
         };
         if slot.ctx.take_banner(banner) {
             self.banner_changed(group, Some(peer));
+        }
+        MemberResponse::Ack
+    }
+
+    /// Takes a group's picture record a member sends.
+    fn on_group_picture_request(
+        &mut self,
+        peer: PeerId,
+        group_id: Vec<u8>,
+        picture: Vec<u8>,
+    ) -> MemberResponse {
+        let Some(group) = group_of(&group_id) else {
+            return MemberResponse::Refused;
+        };
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        if !slot.members.contains(&peer) {
+            return MemberResponse::Refused;
+        }
+        slot.picture_peers.insert(peer);
+        // As a banner past the budget is.
+        if !self.take_group_record(peer, picture.len()) {
+            return MemberResponse::Ack;
+        }
+        let Some(slot) = self.groups.get_mut(&group) else {
+            return MemberResponse::Refused;
+        };
+        // As an older banner is.
+        match slot.ctx.picture_may_be_newer(&picture) {
+            Err(_) => return MemberResponse::Refused,
+            Ok(false) => return MemberResponse::Ack,
+            Ok(true) => {}
+        }
+        let Ok(picture) = fogata_state::GroupPicture::decode(&picture) else {
+            return MemberResponse::Refused;
+        };
+        if slot.ctx.take_picture(picture) {
+            self.picture_changed(group, Some(peer));
         }
         MemberResponse::Ack
     }
