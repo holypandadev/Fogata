@@ -413,6 +413,86 @@ pub(crate) mod tests {
         }
     }
 
+    /// A group of two members taking turns, `n` entries after its start, each about
+    /// `bytes` long: a group picture set as versions before picture records did.
+    pub(crate) fn large_log(ana: &DeviceIdentity, n: usize, bytes: usize) -> GroupLog {
+        let leo = DeviceIdentity::generate().unwrap();
+        let mut log = GroupLog::create(ana, "Home", 1).unwrap();
+        log.add(ana, leo.public_key(), "Leo", 2).unwrap();
+        for i in 0..n {
+            let by = [ana, &leo][i % 2];
+            let mut picture = vec![(i % 251) as u8; bytes];
+            picture[..8].copy_from_slice(&(i as u64).to_be_bytes());
+            let body = Body::SetPicture {
+                picture: Some(picture),
+            };
+            log.append(by, body, 10 + i as u64).unwrap();
+        }
+        log
+    }
+
+    /// What a burst of 200 changes to a group of about 3 MB costs, as the core goes through
+    /// them: each change made on the node's log, which hands the core a copy of it
+    /// (`Node::group`), saved in turn by the writer, which writes only the newest of the
+    /// saves waiting; in a plain folder and a sealed one. For a release build: `cargo test
+    /// --release -p fogata-core --lib -- --ignored measure_a_burst_of_changes --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_a_burst_of_changes_to_a_large_log() {
+        let ana = DeviceIdentity::generate().unwrap();
+        let large = large_log(&ana, 4094, 600);
+        for sealed in [false, true] {
+            let dir = folder(&format!("burst-{sealed}"));
+            let keychain = if sealed {
+                Keychain::Seal(Arc::new(MemoryKeyStore::default()))
+            } else {
+                Keychain::Off
+            };
+            let store = Arc::new(Store::open_with(dir.clone(), keychain).unwrap());
+            store.identity().unwrap();
+            let mut log = large.clone();
+            let id = log.group_id();
+            store.save_group_log(&log, "Home").unwrap();
+            let size = fs::metadata(store.log_path(&id)).unwrap().len();
+            let (_, whole) = timed(|| store.save_group_log(&log, "Home").unwrap());
+            let writer = crate::writer::Writer::start().unwrap();
+            let saves = Arc::new(std::sync::Mutex::new((0, Duration::ZERO)));
+            let started = Instant::now();
+            let mut node = Duration::ZERO;
+            for i in 0..200 {
+                let (snapshot, took) = timed(|| {
+                    let body = Body::Rename {
+                        name: format!("b{i}"),
+                    };
+                    log.append(&ana, body, 1_000_000 + i).unwrap();
+                    log.clone()
+                });
+                node += took;
+                let (store, saves) = (store.clone(), saves.clone());
+                writer.soon(crate::writer::File::Group(id), move || {
+                    let (_, took) = timed(|| store.save_group_log(&snapshot, "Home").unwrap());
+                    let mut saves = saves.lock().unwrap();
+                    saves.0 += 1;
+                    saves.1 += took;
+                });
+            }
+            // Dropped, the writer writes whatever waits before it goes.
+            drop(writer);
+            let took = started.elapsed();
+            let (saves, saving) = *saves.lock().unwrap();
+            let back = store.load_log_of(&id).unwrap();
+            assert_same(&back, &log);
+            println!(
+                "{}: a log of {} entries, {size} bytes on disk, saved whole in {whole:?}; a \
+                 burst of 200 changes in {took:?}, {node:?} of it on the node's side; \
+                 {saves} saves made, in {saving:?}",
+                if sealed { "sealed" } else { "plain" },
+                log.len(),
+            );
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     /// A group a friend offers again, costly to judge, is not judged again on the core's
     /// events: neither the copy kept here, nor what the node judged of the offer, here the
     /// half of the log this copy lacks.
