@@ -1975,3 +1975,18 @@ async fn writing_and_reading_at_once() {
     stop(bea).await;
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// What the recorder makes and a friend's player reads (fogata-voice) is what a voice message
+/// may be on the wire (fogata-proto), which this crate checks as it sends one and takes one:
+/// the two crates keep their limits apart, and a change of one alone would have messages
+/// refused as they are sent, or taken and never played.
+#[test]
+fn the_wire_takes_the_voice_messages_the_recorder_makes_and_the_player_reads() {
+    assert_eq!(fogata_proto::MAX_VOICE_MS, fogata_voice::MAX_MS);
+    assert_eq!(fogata_proto::MAX_VOICE_MS + 1000, fogata_voice::MAX_READ_MS);
+    assert_eq!(
+        fogata_proto::MAX_VOICE_BYTES,
+        fogata_voice::MAX_FILE_BYTES as u64
+    );
+    assert_eq!(fogata_proto::VOICE_BARS, fogata_voice::BARS);
+}
