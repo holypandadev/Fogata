@@ -238,7 +238,7 @@ pub(crate) struct Entries(BTreeMap<EntryHash, Arc<Entry>>);
 
 impl Entries {
     pub(crate) fn get(&self, hash: &EntryHash) -> Option<&Entry> {
-        self.0.get(hash).map(|e| &**e)
+        self.0.get(hash).map(Arc::as_ref)
     }
 
     pub(crate) fn contains_key(&self, hash: &EntryHash) -> bool {
@@ -250,11 +250,11 @@ impl Entries {
     }
 
     pub(crate) fn values(&self) -> impl Iterator<Item = &Entry> {
-        self.0.values().map(|e| &**e)
+        self.0.values().map(Arc::as_ref)
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&EntryHash, &Entry)> {
-        self.0.iter().map(|(h, e)| (h, &**e))
+        self.0.iter().map(|(h, e)| (h, Arc::as_ref(e)))
     }
 
     pub(crate) fn len(&self) -> usize {
