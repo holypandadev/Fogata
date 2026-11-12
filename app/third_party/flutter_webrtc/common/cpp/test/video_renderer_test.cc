@@ -55,10 +55,12 @@ class Refused : public Frame {
   int width_, height_;
 };
 
+// Counts the renderers it holds.
 class Track : public RTCVideoTrack {
  public:
-  void AddRenderer(RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>*) override {}
-  void RemoveRenderer(RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>*) override {}
+  void AddRenderer(RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>*) override { held++; }
+  void RemoveRenderer(RTCVideoRenderer<scoped_refptr<RTCVideoFrame>>*) override { held--; }
+  std::atomic<int> held{0};
   RTCTrackState state() const override { return kLive; }
   const string kind() const override { return "video"; }
   const string id() const override { return "track"; }
@@ -77,8 +79,12 @@ class Registrar : public TextureRegistrar {
 std::mutex events_lock;
 std::vector<std::string> events;
 
+// Event channels closed.
+std::atomic<int> closed{0};
+
 class Events : public EventChannelProxy {
  public:
+  ~Events() override { closed++; }
   void Success(const EncodableValue& event, bool) override {
     const EncodableMap& map = std::get<EncodableMap>(event);
     std::string name = std::get<std::string>(map.at(EncodableValue("event")));
@@ -135,8 +141,8 @@ int main() {
   scoped_refptr<FlutterVideoRenderer> renderer =
       new RefCountedObject<FlutterVideoRenderer>();
   renderer->initialize(&registrar, nullptr, nullptr, nullptr, 1);
-  scoped_refptr<RTCVideoTrack> tracks[2] = {new RefCountedObject<Track>(),
-                                            new RefCountedObject<Track>()};
+  Track* counted[2] = {new RefCountedObject<Track>(), new RefCountedObject<Track>()};
+  scoped_refptr<RTCVideoTrack> tracks[2] = {counted[0], counted[1]};
   scoped_refptr<RTCVideoFrame> frames[2] = {new RefCountedObject<Frame>(64, 48),
                                             new RefCountedObject<Frame>(32, 24)};
   scoped_refptr<RTCVideoFrame> giant = new RefCountedObject<Frame>(16382, 16382);
@@ -194,7 +200,15 @@ int main() {
   done = true;
   decoder.join();
   raster.join();
-  renderer->SetVideoTrack(nullptr);
+  // Disposed, it leaves its track and closes its event channel at once, while its texture
+  // id is still its own, though it lives on until the engine lets go of its texture.
+  renderer->SetVideoTrack(tracks[0]);
+  renderer->Dispose();
+  if (counted[0]->held != 0 || counted[1]->held != 0 || closed != 1) {
+    failures++;
+    std::fprintf(stderr, "disposed: held by its tracks %d and %d, %d channel(s) closed\n",
+                 counted[0]->held.load(), counted[1]->held.load(), closed.load());
+  }
   if (failures > 0) {
     std::printf("video renderer: %d failed\n", failures);
     return 1;

@@ -1081,7 +1081,8 @@ twice"):
   before it erased the same entry twice. Everywhere the event channel went only with
   the renderer: an id given again meanwhile to a new renderer's texture (the id is the
   texture's address: the engine's on Windows, the plugin's proxy on Linux) had its
-  channel's handler cleared by the old renderer's going.
+  channel's handler cleared by the old renderer's going. `common/cpp/test/video_renderer_test.cc`
+  (Linux) checks that a disposed renderer has left its track and closed its channel.
 
 ## A connection freed after its close (Linux, Windows)
 
