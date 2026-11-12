@@ -440,43 +440,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
             group,
             hidden,
             away,
-        } => {
-            let (seen, away) = {
-                let mut state = inner.lock();
-                // Hiding looks like going offline, and showing again like coming back.
-                let seen = state.hidden.contains(&device) != hidden;
-                if seen {
-                    state
-                        .meta
-                        .last_seen
-                        .insert(hex::encode(device.as_bytes()), now);
-                }
-                if hidden {
-                    state.hidden.insert(device);
-                } else {
-                    state.hidden.remove(&device);
-                }
-                if in_room && !hidden {
-                    state.friend_rooms.insert(device, group);
-                } else {
-                    state.friend_rooms.remove(&device);
-                }
-                // A friend that is a member too shows as away in the groups' lists.
-                let away = if away {
-                    state.away.insert(device)
-                } else {
-                    state.away.remove(&device)
-                };
-                (seen, away)
-            };
-            if seen {
-                inner.save_meta();
-            }
-            if away {
-                inner.emit(CoreEvent::GroupsChanged);
-            }
-            inner.emit(CoreEvent::FriendsChanged);
-        }
+        } => handle_friend_status(inner, now, device, in_room, group, hidden, away),
         NodeEvent::MemberPresence {
             device,
             hidden,
@@ -935,6 +899,53 @@ async fn handle_friend_offline(inner: &Arc<Inner>, now: u64, device: DevicePubli
     inner.emit(CoreEvent::FriendOffline { device });
     inner.emit(CoreEvent::FriendsChanged);
     calls::on_offline(inner, device).await;
+}
+
+/// A friend's status: in a room, hidden or away.
+fn handle_friend_status(
+    inner: &Arc<Inner>,
+    now: u64,
+    device: DevicePublicKey,
+    in_room: bool,
+    group: Option<GroupId>,
+    hidden: bool,
+    away: bool,
+) {
+    let (seen, away) = {
+        let mut state = inner.lock();
+        // Hiding looks like going offline, and showing again like coming back.
+        let seen = state.hidden.contains(&device) != hidden;
+        if seen {
+            state
+                .meta
+                .last_seen
+                .insert(hex::encode(device.as_bytes()), now);
+        }
+        if hidden {
+            state.hidden.insert(device);
+        } else {
+            state.hidden.remove(&device);
+        }
+        if in_room && !hidden {
+            state.friend_rooms.insert(device, group);
+        } else {
+            state.friend_rooms.remove(&device);
+        }
+        // A friend that is a member too shows as away in the groups' lists.
+        let away = if away {
+            state.away.insert(device)
+        } else {
+            state.away.remove(&device)
+        };
+        (seen, away)
+    };
+    if seen {
+        inner.save_meta();
+    }
+    if away {
+        inner.emit(CoreEvent::GroupsChanged);
+    }
+    inner.emit(CoreEvent::FriendsChanged);
 }
 
 #[cfg(test)]
