@@ -347,6 +347,26 @@ class Call extends ChangeNotifier {
     ].join();
   }
 
+  /// How long a reading of a connection's statistics may take. WebRTC answers in a few
+  /// milliseconds, but one asked of a connection as it is closed (someone leaving the
+  /// room) may never answer; the readings each wait for the one before, so a single one
+  /// that never answers would stop who-talks, the connection's quality and the checks of
+  /// what others send for the rest of the call. Past it the reading counts as failed.
+  static const statsWithin = Duration(seconds: 2);
+
+  Future<List<StatsReport>> _stats(
+    RTCPeerConnection connection, [
+    MediaStreamTrack? track,
+  ]) => connection
+      .getStats(track)
+      .timeout(
+        statsWithin,
+        onTimeout: () {
+          _trace('statistics not read within ${statsWithin.inSeconds} s');
+          throw TimeoutException('statistics', statsWithin);
+        },
+      );
+
   /// Signals waiting for their sender's connection here (see [EarlySignals]), for tests.
   @visibleForTesting
   int get signalsWaiting => _early.waiting;
@@ -886,7 +906,7 @@ class Call extends ChangeNotifier {
         ?.id;
     final List<StatsReport> reports;
     try {
-      reports = await connection.getStats();
+      reports = await _stats(connection);
     } catch (_) {
       return null;
     }

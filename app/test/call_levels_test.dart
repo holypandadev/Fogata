@@ -196,4 +196,25 @@ void main() {
       expect(slow.readings, 2);
     },
   );
+
+  test(
+    'a reading of who talks that never answers stops no later one',
+    () async {
+      // Asked of a connection as it closed: no answer will ever come.
+      final dead = _Slow();
+      final call = Call(group: 'g', me: 'me', mic: false)
+        ..peers['aaaaaaaa'] = (CallPeer('aaaaaaaa')
+          ..connection = dead
+          ..connected = true
+          ..mic = true);
+      final first = call.readLevelsNow();
+      await pumpEventQueue();
+      expect(dead.readings, 1);
+      // Given up on after a while, it holds up no other.
+      await first.timeout(Call.statsWithin * 2);
+      unawaited(call.readLevelsNow());
+      await pumpEventQueue();
+      expect(dead.readings, 2);
+    },
+  );
 }

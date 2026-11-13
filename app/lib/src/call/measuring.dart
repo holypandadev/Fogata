@@ -228,7 +228,7 @@ extension _Measuring on Call {
       }
       final List<StatsReport> reports;
       try {
-        reports = await connection.getStats();
+        reports = await _stats(connection);
       } catch (_) {
         continue;
       }
@@ -419,13 +419,13 @@ extension _Measuring on Call {
     final voice = peer._voice;
     if (voice != null && voice.on == connection) {
       try {
-        final level = voiceLevel(await connection.getStats(voice.track));
+        final level = voiceLevel(await _stats(connection, voice.track));
         if (level != null) return level;
       } catch (_) {
         // Not found (the connection made again meanwhile): the whole report says.
       }
     }
-    return voiceLevel(await connection.getStats()) ?? 0;
+    return voiceLevel(await _stats(connection)) ?? 0;
   }
 
   /// How loud this device's microphone is, read on [connection] ([micLevel]): from the
@@ -435,13 +435,13 @@ extension _Measuring on Call {
     final mic = _micStream?.getAudioTracks().firstOrNull;
     if (mic != null) {
       try {
-        final level = micLevel(await connection.getStats(mic), mic.id);
+        final level = micLevel(await _stats(connection, mic), mic.id);
         if (level != null) return level;
       } catch (_) {
         // Not on this connection's sender (not put on it yet): the whole report says.
       }
     }
-    return micLevel(await connection.getStats(), mic?.id) ?? 0;
+    return micLevel(await _stats(connection), mic?.id) ?? 0;
   }
 }
 
