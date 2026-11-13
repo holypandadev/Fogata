@@ -179,8 +179,15 @@ elif check == "restart":
                     f"{role} did not record from its microphone before the restart: "
                     f"{sorted(sources_at(role, stopped - 0.5)) or 'nothing'}"
                 )
-            again = next(
-                (t for t, sources in recordings(role) if t >= back and mine in sources), None
+            # What already records from it when the devices are back counts from then:
+            # recordings.log has a line only when something changes.
+            again = (
+                back
+                if mine in sources_at(role, back)
+                else next(
+                    (t for t, sources in recordings(role) if t >= back and mine in sources),
+                    None,
+                )
             )
             if again is None or again - back > RESTART_WITHIN:
                 problems.append(

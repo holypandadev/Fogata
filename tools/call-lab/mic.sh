@@ -112,7 +112,8 @@ if [ "${1:-}" = --inside ]; then
       # a's WebRTC log tells how its audio device lost the server and found it again.
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=restart FOGATA_TEST_RESTART="${RESTART_HOW:-pulse}" \
         FOGATA_WEBRTC_LOG=info
-      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=restart FOGATA_TEST_RESTART="${RESTART_HOW:-pulse}"
+      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=restart FOGATA_TEST_RESTART="${RESTART_HOW:-pulse}" \
+        FOGATA_WEBRTC_LOG=info
       ;;
     *) lab_copy a 2 1 FOGATA_TEST_MIC_CASE="$CHECK"; lab_copy b 2 off FOGATA_TEST_MIC_CASE="$CHECK" ;;
   esac

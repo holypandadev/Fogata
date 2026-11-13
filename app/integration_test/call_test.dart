@@ -4663,6 +4663,8 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
       seconds: 10,
     );
   }
+  // The call stays a while, so that whatever watches the sound server sees it record.
+  await _wait(tester, const Duration(seconds: 5));
   await _say(state, 'restarted');
   await _hear(tester, state, ['restarted'], seconds: 120);
 }

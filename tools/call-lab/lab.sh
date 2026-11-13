@@ -26,6 +26,9 @@ lab_devices() { # copies
     late=${LAB_LATE_DEVICES:-}
     [ -n "$late" ] && [ "${late%%:*}" = "$r" ] && sleep "${late#*:}"
     pactl load-module module-null-sink sink_name=lab${r}_test sink_properties=device.description=FogataTest-lab$r. > /dev/null
+    # Made again (mic.sh restart): its tone's player, started while the output was missing,
+    # may play into the default one; started again, it plays into this one.
+    [ -e "$RUN/paplay-$r.pid" ] && kill "$(cat "$RUN/paplay-$r.pid")" 2>/dev/null
     lab_plug "$r"
     pactl load-module module-null-sink sink_name=lab${r}_quiet sink_properties=device.description=FogataQuietOut-lab$r. > /dev/null
     pactl load-module module-remap-source source_name=lab${r}_quiet_mic master=lab${r}_quiet.monitor source_properties=device.description=FogataQuiet-lab$r. > /dev/null
