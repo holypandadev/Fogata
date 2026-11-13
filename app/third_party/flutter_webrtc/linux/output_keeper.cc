@@ -25,13 +25,15 @@ struct Keeper {
   bool ready = false;
   // Seconds before the next try to connect once the connection was lost (the sound
   // server restarted, as after an update): doubled after each failure, up to
-  // kMostSeconds, and set back once connected.
+  // kMostSeconds, and set back once connected. A try costs next to nothing (a local
+  // socket), and a call's devices wait for it.
   int retry_seconds = kFirstSeconds;
   static constexpr int kFirstSeconds = 1;
-  static constexpr int kMostSeconds = 30;
+  static constexpr int kMostSeconds = 5;
 };
 
 void Connect(Keeper* keeper);
+void RetryLater(Keeper* keeper);
 
 std::mutex lock;
 Keeper* current = nullptr;
@@ -85,7 +87,21 @@ void OnEvent(pa_context*, pa_subscription_event_type_t type, uint32_t, void* dat
 void OnRetry(pa_mainloop_api* api, pa_time_event* event, const struct timeval*,
              void* data) {
   api->time_free(event);
-  Connect(static_cast<Keeper*>(data));
+  auto* k = static_cast<Keeper*>(data);
+  Connect(k);
+  // No context made at all (no memory): no state callback will try again.
+  if (k->context == nullptr) RetryLater(k);
+}
+
+// On the loop's thread: a new connection a while later.
+void RetryLater(Keeper* keeper) {
+  struct timeval when;
+  pa_timeval_add(pa_gettimeofday(&when),
+                 pa_usec_t(keeper->retry_seconds) * PA_USEC_PER_SEC);
+  keeper->retry_seconds =
+      std::min(keeper->retry_seconds * 2, Keeper::kMostSeconds);
+  pa_mainloop_api* api = pa_threaded_mainloop_get_api(keeper->loop);
+  api->time_new(api, &when, OnRetry, keeper);
 }
 
 void OnState(pa_context* c, void* data) {
@@ -93,15 +109,9 @@ void OnState(pa_context* c, void* data) {
   const pa_context_state_t state = pa_context_get_state(c);
   if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
     // The server went away, or never answered: nothing is moved until a new
-    // connection is made, a while later (this one cannot connect again).
+    // connection is made (this one cannot connect again).
     keeper->ready = false;
-    struct timeval when;
-    pa_timeval_add(pa_gettimeofday(&when),
-                   pa_usec_t(keeper->retry_seconds) * PA_USEC_PER_SEC);
-    keeper->retry_seconds =
-        std::min(keeper->retry_seconds * 2, Keeper::kMostSeconds);
-    pa_mainloop_api* api = pa_threaded_mainloop_get_api(keeper->loop);
-    api->time_new(api, &when, OnRetry, keeper);
+    RetryLater(keeper);
     return;
   }
   if (state != PA_CONTEXT_READY) return;

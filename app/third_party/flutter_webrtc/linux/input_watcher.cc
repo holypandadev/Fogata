@@ -21,19 +21,24 @@ struct Watcher {
   std::function<void()> changed;
   // Seconds before the next try to connect once the connection was lost (the sound
   // server restarted, as after an update): doubled after each failure, up to
-  // kMostSeconds, and set back once connected. On the loop's thread.
+  // kMostSeconds, and set back once connected. A try costs next to nothing (a local
+  // socket), and a call's devices wait for it. On the loop's thread.
   int retry_seconds = kFirstSeconds;
   static constexpr int kFirstSeconds = 1;
-  static constexpr int kMostSeconds = 30;
+  static constexpr int kMostSeconds = 5;
 };
 
 void Connect(Watcher* w);
+void RetryLater(Watcher* w);
 
 // On the loop's thread, a while after the connection was lost: a new one.
 void OnRetry(pa_mainloop_api* api, pa_time_event* event, const struct timeval*,
              void* data) {
   api->time_free(event);
-  Connect(static_cast<Watcher*>(data));
+  auto* w = static_cast<Watcher*>(data);
+  Connect(w);
+  // No context made at all (no memory): no state callback will try again.
+  if (w->context == nullptr) RetryLater(w);
 }
 
 std::mutex lock;
@@ -52,18 +57,23 @@ void OnEvent(pa_context* /*c*/,
   static_cast<Watcher*>(data)->changed();
 }
 
+// On the loop's thread: a new connection a while later, which once ready tells what
+// changed meanwhile.
+void RetryLater(Watcher* w) {
+  struct timeval when;
+  pa_timeval_add(pa_gettimeofday(&when),
+                 pa_usec_t(w->retry_seconds) * PA_USEC_PER_SEC);
+  w->retry_seconds = std::min(w->retry_seconds * 2, Watcher::kMostSeconds);
+  pa_mainloop_api* api = pa_threaded_mainloop_get_api(w->loop);
+  api->time_new(api, &when, OnRetry, w);
+}
+
 void OnState(pa_context* c, void* data) {
   auto* w = static_cast<Watcher*>(data);
   const pa_context_state_t state = pa_context_get_state(c);
   if (state == PA_CONTEXT_FAILED || state == PA_CONTEXT_TERMINATED) {
-    // The server went away: a new connection a while later (this one cannot
-    // connect again), which once ready tells what changed meanwhile.
-    struct timeval when;
-    pa_timeval_add(pa_gettimeofday(&when),
-                   pa_usec_t(w->retry_seconds) * PA_USEC_PER_SEC);
-    w->retry_seconds = std::min(w->retry_seconds * 2, Watcher::kMostSeconds);
-    pa_mainloop_api* api = pa_threaded_mainloop_get_api(w->loop);
-    api->time_new(api, &when, OnRetry, w);
+    // The server went away (this connection cannot connect again).
+    RetryLater(w);
     return;
   }
   if (state != PA_CONTEXT_READY) return;
