@@ -196,7 +196,13 @@ library hands over a table of C functions (`noise_suppressor()` in fogata-ffi's
 `api/app.rs`, `DenoiseApi` in `denoise.rs`); the application passes its address with the
 method `fogataNoiseSuppression` (`on`, `api`), which makes the processor on its first call
 and sets the flag on every call, and answers false where it cannot run. The microphone
-itself is opened with WebRTC's own noise suppressor off.
+asks for WebRTC's own noise suppressor off. On Linux and Windows that reaches WebRTC's
+audio processing only with Fogata's libwebrtc's wrapper patch 0013 (before it the
+processing kept its default, that suppressor on at its highest level, whatever the
+application asked; macOS's WebRTC took the options from its source all along). The
+processing runs RNNoise, as its echo canceller, gain control and own suppressor, only
+while its output is used, which with libwebrtc's patch 0008 means while any channel
+sends sound (see "The microphone's processing while a screen's sound goes out").
 
 - `common/cpp/include/fogata_denoise_table.h` (new; Linux, Windows) and
   `FogataDenoise.m` (macOS): the address is taken only inside a library loaded in the
@@ -317,36 +323,50 @@ others in a call would hear their own voices back. Instead:
 
 ## The microphone's processing while a screen's sound goes out (Linux, Windows)
 
-WebRTC has one audio processing module, for what the microphone records, and sets it from
-the source of each channel of sound when that channel starts sending (a track given to
-it, a new description). The package made a screen's sound source with echo cancelling,
-gain control and noise removal off, so while a shared screen's sound went out the
-microphone had none of them either (seen in libwebrtc's log: `aec: 0, agc: 0` from the
-moment someone watched until the share stopped). The screen's sound itself never goes
-through that module.
+WebRTC has one audio processing module for what the microphone records, the voice
+engine's. A shared screen's sound never goes through it (it comes from a custom source
+of its own). Measured in the call lab (`tools/call-lab/mic.sh echo`, with WebRTC's log),
+the sharer's voice went out 10 to 12 dB weaker while its screen's sound went out to a
+watcher, and traces of the others' voices came back for a while. Three things, each
+fixed in Fogata's libwebrtc:
 
-- `tools/webrtc/patches/wrapper/0011` (Fogata's libwebrtc): WebRTC also processed the
-  microphone in the most channels any channel of sound sends
-  (`AudioState::UpdateAudioTransportWithSendingStreams` hands the transport the maximum,
-  and `AudioTransportImpl::RecordedDataIsAvailable` processes in that many): when a
-  screen's sound started going out in stereo, the microphone was processed in two
-  channels, and in one again when it stopped, and each time the audio processing
-  initialized itself again (`AudioProcessingImpl::MaybeInitializeCapture`), its echo
-  canceller and gain control starting from nothing. Measured (`tools/call-lab/mic.sh
-  echo`): the sharer's voice went out 10 to 12 dB weaker while its screen's sound went
-  out, and traces of the others' voices came back for a while, as from an echo canceller
-  starting over; in a room with speakers, the others heard themselves for the first
-  seconds after someone opened the screen. The wrapper's transport, which hands what the
-  microphone records only to the microphone's own sources, now processes it in one
-  channel always; the screen's sound stays stereo. Tested by the wrapper's
+- The processing did nothing at all for most of a call. WebRTC tells it that its output
+  will be muted when a channel's send streams are all muted
+  (`WebRtcVoiceSendChannel::MuteStream`, `set_output_will_be_muted`), and it then passes
+  the microphone through untouched (`minimize_processing_for_unused_output`): no echo
+  cancelling, no noise suppression, no gain control, no RNNoise. With unified plan every
+  audio section has a channel of its own (the voice, the screen's sound, one for each
+  connection), so the channel touched last decided for all of them: the application
+  makes a connection again and closes the old one at every entry into a room, and the old
+  one's voice sender stopping turned the processing off while the new one sent the
+  microphone. It came on again only when some sender got a track (the screen's sound
+  starting to go out to a watcher), which was the level change measured: WebRTC's noise
+  suppressor takes the lab's steady tones for noise. `tools/webrtc/patches/webrtc/0008`:
+  the engine keeps the send streams that send sound, of every channel, and the output
+  counts as muted only while there is none. macOS's WebRTC (webrtc-sdk's) never takes a
+  sender with no track for muted, and keeps its own rule (`patches/apple/0001`).
+- The application's settings never reached the processing. In M156 a channel's options
+  are only kept; WebRTC's own factory sets them as global options when it makes an audio
+  source, which the wrapper did not. `tools/webrtc/patches/wrapper/0013`: a microphone
+  source's options (echo cancelling and gain control on, WebRTC's noise suppressor and
+  high-pass filter off, as `getUserMedia` passes them) set the processing; a custom
+  source's (the screen's sound) never do. `0015`: the processing gets the factory's
+  field trials too.
+- The processing was initialized again each time a screen's sound started or stopped
+  going out in stereo: WebRTC processed the microphone in the most channels any channel
+  sends (`AudioState::UpdateAudioTransportWithSendingStreams`,
+  `AudioTransportImpl::RecordedDataIsAvailable`,
+  `AudioProcessingImpl::MaybeInitializeCapture`), and the echo canceller and gain control
+  started from nothing. `tools/webrtc/patches/wrapper/0011`: the microphone is processed
+  in one channel always; the screen's sound stays stereo. Tested by the wrapper's
   `test/custom_audio_transport.test.cc`.
 - `common/cpp/src/flutter_screen_capture.cc`, `common/cpp/include/flutter_screen_capture.h`:
   `getDisplayMedia` makes the screen's sound source with the processing its `audio` map
   names (`echoCancellation`, `autoGainControl`, `noiseSuppression`; off for any left out,
-  and with `audio: true`), in both the portal path and the other one. The application
-  names the microphone's settings. A change of the microphone's settings during a share
-  reaches the screen's sound source only with the next share: until then, its channel
-  starting to send again (someone else watching) puts back the settings it was made with.
+  and with `audio: true`). That was meant to keep the microphone's settings while the
+  screen's sound went out (the log line `aec: 0, agc: 0` it answered was a channel's kept
+  options, never what the processing did); with 0013 a custom source's options no longer
+  touch the processing at all.
 
 ## Sound of a shared screen (macOS)
 

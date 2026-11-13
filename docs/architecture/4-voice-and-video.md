@@ -522,9 +522,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   cross-fades over 10 ms. The microphone is always opened with echo cancelling and gain
   control on and WebRTC's own noise suppressor off, on every system (macOS reads only
   WebRTC's own names, `goog...` in `mandatory`, and keeps whatever was set last for a name
-  left out, so all three are named). Both suppressors at once were measured too: 8 dB less
-  steady noise than RNNoise alone, but the clean voice 1 dB quieter and 2 dB thinner
-  around 500 Hz (RNNoise alone: 0.2 dB), and "off" would no longer be off. Measured on
+  left out, so all three are named); on Linux and Windows those settings reach WebRTC's
+  audio processing only since Fogata's libwebrtc applies a microphone source's options to
+  it (before, it kept its defaults: WebRTC's suppressor on at its highest level). Both
+  suppressors at once were measured too: 8 dB less steady noise than RNNoise alone, but
+  the clean voice 1 dB quieter and 2 dB thinner around 500 Hz (RNNoise alone: 0.2 dB),
+  and "off" would no longer be off. Measured on
   Linux with real recorded speech and made-up noise, 20 s off and on in turn (level
   between words; voice level while speaking): steady fan, hiss and hum about 30 dB under
   the voice: -47 to -62 dBFS (WebRTC's own: -46 to -62), voice 1 dB lower; the same noise
@@ -604,14 +607,18 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   was started for: a screen captured again at another rate keeps its sound when the old
   capture ends. On both, the
   screen's sound source is made with the microphone's echo cancelling, gain control and
-  noise suppression settings: it never goes through them, but WebRTC sets its one audio
-  processing module from each source whose channel starts sending, and a source made
-  with them off had turned them off for the microphone while the screen's sound went
-  out. And the microphone is processed in one channel whatever the others send (Fogata's
-  libwebrtc): WebRTC processed it in as many as the channel sending the most, so the
-  screen's sound starting and stopping in stereo started the echo canceller and gain
-  control anew each time (the sharer's voice went out 10 dB weaker while it went out, and
-  the others' voices came back as echo for the first seconds). macOS's WebRTC
+  noise suppression settings, which no longer matter: it never goes through the audio
+  processing, and Fogata's libwebrtc never lets a custom source's settings reach it
+  (WebRTC M156 does not set the processing from a channel's source, as was thought).
+  Fogata's libwebrtc (Linux, Windows) also keeps WebRTC's processing of the microphone
+  the same whatever the screen's sound does: WebRTC took its output for
+  unused, and passed the microphone through with no echo cancelling, noise suppression
+  or gain control, whenever the last channel touched had no sender with a track (a
+  connection closed as another took its place), until a screen's sound started going
+  out; it now counts every channel's senders. And it processed the microphone in as many
+  channels as the channel sending the most, so a screen's sound in stereo initialized
+  the processing again as it started and stopped; the microphone is now processed in
+  one channel always. macOS's WebRTC
   hands what it records to every channel of sound, the voice's too, so a Mac sends its
   screen's sound (every application's but Fogata's, taken with ScreenCaptureKit; for a
   shared window only its application's and that application's helpers') on a
