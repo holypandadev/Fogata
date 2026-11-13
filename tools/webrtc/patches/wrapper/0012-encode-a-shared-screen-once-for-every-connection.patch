@@ -102,10 +102,10 @@ index f7e419b..93105dd 100644
        "//third_party/abseil-cpp/absl/strings",
        "//testing/gtest",
 diff --git a/include/rtc_video_source.h b/include/rtc_video_source.h
-index c56c731..2687887 100644
+index c56c731..7dc67f3 100644
 --- a/include/rtc_video_source.h
 +++ b/include/rtc_video_source.h
-@@ -32,6 +32,13 @@ class RTCVideoSource : public RefCountInterface {
+@@ -32,6 +32,15 @@ class RTCVideoSource : public RefCountInterface {
  
    virtual void RemoveProcessor(RTCVideoProcessor* processor) = 0;
  
@@ -113,7 +113,9 @@ index c56c731..2687887 100644
 +  // "Fogata-SharedScreenEncode/Enabled/", every connection that sends it at
 +  // the same size shares one encoder (one encode per frame), and nothing on
 +  // the wire changes. Call it once, right after the source is made; never for
-+  // a camera. Sources that cannot be shared ignore it.
++  // a camera, nor for a source given to more than one video track (a disabled
++  // track's black frames would pass for the source's own). Sources that
++  // cannot be shared ignore it.
 +  virtual void EnableSharedEncode() {}
 +
    ~RTCVideoSource() {}
@@ -121,10 +123,10 @@ index c56c731..2687887 100644
  }  // namespace libwebrtc
 diff --git a/src/internal/shared_encoder.cc b/src/internal/shared_encoder.cc
 new file mode 100644
-index 0000000..689bb23
+index 0000000..12d8737
 --- /dev/null
 +++ b/src/internal/shared_encoder.cc
-@@ -0,0 +1,1496 @@
+@@ -0,0 +1,1502 @@
 +#include "src/internal/shared_encoder.h"
 +
 +#include <algorithm>
@@ -431,9 +433,20 @@ index 0000000..689bb23
 +
 +  ~SharedEncodeGroup() override {
 +    registry_->ForgetDeadGroups();
-+    // Waits for a task that runs; the others are dropped unrun, and they hold
-+    // nothing but a plain pointer to this group.
-+    queue_ = nullptr;
++    {
++      // With no member left, a frame waiting is all that would make an encode
++      // under way post another.
++      MutexLock lock(&mutex_);
++      next_.reset();
++    }
++    // Delete() waits for a task that runs, which may still post to the queue
++    // (dropped), so `queue_` keeps pointing at it until Delete() returns. The
++    // other tasks are dropped unrun; they hold nothing but a plain pointer to
++    // this group. WebRTC asks for a queue to be deleted where it was made;
++    // its implementations only require that it not be from the queue itself,
++    // which never happens here (see "Life" above).
++    queue_.get_deleter()(queue_.get());
++    (void)queue_.release();
 +    if (real_ != nullptr) {
 +      real_->Release();
 +      real_ = nullptr;
@@ -448,7 +461,7 @@ index 0000000..689bb23
 +    member->paused = false;
 +    member->wants_key = true;
 +    member->isolate = false;
-+    member->pending_error = init_error_;
++    member->pending_error = WEBRTC_VIDEO_CODEC_OK;
 +    member->first_missed_us.reset();
 +    member->held.clear();
 +    member->last_delivered = seq_;
@@ -459,7 +472,6 @@ index 0000000..689bb23
 +    if (member->callback != nullptr) {
 +      key_wanted_ = true;
 +    }
-+    rates_changed_ = true;
 +  }
 +
 +  // A member released while the group encodes: real_->Encode() runs without
@@ -473,7 +485,6 @@ index 0000000..689bb23
 +                   members_.end());
 +    member->in_sync = false;
 +    member->held.clear();
-+    rates_changed_ = true;
 +  }
 +
 +  void SetCallback(Member* member, EncodedImageCallback* callback) {
@@ -491,12 +502,13 @@ index 0000000..689bb23
 +                const VideoEncoder::RateControlParameters& rates) {
 +    MutexLock lock(&mutex_);
 +    member->rates = rates;
-+    rates_changed_ = true;
 +  }
 +
 +  // The real encoder's own description, once it is initialized, named for the
-+  // group when it is shared ("libvpx (shared 3)"; the app reads it from the
-+  // outbound-rtp stats' encoderImplementation).
++  // group when it is shared ("libvpx (shared)"; the app reads it from the
++  // outbound-rtp stats' encoderImplementation). Not the number of members:
++  // every VideoStreamEncoder compares the whole description with every frame
++  // and starts its rate adjuster and scalers over when it changes.
 +  std::optional<VideoEncoder::EncoderInfo> Info() const {
 +    MutexLock lock(&mutex_);
 +    if (!real_info_) {
@@ -504,8 +516,7 @@ index 0000000..689bb23
 +    }
 +    VideoEncoder::EncoderInfo info = *real_info_;
 +    if (key_.isolation == 0) {
-+      info.implementation_name += " (shared " +
-+                                  std::to_string(members_.size()) + ")";
++      info.implementation_name += " (shared)";
 +    }
 +    return info;
 +  }
@@ -530,13 +541,9 @@ index 0000000..689bb23
 +    const bool key_asked = AsksForKeyFrame(frame_types);
 +
 +    MutexLock lock(&mutex_);
++    // An encoder error, reported once, as an encoder of its own would:
++    // VideoStreamEncoder then asks for another encoder and stops encoding.
 +    *error = std::exchange(member->pending_error, 0);
-+    if (init_error_ != WEBRTC_VIDEO_CODEC_OK) {
-+      // As with an encoder of its own that failed: VideoStreamEncoder asks
-+      // for another.
-+      *error = init_error_;
-+      return Outcome::kDone;
-+    }
 +    if (member->isolate) {
 +      return Outcome::kIsolate;
 +    }
@@ -685,7 +692,6 @@ index 0000000..689bb23
 +        member->in_sync = false;
 +        member->paused = true;
 +        member->held.clear();
-+        rates_changed_ = true;
 +      } else {
 +        // Skipped by its VideoStreamEncoder (congestion window, a queue
 +        // still busy, the first frames at a low bitrate) or not asked for
@@ -730,7 +736,8 @@ index 0000000..689bb23
 +  // On `queue_`.
 +  void EncodeNext() {
 +    std::optional<VideoFrame> frame;
-+    std::vector<VideoFrameType> frame_types(1, VideoFrameType::kVideoFrameDelta);
++    std::vector<VideoFrameType> frame_types(1,
++                                            VideoFrameType::kVideoFrameDelta);
 +    std::optional<VideoEncoder::RateControlParameters> apply_rates;
 +    {
 +      MutexLock lock(&mutex_);
@@ -750,7 +757,6 @@ index 0000000..689bb23
 +      } else if (real_ == nullptr && applied_rates_) {
 +        apply_rates = applied_rates_;
 +      }
-+      rates_changed_ = false;
 +      const bool key_due =
 +          !last_key_at_ ||
 +          now - *last_key_at_ >= TimeDelta::Millis(config_.key_ms);
@@ -788,8 +794,13 @@ index 0000000..689bb23
 +      if (result != WEBRTC_VIDEO_CODEC_OK) {
 +        RTC_LOG(LS_ERROR) << "Shared encoder: InitEncode failed: " << result;
 +        real_ = nullptr;
++        // Each member hears of it on its next Encode. The next frame asked
++        // for tries again.
 +        MutexLock lock(&mutex_);
-+        init_error_ = result < 0 ? result : WEBRTC_VIDEO_CODEC_ERROR;
++        for (Member* member : members_) {
++          member->pending_error =
++              result < 0 ? result : WEBRTC_VIDEO_CODEC_ERROR;
++        }
 +        encoding_.reset();
 +        next_.reset();
 +        encode_scheduled_ = false;
@@ -1004,7 +1015,6 @@ index 0000000..689bb23
 +            static_cast<size_t>(config_.isolate_keys)) {
 +      member->key_requests.clear();
 +      member->isolate = true;
-+      rates_changed_ = true;
 +      return true;
 +    }
 +    return false;
@@ -1090,7 +1100,6 @@ index 0000000..689bb23
 +                 TimeDelta::Millis(config_.isolate_ms)) {
 +        member->isolate = true;
 +        member->low_since.reset();
-+        rates_changed_ = true;
 +      }
 +    }
 +  }
@@ -1128,9 +1137,7 @@ index 0000000..689bb23
 +  std::optional<Timestamp> last_key_at_ RTC_GUARDED_BY(mutex_);
 +  std::optional<VideoEncoder::RateControlParameters> applied_rates_
 +      RTC_GUARDED_BY(mutex_);
-+  bool rates_changed_ RTC_GUARDED_BY(mutex_) = false;
 +  std::optional<VideoEncoder::EncoderInfo> real_info_ RTC_GUARDED_BY(mutex_);
-+  int init_error_ RTC_GUARDED_BY(mutex_) = WEBRTC_VIDEO_CODEC_OK;
 +
 +  // On `queue_` only (and in the destructor once `queue_` is gone).
 +  std::unique_ptr<VideoEncoder> real_;
@@ -1368,7 +1375,8 @@ index 0000000..689bb23
 +  // Back to the shared group once its bitrate has been at least the group's
 +  // for long enough (or the group is gone).
 +  void MaybeRejoin(int slot, Timestamp now) {
-+    if (last_rejoin_check_ && now - *last_rejoin_check_ < kRejoinCheckInterval) {
++    if (last_rejoin_check_ &&
++        now - *last_rejoin_check_ < kRejoinCheckInterval) {
 +      return;
 +    }
 +    last_rejoin_check_ = now;
@@ -1623,10 +1631,10 @@ index 0000000..689bb23
 +}  // namespace libwebrtc
 diff --git a/src/internal/shared_encoder.h b/src/internal/shared_encoder.h
 new file mode 100644
-index 0000000..7ceb900
+index 0000000..167ea00
 --- /dev/null
 +++ b/src/internal/shared_encoder.h
-@@ -0,0 +1,133 @@
+@@ -0,0 +1,137 @@
 +#ifndef LIB_WEBRTC_SHARED_ENCODER_H_
 +#define LIB_WEBRTC_SHARED_ENCODER_H_
 +
@@ -1662,8 +1670,12 @@ index 0000000..7ceb900
 +// changes. Untagged frames (cameras) are encoded as before, by an encoder of
 +// the proxy's own, on the caller's thread.
 +//
-+// Only WebRTC's api/ and rtc_base/ are used here, so the macOS framework
-+// builds this file too.
++// No type of the wrapper is used here, so the macOS framework builds this
++// file too.
++//
++// One track for each tagged source: VideoBroadcaster gives a sink that wants
++// black frames (a disabled track) black frames with the source's ids, which
++// would then pass for the frames of the same ids.
 +
 +namespace libwebrtc {
 +
@@ -1890,10 +1902,10 @@ index ba01241..1eed88c 100644
    // Receives frames from OnCapturedFrame. Null for desktop sources.
 diff --git a/test/shared_encoder.test.cc b/test/shared_encoder.test.cc
 new file mode 100644
-index 0000000..361a5cb
+index 0000000..b4d4dd6
 --- /dev/null
 +++ b/test/shared_encoder.test.cc
-@@ -0,0 +1,1013 @@
+@@ -0,0 +1,1022 @@
 +#include "src/internal/shared_encoder.h"
 +
 +#include <algorithm>
@@ -2195,9 +2207,9 @@ index 0000000..361a5cb
 +    const int64_t ntp_ms = frame.render_time_ms() + ntp_delta_ms_;
 +    frame.set_ntp_time_ms(ntp_ms);
 +    frame.set_rtp_timestamp(90 * static_cast<uint32_t>(ntp_ms));
-+    std::vector<VideoFrameType> types(1, key || key_next_
-+                                             ? VideoFrameType::kVideoFrameKey
-+                                             : VideoFrameType::kVideoFrameDelta);
++    std::vector<VideoFrameType> types(
++        1, key || key_next_ ? VideoFrameType::kVideoFrameKey
++                            : VideoFrameType::kVideoFrameDelta);
 +    key_next_ = false;
 +    return encoder_->Encode(frame, &types);
 +  }
@@ -2293,7 +2305,7 @@ index 0000000..361a5cb
 +      EXPECT_EQ(images[n].buffer, first[n].buffer);  // Not copied.
 +    }
 +    EXPECT_EQ(watcher->encoder().GetEncoderInfo().implementation_name,
-+              "fake (shared 3)");
++              "fake (shared)");
 +  }
 +}
 +
@@ -2623,7 +2635,7 @@ index 0000000..361a5cb
 +  ExpectContinuous(images, own);
 +  EXPECT_EQ(b->encoder().GetEncoderInfo().implementation_name, "fake");
 +  EXPECT_EQ(a->encoder().GetEncoderInfo().implementation_name,
-+            "fake (shared 2)");
++            "fake (shared)");
 +}
 +
 +TEST_F(SharedEncoderTest, ALossyMemberIsIsolated) {
@@ -2720,7 +2732,7 @@ index 0000000..361a5cb
 +    const size_t moved = static_cast<size_t>(moves_at(i));
 +    ASSERT_GT(images.size(), moved);
 +    for (size_t k = 0; k < moved; ++k) {
-+      EXPECT_EQ(images[k].count, k);
++      EXPECT_EQ(static_cast<size_t>(images[k].count), k);
 +    }
 +    EXPECT_TRUE(images[moved].key);
 +    ExpectContinuous(images, moved);
@@ -2777,7 +2789,8 @@ index 0000000..361a5cb
 +// With real threads: the group delivers on its own thread while a connection
 +// releases its encoder on another.
 +TEST(SharedEncoder, NoDeliveryAfterRelease) {
-+  const Environment env = webrtc::CreateTestEnvironment({.field_trials = kTrial});
++  const Environment env =
++      webrtc::CreateTestEnvironment({.field_trials = kTrial});
 +  // The group's encoder starts only once both connections asked for the first
 +  // frame, so both are its members when it is delivered.
 +  webrtc::Event init_gate;
@@ -2805,13 +2818,12 @@ index 0000000..361a5cb
 +   public:
 +    Result OnEncodedImage(const EncodedImage&,
 +                          const CodecSpecificInfo*) override {
-+      if (count.fetch_add(1) + 1 == 4) {
-+        four.Set();
-+      }
++      count.fetch_add(1);
++      got.Set();
 +      return Result(Result::OK);
 +    }
 +    void OnFrameDropped(uint32_t, int, bool) override {}
-+    webrtc::Event four;
++    webrtc::Event got;
 +    std::atomic<int> count{0};
 +  } counting;
 +
@@ -2835,6 +2847,12 @@ index 0000000..361a5cb
 +  a->Encode(frame, &key);
 +  b->Encode(frame, &key);
 +  init_gate.Set();
++  // Should an assertion end the test early, the group's thread must not stay
++  // waiting in the callback with its lock held.
++  struct OpenGate {
++    ~OpenGate() { gate->Set(); }
++    webrtc::Event* gate;
++  } open_gate{&gated.gate};
 +  ASSERT_TRUE(gated.entered.Wait(TimeDelta::Seconds(5)));
 +
 +  std::atomic<bool> released{false};
@@ -2850,12 +2868,15 @@ index 0000000..361a5cb
 +  releasing.Finalize();
 +  EXPECT_TRUE(released.load());
 +
++  ASSERT_TRUE(counting.got.Wait(TimeDelta::Seconds(5)));  // Frame 0.
 +  for (int n = 1; n < 4; ++n) {
 +    VideoFrame next = Frame(1, n);
 +    next.set_rtp_timestamp(1000 + 90 * kFrameMs * n);
 +    b->Encode(next, &delta);
++    // One at a time: a frame asked for while another waits replaces it.
++    ASSERT_TRUE(counting.got.Wait(TimeDelta::Seconds(5)));
 +  }
-+  ASSERT_TRUE(counting.four.Wait(TimeDelta::Seconds(5)));
++  EXPECT_EQ(counting.count.load(), 4);
 +  EXPECT_EQ(gated.count.load(), 1);  // Nothing after Release.
 +  b->Release();
 +}
