@@ -3077,9 +3077,17 @@ mod tests {
         assert!(here(1), "the copy the send's message refers to went");
 
         // Its time ran out while a send used it, and the send failed: the copy goes then.
-        add(item(3, 3, 1000));
+        // Dated now with a day to live, so the core's own pass, on its clock, never finds
+        // it due before the send uses its file: only the pass asked for here, two days on.
+        let now = now_ms();
+        add(Item {
+            sent_ms: now,
+            got_ms: now,
+            at_ms: now,
+            ..item(3, 3, model::DAY_MS)
+        });
         direct.start_using(&friend, &[3; 32]);
-        expire(&inner, 10_000);
+        expire(&inner, now + 2 * model::DAY_MS);
         assert!(
             here(3),
             "the copy a send uses went with the earlier message"
