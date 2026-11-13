@@ -10,7 +10,8 @@ use crate::api::types::UiEvent;
 /// The network the next cores started with [`crate::api::app::start`] use in place of the
 /// computer's: `options` as given (the port, the peers to dial, the DHT and mDNS), with the
 /// settings of the data folder (bridge, appearing offline) as the application reads them;
-/// the releases page is never asked.
+/// the releases page is never asked, and the computer's idle time is not followed (it is
+/// that of whoever runs the tests: a desktop left alone would make the device away).
 pub fn use_network(options: NetOptions) {
     *crate::api::app::TEST_NETWORK
         .lock()

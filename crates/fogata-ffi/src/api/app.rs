@@ -69,7 +69,8 @@ const GIVEN_AT_MOST: usize = EARLY_EVENTS;
 static TAKEN: tokio::sync::Notify = tokio::sync::Notify::const_new();
 /// The network a core started by [`start`] uses in place of the computer's, set by the
 /// crate's own tests only ([`crate::testing`]): its own port, the peers to dial, no DHT, no
-/// mDNS and no releases page. Never set by the application.
+/// mDNS and no releases page; nor is the computer's idle time followed (it is the desktop's
+/// of whoever runs the tests). Never set by the application.
 pub(crate) static TEST_NETWORK: Mutex<Option<NetOptions>> = Mutex::new(None);
 
 /// Where the core's events go: the screens' stream, or, until they listen, a queue, so a
@@ -426,7 +427,9 @@ pub async fn start(data_dir: String) -> Result<UiProfile> {
             crate::logs::watch_names(&RUNTIME);
             // Ready before a call first rings.
             crate::sounds::prepare();
-            crate::idle::watch(&RUNTIME);
+            if tested.is_none() {
+                crate::idle::watch(&RUNTIME);
+            }
             RUNTIME.spawn(pass_on(
                 events,
                 move |e| event(e, &me),

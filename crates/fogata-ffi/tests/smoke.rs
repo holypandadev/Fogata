@@ -8,16 +8,23 @@
 //!
 //! The bridge runs one core per process, so the other device is a core of its own (Bea),
 //! driven as fogata-core's tests drive one. Both use only the loopback interface: no DHT,
-//! no mDNS, no releases page, and keys kept in memory rather than the system's keychain.
+//! no mDNS, no releases page, no idle time of the desktop, and keys kept in memory rather
+//! than the system's keychain. A wait that fails says what it had seen so far: the events of
+//! both, and how each sees the other.
 
-use std::{path::Path, sync::Arc, time::Duration};
+use std::{
+    collections::VecDeque,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use fogata_core::{
     Core, CoreEvent, CoreEvents, NetOptions,
     direct::{Outgoing, model::Local},
     vault::{Keychain, MemoryKeyStore},
 };
-use fogata_crypto::DevicePublicKey;
+use fogata_crypto::{DevicePublicKey, GroupId};
 use fogata_ffi::{
     api::{
         app, direct,
@@ -93,64 +100,302 @@ fn explained_as(text: &str, part: &str) {
     );
 }
 
-/// Waits for an event the screens would be given, leaving out those before it.
-async fn screens_get(what: &str, mut wanted: impl FnMut(&UiEvent) -> bool) -> UiEvent {
-    let found = timeout(PATIENCE, async {
+/// Shown of an id in a report: its first characters.
+fn short(id: Option<&str>) -> &str {
+    id.map_or("-", |id| &id[..id.len().min(8)])
+}
+
+/// What the test has seen so far, told by any wait that fails: every event the screens were
+/// given and Bea was told, and each core's view of the other. A wait fails at once, with
+/// all of it, when the screens are told of a failure nobody waits for (a friend request
+/// that did not go, a download that failed, the core stopped).
+struct Scene {
+    started: Instant,
+    bea: Core,
+    bea_id: String,
+    group: Mutex<Option<GroupId>>,
+    /// The screens' events taken and not looked for yet, oldest first.
+    kept: Mutex<VecDeque<UiEvent>>,
+    screens: Mutex<Vec<String>>,
+    told_bea: Mutex<Vec<String>>,
+}
+
+/// Events of the screens that say something did not work.
+fn alarming(e: &UiEvent) -> bool {
+    matches!(
+        e.kind,
+        UiEventKind::FriendRequestFailed
+            | UiEventKind::DownloadFailed
+            | UiEventKind::DirectDownloadFailed
+            | UiEventKind::Stopped
+    )
+}
+
+impl Scene {
+    fn new(bea: Core) -> Self {
+        Scene {
+            started: Instant::now(),
+            bea_id: hex_of(bea.me()),
+            bea,
+            group: Mutex::new(None),
+            kept: Mutex::new(VecDeque::new()),
+            screens: Mutex::new(Vec::new()),
+            told_bea: Mutex::new(Vec::new()),
+        }
+    }
+
+    fn at(&self) -> String {
+        format!("{:>6.2}s", self.started.elapsed().as_secs_f64())
+    }
+
+    /// Takes what the screens were given since; the new events that are alarming and not
+    /// `expected`.
+    fn take(&self, expected: &mut dyn FnMut(&UiEvent) -> bool) -> Vec<UiEvent> {
+        let mut alarms = Vec::new();
+        for e in testing::take_events() {
+            self.screens.lock().unwrap().push(format!(
+                "{} {:?} group {} device {} name {:?} text {:?} room {:?} file {}",
+                self.at(),
+                e.kind,
+                short(e.group.as_deref()),
+                short(e.device.as_deref()),
+                e.name,
+                e.text,
+                e.room
+                    .as_ref()
+                    .map(|r| (r.kind, short(r.device.as_deref()).to_string())),
+                short(e.file.as_deref()),
+            ));
+            if alarming(&e) && !expected(&e) {
+                alarms.push(e.clone());
+            }
+            self.kept.lock().unwrap().push_back(e);
+        }
+        alarms
+    }
+
+    /// Everything seen, after why the test fails.
+    async fn report(&self, why: String) -> String {
+        let last = |lines: &[String]| -> String {
+            let from = lines.len().saturating_sub(60);
+            lines[from..].iter().map(|l| format!("\n    {l}")).collect()
+        };
+        let screens = last(&self.screens.lock().unwrap());
+        let told_bea = last(&self.told_bea.lock().unwrap());
+        let group = *self.group.lock().unwrap();
+        format!(
+            "{why} (at {})\nthe screens were given:{screens}\nBea was told:{told_bea}\n\
+             Ana sees:{}\nBea sees:{}",
+            self.at(),
+            self.ana_view(group).await,
+            self.bea_view(group).await
+        )
+    }
+
+    async fn ana_view(&self, group: Option<GroupId>) -> String {
+        let ask = Duration::from_secs(5);
+        let mut out = String::new();
+        match timeout(ask, app::friends()).await {
+            Ok(Ok(friends)) => {
+                for f in friends {
+                    let line = format!("\n    friend {} {:?}", f.person.name, f.presence);
+                    out.push_str(&line);
+                }
+            }
+            Ok(Err(e)) => out.push_str(&format!("\n    friends: {e:#}")),
+            Err(_) => out.push_str("\n    friends: no answer in 5 s"),
+        }
+        match timeout(ask, app::requests()).await {
+            Ok(Ok(r)) => out.push_str(&format!(
+                "\n    requests: {} incoming, {} outgoing",
+                r.incoming.len(),
+                r.outgoing.len()
+            )),
+            Ok(Err(e)) => out.push_str(&format!("\n    requests: {e:#}")),
+            Err(_) => out.push_str("\n    requests: no answer in 5 s"),
+        }
+        if let Some(group) = group {
+            match timeout(ask, app::members(hex::encode(group.as_bytes()))).await {
+                Ok(Ok(members)) => {
+                    for m in members.iter().filter(|m| !m.me) {
+                        let line =
+                            format!("\n    member {} connected by {:?}", m.person.name, m.path);
+                        out.push_str(&line);
+                    }
+                }
+                Ok(Err(e)) => out.push_str(&format!("\n    members: {e:#}")),
+                Err(_) => out.push_str("\n    members: no answer in 5 s"),
+            }
+        }
+        out
+    }
+
+    async fn bea_view(&self, group: Option<GroupId>) -> String {
+        let ask = Duration::from_secs(5);
+        let mut out = String::new();
+        match timeout(ask, self.bea.friends()).await {
+            Ok(Ok(friends)) => {
+                for f in friends {
+                    let line = format!("\n    friend {} {:?}", f.person.name, f.presence);
+                    out.push_str(&line);
+                }
+            }
+            Ok(Err(e)) => out.push_str(&format!("\n    friends: {e:#}")),
+            Err(_) => out.push_str("\n    friends: no answer in 5 s"),
+        }
+        match timeout(ask, self.bea.requests()).await {
+            Ok(Ok((incoming, outgoing))) => out.push_str(&format!(
+                "\n    requests: {} incoming, {} outgoing",
+                incoming.len(),
+                outgoing.len()
+            )),
+            Ok(Err(e)) => out.push_str(&format!("\n    requests: {e:#}")),
+            Err(_) => out.push_str("\n    requests: no answer in 5 s"),
+        }
+        if let Some(group) = group {
+            match timeout(ask, self.bea.members(group)).await {
+                Ok(Ok(members)) => {
+                    for m in members.iter().filter(|m| !m.me) {
+                        let line =
+                            format!("\n    member {} connected by {:?}", m.person.name, m.online);
+                        out.push_str(&line);
+                    }
+                }
+                Ok(Err(e)) => out.push_str(&format!("\n    members: {e:#}")),
+                Err(_) => out.push_str("\n    members: no answer in 5 s"),
+            }
+        }
+        out
+    }
+
+    /// Waits for an event the screens would be given, leaving out those before it.
+    async fn screens_get(&self, what: &str, mut wanted: impl FnMut(&UiEvent) -> bool) -> UiEvent {
+        let deadline = Instant::now() + PATIENCE;
         loop {
-            if let Some(event) = testing::take_events().into_iter().find(&mut wanted) {
-                return event;
+            let alarms = self.take(&mut wanted);
+            {
+                let mut kept = self.kept.lock().unwrap();
+                if let Some(at) = kept.iter().position(&mut wanted) {
+                    let found = kept.remove(at).unwrap();
+                    kept.drain(..at);
+                    return found;
+                }
+            }
+            if let Some(alarm) = alarms.first() {
+                panic!(
+                    "{}",
+                    self.report(format!(
+                        "waiting for {what}, the screens were told {:?}: {:?}",
+                        alarm.kind, alarm.text
+                    ))
+                    .await
+                );
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "{}",
+                    self.report(format!(
+                        "the screens were not told of {what} in {PATIENCE:?}"
+                    ))
+                    .await
+                );
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-    })
-    .await;
-    found.unwrap_or_else(|_| panic!("the screens were not told of {what}"))
-}
+    }
 
-async fn bea_gets(events: &mut CoreEvents, what: &str, mut done: impl FnMut(&CoreEvent) -> bool) {
-    let found = timeout(PATIENCE, async {
-        while let Some(event) = events.recv().await {
-            if done(&event) {
-                return true;
+    /// Fails at once when the screens were told of a failure meanwhile.
+    async fn no_alarm(&self, what: &str) {
+        if let Some(alarm) = self.take(&mut |_| false).first() {
+            panic!(
+                "{}",
+                self.report(format!(
+                    "waiting for {what}, the screens were told {:?}: {:?}",
+                    alarm.kind, alarm.text
+                ))
+                .await
+            );
+        }
+    }
+
+    async fn bea_gets(
+        &self,
+        events: &mut CoreEvents,
+        what: &str,
+        mut done: impl FnMut(&CoreEvent) -> bool,
+    ) {
+        let deadline = Instant::now() + PATIENCE;
+        loop {
+            match timeout(Duration::from_millis(50), events.recv()).await {
+                Ok(Some(event)) => {
+                    let mut said = format!("{event:?}");
+                    if said.len() > 240 {
+                        let cut = (0..=240).rev().find(|&i| said.is_char_boundary(i)).unwrap();
+                        said.truncate(cut);
+                        said.push('…');
+                    }
+                    self.told_bea
+                        .lock()
+                        .unwrap()
+                        .push(format!("{} {said}", self.at()));
+                    if done(&event) {
+                        return;
+                    }
+                }
+                Ok(None) => panic!(
+                    "{}",
+                    self.report(format!("Bea's core stopped before {what}"))
+                        .await
+                ),
+                Err(_) => {}
+            }
+            self.no_alarm(what).await;
+            if Instant::now() > deadline {
+                panic!(
+                    "{}",
+                    self.report(format!("Bea was not told of {what} in {PATIENCE:?}"))
+                        .await
+                );
             }
         }
-        false
-    })
-    .await
-    .unwrap_or(false);
-    assert!(found, "Bea was not told of {what}");
-}
+    }
 
-/// Asks again until `check` gives something: what a device shows of another also changes
-/// with heartbeats and lists read again, which no event marks.
-async fn until<T, F, Fut>(what: &str, mut check: F) -> T
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Option<T>>,
-{
-    let found = timeout(PATIENCE, async {
+    /// Asks again until `check` gives something: what a device shows of another also
+    /// changes with heartbeats and lists read again, which no event marks.
+    async fn until<T, F, Fut>(&self, what: &str, mut check: F) -> T
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Option<T>>,
+    {
+        let deadline = Instant::now() + PATIENCE;
         loop {
             if let Some(found) = check().await {
                 return found;
             }
+            self.no_alarm(what).await;
+            if Instant::now() > deadline {
+                panic!(
+                    "{}",
+                    self.report(format!("timed out waiting for {what} in {PATIENCE:?}"))
+                        .await
+                );
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-    })
-    .await;
-    found.unwrap_or_else(|_| panic!("timed out waiting for {what}"))
-}
+    }
 
-/// Asks again until `check` holds (see [`until`]).
-async fn eventually<F, Fut>(what: &str, mut check: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    until(what, || {
-        let held = check();
-        async move { held.await.then_some(()) }
-    })
-    .await
+    /// Asks again until `check` holds (see [`Scene::until`]).
+    async fn eventually<F, Fut>(&self, what: &str, mut check: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        self.until(what, || {
+            let held = check();
+            async move { held.await.then_some(()) }
+        })
+        .await
+    }
 }
 
 fn text(path: &Path) -> String {
@@ -178,11 +423,21 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     );
     assert!(app::has_profile(text(&dir_a)).unwrap());
 
-    // Bea, on her own core, listens; Ana's core dials her.
-    let (port_a, port_b) = (free_port(), free_port());
+    // Bea, on her own core, and Ana each listen on a loopback port of their own and dial
+    // the other's: dials the test names, which a device makes whatever its networks (an
+    // address a peer names is never dialled on the loopback interface), so the two find
+    // each other the same way on every computer, again after Ana starts anew.
+    let (port_a, port_b) = loop {
+        let ports = (free_port(), free_port());
+        if ports.0 != ports.1 {
+            break ports;
+        }
+    };
     Core::create_profile(&dir_b, "Bea", None).unwrap();
-    let (bea, mut events_b) = Core::start(dir_b.clone(), alone(port_b, Vec::new())).unwrap();
-    let bea_id = hex_of(bea.me());
+    let (bea, mut events_b) =
+        Core::start(dir_b.clone(), alone(port_b, vec![loopback(port_a)])).unwrap();
+    let scene = Scene::new(bea.clone());
+    let bea_id = scene.bea_id.clone();
     testing::use_network(alone(port_a, vec![loopback(port_b)]));
     let me = app::start(text(&dir_a)).await.unwrap();
     assert_eq!(me.person.id, made.person.id);
@@ -214,10 +469,11 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     }
     let own = app::friend_link().await.unwrap();
     app::add_friend(own.text).await.unwrap();
-    let refused = screens_get("the own link refused", |e| {
-        e.kind == UiEventKind::FriendRequestFailed
-    })
-    .await;
+    let refused = scene
+        .screens_get("the own link refused", |e| {
+            e.kind == UiEventKind::FriendRequestFailed
+        })
+        .await;
     explained_as(
         refused.text.as_deref().unwrap(),
         "this link was made on this device",
@@ -235,16 +491,19 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     );
     assert!(groups[0].manager);
     let voice = groups[0].voice_rooms[0].id.clone();
+    let gid = GroupId::from_bytes(&hex::decode(&group).unwrap()).unwrap();
+    *scene.group.lock().unwrap() = Some(gid);
     let invite = app::invite(group.clone(), 1).await.unwrap();
     explained_as(
         &said(app::join_group(invite.clone()).await.unwrap_err()),
         "this device is already in that group",
     );
     bea.join_group(&invite, None, None).await.unwrap();
-    let asked = screens_get("Bea's ask to join", |e| {
-        e.kind == UiEventKind::JoinAsked && e.device.as_deref() == Some(bea_id.as_str())
-    })
-    .await;
+    let asked = scene
+        .screens_get("Bea's ask to join", |e| {
+            e.kind == UiEventKind::JoinAsked && e.device.as_deref() == Some(bea_id.as_str())
+        })
+        .await;
     assert_eq!(
         (asked.group.as_deref(), asked.name.as_deref()),
         (Some(group.as_str()), Some("Bea"))
@@ -258,52 +517,82 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     app::answer_join(group.clone(), bea_id.clone(), true)
         .await
         .unwrap();
-    bea_gets(&mut events_b, "the join", |e| {
-        matches!(e, CoreEvent::Joined { .. })
-    })
-    .await;
-    eventually("Bea among the members", || async {
-        let members = app::members(group.clone()).await.unwrap();
-        members.len() == 2 && members.iter().any(|m| m.person.id == bea_id && !m.me)
-    })
-    .await;
-
-    // Friends from the group: no link or code.
-    app::ask_member(bea_id.clone(), "Bea".into()).await.unwrap();
-    bea_gets(
-        &mut events_b,
-        "Ana's friend request",
-        |e| matches!(e, CoreEvent::FriendRequest { profile } if profile.device == ana),
-    )
-    .await;
-    bea.answer_request(ana, true).await.unwrap();
-    let added = screens_get("Bea a friend", |e| {
-        e.kind == UiEventKind::FriendAdded && e.device.as_deref() == Some(bea_id.as_str())
-    })
-    .await;
-    assert_eq!(added.name.as_deref(), Some("Bea"));
-    eventually("Bea online as a friend", || async {
-        app::friends()
-            .await
-            .unwrap()
-            .iter()
-            .any(|f| f.person.id == bea_id && !matches!(f.presence, UiPresence::Offline))
-    })
-    .await;
-    eventually("Ana online at Bea's", || async {
-        bea.friends().await.unwrap().iter().any(|f| {
-            f.person.device == ana && !matches!(f.presence, fogata_core::Presence::Offline { .. })
+    scene
+        .bea_gets(&mut events_b, "the join", |e| {
+            matches!(e, CoreEvent::Joined { .. })
         })
-    })
-    .await;
+        .await;
+    scene
+        .eventually("Bea among the members", || async {
+            let members = app::members(group.clone()).await.unwrap();
+            members.len() == 2 && members.iter().any(|m| m.person.id == bea_id && !m.me)
+        })
+        .await;
+
+    // Friends from the group: no link or code. The request goes over a connection where
+    // each proved to the other to be a member, so only once each shows the other connected,
+    // as the screens offer it only then: before, it fails at once ("not connected") or comes
+    // back refused ("did not reach the member").
+    scene
+        .eventually(
+            "Ana and Bea connected as members, each in the other's view",
+            || async {
+                let ana_sees = app::members(group.clone())
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.person.id == bea_id && m.path.is_some());
+                let bea_sees = bea
+                    .members(gid)
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|m| m.person.device == ana && m.online.is_some());
+                ana_sees && bea_sees
+            },
+        )
+        .await;
+    app::ask_member(bea_id.clone(), "Bea".into()).await.unwrap();
+    scene
+        .bea_gets(
+            &mut events_b,
+            "Ana's friend request",
+            |e| matches!(e, CoreEvent::FriendRequest { profile } if profile.device == ana),
+        )
+        .await;
+    bea.answer_request(ana, true).await.unwrap();
+    let added = scene
+        .screens_get("Bea a friend", |e| {
+            e.kind == UiEventKind::FriendAdded && e.device.as_deref() == Some(bea_id.as_str())
+        })
+        .await;
+    assert_eq!(added.name.as_deref(), Some("Bea"));
+    scene
+        .eventually("Bea online as a friend", || async {
+            app::friends()
+                .await
+                .unwrap()
+                .iter()
+                .any(|f| f.person.id == bea_id && !matches!(f.presence, UiPresence::Offline))
+        })
+        .await;
+    scene
+        .eventually("Ana online at Bea's", || async {
+            bea.friends().await.unwrap().iter().any(|f| {
+                f.person.device == ana
+                    && !matches!(f.presence, fogata_core::Presence::Offline { .. })
+            })
+        })
+        .await;
     // A friend's link, used again, says so.
     app::add_friend(bea.friend_link().await.unwrap().text)
         .await
         .unwrap();
-    let again = screens_get("a friend's link refused", |e| {
-        e.kind == UiEventKind::FriendRequestFailed
-    })
-    .await;
+    let again = scene
+        .screens_get("a friend's link refused", |e| {
+            e.kind == UiEventKind::FriendRequestFailed
+        })
+        .await;
     explained_as(again.text.as_deref().unwrap(), "you are already friends");
 
     // A direct chat, with a small file each way.
@@ -319,7 +608,7 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     )
     .await
     .unwrap();
-    bea_gets(&mut events_b, "Ana's message", |e| {
+    scene.bea_gets(&mut events_b, "Ana's message", |e| {
         matches!(e, CoreEvent::DirectMessage { friend, text } if *friend == ana && text == "the notes")
     })
     .await;
@@ -328,11 +617,12 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     assert_eq!(sent.files.len(), 1);
     let notes_id = sent.files[0].file.id;
     bea.fetch_direct_file(ana, notes_id).await.unwrap();
-    eventually("the notes at Bea's", || async {
-        let chat = bea.direct_chat(ana, 10).await.unwrap();
-        chat.items.last().unwrap().files[0].file.local == Local::Here
-    })
-    .await;
+    scene
+        .eventually("the notes at Bea's", || async {
+            let chat = bea.direct_chat(ana, 10).await.unwrap();
+            chat.items.last().unwrap().files[0].file.local == Local::Here
+        })
+        .await;
     // Kept sealed, as everything of the chat's: read through the core.
     std::fs::create_dir_all(files.join("at-bea")).unwrap();
     let copy = bea
@@ -354,10 +644,11 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     )
     .await
     .unwrap();
-    let message = screens_get("Bea's answer", |e| {
-        e.kind == UiEventKind::DirectMessage && e.device.as_deref() == Some(bea_id.as_str())
-    })
-    .await;
+    let message = scene
+        .screens_get("Bea's answer", |e| {
+            e.kind == UiEventKind::DirectMessage && e.device.as_deref() == Some(bea_id.as_str())
+        })
+        .await;
     assert_eq!(message.text.as_deref(), Some("got it"));
     let page = direct::direct_chat(bea_id.clone(), 10).await.unwrap();
     assert_eq!(page.friend.id, bea_id);
@@ -372,11 +663,12 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     direct::fetch_direct_file(bea_id.clone(), map_file.id.clone())
         .await
         .unwrap();
-    eventually("the map here", || async {
-        let page = direct::direct_chat(bea_id.clone(), 10).await.unwrap();
-        page.items[1].files[0].state == UiFileState::Here
-    })
-    .await;
+    scene
+        .eventually("the map here", || async {
+            let page = direct::direct_chat(bea_id.clone(), 10).await.unwrap();
+            page.items[1].files[0].state == UiFileState::Here
+        })
+        .await;
     let saved_dir = base.join("saved");
     std::fs::create_dir_all(&saved_dir).unwrap();
     let saved = direct::save_direct_file(bea_id.clone(), map_file.id.clone(), text(&saved_dir))
@@ -394,36 +686,38 @@ async fn a_person_does_the_main_things_through_the_bridge() {
         "join the room first",
     );
     app::join_room(group.clone(), voice.clone()).await.unwrap();
-    let gid = fogata_crypto::GroupId::from_bytes(&hex::decode(&group).unwrap()).unwrap();
     bea.join_room(gid).await.unwrap();
-    let joined = screens_get("Bea in the room", |e| {
-        e.kind == UiEventKind::Room
-            && e.room.as_ref().is_some_and(|r| {
-                r.kind == UiRoomChangeKind::Joined && r.device.as_deref() == Some(bea_id.as_str())
-            })
-    })
-    .await;
+    let joined = scene
+        .screens_get("Bea in the room", |e| {
+            e.kind == UiEventKind::Room
+                && e.room.as_ref().is_some_and(|r| {
+                    r.kind == UiRoomChangeKind::Joined
+                        && r.device.as_deref() == Some(bea_id.as_str())
+                })
+        })
+        .await;
     assert_eq!(
         (joined.group.as_deref(), joined.voice.as_deref()),
         (Some(group.as_str()), Some(voice.as_str()))
     );
     app::say(group.clone(), "hello room".into()).await.unwrap();
-    bea_gets(&mut events_b, "Ana's line", |e| {
+    scene.bea_gets(&mut events_b, "Ana's line", |e| {
         matches!(e, CoreEvent::Room { change: RoomChange::Chat(line), .. } if line.text == "hello room" && line.sender == ana)
     })
     .await;
     app::send_signal(group.clone(), bea_id.clone(), "offer 1".into())
         .await
         .unwrap();
-    bea_gets(&mut events_b, "Ana's signal", |e| {
+    scene.bea_gets(&mut events_b, "Ana's signal", |e| {
         matches!(e, CoreEvent::Signal { from, payload, .. } if *from == ana && payload == b"offer 1")
     })
     .await;
     bea.signal(gid, ana, b"answer 1".to_vec()).await.unwrap();
-    let signal = screens_get("Bea's signal", |e| {
-        e.kind == UiEventKind::Signal && e.device.as_deref() == Some(bea_id.as_str())
-    })
-    .await;
+    let signal = scene
+        .screens_get("Bea's signal", |e| {
+            e.kind == UiEventKind::Signal && e.device.as_deref() == Some(bea_id.as_str())
+        })
+        .await;
     assert_eq!(
         (signal.group.as_deref(), signal.text.as_deref()),
         (Some(group.as_str()), Some("answer 1"))
@@ -434,14 +728,15 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     std::fs::write(&photo, &photo_bytes).unwrap();
     let shared = bea.share_file(gid, photo, None).await.unwrap();
     let shared_id = hex::encode(shared.id);
-    let listed = screens_get("Bea's file in the room", |e| {
-        e.kind == UiEventKind::Room
-            && e.room.as_ref().is_some_and(|r| {
-                r.kind == UiRoomChangeKind::FileShared
-                    && r.file_id.as_deref() == Some(shared_id.as_str())
-            })
-    })
-    .await;
+    let listed = scene
+        .screens_get("Bea's file in the room", |e| {
+            e.kind == UiEventKind::Room
+                && e.room.as_ref().is_some_and(|r| {
+                    r.kind == UiRoomChangeKind::FileShared
+                        && r.file_id.as_deref() == Some(shared_id.as_str())
+                })
+        })
+        .await;
     let change = listed.room.unwrap();
     assert_eq!(
         (change.file_name.as_deref(), change.file_size),
@@ -452,10 +747,11 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     let dest = app::download(group.clone(), shared_id.clone(), text(&downloads))
         .await
         .unwrap();
-    let done = screens_get("the download done", |e| {
-        e.kind == UiEventKind::DownloadDone && e.file.as_deref() == Some(shared_id.as_str())
-    })
-    .await;
+    let done = scene
+        .screens_get("the download done", |e| {
+            e.kind == UiEventKind::DownloadDone && e.file.as_deref() == Some(shared_id.as_str())
+        })
+        .await;
     assert_eq!(done.text.as_deref(), Some(dest.as_str()));
     assert_eq!(std::fs::read(&dest).unwrap(), photo_bytes);
 
@@ -464,13 +760,14 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     let plan_id = app::share_file(group.clone(), text(&plan), None)
         .await
         .unwrap();
-    eventually("Ana's file at Bea's", || async {
-        bea.room(gid, fogata_core::FIRST_ROOM)
-            .await
-            .unwrap()
-            .is_some_and(|r| r.files.iter().any(|f| hex::encode(f.info.id) == plan_id))
-    })
-    .await;
+    scene
+        .eventually("Ana's file at Bea's", || async {
+            bea.room(gid, fogata_core::FIRST_ROOM)
+                .await
+                .unwrap()
+                .is_some_and(|r| r.files.iter().any(|f| hex::encode(f.info.id) == plan_id))
+        })
+        .await;
     let room = app::room(group.clone(), voice.clone())
         .await
         .unwrap()
@@ -494,25 +791,26 @@ async fn a_person_does_the_main_things_through_the_bridge() {
         .await
         .unwrap();
     app::set_profile("Ana B".into(), 3, None).await.unwrap();
-    eventually("the new names at Bea's", || async {
-        let renamed = bea
-            .groups()
-            .await
-            .unwrap()
-            .iter()
-            .any(|g| g.id == gid && g.name == "crew two");
-        let named = bea
-            .friends()
-            .await
-            .unwrap()
-            .iter()
-            .any(|f| f.person.device == ana && f.person.name == "Ana B");
-        renamed && named
-    })
-    .await;
+    scene
+        .eventually("the new names at Bea's", || async {
+            let renamed = bea
+                .groups()
+                .await
+                .unwrap()
+                .iter()
+                .any(|g| g.id == gid && g.name == "crew two");
+            let named = bea
+                .friends()
+                .await
+                .unwrap()
+                .iter()
+                .any(|f| f.person.device == ana && f.person.name == "Ana B");
+            renamed && named
+        })
+        .await;
 
     app::leave_room(group.clone()).await.unwrap();
-    bea_gets(&mut events_b, "Ana gone from the room", |e| {
+    scene.bea_gets(&mut events_b, "Ana gone from the room", |e| {
         matches!(e, CoreEvent::Room { change: RoomChange::Left { device, .. }, .. } if *device == ana)
     })
     .await;
@@ -549,21 +847,23 @@ async fn a_person_does_the_main_things_through_the_bridge() {
     assert_eq!(texts, ["the notes", "got it\nhere is the map"]);
     assert_eq!(page.items[1].files[0].state, UiFileState::Here);
     assert!(Path::new(&dest).is_file());
-    screens_get("Bea back after the restart", |e| {
-        matches!(
-            e.kind,
-            UiEventKind::FriendOnline | UiEventKind::MemberConnected
-        ) && e.device.as_deref() == Some(bea_id.as_str())
-    })
-    .await;
+    scene
+        .screens_get("Bea back after the restart", |e| {
+            matches!(
+                e.kind,
+                UiEventKind::FriendOnline | UiEventKind::MemberConnected
+            ) && e.device.as_deref() == Some(bea_id.as_str())
+        })
+        .await;
 
     // Leaving the group.
     app::leave_group(group.clone()).await.unwrap();
     assert!(app::groups().await.unwrap().is_empty());
-    eventually("Ana gone from the group at Bea's", || async {
-        bea.members(gid).await.unwrap().len() == 1
-    })
-    .await;
+    scene
+        .eventually("Ana gone from the group at Bea's", || async {
+            bea.members(gid).await.unwrap().len() == 1
+        })
+        .await;
 
     app::stop_core(text(&dir_a)).await.unwrap();
     bea.shutdown().await.unwrap();
