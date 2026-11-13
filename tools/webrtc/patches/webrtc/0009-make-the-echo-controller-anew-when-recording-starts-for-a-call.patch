@@ -1,0 +1,169 @@
+Make the echo controller anew when recording starts again for a call
+
+AudioState starts the audio device's recording with the first stream that sends sound
+and stops it with the last (AddSendingStream, RemoveSendingStream), so it stops at the
+end of every call and starts again with the next. The audio processing and its echo
+controller (AEC3) stay from one call to the next, and AEC3 kept the last call's
+alignment of what was played with what is recorded: its render buffer, where the read
+point stood, and its delay estimate. Playout starting before recording piled played
+blocks up in it, which AEC3 notices only when it checks for excess render blocks
+(EchoCanceller3Config buffering.excess_render_detection_interval_blocks: 250 blocks,
+once a second) and then resets its buffer and finds the delay again from the echo.
+Meanwhile the other side's speech went back to them: in a call lab with a room's echo,
+from the start of every call after the first, 1.2 to 2 s ("Excess render blocks
+detected", then "Applying total delay of ..."), where the first call, whose AEC3 was
+made when recording first started at the processing's rate, found the delay in 0.5 s.
+
+AudioState now makes the echo controller anew once the device has started recording
+again (AudioProcessing::RestartEchoController, the part of ApplyConfig that turning the
+echo canceller on runs: AudioProcessingImpl::InitializeEchoController, under both
+locks). A new AEC3 does not process the microphone before played sound reaches it, and
+on its first recorded block after that resets its render buffer to the delay the audio
+device reports with every block (set_stream_delay_ms; PulseAudio's playout and
+recording latencies, about 27 to 53 ms there), less its headroom, then finds the
+delay from the echo as at the first call. Nothing else of the processing is touched:
+the gain control and its level, the noise suppressor, the custom capture processing
+(the application's denoiser and its state), whether the output is used
+(set_output_will_be_muted) and the runtime settings stay as they were. A full
+AudioProcessing::Initialize() would have started them all over.
+
+Only a start of recording does it: a stream added while recording runs (another
+connection's voice, a shared screen's sound), a track replaced or muted with the
+stream still sending, and the audio device starting again by itself (another device
+chosen, a sound server back, patch 0006) leave the echo controller as it is. A
+microphone turned off by having the voice channel only receive stops the recording
+when nothing else sends, and turned on again it is a start like a call's (the same
+stale alignment). The processing's rate does not change in a call (every sending
+stream is Opus at 48 kHz), and its channels are kept by wrapper patch 0011, so the
+echo controller is not made anew in a call that way either.
+
+AEC3's excess render check is left at once a second: checked more often it would
+reset the buffer (and align again from the reported delay) on bursts of played blocks
+in a call, and a reset at the start leaves nothing piled up for it to find.
+
+diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
+index a4f3f52..c7fd326 100644
+--- a/api/audio/audio_processing.h
++++ b/api/audio/audio_processing.h
+@@ -522,6 +522,14 @@ class RTC_EXPORT AudioProcessing : public RefCountInterface {
+   virtual size_t num_output_channels() const = 0;
+   virtual size_t num_reverse_channels() const = 0;
+ 
++  // Fogata: makes the echo controller anew, as turning it on does, and leaves
++  // every other part of the processing as it is (gain control, noise
++  // suppression, the custom processing, whether the output is used, runtime
++  // settings). For the sound of a call starting after the audio device stopped
++  // recording: the echo controller kept from the last call holds that call's
++  // alignment of what was played with what is recorded. Takes both locks.
++  virtual void RestartEchoController() {}
++
+   // Set to true when the output of AudioProcessing will be muted or in some
+   // other way not used. Ideally, the captured audio would still be processed,
+   // but some components may change behavior based on this information.
+diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+index b505f56..f63352c 100644
+--- a/audio/audio_state.cc
++++ b/audio/audio_state.cc
+@@ -127,7 +127,7 @@ void AudioState::SetRecording(bool enabled) {
+     if (!sending_streams_.empty()) {
+       if (!adm->Recording()) {
+         if (adm->InitRecording() == 0) {
+-          adm->StartRecording();
++          StartRecordingForCall();
+         }
+       }
+     }
+@@ -152,7 +152,7 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
+   if (recording_enabled_) {
+     if (!adm->Recording()) {
+       if (adm->InitRecording() == 0) {
+-        adm->StartRecording();
++        StartRecordingForCall();
+       } else {
+         RTC_DLOG_F(LS_ERROR) << "Failed to initialize recording.";
+       }
+@@ -189,6 +189,28 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
+                                       max_sample_rate_hz, max_num_channels);
+ }
+ 
++// Fogata: the audio device stops recording when the last stream sending sound
++// goes (the end of a call) and starts again with the first one of the next call,
++// but the audio processing and its echo controller stay. AEC3 kept the last call's
++// alignment of what was played with what is recorded (its render buffer and delay
++// estimate), and playout starting before recording piled played blocks up in it:
++// the other side's first second or two of speech went back to them, until AEC3
++// saw too many played blocks (it checks once a second,
++// buffering.excess_render_detection_interval_blocks) and aligned again. Made anew
++// as recording starts, AEC3 aligns from the delay the audio device reports when
++// the first recorded block reaches it, as at the first call. Only here: a stream
++// added while recording runs (a second connection, a shared screen's sound),
++// muting or replacing a track, and the device itself starting again (a device
++// chosen, a sound server back) leave it as it is.
++void AudioState::StartRecordingForCall() {
++  if (config_.audio_device_module->StartRecording() != 0) {
++    return;
++  }
++  if (config_.audio_processing) {
++    config_.audio_processing->RestartEchoController();
++  }
++}
++
+ void AudioState::UpdateNullAudioPollerState() {
+   // Run NullAudioPoller when there are receiving streams and playout is
+   // disabled.
+diff --git a/audio/audio_state.h b/audio/audio_state.h
+index 7b3ec07..7742337 100644
+--- a/audio/audio_state.h
++++ b/audio/audio_state.h
+@@ -67,6 +67,9 @@ class AudioState : public webrtc::AudioState {
+   void UpdateAudioTransportWithSendingStreams()
+       RTC_RUN_ON(&worker_thread_checker_);
+   void UpdateNullAudioPollerState() RTC_RUN_ON(&worker_thread_checker_);
++  // Fogata: starts the audio device's recording, and makes the echo controller
++  // anew once it records.
++  void StartRecordingForCall() RTC_RUN_ON(&worker_thread_checker_);
+ 
+   RTC_NO_UNIQUE_ADDRESS SequenceChecker worker_thread_checker_{
+       SequenceChecker::kDetached};
+diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
+index 89d537f..d2ea94c 100644
+--- a/modules/audio_processing/audio_processing_impl.cc
++++ b/modules/audio_processing/audio_processing_impl.cc
+@@ -1839,6 +1839,13 @@ void AudioProcessingImpl::InitializeHighPassFilter(bool forced_reset) {
+   }
+ }
+ 
++void AudioProcessingImpl::RestartEchoController() {
++  MutexLock lock_render(&mutex_render_);
++  MutexLock lock_capture(&mutex_capture_);
++  RTC_LOG(LS_INFO) << "AudioProcessing: echo controller made anew";
++  InitializeEchoController();
++}
++
+ void AudioProcessingImpl::InitializeEchoController() {
+   submodules_.echo_controller.reset();
+   capture_.linear_aec_output.reset();
+diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
+index 2d50d8d..2f8ead4 100644
+--- a/modules/audio_processing/audio_processing_impl.h
++++ b/modules/audio_processing/audio_processing_impl.h
+@@ -92,6 +92,7 @@ class AudioProcessingImpl : public AudioProcessing {
+   void DetachAecDump() override;
+   void SetRuntimeSetting(RuntimeSetting setting) override;
+   bool PostRuntimeSetting(RuntimeSetting setting) override;
++  void RestartEchoController() override;
+ 
+   // Capture-side exclusive methods possibly running APM in a
+   // multi-threaded manner. Acquire the capture lock.
+diff --git a/modules/audio_processing/include/mock_audio_processing.h b/modules/audio_processing/include/mock_audio_processing.h
+index 2b6f468..db22a2d 100644
+--- a/modules/audio_processing/include/mock_audio_processing.h
++++ b/modules/audio_processing/include/mock_audio_processing.h
+@@ -181,6 +181,7 @@ class MockAudioProcessing : public AudioProcessing {
+   MOCK_METHOD(AudioProcessingStats, GetStatistics, (bool), (override));
+ 
+   MOCK_METHOD(AudioProcessing::Config, GetConfig, (), (const, override));
++  MOCK_METHOD(void, RestartEchoController, (), (override));
+ };
+ 
+ class MockAudioProcessingBuilder : public AudioProcessingBuilderInterface {

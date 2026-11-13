@@ -2118,7 +2118,7 @@ index 0000000000..5e86fb378b
 +
 +}  // namespace webrtc
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index b505f56720..e17c03c2e9 100644
+index f63352c..997fefa 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
 @@ -149,13 +149,21 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
@@ -2139,7 +2139,7 @@ index b505f56720..e17c03c2e9 100644
 +          adm->StartPlayout();
 +        }
 +#endif
-         adm->StartRecording();
+         StartRecordingForCall();
 -      } else {
 -        RTC_DLOG_F(LS_ERROR) << "Failed to initialize recording.";
        }

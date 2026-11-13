@@ -653,7 +653,11 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   out; it now counts every channel's senders. And it processed the microphone in as many
   channels as the channel sending the most, so a screen's sound in stereo initialized
   the processing again as it started and stopped; the microphone is now processed in
-  one channel always. macOS's WebRTC
+  one channel always. Its echo canceller starts anew each time recording starts (a
+  call, or the microphone on again with nothing else going out): kept from the last
+  call, it held that call's alignment of the played sound with the recorded one and let
+  the other side's first second or two of speech go back to them (every system, macOS
+  too). macOS's WebRTC
   hands what it records to every channel of sound, the voice's too, so a Mac sends its
   screen's sound (every application's but Fogata's, taken with ScreenCaptureKit; for a
   shared window only its application's and that application's helpers') on a

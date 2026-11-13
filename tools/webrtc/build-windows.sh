@@ -49,4 +49,4 @@ cp "$work/dist/$LIBWEBRTC_VERSION"/libwebrtc-win-x64-release.zip* "$store/"
 echo "copied into $store, where the app's build takes it from"
 echo "Run the wrapper's tests on Windows: copy $out/libwebrtc_cpp_api_unittests.exe" \
     "and $out/libwebrtc.dll to one folder there and run" \
-    "libwebrtc_cpp_api_unittests.exe --gtest_filter=Vp8SizeGate.*:CustomAudioTransport.*:VoiceEngineMuted.*:PortableVector.*:SharedEncoder*:SharedEncodeSlots.*"
+    "libwebrtc_cpp_api_unittests.exe --gtest_filter=Vp8SizeGate.*:CustomAudioTransport.*:VoiceEngineMuted.*:EchoRestart.*:PortableVector.*:SharedEncoder*:SharedEncodeSlots.*"

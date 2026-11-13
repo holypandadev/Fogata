@@ -43,7 +43,8 @@ the patches in `patches/`:
   screen's sound starting to go out in stereo made WebRTC process the microphone in two
   channels, starting its echo canceller and gain control over. The processing now counts
   every channel's senders, takes a microphone source's options, and processes the
-  microphone in one channel always.
+  microphone in one channel always. The echo canceller starts each call anew: kept from
+  the last call, it sent the other side's first second or two of speech back to them.
 - **A statistics read keeps nothing once answered** (Linux, Windows): every `getStats`
   kept about 2 KB for good, more with more people in a call. The wrapper's callback took
   one reference more than WebRTC gives back, keeping its closures (and the plugin's answer
@@ -81,8 +82,8 @@ first time.
 Rust and sysroot its hooks fetch) and the wrapper, each at its pinned commit.
 `build-linux.sh` resets the tree (`prepare.sh`), applies the patches, builds, runs the
 wrapper's tests of the size check, of the microphone's channels, of the voice engine's
-muted state, of the arrays it hands across and of the shared screen encoder, and writes
-into `<work>/dist`:
+muted state, of the echo controller made anew, of the arrays it hands across and of the
+shared screen encoder, and writes into `<work>/dist`:
 
     fogata-libwebrtc.m156.8078.5/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
@@ -199,6 +200,14 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    it from its own streams, so the one touched last decided for all). On macOS
    `patches/apple/0001` keeps webrtc-sdk's own rule in `MuteStream`, which never takes a
    sender with no track for muted.
+9. `0009-make-the-echo-controller-anew-when-recording-starts-for-a-call`: when the audio
+   device starts recording again (the first stream that sends sound of a call after the
+   last one's went, or the microphone on again with nothing else sending), the audio
+   processing makes its echo controller anew (`AudioProcessing::RestartEchoController`)
+   and leaves the rest of the processing as it was. AEC3 kept the last call's alignment of
+   what was played with what is recorded, and let the other side's first second or two
+   of speech go back to them, until it noticed (once a second) the played blocks piled
+   up. `patches/apple/0001` keeps this in its own `AudioState::AddSendingStream`.
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -253,7 +262,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     connection as before (its encoder made and initialized in `InitEncode`, as without
     the trial). A joiner gets a key frame at once; one owed on a still screen is made of
     the last frame again; one failed encode is a dropped frame, three in a row give every
-    connection an encoder of its own.
+    connection an encoder of its own;
+18. the test of WebRTC's patch 0009 (`test/echo_restart.test.cc`), with the audio state,
+    a mock audio device and a mock audio processing built in.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of
