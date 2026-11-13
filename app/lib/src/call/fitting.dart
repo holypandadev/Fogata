@@ -105,10 +105,12 @@ const maxScreenPixels = 7680 * 4320;
 const screenSteps = [1080, 720, 540];
 
 /// The most lines a shared screen goes out at with [watchers] watching it, as the 16:9 box
-/// of [ScreenQuality.lines]; null for no more than the quality chosen. Everyone watching
-/// has an encoder of their own for the same picture, and each one's memory and work grow
-/// with its pixels: shared to seven, a 1600×900 screen took the sharer about 1 GB and a
-/// core. One or two watchers get the quality chosen; three or four at most 1080 lines,
+/// of [ScreenQuality.lines]; null for no more than the quality chosen. Without the shared
+/// encode ([ScreenLoad.sharedEncode]) everyone watching has an encoder of their own for the
+/// same picture, and each one's memory and work grow with its pixels: shared to seven, a
+/// 1600×900 screen took the sharer about 1 GB and a core. With it, the upload still grows
+/// with each watcher, and this stays until measured. One or two watchers get the quality
+/// chosen; three or four at most 1080 lines,
 /// where a screen shared at its own size (1440 lines, or 4K) would take two to four times
 /// that; five or more at most 720, the smaller quality offered, so that what [ScreenLoad]
 /// gives back when the processor allows is frames rather than size.
@@ -235,10 +237,12 @@ class ScreenFit {
   }
 }
 
-/// How much of this device's processor a shared screen may take. Everyone watching has an
-/// encoder of their own for the same picture, so the work grows with each one: on a
-/// 16-thread desktop, five watchers of a 1600×900 screen took 2.7 cores and seven brought it
-/// down to 5 frames a second for everyone, as measured. It also keeps the screen within
+/// How much of this device's processor a shared screen may take. Without the shared encode
+/// ([sharedEncode]) everyone watching has an encoder of their own for the same picture, so
+/// the work grows with each one: on a 16-thread desktop, five watchers of a 1600×900 screen
+/// took 2.7 cores and seven brought it down to 5 frames a second for everyone, as
+/// measured; with it, one encode for each size the screen goes out at. It also keeps the
+/// screen within
 /// the [ceiling] the number watching calls for (see [screenCeiling]). Unlike [ScreenFit],
 /// which follows one person's connection, this follows the encoders together and lowers
 /// the screen for everyone at once, a level at a time (see [levels]): when WebRTC says an
