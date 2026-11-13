@@ -126,7 +126,7 @@ enum Command {
         /// A DHT key, in hex (see `lab-keys`): the node is made near it, so that lookups of
         /// it ask this node first, and its made-up peers near each key it is asked.
         #[arg(long = "lie-near", requires = "lies", value_parser = parse_hex)]
-        lie_near: Option<Vec<u8>>,
+        lie_near: Option<HexBytes>,
     },
     /// Network lab only: print the DHT keys the groups of this device are announced under
     /// now, in hex as a lab DHT node writes them down, one line per group.
@@ -223,9 +223,14 @@ enum Command {
 
 /// The bytes a hex argument writes.
 #[cfg(feature = "lab")]
-fn parse_hex(text: &str) -> Result<Vec<u8>, hex::FromHexError> {
-    hex::decode(text)
+fn parse_hex(text: &str) -> Result<HexBytes, hex::FromHexError> {
+    hex::decode(text).map(HexBytes)
 }
+
+/// Bytes given in hex. Not a bare `Vec<u8>`, which clap would take for a list of values.
+#[cfg(feature = "lab")]
+#[derive(Clone, Debug)]
+struct HexBytes(Vec<u8>);
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -295,8 +300,22 @@ async fn main() -> Result<()> {
             lie_near,
         } => {
             let lies = lies.map(|count| (count, lie_at));
+            let lie_near = lie_near.map(|key| key.0);
+            let near = lie_near.clone();
+            let told = std::sync::atomic::AtomicBool::new(false);
             fogata_net::run_lab_dht(port, peers, records, identified, lies, lie_near, |addr| {
-                println!("{addr}")
+                println!("{addr}");
+                // What it lies near, once: the key and how near this node is to it.
+                if let (Some(key), Some(fogata_net::multiaddr::Protocol::P2p(peer))) =
+                    (&near, addr.iter().last())
+                    && !told.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
+                    println!(
+                        "lying near {}: this node shares {} leading bits with it",
+                        hex::encode(key),
+                        fogata_net::lab_shared_bits(key, &peer)
+                    );
+                }
             })
             .await?;
         }

@@ -49,8 +49,8 @@ pub use crate::{
     events::{Backlog, NodeEvents},
     group::GroupSetup,
     lab::{
-        lab_is_sealed, lab_lookup_keys, lab_open_sealed, run_lab_dht, run_lab_flood, run_lab_liar,
-        run_lab_mdns_flood, run_lab_silent,
+        lab_is_sealed, lab_lookup_keys, lab_open_sealed, lab_shared_bits, run_lab_dht,
+        run_lab_flood, run_lab_liar, run_lab_mdns_flood, run_lab_silent,
     },
     node::typing::{TYPING_PROTOCOL, TypingSignal},
     rendezvous::AMINO_BOOTSTRAP,

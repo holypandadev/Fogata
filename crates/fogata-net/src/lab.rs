@@ -44,10 +44,29 @@ const NEAR_BITS: u32 = 12;
 
 /// Whether `peer` is near `key` (see [`NEAR_BITS`]).
 fn near(key: &kad::RecordKey, peer: PeerId) -> bool {
+    shared_bits(key, peer) >= NEAR_BITS
+}
+
+/// Leading bits `peer` shares with `key`, of the hashes the DHT compares: the nearer, the
+/// more. A random peer shares none in half the cases, one in a quarter...
+fn shared_bits(key: &kad::RecordKey, peer: PeerId) -> u32 {
     kad::KBucketKey::new(key.clone())
         .distance(&kad::KBucketKey::from(peer))
         .ilog2()
-        .is_none_or(|bucket| bucket < 256 - NEAR_BITS)
+        .map_or(256, |bucket| 255 - bucket)
+}
+
+/// An identity whose peer is near `key`.
+fn identity_near(key: &kad::RecordKey) -> Keypair {
+    std::iter::repeat_with(Keypair::generate_ed25519)
+        .find(|identity| near(key, identity.public().to_peer_id()))
+        .expect("an endless iterator")
+}
+
+/// Leading bits `peer` shares with the DHT key whose bytes are `key`, of the hashes the DHT
+/// compares (see `lab-dht --lie-near`).
+pub fn lab_shared_bits(key: &[u8], peer: &PeerId) -> u32 {
+    shared_bits(&kad::RecordKey::new(&key), *peer)
 }
 
 impl kad::store::RecordStore for Recording {
@@ -140,12 +159,7 @@ pub async fn run_lab_dht(
         .map_err(|e| NetError::Setup(e.to_string()))?;
     let setup = |e: &dyn std::fmt::Display| NetError::Setup(e.to_string());
     let identity = match &lie_near {
-        Some(key) => {
-            let key = kad::RecordKey::new(key);
-            std::iter::repeat_with(Keypair::generate_ed25519)
-                .find(|identity| near(&key, identity.public().to_peer_id()))
-                .expect("an endless iterator")
-        }
+        Some(key) => identity_near(&kad::RecordKey::new(key)),
         None => Keypair::generate_ed25519(),
     };
     let mut swarm = SwarmBuilder::with_existing_identity(identity)
@@ -615,6 +629,10 @@ mod tests {
         let made_up = lying.providers(&key);
         assert_eq!(made_up.len(), 8);
         assert!(made_up.iter().all(|record| near(&key, record.provider)));
+        assert!(near(&key, identity_near(&key).public().to_peer_id()));
+        // Random peers are seldom that near: of 64, none but about once in 64 runs.
+        let random = (0..64).filter(|_| near(&key, PeerId::random())).count();
+        assert!(random <= 1, "{random} random peers near the key");
     }
 
     #[test]
