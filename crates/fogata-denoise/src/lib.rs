@@ -8,6 +8,13 @@
 //! way in and out (about 1 ms more delay each way). RNNoise itself gives each frame back
 //! one frame (10 ms) later: the price of looking at 20 ms at a time.
 //!
+//! RNNoise takes a sound that starts out of silence for speech for a while: after as
+//! little as 10 ms of nothing (the microphone opening again, the sound server dropping a
+//! moment) a steady noise came back whole for up to a second. So frames that hold
+//! nothing go past it as they are: it never hears the gap, and goes on from what it knew
+//! of the noise before it. The frame it was holding back when the gap began (the 10 ms
+//! before it) is dropped rather than played after the gap.
+//!
 //! [`Denoiser::process`] is told on every frame whether to suppress, so the setting
 //! applies from the next frame. While off it only keeps the last frames, so that turning
 //! it on starts from a network that has already heard them; either way the change
@@ -28,6 +35,10 @@ const FRAME: usize = DenoiseState::FRAME_SIZE;
 /// 36 ms back.
 const HISTORY: usize = 4;
 
+/// A frame whose every sample is under this (16-bit values: about −78 dBFS) holds
+/// nothing: digital silence, or its last bit of dither.
+const NOTHING: f32 = 4.0;
+
 /// The rates WebRTC processes the microphone's sound at.
 const RATES: [usize; 3] = [16000, 32000, 48000];
 
@@ -38,6 +49,8 @@ pub struct Denoiser {
     rate: usize,
     /// The last frame went through RNNoise.
     running: bool,
+    /// The last frame held nothing and went past RNNoise.
+    gap: bool,
     /// The last [`HISTORY`] frames as they came in, oldest first.
     history: Vec<f32>,
     /// To 48 kHz and back, for 16 and 32 kHz.
@@ -72,6 +85,7 @@ impl Denoiser {
             rnn: DenoiseState::new(),
             rate: 0,
             running: false,
+            gap: false,
             history: Vec::new(),
             up: None,
             down: None,
@@ -98,11 +112,24 @@ impl Denoiser {
         if rate != self.rate {
             self.start(rate);
         }
+        // A gap: its frames go past RNNoise as they are, on or off, and a change of the
+        // switch waits for the sound to come back.
+        if frame.iter().all(|x| x.abs() < NOTHING) {
+            self.gap = true;
+            return;
+        }
+        let after_gap = std::mem::take(&mut self.gap);
         match (on, self.running) {
             (false, false) => self.remember(frame),
             (true, true) => {
                 self.denoise(frame);
-                frame.copy_from_slice(&self.clean);
+                if after_gap {
+                    // What RNNoise held back is the sound from before the gap; this
+                    // frame's own comes with the next one, as ever.
+                    frame.fill(0.0);
+                } else {
+                    frame.copy_from_slice(&self.clean);
+                }
             }
             (true, false) => {
                 // The frames heard while off, so the network, its pitch analysis and its
@@ -296,8 +323,9 @@ mod tests {
                         let lowered = db(rms(&before) / rms(&after).max(1e-3));
                         assert!(
                             lowered > 30.0,
-                            "{rate} Hz, {tenth}00 ms after a gap of {gap} frames \
-                             (dither {dither}): only {lowered:.1} dB lower"
+                            "{rate} Hz, {} ms after a gap of {gap} frames \
+                             (dither {dither}): only {lowered:.1} dB lower",
+                            tenth * 100
                         );
                     }
                 }
