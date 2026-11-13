@@ -1,5 +1,21 @@
 part of '../call.dart';
 
+/// What a connection's statistics say of the shared screen's encoder (see
+/// [screenEncoder]): whether WebRTC holds it back for the processor ([cpu]), its time
+/// spent encoding so far, in seconds ([encodeSeconds]), the frames a second it sends
+/// ([fps]) and those the screen is captured at ([captured]), the size it encodes ([width]
+/// by [height]), each null when not told, and whether it is one encoder for every
+/// connection that sends the screen at that size ([shared]).
+typedef ScreenEncoderReading = ({
+  bool cpu,
+  double encodeSeconds,
+  double? fps,
+  double? captured,
+  int? width,
+  int? height,
+  bool shared,
+});
+
 /// How a shared screen goes out: at most [lines] lines high (720 or 1080, in a 16:9 box),
 /// or as large as it is captured when null, and at most [fps] pictures a second.
 @immutable
@@ -269,13 +285,25 @@ class ScreenLoad {
   /// watchers of a 1600×900 screen kept 15 frames a second at its full size, but five
   /// started at 720 lines went down to 10. 540 lines at 15 takes seven encoders about
   /// what 720 lines took five. With fewer pixels from five on (see [screenCeiling]), a
-  /// level up there brings back frames rather than size.
-  static int startFor(int watchers) => switch (watchers) {
-    <= 2 => 0,
-    3 => 2,
-    4 => 3,
-    _ => 4,
-  };
+  /// level up there brings back frames rather than size. The first level for any number
+  /// when the watchers share one encoder of the screen ([shared], see [sharedEncode]):
+  /// these levels were for work that grew with each watcher, and the encoders' load still
+  /// lowers the screen when it is too much.
+  static int startFor(int watchers, {bool shared = false}) {
+    if (shared) return 0;
+    return switch (watchers) {
+      <= 2 => 0,
+      3 => 2,
+      4 => 3,
+      _ => 4,
+    };
+  }
+
+  /// Whether the connections that send the screen share one encoder of it at each size
+  /// (libwebrtc's shared screen encode, as the plugin's `fogataSharedScreenEncode`
+  /// answers): a share then starts at the first level ([startFor]). The library's, so
+  /// kept across shares.
+  bool sharedEncode = false;
 
   /// How much encoding a level takes, as lines squared times frames a second, with the
   /// screen captured at most [fps] frames a second and kept within [ceiling] lines: the
@@ -392,7 +420,7 @@ class ScreenLoad {
     _watchers = watchers;
     final more = watchers > _mostWatchers;
     _mostWatchers = math.max(_mostWatchers, watchers);
-    final start = startFor(watchers);
+    final start = startFor(watchers, shared: sharedEncode);
     if (!more || start <= level) return capped;
     _setLevel(start, at);
     return true;
@@ -428,20 +456,14 @@ class ScreenLoad {
     return true;
   }
 
-  /// Takes a reading of every encoder of the screen: by watcher, whether WebRTC says the
-  /// processor holds it back ([cpu]), its total time spent encoding so far in seconds
-  /// ([encodeSeconds]), the frames a second it sends ([fps]) and those the screen is
-  /// captured at ([captured]), each null when not told. One held back counts only while it
+  /// Takes a reading of every encoder of the screen, by watcher (see
+  /// [ScreenEncoderReading]). One held back counts only while it
   /// also sends well under what is captured and under the level's rate, without rising
   /// (WebRTC keeps saying "cpu" while its own lowering lasts, even once the level asks for
   /// less than that; a still screen under Wayland is captured at a few frames a second),
   /// and not for [settling] after a change. Returns whether [level] changed.
   bool take({
-    required Map<
-      String,
-      ({bool cpu, double encodeSeconds, double? fps, double? captured})
-    >
-    encoders,
+    required Map<String, ScreenEncoderReading> encoders,
     required DateTime now,
   }) {
     final at = _at;
@@ -474,15 +496,27 @@ class ScreenLoad {
               fps < _fps * 0.8 &&
               (last == null || fps <= last);
         });
-    // Cores busy encoding since the last reading; unknown on the first.
+    // Cores busy encoding since the last reading; unknown on the first. Connections that
+    // share one encoder each count the time of the same encodes (and a little wait for
+    // them): such an encoder counts once for each size, the most any of its connections
+    // grew, and every other encoder for itself.
     var busy = 0.0;
     if (at != null && now.isAfter(at)) {
       final seconds = now.difference(at).inMilliseconds / 1000;
+      final shared = <(int?, int?), double>{};
       for (final MapEntry(:key, :value) in encoders.entries) {
         final last = before[key];
-        if (last != null && value.encodeSeconds >= last) {
-          busy += (value.encodeSeconds - last) / seconds;
+        if (last == null || value.encodeSeconds < last) continue;
+        final grew = (value.encodeSeconds - last) / seconds;
+        if (value.shared) {
+          final size = (value.width, value.height);
+          shared[size] = math.max(shared[size] ?? 0, grew);
+        } else {
+          busy += grew;
         }
+      }
+      for (final grew in shared.values) {
+        busy += grew;
       }
     }
     if (busy < busyCores / 4) {
@@ -1053,13 +1087,7 @@ extension _Fitting on Call {
   /// Tunes [peer]'s connection after what is under way on it, without waiting for that.
   /// Lowers or raises the shared screen for everyone as [ScreenLoad] says, from a reading
   /// of every watcher's encoder.
-  void _fitScreenLoad(
-    Map<
-      String,
-      ({bool cpu, double encodeSeconds, double? fps, double? captured})
-    >
-    encoders,
-  ) {
+  void _fitScreenLoad(Map<String, ScreenEncoderReading> encoders) {
     final before = _screenLoad.level;
     _screenLoad.capturedFps = _capturedAt > 0
         ? math.min(screenQuality.fps, _capturedAt)

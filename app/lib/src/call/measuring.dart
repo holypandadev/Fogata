@@ -133,13 +133,12 @@ class VideoFlood {
   }
 }
 
-/// What a connection's statistics say of the shared screen's encoder, for [ScreenLoad]:
-/// whether WebRTC holds it back for the processor, its time spent encoding so far, in
-/// seconds, the frames a second it sends and those the screen is captured at (each null
-/// when not told); null while the screen does not go out on it.
+/// What a connection's statistics say of the shared screen's encoder, for [ScreenLoad]
+/// (see [ScreenEncoderReading]); null while the screen does not go out on it. An encoder
+/// that every connection sending the screen at its size shares names itself so
+/// (`encoderImplementation` "libvpx (shared)", libwebrtc's shared screen encode).
 @visibleForTesting
-({bool cpu, double encodeSeconds, double? fps, double? captured})?
-screenEncoder(List<StatsReport> reports) {
+ScreenEncoderReading? screenEncoder(List<StatsReport> reports) {
   for (final report in reports) {
     final v = report.values;
     if (report.type != 'outbound-rtp' || '${v['mid']}' != '$_screen') continue;
@@ -153,6 +152,9 @@ screenEncoder(List<StatsReport> reports) {
       encodeSeconds: (v['totalEncodeTime'] as num? ?? 0).toDouble(),
       fps: (v['framesPerSecond'] as num?)?.toDouble(),
       captured: (source?.values['framesPerSecond'] as num?)?.toDouble(),
+      width: (v['frameWidth'] as num?)?.toInt(),
+      height: (v['frameHeight'] as num?)?.toInt(),
+      shared: '${v['encoderImplementation'] ?? ''}'.endsWith(' (shared)'),
     );
   }
   return null;
@@ -211,11 +213,7 @@ extension _Measuring on Call {
 
   Future<void> _measureNow(Set<String>? only) async {
     final quiet = <String>{};
-    final encoders =
-        <
-          String,
-          ({bool cpu, double encodeSeconds, double? fps, double? captured})
-        >{};
+    final encoders = <String, ScreenEncoderReading>{};
     var voiceSending = false;
     double? voiceRead;
     final voiceSent = <String, num>{};

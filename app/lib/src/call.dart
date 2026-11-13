@@ -1200,11 +1200,29 @@ class Call extends ChangeNotifier {
                 server: server,
               );
         }
+        if (sharing) await _askSharedEncode();
         await _resetFits();
         await _resend(_screen);
         await _soundChannel();
         if (sharing) onSound?.call(UiSound.shareStart);
       });
+
+  /// Asks the plugin, once, whether the connections that send the shared screen share
+  /// one encoder of it (`fogataSharedScreenEncode`: libwebrtc's shared screen encode, on
+  /// unless `FOGATA_SHARED_SCREEN_ENCODE=off`): the screen's load then no longer grows
+  /// with each watcher ([ScreenLoad.sharedEncode]). No answer counts as no.
+  Future<void> _askSharedEncode() async {
+    if (_sharedEncodeAsked) return;
+    _sharedEncodeAsked = true;
+    try {
+      final answer = await WebRTC.invokeMethod<bool, dynamic>(
+        'fogataSharedScreenEncode',
+      );
+      _screenLoad.sharedEncode = answer == true;
+    } catch (_) {
+      _screenLoad.sharedEncode = false;
+    }
+  }
 
   Future<void> stopSharing({bool resend = true}) async {
     screenOut.value = const {};
@@ -1777,6 +1795,10 @@ class Call extends ChangeNotifier {
 
   /// How far the shared screen is lowered for everyone, for this device's processor.
   final _screenLoad = ScreenLoad();
+
+  /// Whether the plugin was asked if the screen's watchers share one encoder of it
+  /// ([_askSharedEncode]).
+  bool _sharedEncodeAsked = false;
 
   /// The shared screen's lowering for the processor now, for tests.
   @visibleForTesting

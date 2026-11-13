@@ -4,16 +4,17 @@ import 'package:fogata/src/call.dart';
 
 final start = DateTime(2026, 11, 5, 9);
 
-typedef Encoders =
-    Map<
-      String,
-      ({bool cpu, double encodeSeconds, double? fps, double? captured})
-    >;
+typedef Encoders = Map<String, ScreenEncoderReading>;
+
+/// Widths the watchers' encoders take in turn, for [reading]'s `sizes`.
+const widths = [1920, 1280, 960];
 
 /// A reading of [watchers] encoders, [after] seconds from [start], each having spent
 /// [busy] of every second encoding so far, held back by the processor when [cpu], sending
 /// [fps] frames a second (by default 2 when held back, 30 otherwise) of the [captured] ones
-/// (30 by default); [unknown] leaves both rates out, as statistics may.
+/// (30 by default); [unknown] leaves both rates out, as statistics may. They encode in
+/// turn the first [sizes] of [widths], each one encoder for all at its size when
+/// [shared].
 ({Encoders encoders, DateTime now}) reading(
   int after, {
   int watchers = 3,
@@ -22,6 +23,8 @@ typedef Encoders =
   double? fps,
   double captured = 30,
   bool unknown = false,
+  bool shared = false,
+  int sizes = 1,
 }) => (
   encoders: {
     for (var i = 0; i < watchers; i++)
@@ -30,6 +33,9 @@ typedef Encoders =
         encodeSeconds: busy * after,
         fps: unknown ? null : fps ?? (cpu ? 2.0 : 30.0),
         captured: unknown ? null : captured,
+        width: widths[i % sizes],
+        height: widths[i % sizes] * 9 ~/ 16,
+        shared: shared,
       ),
   },
   now: start.add(Duration(seconds: after)),
@@ -46,6 +52,8 @@ bool feed(
   double? fps,
   double captured = 30,
   bool unknown = false,
+  bool shared = false,
+  int sizes = 1,
 }) {
   var changed = false;
   for (var t = from; t <= to; t += 2) {
@@ -57,6 +65,8 @@ bool feed(
       fps: fps,
       captured: captured,
       unknown: unknown,
+      shared: shared,
+      sizes: sizes,
     );
     changed |= load.take(encoders: r.encoders, now: r.now);
   }
@@ -120,6 +130,27 @@ void main() {
     final load = ScreenLoad();
     // Three encoders each busy 0.6 of a second every second: 1.8 cores.
     feed(load, 0, 8, busy: 0.6);
+    expect(load.level, greaterThan(0));
+  });
+
+  test('five watchers sharing one encoder at one size count it once', () {
+    final load = ScreenLoad();
+    // Each connection counts the same 0.8 of a core: one encode, not 4 cores.
+    expect(feed(load, 0, 40, watchers: 5, busy: 0.8, shared: true), isFalse);
+    expect(load.level, 0);
+  });
+
+  test('a shared encoder at each of two sizes counts twice', () {
+    final load = ScreenLoad();
+    // 0.8 of a core at each size: 1.6 cores, over the limit.
+    feed(load, 0, 8, watchers: 5, busy: 0.8, shared: true, sizes: 2);
+    expect(load.level, greaterThan(0));
+  });
+
+  test('encoders of their own each count, as before', () {
+    final load = ScreenLoad();
+    // Two encoders of their own at one size, 0.8 of a core each: 1.6 cores.
+    feed(load, 0, 8, watchers: 2, busy: 0.8);
     expect(load.level, greaterThan(0));
   });
 
@@ -272,6 +303,14 @@ void main() {
     expect(ScreenLoad.startFor(4), 3);
     expect(ScreenLoad.startFor(5), 4);
     expect(ScreenLoad.startFor(20), 4);
+    // Unless they share one encoder: their number no longer adds work.
+    expect(ScreenLoad.startFor(5, shared: true), 0);
+    expect(ScreenLoad.startFor(20, shared: true), 0);
+    final shared = ScreenLoad()..sharedEncode = true;
+    shared.watchersAre(5, now: start);
+    expect(shared.level, 0);
+    // The ceiling still comes down: the upload grows with each watcher.
+    expect(shared.ceiling, 720);
     final load = ScreenLoad();
     expect(load.watchersAre(2), isFalse);
     expect(load.watchersAre(5), isTrue);
@@ -425,7 +464,33 @@ void main() {
           'qualityLimitationReason': 'cpu',
         }),
       ]),
-      (cpu: true, encodeSeconds: 1.5, fps: null, captured: null),
+      (
+        cpu: true,
+        encodeSeconds: 1.5,
+        fps: null,
+        captured: null,
+        width: null,
+        height: null,
+        shared: false,
+      ),
+    );
+    final shared = screenEncoder([
+      out('2', {
+        'framesEncoded': 90,
+        'totalEncodeTime': 0.4,
+        'frameWidth': 1280,
+        'frameHeight': 720,
+        'encoderImplementation': 'libvpx (shared)',
+      }),
+    ]);
+    expect(shared?.shared, isTrue);
+    expect(shared?.width, 1280);
+    expect(shared?.height, 720);
+    expect(
+      screenEncoder([
+        out('2', {'framesEncoded': 90, 'encoderImplementation': 'libvpx'}),
+      ])?.shared,
+      isFalse,
     );
     expect(
       screenEncoder([
