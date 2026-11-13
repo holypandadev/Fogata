@@ -86,9 +86,10 @@ therefore treats DHT nodes as strangers:
   which all keep the real announcement, do) takes the place of the earliest only one
   answer named even while its dial goes on, which is stopped; nodes on the way would have
   to name a made-up member twice to do the same (netlab `dht-liars`: six nodes on the way
-  answering every lookup first with eight made-up members each, at an address that answers
-  after twelve seconds, and the two members still find each other at the first lookup after
-  they announce). One lookup still takes 64 in all, each
+  answering every lookup first with eight made-up members each, made near the key, at an
+  address that answers after twelve seconds, and the two members still find each other at
+  the first lookup after they announce; the lookup itself never dials the made-up members as
+  DHT nodes, see kad above). One lookup still takes 64 in all, each
   dialled, however many nodes it asks (it takes eight nodes on the way, answering before
   the nearest ones, to keep a member out). At most 16 never reached are kept for one
   group or friend (or link, code, move) and 64 in all, resting ones not counted; past

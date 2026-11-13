@@ -1562,6 +1562,15 @@ EOF2
         # announcements, answer 1.5 s later. A and B, members on public addresses that only
         # the DHT tells of, must still find each other at the lookups that name them, not
         # once the made-up members' dials are over.
+        # The lying nodes and their made-up members are made near the key A and B announce
+        # under (lab-dht --lie-near): every lookup of it asks the liars first, and a lookup
+        # that walked the providers an answer names as if they were DHT nodes would dial the
+        # made-up members before ever asking the real nodes. Without it, the real nodes were
+        # among the first asked in three runs out of four, and the case seldom saw that.
+        members A B
+        # The key turns every 6 hours (fogata-crypto's WINDOW_SECS): not across this run.
+        while (( $(date -u +%s) % 21600 > 21600 - 150 )); do sleep 5; done
+        near=$("$BIN" --data-dir "$WORK/data-A" lab-keys | head -1)
         public_host S 203.0.113.90
         start_dht S 4001
         in_ns S tc qdisc add dev wan root netem delay 12000ms
@@ -1569,7 +1578,7 @@ EOF2
         liars=""
         for i in 1 2 3 4 5 6; do
             public_host "L$i" "203.0.113.8$i"
-            start_dht "L$i" 4001 --peer "$DHT1" --lies 8 --lie-at "$slow"
+            start_dht "L$i" 4001 --peer "$DHT1" --lies 8 --lie-at "$slow" --lie-near "$near"
             liars="$liars --bootstrap $DHT_ADDR"
         done
         in_ns dht1 tc qdisc add dev wan root netem delay 1500ms
@@ -1578,7 +1587,6 @@ EOF2
         BOOT="$liars $BOOT"
         public_host A 203.0.113.21
         public_host B 203.0.113.22
-        members A B
         DURATION=90 SAY_AT=60
         started=$(date -u +%s)
         RUST_LOG=warn,fogata_net=debug run_device A --port 41000

@@ -123,7 +123,16 @@ enum Command {
         /// The addresses the made-up peers are said to be at.
         #[arg(long = "lie-at")]
         lie_at: Vec<Multiaddr>,
+        /// A DHT key, in hex (see `lab-keys`): the node is made near it, so that lookups of
+        /// it ask this node first, and its made-up peers near each key it is asked.
+        #[arg(long = "lie-near", requires = "lies", value_parser = parse_hex)]
+        lie_near: Option<Vec<u8>>,
     },
+    /// Network lab only: print the DHT keys the groups of this device are announced under
+    /// now, in hex as a lab DHT node writes them down, one line per group.
+    #[cfg(feature = "lab")]
+    #[command(hide = true)]
+    LabKeys,
     /// Network lab only: a peer that tells everyone it meets a false address of theirs.
     #[cfg(feature = "lab")]
     #[command(hide = true)]
@@ -212,6 +221,12 @@ enum Command {
     LabSoak(soak::SoakArgs),
 }
 
+/// The bytes a hex argument writes.
+#[cfg(feature = "lab")]
+fn parse_hex(text: &str) -> Result<Vec<u8>, hex::FromHexError> {
+    hex::decode(text)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -277,13 +292,16 @@ async fn main() -> Result<()> {
             identified,
             lies,
             lie_at,
+            lie_near,
         } => {
             let lies = lies.map(|count| (count, lie_at));
-            fogata_net::run_lab_dht(port, peers, records, identified, lies, |addr| {
+            fogata_net::run_lab_dht(port, peers, records, identified, lies, lie_near, |addr| {
                 println!("{addr}")
             })
             .await?;
         }
+        #[cfg(feature = "lab")]
+        Command::LabKeys => lab::print_keys(store()?)?,
         #[cfg(feature = "lab")]
         Command::LabLiar { dial, says } => {
             fogata_net::run_lab_liar(dial, says, |line| say!("{line}")).await?;

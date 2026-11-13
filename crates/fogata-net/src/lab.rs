@@ -28,11 +28,26 @@ struct LabBehaviour {
 /// A DHT node's store that also writes down every announcement (provider record) it takes,
 /// one line each: the key in hex, the provider and the addresses it gave. With `lies`, it
 /// answers every lookup with that many announcements of peers made up for that answer, all
-/// at the addresses given, and never with the real ones.
+/// at the addresses given, and never with the real ones; with `near` too, made up nearer the
+/// key looked up than the real nodes are (see [`NEAR_BITS`]).
 struct Recording {
     store: kad::store::MemoryStore,
     file: Option<File>,
     lies: Option<(usize, Vec<Multiaddr>)>,
+    near: bool,
+}
+
+/// Leading bits that a peer made near a key shares with it, of the hashes the DHT compares:
+/// the lab's real DHT nodes, a handful, are nearer only about once in a thousand runs. Made
+/// up by trying random peers, a few thousand tries for each.
+const NEAR_BITS: u32 = 12;
+
+/// Whether `peer` is near `key` (see [`NEAR_BITS`]).
+fn near(key: &kad::RecordKey, peer: PeerId) -> bool {
+    kad::KBucketKey::new(key.clone())
+        .distance(&kad::KBucketKey::from(peer))
+        .ilog2()
+        .is_none_or(|bucket| bucket < 256 - NEAR_BITS)
 }
 
 impl kad::store::RecordStore for Recording {
@@ -74,7 +89,9 @@ impl kad::store::RecordStore for Recording {
             Some((count, addresses)) => (0..*count)
                 .map(|_| kad::ProviderRecord {
                     key: key.clone(),
-                    provider: PeerId::random(),
+                    provider: std::iter::repeat_with(PeerId::random)
+                        .find(|peer| !self.near || near(key, *peer))
+                        .expect("an endless iterator"),
                     expires: None,
                     addresses: addresses.clone(),
                 })
@@ -99,13 +116,17 @@ impl kad::store::RecordStore for Recording {
 /// `identified`, the protocols each peer lists in identify, one line each: the peer, then
 /// the protocols. With `lies`, every lookup it is asked gets that many made-up peers, new
 /// ones each time, at the addresses given (see [`Recording`]): what a node on the way to a
-/// key can answer.
+/// key can answer. With `lie_near`, a DHT key (its bytes), the node is made near that key and
+/// its made-up peers near each key it is asked (see [`NEAR_BITS`]): a lookup of that key asks
+/// it before the real nodes, and walks its made-up peers before them too if it takes
+/// providers for DHT nodes, as a liar choosing its peers would have it.
 pub async fn run_lab_dht(
     port: u16,
     peers: Vec<Multiaddr>,
     records: Option<PathBuf>,
     identified: Option<PathBuf>,
     lies: Option<(usize, Vec<Multiaddr>)>,
+    lie_near: Option<Vec<u8>>,
     on_listen: impl Fn(Multiaddr),
 ) -> Result<(), NetError> {
     let open = |path: PathBuf| File::options().create(true).append(true).open(path);
@@ -118,7 +139,16 @@ pub async fn run_lab_dht(
         .transpose()
         .map_err(|e| NetError::Setup(e.to_string()))?;
     let setup = |e: &dyn std::fmt::Display| NetError::Setup(e.to_string());
-    let mut swarm = SwarmBuilder::with_new_identity()
+    let identity = match &lie_near {
+        Some(key) => {
+            let key = kad::RecordKey::new(key);
+            std::iter::repeat_with(Keypair::generate_ed25519)
+                .find(|identity| near(&key, identity.public().to_peer_id()))
+                .expect("an endless iterator")
+        }
+        None => Keypair::generate_ed25519(),
+    };
+    let mut swarm = SwarmBuilder::with_existing_identity(identity)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
@@ -135,6 +165,7 @@ pub async fn run_lab_dht(
                     store: kad::store::MemoryStore::new(peer_id),
                     file,
                     lies,
+                    near: lie_near.is_some(),
                 },
                 kad::Config::new(StreamProtocol::new(AMINO_PROTOCOL)),
             );
@@ -570,6 +601,21 @@ pub fn lab_lookup_keys(rendezvous_secret: &[u8; 32], unix_secs: u64) -> Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn made_up_peers_are_near_the_key_asked_when_told_to_be() {
+        use kad::store::RecordStore as _;
+        let key = kad::RecordKey::new(&[7u8; 34]);
+        let lying = Recording {
+            store: kad::store::MemoryStore::new(PeerId::random()),
+            file: None,
+            lies: Some((8, Vec::new())),
+            near: true,
+        };
+        let made_up = lying.providers(&key);
+        assert_eq!(made_up.len(), 8);
+        assert!(made_up.iter().all(|record| near(&key, record.provider)));
+    }
 
     #[test]
     fn a_lie_reads_back_as_an_identify_message() {

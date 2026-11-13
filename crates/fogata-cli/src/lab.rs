@@ -6,6 +6,25 @@ use anyhow::{Context, Result};
 use fogata_core::Store;
 use fogata_net::Multiaddr;
 
+/// Prints, for each group of this device, the DHT key it is announced under now (by the
+/// rendezvous secret of its newest epoch), in hex as a lab DHT node writes it down: what the
+/// lab's lying DHT nodes are made near (`lab-dht --lie-near`).
+pub fn print_keys(store: Store) -> Result<()> {
+    let (identity, _) = store.identity()?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default();
+    for group in store.groups()? {
+        let log = store.load_log(&group)?;
+        if let Some(keys) = log.all_keys(&identity).values().next_back() {
+            let current = fogata_net::lab_lookup_keys(keys.rendezvous_secret(), now);
+            println!("{}", current[0]);
+        }
+    }
+    Ok(())
+}
+
 /// Reads the announcements a lab DHT node wrote down (`lab-dht --records`) and tries to open
 /// every sealed local-address name in them with this device's secrets: its own and its
 /// friends' friend secrets, and every epoch of its groups. Prints what opens with which, and
