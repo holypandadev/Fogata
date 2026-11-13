@@ -498,7 +498,15 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   as its place in the list of inputs and, on Linux, reads the list again each time it
   starts recording (when someone comes into a room where this device was alone, say); our
   copy of flutter_webrtc selects it again at its new place whenever an input comes or
-  goes, so it never becomes another microphone or the default one.
+  goes, so it never becomes another microphone or the default one. On Linux a sound server
+  that goes away while the application runs (PipeWire or PulseAudio restarted, as after an
+  update) is connected to again by Fogata's libwebrtc itself (0.5 s after, then after 1, 2
+  and 4 s, then every 5 s, never waiting on the server more than 5 s), which then takes
+  the chosen speaker and microphone again by name where they are still there and plays and
+  records again as before; meanwhile it lists no device at all, the call says nothing of
+  its microphone and does not turn it off for reading nothing, and a server gone over 5 s
+  is told, and its return too. It used to keep a dead connection until the application
+  restarted, listing only "System default".
 - Noise suppression (Settings, under the microphone; off by default, kept in `app.json`)
   is RNNoise (`crates/fogata-denoise`, nnnoiseless: a small neural network that tells
   speech from noise in 22 bands and lowers the bands that hold noise, so a fan, a hum,
@@ -599,7 +607,11 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   noise suppression settings: it never goes through them, but WebRTC sets its one audio
   processing module from each source whose channel starts sending, and a source made
   with them off had turned them off for the microphone while the screen's sound went
-  out. macOS's WebRTC
+  out. And the microphone is processed in one channel whatever the others send (Fogata's
+  libwebrtc): WebRTC processed it in as many as the channel sending the most, so the
+  screen's sound starting and stopping in stereo started the echo canceller and gain
+  control anew each time (the sharer's voice went out 10 dB weaker while it went out, and
+  the others' voices came back as echo for the first seconds). macOS's WebRTC
   hands what it records to every channel of sound, the voice's too, so a Mac sends its
   screen's sound (every application's but Fogata's, taken with ScreenCaptureKit; for a
   shared window only its application's and that application's helpers') on a

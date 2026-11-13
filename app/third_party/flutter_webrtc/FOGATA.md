@@ -305,7 +305,9 @@ others in a call would hear their own voices back. Instead:
   `common/cpp/include/fogata_turns.h`), so a stalled server does not freeze the window. A connection lost
   (PipeWire restarted, as after an update) is noticed by the core's error, and the next
   `fogataSilentInput` makes the node again on a new one; it answered true at once for the
-  node gone with the old connection.
+  node gone with the old connection. The application asks for it again when the list of
+  devices no longer has it while it is in use ("A sound server that goes away and comes
+  back").
   WebRTC records from its input whenever any channel of sound sends; while the
   microphone is off and a shared screen's sound goes out, the application points WebRTC
   here so the microphone stays closed.
@@ -323,6 +325,21 @@ microphone had none of them either (seen in libwebrtc's log: `aec: 0, agc: 0` fr
 moment someone watched until the share stopped). The screen's sound itself never goes
 through that module.
 
+- `tools/webrtc/patches/wrapper/0011` (Fogata's libwebrtc): WebRTC also processed the
+  microphone in the most channels any channel of sound sends
+  (`AudioState::UpdateAudioTransportWithSendingStreams` hands the transport the maximum,
+  and `AudioTransportImpl::RecordedDataIsAvailable` processes in that many): when a
+  screen's sound started going out in stereo, the microphone was processed in two
+  channels, and in one again when it stopped, and each time the audio processing
+  initialized itself again (`AudioProcessingImpl::MaybeInitializeCapture`), its echo
+  canceller and gain control starting from nothing. Measured (`tools/call-lab/mic.sh
+  echo`): the sharer's voice went out 10 to 12 dB weaker while its screen's sound went
+  out, and traces of the others' voices came back for a while, as from an echo canceller
+  starting over; in a room with speakers, the others heard themselves for the first
+  seconds after someone opened the screen. The wrapper's transport, which hands what the
+  microphone records only to the microphone's own sources, now processes it in one
+  channel always; the screen's sound stays stereo. Tested by the wrapper's
+  `test/custom_audio_transport.test.cc`.
 - `common/cpp/src/flutter_screen_capture.cc`, `common/cpp/include/flutter_screen_capture.h`:
   `getDisplayMedia` makes the screen's sound source with the processing its `audio` map
   names (`echoCancellation`, `autoGainControl`, `noiseSuppression`; off for any left out,
@@ -872,8 +889,8 @@ short sounds (through ALSA) and chat videos (through GStreamer) open the system'
 - `linux/output_keeper.{h,cc}` (new, with libpulse): keeps the chosen output's description
   and moves every sink input of this process to that sink as it appears (and when the
   sink appears again); the system's default leaves streams where they open. A connection
-  lost (the sound server restarted) is made again 1 s later, then after 2, 4... up to
-  30 s between tries; it kept a dead connection and moved nothing until the application
+  lost (the sound server restarted) is made again 1 s later, then after 2 and 4 s, then
+  every 5 s; it kept a dead connection and moved nothing until the application
   restarted. `linux/input_watcher.cc`'s connection does the same, and once connected again
   runs the change it would have missed.
 - `common/cpp/src/flutter_webrtc.cc`: the method `fogataSoundsTo` (`deviceId`, as
@@ -895,9 +912,10 @@ server's own name for it.
 
 ## No call without a sound server (Linux)
 
-WebRTC's voice engine, made with a call's first connection, checks that its audio device
-starts (`adm_helpers.cc`: `RTC_CHECK_EQ(0, adm->Init())`, also in release builds) and ends
-the process otherwise. On Linux Fogata's libwebrtc takes the PulseAudio device whenever libpulse loads (it has ALSA too, never used then), so with no
+WebRTC's voice engine, made with a call's first connection, checked that its audio device
+starts (`adm_helpers.cc`: `RTC_CHECK_EQ(0, adm->Init())`, also in release builds) and ended
+the process otherwise; Fogata's libwebrtc keeps the engine up without a device now
+(`tools/webrtc/patches/webrtc/0007`), but a call made then would play and record nothing. On Linux Fogata's libwebrtc takes the PulseAudio device whenever libpulse loads (it has ALSA too, never used then), so with no
 sound server answering (none running, a sandbox without its socket) entering a call aborted
 the application.
 
@@ -913,10 +931,53 @@ the application.
   application asks before it makes a call (`AppState._startCall`): on "timeout" it asks
   once more, as a slow server (a fresh session, a busy computer) answers then; it makes no
   call on "none" or on a second "timeout" (WebRTC's own connection to such a server fails
-  the same way and ends the application), saying why;
+  the same way, after 5 s, and the call would have no sound), saying why;
   the room and its chat stay (`tools/call-lab/mic.sh broken`, `alsa` and `hang` check it).
 - `linux/CMakeLists.txt`: a build other than Debug fails without libpulse's headers, as the
   check would always say "unknown" and the voice engine could end the application.
+
+## A sound server that goes away and comes back (Linux)
+
+PipeWire's PulseAudio service, or PulseAudio, restarted while the application runs (as
+after a system update: `systemctl --user restart pipewire pipewire-pulse wireplumber`)
+left libwebrtc's PulseAudio device with a dead connection for good: its lists held only
+"System default", and nothing played or recorded until the application restarted (the
+voice engine stays, "The voice engine stays", so it was never made again).
+
+- `tools/webrtc/patches/webrtc/0006` (Fogata's libwebrtc): PulseAudio's mainloop thread
+  sees the device's connection fail and posts to WebRTC's worker thread, where the voice
+  engine calls the device and where everything else happens. There the device stops
+  playout and recording, keeping what the voice engine had asked for; lists no input and
+  no output at all, not even the default, while no server answers; tells its observer
+  (the wrapper's `OnDeviceChange`, which on Linux libwebrtc never told before); and
+  connects again on the same mainloop, without waiting for an answer: 0.5 s after the
+  loss, then after 1, 2 and 4 s, then every 5 s; a server that takes the connection and
+  does not answer in 5 s is tried again the same way. Once connected it takes the chosen
+  output and input again by the server's own names for them where they are still listed
+  (else the default), starts playout and recording again as they were (what does not
+  start, as with no device listed yet, is tried again every second for 5 s, then every
+  5 s), and tells its observer again. Every wait of the device on the server is bounded:
+  its first connection (it waited for ever for a server that took the connection and
+  never answered), and every question to it (5 s, then given up). The worker thread waits
+  on the server for one question at most.
+- `tools/webrtc/patches/wrapper/0010`: the lists' counts are read on the worker thread
+  too, the listener is set and called under a lock, and a null one stops it.
+- `common/cpp/src/flutter_webrtc_base.cc`: the plugin hears of it as of any other change
+  (`KeepRecordingDevice`, then `onDeviceChange`, on the platform thread), which reads no
+  device while the server is gone and so selects nothing; it lets go of its listener as
+  it goes.
+- `linux/input_watcher.cc`, `linux/output_keeper.cc`: their own connections are made again
+  after 1, 2 and 4 s, then every 5 s (up to 30 s before: a call's chosen microphone, and
+  the chosen output of the application's other sounds, waited that long after the server
+  was back); a connection that could not even be made is tried again too.
+- The application (`app/lib/src/call.dart`, `SoundServerWatch` in `call/media.dart`): a
+  list with no sound device at all, on Linux, is the voice engine reaching no server.
+  Meanwhile nothing is said of the microphone, and it is not judged as reading nothing
+  (it would be turned off); a server gone 5 s is told ("This computer's sound system
+  stopped..."), and its return then told too. A silent input in use that is no longer
+  listed (it went with PipeWire's connection) is made and chosen again.
+- Checked by `tools/call-lab/mic.sh restart` (PipeWire's PulseAudio service alone, all
+  three, the server gone 20 s, and gone a minute) on two copies in a call.
 
 ## The Linux task runner
 
@@ -1127,24 +1188,8 @@ to the system's default devices.
 - The application chooses the system's default devices by their own ids when none is
   chosen (`app/lib/src/call.dart`), as the engine now keeps the devices it was given last
   from one call or microphone test to the next.
-- A sound server restarted while the application runs is not reached again by the audio
-  device (Linux), as before for a server restarted before the first call ended; now it
-  is not reached again at all until the application restarts. libwebrtc's PulseAudio
-  device connects once, in `Init`, and keeps a dead context after the server goes (its
-  lists then hold only "default", and nothing plays or records); the wrapper's API has no
-  way to initialize the device again. The only one is to let the engine stop (the
-  plugin's idle connection let go while no other is open) and start again with the next
-  connection, which is not done: `adm_helpers::Init` ends the process (`RTC_CHECK`) if
-  the server refuses then, and `InitPulseAudio` waits with no limit for one that takes
-  the connection and never answers, on libwebrtc's worker thread; the devices chosen
-  also go back to the system's defaults. Doing it safely needs the device's own
-  `Terminate`/`Init` reachable from the wrapper with a bounded wait (a wrapper and WebRTC
-  patch), or proof on Linux that the stop and start are safe when `InputWatcher` has
-  just connected again. To see it: in `tools/call-lab/session.sh <folder> bash`, start a
-  debug build with `FOGATA_WEBRTC_LOG=info`, run the settings' microphone test, restart
-  the session's `pipewire-pulse` (or `pipewire` and all three), then open the settings
-  again and run the test: by the code, the lists should hold "System default" alone and
-  the meter stay empty until the application restarts (not yet seen on a computer).
+- A sound server restarted while the application runs (Linux) is reached again by the
+  audio device itself: see "A sound server that goes away and comes back".
 - `common/cpp/test/voice_engine_test.cc` (new; Linux, in `run_tests.sh`): what this counts
   on, with the real libwebrtc and the computer's sound server: the device lists no input
   and no output once the last connection is freed, and keeps its lists while an idle
