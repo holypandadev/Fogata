@@ -108,6 +108,11 @@ FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
 }
 
 FlutterWebRTCBase::~FlutterWebRTCBase() {
+  // Fogata: libwebrtc's audio device tells of its devices from its own threads (on
+  // Linux also when the sound server goes away and comes back), and outlives this.
+  if (audio_device_) {
+    audio_device_->OnDeviceChange(nullptr);
+  }
 #ifdef __linux__
   InputWatcher::Stop();
 #endif
@@ -185,7 +190,8 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
 
   audio_device_->OnDeviceChange([&] {
     // Fogata: the chosen input may have moved in the list. Not on the thread
-    // that tells, which may be WebRTC's own.
+    // that tells, which may be WebRTC's own: on Linux its worker thread tells when
+    // the sound server goes away (no device listed at all then) and when it is back.
     task_runner_->EnqueueTask([this] { KeepRecordingDevice(); });
     EncodableMap info;
     info[EncodableValue("event")] = "onDeviceChange";

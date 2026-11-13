@@ -1,0 +1,806 @@
+PulseAudio: connect again to a sound server that went away, never wait for it for ever
+
+On Linux the PulseAudio device connected once, in Init, and kept a dead context after the
+server went away (PipeWire's PulseAudio service or PulseAudio restarted, as after a system
+update): its lists then held only the default, and nothing played or recorded until the
+application restarted. Now PulseAudio's mainloop thread, seeing the context fail, posts to
+the thread that made the device (WebRTC's worker thread, where the voice engine calls
+it), which:
+- stops playout and recording, keeping what the voice engine had asked for, lists no
+  device at all (not even the default) while no server answers, and tells the device's
+  observer (AudioDeviceObserver::OnDevicesUpdated, now also on Linux);
+- makes a new context on the same mainloop and connects it without waiting, 0.5 s after
+  the loss, then after 1, 2 and 4 s, then every 5 s; a server that takes the connection
+  and does not answer within 5 s is tried again the same way;
+- once a context is ready, takes the chosen output and input again by the server's names
+  for them where they are still listed (else the default), starts playout and recording
+  again as they were (what does not start is tried again every second for 5 s, then
+  every 5 s), and tells the observer again.
+Every wait on the mainloop is bounded: the first connection in Init (5 s; it waited for
+ever for a server that took the connection and never answered, on the worker thread),
+and every question to the server, of the device and of its mixer (5 s, then cancelled;
+the mixer's wait also took a null operation, which libpulse asserts on). The device's own
+disconnect no longer reaches its state callback.
+
+diff --git a/modules/audio_device/BUILD.gn b/modules/audio_device/BUILD.gn
+index 1205038..407af4f 100644
+--- a/modules/audio_device/BUILD.gn
++++ b/modules/audio_device/BUILD.gn
+@@ -346,6 +346,13 @@ rtc_library("audio_device_impl") {
+         if (rtc_include_pulse_audio) {
+           defines += [ "WEBRTC_ENABLE_LINUX_PULSE" ]
+         }
++
++        # Fogata: the PulseAudio device connects again, from WebRTC's worker
++        # thread, to a sound server that went away.
++        deps += [
++          "../../api/task_queue:pending_task_safety_flag",
++          "//third_party/abseil-cpp/absl/functional:any_invocable",
++        ]
+         sources += [
+           "linux/audio_device_pulse_linux.cc",
+           "linux/audio_device_pulse_linux.h",
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
+index 72f0587..67858b5 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -12,12 +12,17 @@
+ 
+ #include <sys/time.h>
+ 
++#include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
+ #include <cstring>
++#include <string>
++#include <utility>
+ 
+ #include "api/audio/audio_device.h"
+ #include "api/audio/audio_device_defines.h"
++#include "api/task_queue/pending_task_safety_flag.h"
++#include "api/task_queue/task_queue_base.h"
+ #include "api/units/time_delta.h"
+ #include "modules/audio_device/audio_device_buffer.h"
+ #include "modules/audio_device/audio_device_generic.h"
+@@ -55,6 +60,30 @@ namespace {
+ constexpr int kPulseStreamReadyTimeoutSec = 9;
+ constexpr int kPulseStartTimeoutSec = kPulseStreamReadyTimeoutSec + 3;
+ 
++// Fogata: how long a sound server may take to take a connection and answer it,
++// and to answer a question of the device.
++constexpr int kPulseConnectTimeoutSec = 5;
++constexpr int kPulseAnswerTimeoutSec = 5;
++
++// Fogata: how long the device waits before connecting again to a sound server that
++// went away: half a second, then twice as long after each try that failed, at most
++// 5 s.
++TimeDelta ReconnectDelay(int tries) {
++  constexpr TimeDelta kFirst = TimeDelta::Millis(500);
++  constexpr TimeDelta kMost = TimeDelta::Seconds(5);
++  TimeDelta delay = kFirst;
++  for (int i = 0; i < tries && delay < kMost; ++i) {
++    delay = delay * 2;
++  }
++  return std::min(delay, kMost);
++}
++
++// Fogata: how long before starting again what did not start once the server was
++// back (its devices may not be there yet): a second for the first 5 tries, then 5 s.
++TimeDelta RestoreDelay(int round) {
++  return round < 5 ? TimeDelta::Seconds(1) : TimeDelta::Seconds(5);
++}
++
+ }  // namespace
+ 
+ AudioDeviceLinuxPulse::AudioDeviceLinuxPulse()
+@@ -172,6 +201,11 @@ AudioDeviceGeneric::InitStatus AudioDeviceLinuxPulse::Init() {
+     _startPlay = false;
+   }
+ 
++  // Fogata: the thread the voice engine calls on, where the device connects again
++  // to a sound server that goes away (LoseServer).
++  worker_ = TaskQueueBase::Current();
++  ++connection_;
++
+   // Initialize PulseAudio
+   if (InitPulseAudio() < 0) {
+     RTC_LOG(LS_ERROR) << "failed to initialize PulseAudio";
+@@ -180,6 +214,8 @@ AudioDeviceGeneric::InitStatus AudioDeviceLinuxPulse::Init() {
+     }
+     return InitStatus::OTHER_ERROR;
+   }
++  connected_ = true;
++  reconnect_tries_ = 0;
+ 
+ #if defined(WEBRTC_USE_X11)
+   // Get X display handle for typing detection
+@@ -247,6 +283,13 @@ int32_t AudioDeviceLinuxPulse::Terminate() {
+   _initialized = false;
+   _outputDeviceIsSpecified = false;
+   _inputDeviceIsSpecified = false;
++  // Fogata: nothing more to connect to again or to start again.
++  connected_ = false;
++  ++connection_;
++  play_wanted_ = Wanted::kNo;
++  rec_wanted_ = Wanted::kNo;
++  play_name_.clear();
++  rec_name_.clear();
+ 
+   return 0;
+ }
+@@ -672,6 +715,12 @@ int32_t AudioDeviceLinuxPulse::MinMicrophoneVolume(uint32_t& minVolume) const {
+ }
+ 
+ int16_t AudioDeviceLinuxPulse::PlayoutDevices() {
++  // Fogata: none at all, not even the default, while no sound server answers: the
++  // application tells that from such a list.
++  if (!connected_) {
++    return 0;
++  }
++
+   PaLock();
+ 
+   pa_operation* paOperation = nullptr;
+@@ -706,6 +755,8 @@ int32_t AudioDeviceLinuxPulse::SetPlayoutDevice(uint16_t index) {
+ 
+   _outputDeviceIndex = index;
+   _outputDeviceIsSpecified = true;
++  // Fogata: by its name too, which stays when the list changes.
++  play_name_ = DeviceNameAt(false, index);
+ 
+   return 0;
+ }
+@@ -793,6 +844,11 @@ int32_t AudioDeviceLinuxPulse::RecordingDeviceName(
+ }
+ 
+ int16_t AudioDeviceLinuxPulse::RecordingDevices() {
++  // Fogata: as PlayoutDevices.
++  if (!connected_) {
++    return 0;
++  }
++
+   PaLock();
+ 
+   pa_operation* paOperation = nullptr;
+@@ -827,6 +883,8 @@ int32_t AudioDeviceLinuxPulse::SetRecordingDevice(uint16_t index) {
+ 
+   _inputDeviceIndex = index;
+   _inputDeviceIsSpecified = true;
++  // Fogata: by its name too, which stays when the list changes.
++  rec_name_ = DeviceNameAt(true, index);
+ 
+   return 0;
+ }
+@@ -886,6 +944,16 @@ int32_t AudioDeviceLinuxPulse::InitPlayout() {
+     return 0;
+   }
+ 
++  // Fogata: asked for while no sound server answers, it is done once one does
++  // (Restore).
++  if (!restoring_ && play_wanted_ == Wanted::kNo) {
++    play_wanted_ = Wanted::kInitialized;
++  }
++  if (!connected_) {
++    RTC_LOG(LS_WARNING) << "no PulseAudio server: playout waits for one";
++    return -1;
++  }
++
+   // Initialize the speaker (devices might have been added or removed)
+   if (InitSpeaker() == -1) {
+     RTC_LOG(LS_WARNING) << "InitSpeaker() failed";
+@@ -995,6 +1063,15 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
+     return 0;
+   }
+ 
++  // Fogata: as in InitPlayout.
++  if (!restoring_ && rec_wanted_ == Wanted::kNo) {
++    rec_wanted_ = Wanted::kInitialized;
++  }
++  if (!connected_) {
++    RTC_LOG(LS_WARNING) << "no PulseAudio server: recording waits for one";
++    return -1;
++  }
++
+   // Initialize the microphone (devices might have been added or removed)
+   if (InitMicrophone() == -1) {
+     RTC_LOG(LS_WARNING) << "InitMicrophone() failed";
+@@ -1078,6 +1155,10 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
+ 
+ int32_t AudioDeviceLinuxPulse::StartRecording() {
+   RTC_DCHECK(thread_checker_.IsCurrent());
++  // Fogata: as in InitPlayout.
++  if (!restoring_ && (_recIsInitialized || !connected_)) {
++    rec_wanted_ = Wanted::kStarted;
++  }
+   if (!_recIsInitialized) {
+     return -1;
+   }
+@@ -1123,6 +1204,10 @@ int32_t AudioDeviceLinuxPulse::StartRecording() {
+ 
+ int32_t AudioDeviceLinuxPulse::StopRecording() {
+   RTC_DCHECK(thread_checker_.IsCurrent());
++  // Fogata: no longer wanted, unless the device stops it itself.
++  if (!restoring_) {
++    rec_wanted_ = Wanted::kNo;
++  }
+   MutexLock lock(&mutex_);
+ 
+   if (!_recIsInitialized) {
+@@ -1196,6 +1281,10 @@ bool AudioDeviceLinuxPulse::PlayoutIsInitialized() const {
+ int32_t AudioDeviceLinuxPulse::StartPlayout() {
+   RTC_DCHECK(thread_checker_.IsCurrent());
+ 
++  // Fogata: as in InitPlayout.
++  if (!restoring_ && (_playIsInitialized || !connected_)) {
++    play_wanted_ = Wanted::kStarted;
++  }
+   if (!_playIsInitialized) {
+     return -1;
+   }
+@@ -1244,6 +1333,10 @@ int32_t AudioDeviceLinuxPulse::StartPlayout() {
+ 
+ int32_t AudioDeviceLinuxPulse::StopPlayout() {
+   RTC_DCHECK(thread_checker_.IsCurrent());
++  // Fogata: no longer wanted, unless the device stops it itself.
++  if (!restoring_) {
++    play_wanted_ = Wanted::kNo;
++  }
+   MutexLock lock(&mutex_);
+ 
+   if (!_playIsInitialized) {
+@@ -1311,6 +1404,243 @@ bool AudioDeviceLinuxPulse::Playing() const {
+   return (_playing);
+ }
+ 
++// ============================================================================
++//                 Fogata: a sound server that goes away and comes back
++// ============================================================================
++//
++// PipeWire's PulseAudio service, or PulseAudio, restarted while the device runs (as
++// after a system update) left the device's context dead for good: its lists held only
++// the default, and nothing played or recorded until the application restarted. Now:
++// - PulseAudio's mainloop thread sees the context fail (PaContextStateCallbackHandler)
++//   and only posts to the worker thread, where everything else below runs, as every
++//   call of the voice engine does;
++// - LoseServer stops playout and recording, keeping what the voice engine had asked
++//   for (play_wanted_, rec_wanted_), lists no device at all meanwhile, tells the
++//   observer, and tries again;
++// - each try (Reconnect) makes a new context on the same mainloop and connects it
++//   without waiting: 0.5 s after the loss, then after 1, 2 and 4 s, then every 5 s; a
++//   server that takes the connection and does not answer within 5 s is tried again
++//   the same way;
++// - once a context is ready (ServerBack), the chosen output and input are taken
++//   again by their names where they are still listed, else the default, playout and
++//   recording start again as they were, and the observer is told (the application
++//   reads the lists again). What does not start (no device listed yet) is tried again
++//   every second for 5 s, then every 5 s, while the server stays.
++// The worker thread never waits for the server longer than one question (5 s).
++
++int32_t AudioDeviceLinuxPulse::SetObserver(AudioDeviceObserver* observer) {
++  MutexLock lock(&observer_mutex_);
++  observer_ = observer;
++  return 0;
++}
++
++void AudioDeviceLinuxPulse::TellDevicesUpdated() {
++  // Under the lock, so an observer going away (SetObserver(nullptr)) waits for it.
++  MutexLock lock(&observer_mutex_);
++  if (observer_ != nullptr) {
++    observer_->OnDevicesUpdated();
++  }
++}
++
++void AudioDeviceLinuxPulse::PostToWorker(absl::AnyInvocable<void() &&> task,
++                                         TimeDelta delay) {
++  if (worker_ == nullptr) {
++    return;
++  }
++  absl::AnyInvocable<void() &&> safe =
++      SafeTask(task_safety_.flag(), std::move(task));
++  if (delay.IsZero()) {
++    worker_->PostTask(std::move(safe));
++  } else {
++    worker_->PostDelayedTask(std::move(safe), delay);
++  }
++}
++
++void AudioDeviceLinuxPulse::OnContextState() {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  if (!_initialized || _paMainloop == nullptr || _paContext == nullptr) {
++    return;
++  }
++  PaLock();
++  const pa_context_state_t state = LATE(pa_context_get_state)(_paContext);
++  PaUnLock();
++  if (connected_) {
++    if (!PA_CONTEXT_IS_GOOD(state)) {
++      LoseServer();
++    }
++    return;
++  }
++  if (state == PA_CONTEXT_READY) {
++    ServerBack();
++  } else if (!PA_CONTEXT_IS_GOOD(state)) {
++    // No server there yet.
++    TryAgainLater();
++  }
++}
++
++void AudioDeviceLinuxPulse::LoseServer() {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  RTC_LOG(LS_WARNING) << "PulseAudio sound server lost: connecting again";
++  connected_ = false;
++  reconnect_tries_ = 0;
++  // Stopped by the device itself: what the voice engine asked for stays wanted.
++  restoring_ = true;
++  StopPlayout();
++  StopRecording();
++  restoring_ = false;
++  // The server's own indices of the devices mean nothing to the next one.
++  _mixerManager.CloseSpeaker();
++  _mixerManager.CloseMicrophone();
++  TryAgainLater();
++  TellDevicesUpdated();
++}
++
++void AudioDeviceLinuxPulse::TryAgainLater() {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  // A try still under way, and its time limit, no longer count.
++  const int attempt = ++connection_;
++  const TimeDelta delay = ReconnectDelay(reconnect_tries_++);
++  RTC_LOG(LS_INFO) << "PulseAudio: trying again in " << delay.ms() << " ms";
++  PostToWorker([this, attempt] { Reconnect(attempt); }, delay);
++}
++
++void AudioDeviceLinuxPulse::Reconnect(int attempt) {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  if (attempt != connection_ || !_initialized || connected_) {
++    return;
++  }
++  PaLock();
++  pa_context* fresh =
++      LATE(pa_context_new)(_paMainloopApi, "WEBRTC VoiceEngine");
++  if (fresh != nullptr) {
++    // Nothing holds the dead context any more: its streams went in LoseServer, and
++    // the mixer is given the new one below. Its own disconnect tells nothing.
++    if (_paContext != nullptr) {
++      LATE(pa_context_set_state_callback)(_paContext, nullptr, nullptr);
++      LATE(pa_context_disconnect)(_paContext);
++      LATE(pa_context_unref)(_paContext);
++    }
++    _paContext = fresh;
++    _paStateChanged = false;
++    LATE(pa_context_set_state_callback)(_paContext, PaContextStateCallback,
++                                        this);
++    // Never starts a server of its own. Connecting does not wait for the server:
++    // the state callback tells how it went.
++    if (LATE(pa_context_connect)(_paContext, nullptr, PA_CONTEXT_NOAUTOSPAWN,
++                                 nullptr) != PA_OK) {
++      RTC_LOG(LS_INFO) << "PulseAudio: no server to connect to yet";
++    }
++  }
++  PaUnLock();
++  if (fresh == nullptr) {
++    RTC_LOG(LS_ERROR) << "could not create context";
++    TryAgainLater();
++    return;
++  }
++  _mixerManager.SetPulseAudioObjects(_paMainloop, _paContext);
++  // A server that takes the connection and does not answer is tried again.
++  PostToWorker(
++      [this, attempt] {
++        if (attempt != connection_ || !_initialized || connected_) {
++          return;
++        }
++        RTC_LOG(LS_WARNING) << "PulseAudio sound server did not answer in "
++                            << kPulseConnectTimeoutSec << " s";
++        TryAgainLater();
++      },
++      TimeDelta::Seconds(kPulseConnectTimeoutSec));
++}
++
++void AudioDeviceLinuxPulse::ServerBack() {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  // The try's time limit no longer counts.
++  ++connection_;
++  connected_ = true;
++  reconnect_tries_ = 0;
++  RTC_LOG(LS_INFO) << "PulseAudio sound server back";
++  _mixerManager.SetPulseAudioObjects(_paMainloop, _paContext);
++  // Another server may run at another rate.
++  InitSamplingFrequency();
++  Restore(0);
++  TellDevicesUpdated();
++}
++
++void AudioDeviceLinuxPulse::Restore(int round) {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  if (!_initialized || !connected_) {
++    return;
++  }
++  bool failed = false;
++  restoring_ = true;
++  if (play_wanted_ != Wanted::kNo && !_playing) {
++    // The chosen output where it is still listed, else the default.
++    _outputDeviceIndex =
++        play_name_.empty() ? uint16_t{0} : DeviceIndexOf(false, play_name_);
++    if (InitPlayout() != 0 ||
++        (play_wanted_ == Wanted::kStarted && StartPlayout() != 0)) {
++      failed = true;
++    }
++  }
++  if (rec_wanted_ != Wanted::kNo && !_recording) {
++    _inputDeviceIndex =
++        rec_name_.empty() ? uint16_t{0} : DeviceIndexOf(true, rec_name_);
++    if (InitRecording() != 0 ||
++        (rec_wanted_ == Wanted::kStarted && StartRecording() != 0)) {
++      failed = true;
++    }
++  }
++  restoring_ = false;
++  if (failed) {
++    const TimeDelta delay = RestoreDelay(round);
++    RTC_LOG(LS_WARNING) << "PulseAudio: playout or recording did not start "
++                           "again; trying in "
++                        << delay.ms() << " ms";
++    const int connection = connection_;
++    PostToWorker(
++        [this, connection, round] {
++          if (connection == connection_) {
++            Restore(round + 1);
++          }
++        },
++        delay);
++  }
++}
++
++std::string AudioDeviceLinuxPulse::DeviceNameAt(bool recDevice,
++                                                uint16_t index) {
++  if (index == 0) {
++    return std::string();
++  }
++  char name[kAdmMaxDeviceNameSize] = {0};
++  // The list's callbacks copy the name of the device at _deviceIndex into
++  // _recDeviceName or _playDeviceName, which the audio threads also use (with the
++  // lock held) as they start.
++  MutexLock lock(&mutex_);
++  char*& wanted = recDevice ? _recDeviceName : _playDeviceName;
++  char* const kept = wanted;
++  wanted = name;
++  _deviceIndex = index;
++  if (recDevice) {
++    RecordingDevices();
++  } else {
++    PlayoutDevices();
++  }
++  _deviceIndex = -1;
++  wanted = kept;
++  return std::string(name);
++}
++
++uint16_t AudioDeviceLinuxPulse::DeviceIndexOf(bool recDevice,
++                                              const std::string& name) {
++  const int16_t count = recDevice ? RecordingDevices() : PlayoutDevices();
++  for (int16_t i = 1; i < count; ++i) {
++    if (DeviceNameAt(recDevice, static_cast<uint16_t>(i)) == name) {
++      return static_cast<uint16_t>(i);
++    }
++  }
++  return 0;
++}
++
+ // ============================================================================
+ //                                 Private Methods
+ // ============================================================================
+@@ -1366,11 +1696,16 @@ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
+       RTC_LOG(LS_VERBOSE) << "failed";
+       _paStateChanged = true;
+       LATE(pa_threaded_mainloop_signal)(_paMainloop, 0);
++      // Fogata: the server went away, or a try to reach it again failed: the
++      // worker thread connects again (OnContextState).
++      PostToWorker([this] { OnContextState(); });
+       break;
+     case PA_CONTEXT_READY:
+       RTC_LOG(LS_VERBOSE) << "ready";
+       _paStateChanged = true;
+       LATE(pa_threaded_mainloop_signal)(_paMainloop, 0);
++      // Fogata: a try to reach a server that went away worked.
++      PostToWorker([this] { OnContextState(); });
+       break;
+   }
+ }
+@@ -1654,9 +1989,13 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+     return -1;
+   }
+ 
+-  // Wait for state change
+-  while (!_paStateChanged) {
+-    LATE(pa_threaded_mainloop_wait)(_paMainloop);
++  // Wait for state change. Fogata: for a while only: a server that takes the
++  // connection and never answers held the worker thread for ever.
++  {
++    PulseWaitLimit limit(_paMainloop, kPulseConnectTimeoutSec);
++    while (!_paStateChanged && !limit.Expired()) {
++      LATE(pa_threaded_mainloop_wait)(_paMainloop);
++    }
+   }
+ 
+   // Now check to see what final state we reached.
+@@ -1668,9 +2007,8 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+     } else if (state == PA_CONTEXT_TERMINATED) {
+       RTC_LOG(LS_ERROR) << "PulseAudio connection terminated early";
+     } else {
+-      // Shouldn't happen, because we only signal on one of those three
+-      // states
+-      RTC_LOG(LS_ERROR) << "unknown problem connecting to PulseAudio";
++      RTC_LOG(LS_ERROR) << "PulseAudio sound server did not answer in "
++                        << kPulseConnectTimeoutSec << " s";
+     }
+     PaUnLock();
+     return -1;
+@@ -1709,6 +2047,8 @@ int32_t AudioDeviceLinuxPulse::TerminatePulseAudio() {
+ 
+   // Disconnect the context
+   if (_paContext) {
++    // Fogata: the device's own disconnect is no server going away.
++    LATE(pa_context_set_state_callback)(_paContext, nullptr, nullptr);
+     LATE(pa_context_disconnect)(_paContext);
+   }
+ 
+@@ -1814,11 +2154,8 @@ void AudioDeviceLinuxPulse::WaitForOperationCompletion(
+     return;
+   }
+ 
+-  while (LATE(pa_operation_get_state)(paOperation) == PA_OPERATION_RUNNING) {
+-    LATE(pa_threaded_mainloop_wait)(_paMainloop);
+-  }
+-
+-  LATE(pa_operation_unref)(paOperation);
++  // Fogata: for a while only (audio_mixer_manager_pulse_linux.h).
++  WaitForPulseOperation(_paMainloop, paOperation, kPulseAnswerTimeoutSec);
+ }
+ 
+ // ============================================================================
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.h b/modules/audio_device/linux/audio_device_pulse_linux.h
+index d748dca..ba1aae0 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.h
++++ b/modules/audio_device/linux/audio_device_pulse_linux.h
+@@ -13,12 +13,18 @@
+ 
+ #include <pulse/pulseaudio.h>
+ 
++#include <atomic>
+ #include <cstddef>
+ #include <cstdint>
++#include <string>
+ 
++#include "absl/functional/any_invocable.h"
+ #include "api/audio/audio_device.h"
+ #include "api/audio/audio_device_defines.h"
+ #include "api/sequence_checker.h"
++#include "api/task_queue/pending_task_safety_flag.h"
++#include "api/task_queue/task_queue_base.h"
++#include "api/units/time_delta.h"
+ #include "modules/audio_device/audio_device_buffer.h"
+ #include "modules/audio_device/audio_device_generic.h"
+ #include "modules/audio_device/linux/audio_mixer_manager_pulse_linux.h"
+@@ -196,7 +202,35 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+ 
+   void AttachAudioBuffer(AudioDeviceBuffer* audioBuffer) override;
+ 
++  // Fogata: told when the sound server goes away and when it is back (devices then
++  // listed again). From any thread; told on WebRTC's worker thread.
++  int32_t SetObserver(AudioDeviceObserver* observer) override;
++
+  private:
++  // Fogata: what the voice engine asked of a side (playout or recording): nothing,
++  // initialized, or started. Kept while the sound server is gone, and done again
++  // once it is back.
++  enum class Wanted { kNo, kInitialized, kStarted };
++
++  // Fogata: a sound server that went away (PipeWire or PulseAudio restarted, as after
++  // an update) is connected to again. All on the thread that made the device,
++  // WebRTC's worker thread, as every other call of the voice engine; PulseAudio's
++  // mainloop thread only posts there (PaContextStateCallbackHandler).
++  void OnContextState();
++  void LoseServer();
++  void TryAgainLater();
++  void Reconnect(int attempt);
++  void ServerBack();
++  void Restore(int round);
++  void TellDevicesUpdated();
++  void PostToWorker(absl::AnyInvocable<void() &&> task,
++                    TimeDelta delay = TimeDelta::Zero());
++  // The sound server's own name of the device at `index` of the list (empty for
++  // the default, at 0), and the place in the list of the device with that name (0,
++  // the default, when it is not there).
++  std::string DeviceNameAt(bool recDevice, uint16_t index);
++  uint16_t DeviceIndexOf(bool recDevice, const std::string& name);
++
+   void Lock() RTC_EXCLUSIVE_LOCK_FUNCTION(mutex_) { mutex_.Lock(); }
+   void UnLock() RTC_UNLOCK_FUNCTION(mutex_) { mutex_.Unlock(); }
+   void WaitForOperationCompletion(pa_operation* paOperation) const;
+@@ -338,6 +372,29 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+   pa_buffer_attr _playBufferAttr;
+   pa_buffer_attr _recBufferAttr;
+ 
++  // Fogata: reconnecting (see LoseServer). On the worker thread unless said.
++  TaskQueueBase* worker_ = nullptr;
++  // The context in use answered and has not gone away since. Read by the audio
++  // threads too, while the worker thread waits for them.
++  std::atomic<bool> connected_{false};
++  // Counts the contexts made and the device's starts and stops: a task for an
++  // earlier one does nothing.
++  int connection_ = 0;
++  int reconnect_tries_ = 0;
++  // Playout and recording stopped or started by the device itself, not asked
++  // for by the voice engine.
++  bool restoring_ = false;
++  Wanted play_wanted_ = Wanted::kNo;
++  Wanted rec_wanted_ = Wanted::kNo;
++  // The sound server's names of the chosen output and input; empty for the
++  // default. The list is read again when the server is back, and its places can
++  // differ.
++  std::string play_name_;
++  std::string rec_name_;
++  Mutex observer_mutex_;
++  AudioDeviceObserver* observer_ RTC_GUARDED_BY(observer_mutex_) = nullptr;
++  ScopedTaskSafety task_safety_;
++
+   char _oldKeyState[32];
+ #if defined(WEBRTC_USE_X11)
+   Display* _XDisplay;
+diff --git a/modules/audio_device/linux/audio_mixer_manager_pulse_linux.cc b/modules/audio_device/linux/audio_mixer_manager_pulse_linux.cc
+index 4a57248..1c2df81 100644
+--- a/modules/audio_device/linux/audio_mixer_manager_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_mixer_manager_pulse_linux.cc
+@@ -10,6 +10,8 @@
+ 
+ #include "modules/audio_device/linux/audio_mixer_manager_pulse_linux.h"
+ 
++#include <sys/time.h>
++
+ #include <cstdint>
+ 
+ #include "modules/audio_device/linux/audio_device_pulse_linux.h"
+@@ -26,6 +28,66 @@
+ 
+ namespace webrtc {
+ 
++namespace {
++
++// How long PulseAudio may take to answer a question of the mixer.
++constexpr int kPulseMixerAnswerTimeoutSec = 5;
++
++}  // namespace
++
++PulseWaitLimit::PulseWaitLimit(pa_threaded_mainloop* mainloop, int seconds)
++    : mainloop_(mainloop),
++      api_(LATE(pa_threaded_mainloop_get_api)(mainloop)) {
++  struct timeval when;
++  gettimeofday(&when, nullptr);
++  when.tv_sec += seconds;
++  if (api_ != nullptr) {
++    event_ = api_->time_new(api_, &when, &PulseWaitLimit::OnTime, this);
++  }
++}
++
++PulseWaitLimit::~PulseWaitLimit() {
++  if (event_ != nullptr) {
++    api_->time_free(event_);
++  }
++}
++
++void PulseWaitLimit::OnTime(pa_mainloop_api* /*api*/,
++                            pa_time_event* /*event*/,
++                            const struct timeval* /*when*/,
++                            void* data) {
++  auto* limit = static_cast<PulseWaitLimit*>(data);
++  limit->expired_ = true;
++  LATE(pa_threaded_mainloop_signal)(limit->mainloop_, 0);
++}
++
++bool WaitForPulseOperation(pa_threaded_mainloop* mainloop,
++                           pa_operation* operation,
++                           int timeout_seconds) {
++  if (operation == nullptr) {
++    return false;
++  }
++  bool done = true;
++  {
++    PulseWaitLimit limit(mainloop, timeout_seconds);
++    while (LATE(pa_operation_get_state)(operation) == PA_OPERATION_RUNNING) {
++      if (limit.Expired()) {
++        done = false;
++        break;
++      }
++      LATE(pa_threaded_mainloop_wait)(mainloop);
++    }
++  }
++  if (!done) {
++    RTC_LOG(LS_ERROR) << "PulseAudio did not answer in " << timeout_seconds
++                      << " s";
++    // No callback of it runs after this.
++    LATE(pa_operation_cancel)(operation);
++  }
++  LATE(pa_operation_unref)(operation);
++  return done;
++}
++
+ class AutoPulseLock {
+  public:
+   explicit AutoPulseLock(pa_threaded_mainloop* pa_mainloop)
+@@ -798,11 +860,9 @@ void AudioMixerManagerLinuxPulse::PaSourceInfoCallbackHandler(
+ 
+ void AudioMixerManagerLinuxPulse::WaitForOperationCompletion(
+     pa_operation* paOperation) const {
+-  while (LATE(pa_operation_get_state)(paOperation) == PA_OPERATION_RUNNING) {
+-    LATE(pa_threaded_mainloop_wait)(_paMainloop);
+-  }
+-
+-  LATE(pa_operation_unref)(paOperation);
++  // Fogata: bounded, and safe for the null operation a context that went away
++  // gives (libpulse asserts on a null one).
++  WaitForPulseOperation(_paMainloop, paOperation, kPulseMixerAnswerTimeoutSec);
+ }
+ 
+ bool AudioMixerManagerLinuxPulse::GetSinkInputInfo() const {
+diff --git a/modules/audio_device/linux/audio_mixer_manager_pulse_linux.h b/modules/audio_device/linux/audio_mixer_manager_pulse_linux.h
+index bdce949..30cea45 100644
+--- a/modules/audio_device/linux/audio_mixer_manager_pulse_linux.h
++++ b/modules/audio_device/linux/audio_mixer_manager_pulse_linux.h
+@@ -19,6 +19,42 @@
+ 
+ namespace webrtc {
+ 
++// Fogata: a time limit for a wait on a PulseAudio threaded mainloop. Made and freed
++// with the mainloop's lock held: it wakes the waiting thread once `seconds` have
++// passed, and Expired() then says so (read with the lock held). A limit that could
++// not be armed counts as expired.
++class PulseWaitLimit {
++ public:
++  PulseWaitLimit(pa_threaded_mainloop* mainloop, int seconds);
++  ~PulseWaitLimit();
++
++  PulseWaitLimit(const PulseWaitLimit&) = delete;
++  PulseWaitLimit& operator=(const PulseWaitLimit&) = delete;
++
++  bool Expired() const { return expired_ || event_ == nullptr; }
++
++ private:
++  static void OnTime(pa_mainloop_api* api,
++                     pa_time_event* event,
++                     const struct timeval* when,
++                     void* data);
++
++  pa_threaded_mainloop* const mainloop_;
++  pa_mainloop_api* const api_;
++  pa_time_event* event_ = nullptr;
++  bool expired_ = false;
++};
++
++// Fogata: waits on `mainloop`, whose lock the caller holds, until `operation` is
++// done or `timeout_seconds` have passed, then lets go of it (cancelled first if it
++// still runs). A sound server that took the connection and stopped answering held
++// the waiting thread (WebRTC's worker thread, or an audio thread holding the
++// device's lock) for as long as libpulse waits for a reply. A null operation (asked
++// of a context that is not connected) is not waited for. True if it finished.
++bool WaitForPulseOperation(pa_threaded_mainloop* mainloop,
++                           pa_operation* operation,
++                           int timeout_seconds);
++
+ class AudioMixerManagerLinuxPulse {
+  public:
+   int32_t SetPlayStream(pa_stream* playStream);
+diff --git a/modules/audio_device/linux/pulseaudiosymboltable_linux.h b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
+index 2f6a951..18c9f9c 100644
+--- a/modules/audio_device/linux/pulseaudiosymboltable_linux.h
++++ b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
+@@ -59,6 +59,7 @@ namespace adm_linux_pulse {
+   X(pa_context_set_state_callback)         \
+   X(pa_context_unref)                      \
+   X(pa_cvolume_set)                        \
++  X(pa_operation_cancel)                   \
+   X(pa_operation_get_state)                \
+   X(pa_operation_unref)                    \
+   X(pa_stream_connect_playback)            \

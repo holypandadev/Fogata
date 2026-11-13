@@ -26,6 +26,14 @@ the patches in `patches/`:
   interface once, lists and opens the cameras of the PipeWire connection it gives as they
   come and go, tells whether they were granted, refused or cannot be reached, and keeps the
   id V4L2 gives a camera.
+- **A sound server that restarts is connected to again** (Linux): PulseAudio's device kept
+  a dead connection after PipeWire's PulseAudio service or PulseAudio restarted (as after
+  a system update), listing only the default and playing and recording nothing until the
+  application restarted. It now tries again (0.5 s after, then after 1, 2 and 4 s, then
+  every 5 s), lists no device meanwhile, takes the chosen devices again by name and starts
+  again what was running, and tells the wrapper's `OnDeviceChange` both ways. No wait on the
+  server is longer than 5 s (the first connection waited for ever on a server that never
+  answered), and the voice engine stays up without a device instead of ending the process.
 - **A shared screen or window is captured at the rate asked** (Linux X11, Windows and macOS): the
   wrapper waited the whole interval after each capture ended, so a capture taking 20 ms made
   30 frames a second into 19, and it compared every frame with the last for a changed region
@@ -143,6 +151,17 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    path, Linux only) read with PipeWire's loop locked while its thread adds and removes
    them, listed once their formats are known, with the V4L2 bus of those PipeWire reaches
    through V4L2; without PipeWire's library the session stops instead of using it.
+6. `0006-pulseaudio-connect-again-to-a-sound-server-that-went-away` (Linux only): the
+   PulseAudio device connects again, from WebRTC's worker thread, to a sound server that
+   went away (0.5 s after, then after 1, 2 and 4 s, then every 5 s; a server that does not
+   answer within 5 s is tried again), lists no device at all meanwhile, takes the chosen
+   output and input again by the server's names for them where they are still listed,
+   starts playout and recording again as they were, and tells its observer both ways;
+   every wait on the server (the first connection, every question to it, the mixer's
+   too) is at most 5 s.
+7. `0007-keep-the-voice-engine-up-without-its-audio-device` (every system):
+   `adm_helpers::Init` logs a device that does not initialize instead of ending the
+   process.
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -170,6 +189,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    (its bus), PipeWire is asked for one of the formats the camera offers (the nearest to
    the size and rate wanted), and a device gone since it was counted has no name.
    Elsewhere, and on Linux by default, nothing changes.
+10. the audio device's lists are counted on the worker thread, as every other call of the
+    audio device module, its device change listener is set and called under a lock (a
+    null one stops it), and it is taken off the module as it goes.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

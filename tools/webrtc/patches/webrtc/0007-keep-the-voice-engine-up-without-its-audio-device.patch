@@ -1,0 +1,27 @@
+Keep the voice engine up without its audio device
+
+adm_helpers::Init ended the process (RTC_CHECK, in release builds too) when the audio
+device module did not initialize: on Linux, when no sound server answered or one did not
+answer in time, the first connection of a call took the whole application down. The
+voice engine now logs it and goes on without a device: it plays and records nothing, as
+with any other failure of the device, and everything else of the call works.
+
+diff --git a/media/engine/adm_helpers.cc b/media/engine/adm_helpers.cc
+index 12dfbc9..7a5f536 100644
+--- a/media/engine/adm_helpers.cc
++++ b/media/engine/adm_helpers.cc
+@@ -36,7 +36,13 @@ namespace adm_helpers {
+ void Init(AudioDeviceModule* adm) {
+   RTC_DCHECK(adm);
+ 
+-  RTC_CHECK_EQ(0, adm->Init()) << "Failed to initialize the ADM.";
++  // Fogata: without its audio device (on Linux, no sound server answering, or one
++  // that does not answer in time) the voice engine stays up, and plays and records
++  // nothing: ending the process for it took the whole application down.
++  if (adm->Init() != 0) {
++    RTC_LOG(LS_ERROR) << "Failed to initialize the ADM.";
++    return;
++  }
+ 
+   // Playout device.
+   {
