@@ -1571,6 +1571,7 @@ EOF2
         # The key turns every 6 hours (fogata-crypto's WINDOW_SECS): not across this run.
         while (( $(date -u +%s) % 21600 > 21600 - 150 )); do sleep 5; done
         near=$("$BIN" --data-dir "$WORK/data-A" lab-keys | head -1)
+        [[ -n $near ]] || { echo "netlab: no key for the lab group" >&2; exit 1; }
         public_host S 203.0.113.90
         start_dht S 4001
         in_ns S tc qdisc add dev wan root netem delay 12000ms

@@ -223,8 +223,12 @@ enum Command {
 
 /// The bytes a hex argument writes.
 #[cfg(feature = "lab")]
-fn parse_hex(text: &str) -> Result<HexBytes, hex::FromHexError> {
-    hex::decode(text).map(HexBytes)
+fn parse_hex(text: &str) -> Result<HexBytes, String> {
+    match hex::decode(text) {
+        Ok(bytes) if !bytes.is_empty() => Ok(HexBytes(bytes)),
+        Ok(_) => Err("no bytes given".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// Bytes given in hex. Not a bare `Vec<u8>`, which clap would take for a list of values.
