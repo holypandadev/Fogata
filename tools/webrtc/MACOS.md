@@ -35,6 +35,16 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    one interval after the last one began, not after it ended, screens are not compared
    frame by frame for an updated region nobody reads, and WebRTC's log says every 10 s what
    a capture cost.
+7. `0007-encode-a-shared-screen-once`: one encoder for every connection that sends a shared
+   screen at one size, as the C++ wrapper's (`patches/wrapper/0012`, built in from
+   `//libwebrtc` as `fogata_shared_encoder`, like the size check): the encoder factory given
+   to `RTCPeerConnectionFactory` (`initWithAudioDeviceModuleType:...`, which the plugin
+   uses, and `initWithEncoderFactory:decoderFactory:audioDevice:`) is wrapped in
+   `SharedEncoderFactory`, `ObjCVideoTrackSource` tags the frames of a source marked with
+   `RTCVideoSource`'s `enableFogataSharedEncode` (the plugin marks its ScreenCaptureKit
+   source), and the field trial `Fogata-SharedScreenEncode/Enabled/` turns it on. Written
+   without a Mac at hand: it applies after 0001-0006, but its first build is on a Mac (see
+   "Checking patch 7" below).
 
 The macOS framework is all these patches are for: the iOS framework and WebRTC's own
 Objective-C tests, which still name the VideoToolbox codecs, are not built from them.
@@ -56,6 +66,24 @@ with its SHA-256.
 To change the port, fix it in `~/webrtc-work/webrtc/src`, build again with `--no-prepare`,
 and save the fix as a patch of `patches/apple` (`git -C ~/webrtc-work/webrtc/src diff` against
 the tree `prepare.sh` made).
+
+## Checking patch 7
+
+Patch 7 was written on Linux against the tree the other patches make, and never built
+there. On the first Mac build, check:
+
+- that `sdk/BUILD.gn`'s `fogata_shared_encoder` compiles `//libwebrtc/src/internal/shared_encoder.cc`
+  with the deps it lists (as `fogata_vp8_size_gate` does), and that `native_video` and
+  `peerconnectionfactory_base_objc` find `src/internal/shared_encoder.h` through their
+  `include_dirs`;
+- that the framework still exports no other codec (`build-macos.sh` checks it);
+- in a call where the Mac shares its screen to two or three watchers: each watcher's
+  `outbound-rtp` names its encoder `... (shared)` (`encoderImplementation`; on macOS the
+  real encoder is the `SimulcastEncoderAdapter` the plugin's `VideoEncoderFactorySimulcast`
+  makes over libvpx, so the name before " (shared)" may be that adapter's), one
+  `SharedScreenEnc` thread runs for each size, every watcher sees the screen, and with
+  `FOGATA_SHARED_SCREEN_ENCODE=off` each connection has its encoder again;
+- that a camera is never shared (its connections keep encoders of their own).
 
 ## The app on it
 

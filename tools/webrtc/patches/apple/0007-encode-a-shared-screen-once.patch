@@ -1,0 +1,266 @@
+One encoder for every connection that sends a shared screen at one size, in the
+Objective-C SDK, as the C++ wrapper does (patches/wrapper/0012): the encoder factory the
+plugin passes is wrapped in //libwebrtc's SharedEncoderFactory (both initializers that
+take an RTCVideoEncoderFactory), ObjCVideoTrackSource tags the frames of a source marked
+with RTCVideoSource's enableFogataSharedEncode, and the field trial
+Fogata-SharedScreenEncode/Enabled/ turns it on. Without the trial, or for a source not
+marked (cameras), nothing changes.
+
+diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
+index 236edc2..7d4230f 100644
+--- a/sdk/BUILD.gn
++++ b/sdk/BUILD.gn
+@@ -623,6 +623,39 @@ if (is_ios || is_mac) {
+       ]
+     }
+ 
++    # Fogata: the connections that send a shared screen at one size share one
++    # encoder of it, through the C++ wrapper's SharedEncoderFactory (copied in as
++    # //libwebrtc, patches/wrapper/0012).
++    rtc_library("fogata_shared_encoder") {
++      visibility = [ "*" ]
++      include_dirs = [ "//libwebrtc" ]
++      sources = [
++        "//libwebrtc/src/internal/shared_encoder.cc",
++        "//libwebrtc/src/internal/shared_encoder.h",
++      ]
++      deps = [
++        "../api:fec_controller_api",
++        "../api:field_trials_view",
++        "../api/environment",
++        "../api/task_queue",
++        "../api/units:data_rate",
++        "../api/units:time_delta",
++        "../api/units:timestamp",
++        "../api/video:encoded_image",
++        "../api/video:resolution",
++        "../api/video:video_frame",
++        "../api/video:video_frame_type",
++        "../api/video_codecs:video_codecs_api",
++        "../modules/video_coding:video_codec_interface",
++        "../rtc_base:logging",
++        "../rtc_base:macromagic",
++        "../rtc_base/experiments:field_trial_parser",
++        "../rtc_base/synchronization:mutex",
++        "../system_wrappers",
++        "//third_party/abseil-cpp/absl/strings",
++      ]
++    }
++
+     rtc_library("videoframebuffer_objc") {
+       visibility = [ "*" ]
+       sources = [
+@@ -1232,11 +1265,15 @@ if (is_ios || is_mac) {
+       ]
+       public_configs = [ ":common_config_objc" ]
+ 
++      # Fogata: the encoder factory is wrapped in the shared screen encoder's.
++      include_dirs = [ "//libwebrtc" ]
++
+       deps = [
+         ":audio_device_api_objc",
+         ":base_native_additions_objc",
+         ":base_objc",
+         ":file_logger_objc",
++        ":fogata_shared_encoder",
+         ":helpers_objc",
+         ":mediaconstraints_objc",
+         ":mediasource_objc",
+@@ -1903,8 +1940,12 @@ if (is_ios || is_mac) {
+ 
+       public_configs = [ ":common_config_objc" ]
+ 
++      # Fogata: ObjCVideoTrackSource tags a shared screen's frames.
++      include_dirs = [ "//libwebrtc" ]
++
+       deps = [
+         ":base_native_additions_objc",
++        ":fogata_shared_encoder",
+         ":base_objc",
+         ":helpers_objc",
+         ":videocodec_objc",
+diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+index c11c673..21b0e45 100644
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -36,6 +36,8 @@
+ #import "helpers/NSString+StdString.h"
+ #include "rtc_base/checks.h"
+ #include "sdk/objc/native/api/network_monitor_factory.h"
++// Fogata: one encoder for every connection that sends a shared screen at one size.
++#include "src/internal/shared_encoder.h"
+ #include "sdk/objc/native/api/ssl_certificate_verifier.h"
+ 
+ #include "api/audio/builtin_audio_processing_builder.h"
+@@ -130,7 +132,11 @@ static webrtc::Environment CreateDefaultEnvironment() {
+   dependencies.audio_decoder_factory =
+       webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
+   if (encoderFactory) {
+-    dependencies.video_encoder_factory = webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory);
++    // Fogata: with the field trial Fogata-SharedScreenEncode, the connections that send
++    // a shared screen at one size share one encoder of it (//libwebrtc's
++    // src/internal/shared_encoder.h).
++    dependencies.video_encoder_factory = std::make_unique<libwebrtc::SharedEncoderFactory>(
++        webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory));
+   }
+   if (decoderFactory) {
+     dependencies.video_decoder_factory = webrtc::ObjCToNativeVideoDecoderFactory(decoderFactory);
+@@ -157,7 +163,10 @@ static webrtc::Environment CreateDefaultEnvironment() {
+   std::unique_ptr<webrtc::VideoEncoderFactory> native_encoder_factory;
+   std::unique_ptr<webrtc::VideoDecoderFactory> native_decoder_factory;
+   if (encoderFactory) {
+-    native_encoder_factory = webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory);
++    // Fogata: as above, one encoder for every connection that sends a shared screen at
++    // one size, with the field trial.
++    native_encoder_factory = std::make_unique<libwebrtc::SharedEncoderFactory>(
++        webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory));
+   }
+   if (decoderFactory) {
+     native_decoder_factory = webrtc::ObjCToNativeVideoDecoderFactory(decoderFactory);
+diff --git a/sdk/objc/api/peerconnection/RTCVideoSource.h b/sdk/objc/api/peerconnection/RTCVideoSource.h
+index 283a8c8..478def2 100644
+--- a/sdk/objc/api/peerconnection/RTCVideoSource.h
++++ b/sdk/objc/api/peerconnection/RTCVideoSource.h
+@@ -32,6 +32,15 @@ RTC_OBJC_EXPORT
+  */
+ - (void)adaptOutputFormatToWidth:(int)width height:(int)height fps:(int)fps;
+ 
++/**
++ * Fogata: marks this source as a shared screen. With the field trial
++ * "Fogata-SharedScreenEncode/Enabled/", every connection that sends it at one size
++ * shares one encoder of it (one encode of each frame); nothing on the wire changes.
++ * Call it once, right after the source is made; never for a camera, nor for a source
++ * given to more than one video track.
++ */
++- (void)enableFogataSharedEncode;
++
+ @end
+ 
+ NS_ASSUME_NONNULL_END
+diff --git a/sdk/objc/api/peerconnection/RTCVideoSource.mm b/sdk/objc/api/peerconnection/RTCVideoSource.mm
+index 46251ff..1b4da1d 100644
+--- a/sdk/objc/api/peerconnection/RTCVideoSource.mm
++++ b/sdk/objc/api/peerconnection/RTCVideoSource.mm
+@@ -80,6 +80,10 @@ static webrtc::ObjCVideoTrackSource *getObjCVideoSource(
+       ->OnOutputFormatRequest(width, height, fps);
+ }
+ 
++- (void)enableFogataSharedEncode {
++  getObjCVideoSource(_nativeVideoSource)->EnableSharedEncode();
++}
++
+ #pragma mark - Private
+ 
+ - (webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>)nativeVideoSource {
+diff --git a/sdk/objc/native/src/objc_video_track_source.h b/sdk/objc/native/src/objc_video_track_source.h
+index 35d3190..4fab315 100644
+--- a/sdk/objc/native/src/objc_video_track_source.h
++++ b/sdk/objc/native/src/objc_video_track_source.h
+@@ -13,6 +13,8 @@
+ 
+ #import "base/RTCVideoCapturer.h"
+ 
++#include <memory>
++
+ #include "api/environment/environment.h"
+ #include "api/video/adapted_video_track_source.h"
+ #include "rtc_base/timestamp_aligner.h"
+@@ -20,6 +22,10 @@
+ 
+ RTC_FWD_DECL_OBJC_CLASS(RTC_OBJC_TYPE(RTCVideoFrame));
+ 
++namespace libwebrtc {
++class SharedEncodeTag;
++}  // namespace libwebrtc
++
+ @interface RTC_OBJC_TYPE(RTCObjCVideoSourceAdapter) : NSObject <RTC_OBJC_TYPE (RTCVideoCapturerDelegate)>
+ @end
+ 
+@@ -30,6 +36,7 @@ class ObjCVideoTrackSource : public AdaptedVideoTrackSource {
+   ObjCVideoTrackSource(const Environment& env, bool is_screencast);
+   ObjCVideoTrackSource(const Environment& env,
+                        RTC_OBJC_TYPE(RTCObjCVideoSourceAdapter)* adapter);
++  ~ObjCVideoTrackSource() override;
+ 
+   bool is_screencast() const override;
+ 
+@@ -47,6 +54,12 @@ class ObjCVideoTrackSource : public AdaptedVideoTrackSource {
+   // Called by RTCVideoSource.
+   void OnOutputFormatRequest(int width, int height, int fps);
+ 
++  // Fogata: tags every frame from now on as this source's (a shared screen), so
++  // every connection that sends it at one size shares one encoder of it
++  // (//libwebrtc's src/internal/shared_encoder.h). Called by RTCVideoSource's
++  // enableFogataSharedEncode; never for a camera.
++  void EnableSharedEncode();
++
+  private:
+   const Environment env_;
+   VideoBroadcaster broadcaster_;
+@@ -54,6 +67,9 @@ class ObjCVideoTrackSource : public AdaptedVideoTrackSource {
+ 
+   RTC_OBJC_TYPE(RTCObjCVideoSourceAdapter)* adapter_;
+   bool is_screencast_;
++  // Made with the source, so frames never see it change; tags nothing until
++  // EnableSharedEncode.
++  const std::unique_ptr<libwebrtc::SharedEncodeTag> shared_encode_tag_;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/sdk/objc/native/src/objc_video_track_source.mm b/sdk/objc/native/src/objc_video_track_source.mm
+index 9586e31..5241029 100644
+--- a/sdk/objc/native/src/objc_video_track_source.mm
++++ b/sdk/objc/native/src/objc_video_track_source.mm
+@@ -16,6 +16,7 @@
+ 
+ #include "api/video/i420_buffer.h"
+ #include "sdk/objc/native/src/objc_frame_buffer.h"
++#include "src/internal/shared_encoder.h"
+ 
+ @interface RTC_OBJC_TYPE(RTCObjCVideoSourceAdapter) ()
+ @property(nonatomic) webrtc::ObjCVideoTrackSource *objCVideoTrackSource;
+@@ -38,14 +39,24 @@ ObjCVideoTrackSource::ObjCVideoTrackSource(const Environment &env,
+                                            bool is_screencast)
+     : AdaptedVideoTrackSource(/* required resolution alignment */ 2),
+       env_(env),
+-      is_screencast_(is_screencast) {}
++      is_screencast_(is_screencast),
++      shared_encode_tag_(std::make_unique<libwebrtc::SharedEncodeTag>()) {}
+ 
+ ObjCVideoTrackSource::ObjCVideoTrackSource(const Environment &env,
+                                            RTC_OBJC_TYPE(RTCObjCVideoSourceAdapter) *adapter)
+-    : env_(env), adapter_(adapter), is_screencast_(false) {
++    : env_(env),
++      adapter_(adapter),
++      is_screencast_(false),
++      shared_encode_tag_(std::make_unique<libwebrtc::SharedEncodeTag>()) {
+   adapter_.objCVideoTrackSource = this;
+ }
+ 
++ObjCVideoTrackSource::~ObjCVideoTrackSource() = default;
++
++void ObjCVideoTrackSource::EnableSharedEncode() {
++  shared_encode_tag_->Enable();
++}
++
+ bool ObjCVideoTrackSource::is_screencast() const {
+   return is_screencast_;
+ }
+@@ -72,6 +83,9 @@ void ObjCVideoTrackSource::OnOutputFormatRequest(int width,
+ 
+ void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
+                                            frame) {
++  // Fogata: counted before adaptation, as the C++ wrapper's VideoCapturer does; 0
++  // (no id) unless this is a shared screen.
++  const uint16_t frame_id = shared_encode_tag_->NextFrameId();
+   const int64_t timestamp_us =
+       frame.timeStampNs / webrtc::kNumNanosecsPerMicrosec;
+   const int64_t translated_timestamp_us = timestamp_aligner_.TranslateTimestamp(
+@@ -136,6 +150,7 @@ void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
+               .set_video_frame_buffer(buffer)
+               .set_rotation(rotation)
+               .set_timestamp_us(translated_timestamp_us)
++              .set_id(frame_id)
+               .build());
+ }
+ 
