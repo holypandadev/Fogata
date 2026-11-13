@@ -19,8 +19,9 @@ it), which:
 Every wait on the mainloop is bounded: the first connection in Init (5 s; it waited for
 ever for a server that took the connection and never answered, on the worker thread),
 and every question to the server, of the device and of its mixer (5 s, then cancelled;
-the mixer's wait also took a null operation, which libpulse asserts on). The device's own
-disconnect no longer reaches its state callback.
+the mixer's wait also took a null operation, which libpulse asserts on), as a stream
+starting already was (9 s). The device's own disconnect no longer reaches its state
+callback.
 
 diff --git a/modules/audio_device/BUILD.gn b/modules/audio_device/BUILD.gn
 index 1205038..407af4f 100644
@@ -41,7 +42,7 @@ index 1205038..407af4f 100644
            "linux/audio_device_pulse_linux.cc",
            "linux/audio_device_pulse_linux.h",
 diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
-index 72f0587..67858b5 100644
+index 72f0587..c83ec32 100644
 --- a/modules/audio_device/linux/audio_device_pulse_linux.cc
 +++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
 @@ -12,12 +12,17 @@
@@ -248,7 +249,7 @@ index 72f0587..67858b5 100644
    MutexLock lock(&mutex_);
  
    if (!_playIsInitialized) {
-@@ -1311,6 +1404,243 @@ bool AudioDeviceLinuxPulse::Playing() const {
+@@ -1311,6 +1404,246 @@ bool AudioDeviceLinuxPulse::Playing() const {
    return (_playing);
  }
  
@@ -274,7 +275,10 @@ index 72f0587..67858b5 100644
 +//   recording start again as they were, and the observer is told (the application
 +//   reads the lists again). What does not start (no device listed yet) is tried again
 +//   every second for 5 s, then every 5 s, while the server stays.
-+// The worker thread never waits for the server longer than one question (5 s).
++// Every wait on the server has a limit: a connection and a question 5 s
++// (InitPulseAudio, WaitForOperationCompletion), a stream starting 9 s
++// (WaitForPulseStreamReady), which StartPlayout and StartRecording wait for on the
++// worker thread.
 +
 +int32_t AudioDeviceLinuxPulse::SetObserver(AudioDeviceObserver* observer) {
 +  MutexLock lock(&observer_mutex_);
@@ -492,7 +496,7 @@ index 72f0587..67858b5 100644
  // ============================================================================
  //                                 Private Methods
  // ============================================================================
-@@ -1366,11 +1696,16 @@ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
+@@ -1366,11 +1699,16 @@ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
        RTC_LOG(LS_VERBOSE) << "failed";
        _paStateChanged = true;
        LATE(pa_threaded_mainloop_signal)(_paMainloop, 0);
@@ -509,7 +513,7 @@ index 72f0587..67858b5 100644
        break;
    }
  }
-@@ -1654,9 +1989,13 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+@@ -1654,9 +1992,13 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
      return -1;
    }
  
@@ -526,7 +530,7 @@ index 72f0587..67858b5 100644
    }
  
    // Now check to see what final state we reached.
-@@ -1668,9 +2007,8 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+@@ -1668,9 +2010,8 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
      } else if (state == PA_CONTEXT_TERMINATED) {
        RTC_LOG(LS_ERROR) << "PulseAudio connection terminated early";
      } else {
@@ -538,7 +542,7 @@ index 72f0587..67858b5 100644
      }
      PaUnLock();
      return -1;
-@@ -1709,6 +2047,8 @@ int32_t AudioDeviceLinuxPulse::TerminatePulseAudio() {
+@@ -1709,6 +2050,8 @@ int32_t AudioDeviceLinuxPulse::TerminatePulseAudio() {
  
    // Disconnect the context
    if (_paContext) {
@@ -547,7 +551,7 @@ index 72f0587..67858b5 100644
      LATE(pa_context_disconnect)(_paContext);
    }
  
-@@ -1814,11 +2154,8 @@ void AudioDeviceLinuxPulse::WaitForOperationCompletion(
+@@ -1814,11 +2157,8 @@ void AudioDeviceLinuxPulse::WaitForOperationCompletion(
      return;
    }
  

@@ -958,8 +958,8 @@ voice engine stays, "The voice engine stays", so it was never made again).
   start, as with no device listed yet, is tried again every second for 5 s, then every
   5 s), and tells its observer again. Every wait of the device on the server is bounded:
   its first connection (it waited for ever for a server that took the connection and
-  never answered), and every question to it (5 s, then given up). The worker thread waits
-  on the server for one question at most.
+  never answered) and every question to it are given up after 5 s, as a stream starting
+  already was after 9 s.
 - `tools/webrtc/patches/wrapper/0010`: the lists' counts are read on the worker thread
   too, the listener is set and called under a lock, and a null one stops it.
 - `common/cpp/src/flutter_webrtc_base.cc`: the plugin hears of it as of any other change

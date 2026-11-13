@@ -501,12 +501,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   goes, so it never becomes another microphone or the default one. On Linux a sound server
   that goes away while the application runs (PipeWire or PulseAudio restarted, as after an
   update) is connected to again by Fogata's libwebrtc itself (0.5 s after, then after 1, 2
-  and 4 s, then every 5 s, never waiting on the server more than 5 s), which then takes
-  the chosen speaker and microphone again by name where they are still there and plays and
-  records again as before; meanwhile it lists no device at all, the call says nothing of
-  its microphone and does not turn it off for reading nothing, and a server gone over 5 s
-  is told, and its return too. It used to keep a dead connection until the application
-  restarted, listing only "System default".
+  and 4 s, then every 5 s, giving up on a server that does not answer in 5 s), which then
+  takes the chosen speaker and microphone again by name where they are still there and
+  plays and records again as before; meanwhile it lists no device at all, the call says
+  nothing of its microphone and does not turn it off for reading nothing, and a server
+  gone over 5 s is told, and its return too. It used to keep a dead connection until the
+  application restarted, listing only "System default".
 - Noise suppression (Settings, under the microphone; off by default, kept in `app.json`)
   is RNNoise (`crates/fogata-denoise`, nnnoiseless: a small neural network that tells
   speech from noise in 22 bands and lowers the bands that hold noise, so a fan, a hum,

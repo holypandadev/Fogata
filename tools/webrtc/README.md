@@ -31,9 +31,10 @@ the patches in `patches/`:
   a system update), listing only the default and playing and recording nothing until the
   application restarted. It now tries again (0.5 s after, then after 1, 2 and 4 s, then
   every 5 s), lists no device meanwhile, takes the chosen devices again by name and starts
-  again what was running, and tells the wrapper's `OnDeviceChange` both ways. No wait on the
-  server is longer than 5 s (the first connection waited for ever on a server that never
-  answered), and the voice engine stays up without a device instead of ending the process.
+  again what was running, and tells the wrapper's `OnDeviceChange` both ways. Connecting and
+  every question to the server are given up after 5 s (the first connection waited for
+  ever on a server that never answered), and the voice engine stays up without a device
+  instead of ending the process.
 - **The microphone is processed in one channel**, whatever the other channels of sound
   send: a shared screen's sound starting to go out in stereo made WebRTC process the
   microphone in two channels, and its echo canceller and gain control started over each
@@ -162,8 +163,8 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    answer within 5 s is tried again), lists no device at all meanwhile, takes the chosen
    output and input again by the server's names for them where they are still listed,
    starts playout and recording again as they were, and tells its observer both ways;
-   every wait on the server (the first connection, every question to it, the mixer's
-   too) is at most 5 s.
+   connecting and every question to the server (the mixer's too) are given up after 5 s,
+   as a stream starting already was after 9 s.
 7. `0007-keep-the-voice-engine-up-without-its-audio-device` (every system):
    `adm_helpers::Init` logs a device that does not initialize instead of ending the
    process.
