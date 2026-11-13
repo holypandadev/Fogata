@@ -2,7 +2,7 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|echo|broken|alsa|hang|quit>
+Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|echo|broken|alsa|hang|quit|restart>
 """
 
 import json
@@ -159,6 +159,58 @@ elif check == "unplug":
         if not re.search(r"told: Your microphone is back", log("a")):
             problems.append("a was not told its microphone came back")
         notes += said
+elif check == "restart":
+    # The session's sound server stopped (sound-stopped) and started again, and the lab's
+    # devices made again (devices-back): each copy must record from its own microphone
+    # again within RESTART_WITHIN of that (call_test.dart's _restartWithin), as the
+    # sound server saw it; what each copy saw and said is in its log.
+    RESTART_WITHIN = 20.0
+    settings = (run / "settings.txt").read_text().splitlines()
+    notes += settings[1:]
+    stopped, back = moment("sound-stopped"), moment("devices-back")
+    if None in (stopped, back):
+        problems.append(f"the sound server was not stopped and started again: {result('a')}")
+    else:
+        notes.append(f"the lab's devices were back {back - stopped:.1f} s after the server stopped")
+        for role in ("a", "b"):
+            mine = f"lab{role}_mic"
+            if mine not in sources_at(role, stopped - 0.5):
+                problems.append(
+                    f"{role} did not record from its microphone before the restart: "
+                    f"{sorted(sources_at(role, stopped - 0.5)) or 'nothing'}"
+                )
+            again = next(
+                (t for t, sources in recordings(role) if t >= back and mine in sources), None
+            )
+            if again is None or again - back > RESTART_WITHIN:
+                problems.append(
+                    f"{role} did not record from its microphone again within "
+                    f"{RESTART_WITHIN:.0f} s of the devices being back"
+                )
+            else:
+                notes.append(
+                    f"{role} records from its microphone again {1000 * (again - back):.0f} ms "
+                    "after the devices were back"
+                )
+            # Before the lab's devices are made again the server may link a recording to
+            # whatever source comes first, which is told; the other copy's microphone,
+            # never (a device chosen by its place in a list that changed).
+            others = sources_between(role, 0, 1e12) - {mine, "lab_default_mic"}
+            theirs = "laba_mic" if role == "b" else "labb_mic"
+            if theirs in others:
+                problems.append(f"{role} recorded from the other copy's microphone")
+            elif others:
+                notes.append(f"{role} also recorded from {sorted(others)}")
+        notes += re.findall(r"restart[^\n]*", log("a") + log("b"))
+        # How a's audio device lost the server and found it again (FOGATA_WEBRTC_LOG=info).
+        device = re.findall(
+            r"[^\n]*PulseAudio(?: sound server|:)[^\n]*",
+            (run / "a.out").read_text(errors="replace"),
+        )
+        notes += [f"a's WebRTC: {line.strip()[:160]}" for line in device[:12]]
+        lab = run / "lab.log"
+        if lab.exists():
+            notes += [f"lab: {line}" for line in lab.read_text().splitlines()]
 elif check == "devices":
     # a's own result says whether its devices stayed listed; its log, what each list held.
     notes += re.findall(r"(devices [^\n]*|held over[^\n]*|soak [^\n]*|calls [^\n]*)", log("a"))

@@ -53,9 +53,19 @@
 #            loopback of what a plays into another output and a combined output (with
 #            ECHO_FROM empty, so they could be taken). ECHO_PROOF=1 has another
 #            application play again what a plays (b's voice among it): the check must fail
+#   restart  a and b talk and hear each other; the session's sound server is stopped and
+#            started again (restart:<how>, RESTART_HOW): pulse, PipeWire's PulseAudio service
+#            alone; all, the three daemons, as `systemctl --user restart pipewire
+#            pipewire-pulse wireplumber`; down20, the three, away 20 s; gone, the three, away
+#            a minute (meanwhile both must stay in the call with the microphone on and say
+#            the sound system stopped). The lab's devices are then made again, as a desktop's
+#            come back. Within 20 s of that each copy must record from its own microphone
+#            again (recordings.log), hear the other (its voice's packets and level) and list
+#            its devices; one away over 5 s must be told gone and back
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
-#        300 and 1500). Build first as for measure.sh. Prints PASS or FAIL for each and the
-#        run folders; exits non-zero when one failed.
+#        300 and 1500, restart as pulse, all, down20 and gone). Build first as for
+#        measure.sh. Prints PASS or FAIL for each and the run folders; exits non-zero when
+#        one failed.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" = --inside ]; then
@@ -97,6 +107,12 @@ if [ "${1:-}" = --inside ]; then
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=quit
       ;;
+    restart)
+      # a's WebRTC log tells how its audio device lost the server and found it again.
+      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=restart FOGATA_TEST_RESTART="${RESTART_HOW:-pulse}" \
+        FOGATA_WEBRTC_LOG=info
+      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=restart FOGATA_TEST_RESTART="${RESTART_HOW:-pulse}"
+      ;;
     *) lab_copy a 2 1 FOGATA_TEST_MIC_CASE="$CHECK"; lab_copy b 2 off FOGATA_TEST_MIC_CASE="$CHECK" ;;
   esac
   now() { date +%s%3N; }
@@ -117,6 +133,33 @@ if [ "${1:-}" = --inside ]; then
         wait_mark mark-a-replug-ready 120
         lab_plug a
         now > "$M/replugged"
+      fi
+      lab_wait "a b" 300
+      ;;
+    restart)
+      all=(pipewire-pulse wireplumber pipewire)
+      if wait_mark mark-a-restart-ready 900 && wait_mark mark-b-restart-ready 120; then
+        now > "$M/sound-stopped"
+        case "${RESTART_HOW:-pulse}" in
+          pulse) lab_sound_stop pipewire-pulse ;;
+          *) lab_sound_stop "${all[@]}" ;;
+        esac
+        case "${RESTART_HOW:-pulse}" in
+          down20) sleep 20 ;;
+          gone)
+            sleep 60
+            now > "$M/still-gone"
+            # The copies check what they show then.
+            sleep 3
+            ;;
+        esac
+        case "${RESTART_HOW:-pulse}" in
+          pulse) lab_sound_start pipewire-pulse ;;
+          *) lab_sound_start pipewire wireplumber pipewire-pulse ;;
+        esac
+        now > "$M/sound-back"
+        lab_devices 2
+        now > "$M/devices-back"
       fi
       lab_wait "a b" 300
       ;;
@@ -141,14 +184,19 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin echo broken alsa hang quit:0 quit:300 quit:1500)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin echo broken alsa hang quit:0 quit:300 quit:1500 restart:pulse restart:all restart:down20 restart:gone)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }
 failed=0
 for check in "${checks[@]}"; do
   name=${check%%:*}
-  [ "$name" != "$check" ] && export QUIT_AFTER=${check#*:}
+  if [ "$name" != "$check" ]; then
+    case "$name" in
+      quit) export QUIT_AFTER=${check#*:} ;;
+      restart) export RESTART_HOW=${check#*:} ;;
+    esac
+  fi
   # A debug build runs from the Dart kernel beside it; a profile or release one has none.
   if [ "$name" = media ] && [ ! -e "$(dirname "$BUNDLE")/data/flutter_assets/kernel_blob.bin" ]; then
     echo "FAIL media"
@@ -160,6 +208,7 @@ for check in "${checks[@]}"; do
   export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/mic-${check/:/-}-$(date +%m%d-%H%M%S)
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
+  [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse}" >> "$RUN/settings.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10}" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1

@@ -10,7 +10,9 @@
 #   neither a client.conf, nor the X display's root window, nor a TCP default can lead
 #   anywhere else; it stops unless `pactl info` names exactly that socket;
 # - ends every process started inside when it ends (its first process is the namespace's init).
-# The network is the computer's own.
+# The network is the computer's own. The daemons' PIDs are in <folder>/<daemon>.pid, and
+# CALL_LAB_SESSION names the folder, so the command can stop and start them again
+# (lab.sh's lab_sound_stop and lab_sound_start).
 #
 # Usage: tools/call-lab/session.sh <folder> <command> [args...]
 #   <folder> keeps the session's configuration, state and the daemons' logs.
@@ -79,24 +81,28 @@ mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 : > "$DIR/client.conf"
 export PULSE_SERVER=unix:$RUNTIME/pulse/native PULSE_CLIENTCONFIG=$DIR/client.conf
 
+# The daemons as running now (the command may have started them again since).
 stop() {
-  [ -n "${PP:-}" ] && kill "$PP" 2>/dev/null
-  [ -n "${WP:-}" ] && kill "$WP" 2>/dev/null
+  local d
+  for d in pipewire-pulse wireplumber; do
+    [ -e "$DIR/$d.pid" ] && kill "$(cat "$DIR/$d.pid")" 2>/dev/null
+  done
   sleep 0.3
-  [ -n "${PW:-}" ] && kill "$PW" 2>/dev/null
+  [ -e "$DIR/pipewire.pid" ] && kill "$(cat "$DIR/pipewire.pid")" 2>/dev/null
 }
 trap 'stop; exit 1' INT TERM HUP
 trap stop EXIT
 
 pipewire > "$DIR/pipewire.log" 2>&1 &
-PW=$!
+echo $! > "$DIR/pipewire.pid"
 for _ in $(seq 50); do [ -S "$RUNTIME/pipewire-0" ] && break; sleep 0.1; done
 wireplumber > "$DIR/wireplumber.log" 2>&1 &
-WP=$!
+echo $! > "$DIR/wireplumber.pid"
 pipewire-pulse > "$DIR/pipewire-pulse.log" 2>&1 &
-PP=$!
+echo $! > "$DIR/pipewire-pulse.pid"
 for _ in $(seq 100); do pactl info > /dev/null 2>&1 && break; sleep 0.1; done
 server=$(pactl info 2>/dev/null | sed -n 's/^Server String: //p')
 [ "$server" = "$PULSE_SERVER" ] || fail "pactl reaches \"$server\", not the session's own server"
 
+export CALL_LAB_SESSION=$DIR
 "$@"

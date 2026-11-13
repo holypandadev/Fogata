@@ -58,7 +58,7 @@
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
 // one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices)
-// or of the call (rejoin, echo);
+// or of the call (rejoin, echo, restart);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
 // FOGATA_TEST_MIC_CASE=rejoin (two copies, both with the microphone on, on one computer or
@@ -3958,6 +3958,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 /// - devices: see [_listedAfterCall]; copy b only stays in the call.
 /// - rejoin: see [_rejoin].
 /// - echo: see [_echo].
+/// - restart: see [_soundRestart].
 Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
   final call = state.callState.call!;
   switch (name) {
@@ -4060,6 +4061,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       await _rejoin(tester, state);
     case 'echo':
       await _echo(tester, state);
+    case 'restart':
+      await _soundRestart(tester, state);
     default:
       throw StateError('no microphone check called $name');
   }
@@ -4533,6 +4536,125 @@ Future<int> _voiceBytesFrom(CallPeer peer) async {
     }
   }
   return bytes;
+}
+
+/// How long after the lab made its devices again (the sound server back) each copy must
+/// list its own microphone and speaker, record, and hear the other again
+/// ([_soundRestart]). The voice engine tries the server again every 5 s at most, the
+/// plugin's input watcher too, and the lab's devices are made a moment after the server
+/// answers.
+const _restartWithin = Duration(seconds: 20);
+
+/// tools/call-lab/mic.sh restart: both copies talk (their tones) and hear each other; the
+/// lab then stops the session's own sound server and starts it again as
+/// FOGATA_TEST_RESTART says (pulse: PipeWire's PulseAudio service alone; all: the three
+/// daemons; down20: the three, 20 s away; gone: the three, a minute away), and makes its
+/// devices again. Meanwhile each copy must stay in the call with its microphone on (not
+/// turned off as reading nothing), and with `gone` say by the minute's end that the
+/// sound system stopped. From the moment the lab's devices are back (`devices-back`),
+/// each must list its own microphone and speaker again, record (its own level), and hear
+/// the other again (more of its voice received, and its level), within
+/// [_restartWithin]; a server away over 5 s is told gone and back (one back within a
+/// moment, pulse or all, need not be).
+Future<void> _soundRestart(WidgetTester tester, AppState state) async {
+  final call = state.callState.call!;
+  final how = _env['FOGATA_TEST_RESTART'] ?? 'pulse';
+  final role = _role == 'a' ? 'b' : 'a';
+  final _Other other = (id: call.peers.keys.single, name: _names[role]!);
+  final peer = _peer(state, other);
+  await _until(
+    tester,
+    'heard ${other.name}',
+    () => peer.speaking,
+    seconds: 120,
+  );
+  _mark('restart-ready');
+  await _rig(tester, 'sound-stopped', seconds: 300);
+  bool told(String text) => state.toasts.list.any((t) => t.text == text);
+  final suffix = _env['FOGATA_TEST_DEVICES'] ?? '';
+  // This copy's own microphone and speaker listed, and how many sound devices are.
+  Future<({bool mine, int count})> listed() async {
+    final devices = await navigator.mediaDevices.enumerateDevices();
+    final sound = devices.where(
+      (d) => d.kind == 'audioinput' || d.kind == 'audiooutput',
+    );
+    final mine =
+        sound.any((d) => d.label.contains('FogataMic$suffix')) &&
+        sound.any((d) => d.label.contains('FogataTest$suffix'));
+    return (mine: mine, count: sound.length);
+  }
+
+  final stopped = DateTime.now();
+  var sawNone = false;
+  var checkedGone = false;
+  while (!File('$_dir/devices-back').existsSync()) {
+    if (DateTime.now().difference(stopped) > const Duration(seconds: 200)) {
+      throw StateError('the lab did not bring the sound server back');
+    }
+    if (state.callState.call != call) {
+      throw StateError('the call ended while the sound server was away');
+    }
+    final now = await listed();
+    if (now.count == 0 && !sawNone) {
+      sawNone = true;
+      _log('restart: no sound device listed');
+    }
+    if (File('$_dir/still-gone').existsSync() && !checkedGone) {
+      checkedGone = true;
+      _log(
+        'restart: a minute without a sound server: mic ${call.mic}, told '
+        '${state.toasts.list.map((t) => t.text).toList()}',
+      );
+      if (!told(l10n.callSoundSystemLost)) {
+        throw StateError('not told the sound system stopped');
+      }
+      if (!call.mic) throw StateError('the microphone was turned off');
+    }
+    await _wait(tester, const Duration(milliseconds: 500));
+  }
+  final back = DateTime.now();
+  final before = await _voiceBytesFrom(peer);
+  int? listedAfter, recordingAfter, heardAfter;
+  bool done() =>
+      listedAfter != null && recordingAfter != null && heardAfter != null;
+  while (!done() && DateTime.now().difference(back) < _restartWithin) {
+    final ms = DateTime.now().difference(back).inMilliseconds;
+    if (listedAfter == null && (await listed()).mine) listedAfter = ms;
+    if (recordingAfter == null && call.speaking) recordingAfter = ms;
+    if (heardAfter == null &&
+        peer.speaking &&
+        await _voiceBytesFrom(peer) > before) {
+      heardAfter = ms;
+    }
+    await _wait(tester, const Duration(milliseconds: 250));
+  }
+  final toasts = state.toasts.list.map((t) => t.text).toList();
+  _log(
+    'restart $how: no device listed meanwhile: $sawNone; own devices '
+    'listed again after ${listedAfter ?? 'never'} ms, recording after '
+    '${recordingAfter ?? 'never'} ms, ${other.name} heard after '
+    '${heardAfter ?? 'never'} ms; mic ${call.mic}; told $toasts',
+  );
+  if (!call.mic) throw StateError('the microphone was turned off');
+  if (listedAfter == null) throw StateError('its devices not listed again');
+  if (recordingAfter == null) throw StateError('not recording again');
+  if (heardAfter == null) throw StateError('${other.name} not heard again');
+  // Away over 5 s, it is told; back sooner (pulse, all: unless the voice engine's
+  // next try came later), it need not be. Told gone, it is told back.
+  final away = how == 'down20' || how == 'gone';
+  if (away && !told(l10n.callSoundSystemLost)) {
+    throw StateError('not told the sound system stopped');
+  }
+  if (told(l10n.callSoundSystemLost)) {
+    await _until(
+      tester,
+      'told: ${l10n.callSoundSystemBack}',
+      () => told(l10n.callSoundSystemBack),
+      seconds: 10,
+    );
+  }
+  await _say(state, 'restarted');
+  await _hear(tester, state, ['restarted'], seconds: 120);
 }
 
 /// Copy a talks (the tone) while b listens; a then changes to the silent input and back

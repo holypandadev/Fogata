@@ -60,11 +60,13 @@ lab_tones() { # copies
   for i in $(seq 0 $(($1 - 1))); do
     r=${ROLES[$i]}
     python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" $((330 + 55 * i))
+    # A player that fails (no sound server, or its output not made again yet after
+    # lab_sound_start) is started again a moment later.
     ( trap 'kill "$(cat "$RUN/paplay-$r.pid")" 2>/dev/null; exit 0' TERM HUP INT
       while true; do
         env "${as[@]}" paplay --device="lab${r}_test" "$RUN/tone-$r.wav" 2>/dev/null &
         echo $! > "$RUN/paplay-$r.pid"
-        wait $!
+        wait $! || sleep 0.2
       done ) > /dev/null 2>&1 &
     echo $! > "$RUN/tone-$r.pid"
   done
@@ -96,6 +98,40 @@ lab_start() { # copies
   for _ in $(seq 50); do xdpyinfo -display ":$X" > /dev/null 2>&1 && break; sleep 0.1; done
   lab_tones "$1"
   lab_recorder
+}
+
+# The session's own sound daemons (session.sh: pipewire, wireplumber, pipewire-pulse),
+# stopped and started again as `systemctl --user restart` does on a desktop.
+# lab_sound_stop stops the ones named, in that order, each gone before the next;
+# lab_sound_start starts them in that order, each taking connections before the next
+# (pipewire its socket, pipewire-pulse `pactl info`; their logs go on in the session's
+# folder). The lab's devices were pipewire-pulse's modules: lab_devices makes them again.
+lab_sound_stop() { # daemon...
+  local d
+  for d in "$@"; do
+    [ -e "$CALL_LAB_SESSION/$d.pid" ] || continue
+    lab_kill "$(cat "$CALL_LAB_SESSION/$d.pid")" "$d"
+    rm -f "$CALL_LAB_SESSION/$d.pid"
+    # Left by a pipewire killed (lab_kill's last resort), its socket would pass for the
+    # new one's before that one takes connections.
+    [ "$d" = pipewire ] && rm -f "$XDG_RUNTIME_DIR/pipewire-0" "$XDG_RUNTIME_DIR/pipewire-0-manager"
+    echo "$(date +%s.%N | cut -c1-14) stopped $d" >> "$RUN/lab.log"
+  done
+}
+
+lab_sound_start() { # daemon...
+  local d
+  for d in "$@"; do
+    "$d" >> "$CALL_LAB_SESSION/$d.log" 2>&1 &
+    echo $! > "$CALL_LAB_SESSION/$d.pid"
+    case "$d" in
+      pipewire)
+        for _ in $(seq 50); do [ -S "$XDG_RUNTIME_DIR/pipewire-0" ] && break; sleep 0.1; done ;;
+      pipewire-pulse)
+        for _ in $(seq 100); do pactl info > /dev/null 2>&1 && break; sleep 0.1; done ;;
+    esac
+    echo "$(date +%s.%N | cut -c1-14) started $d" >> "$RUN/lab.log"
+  done
 }
 
 # A sound server that takes connections and never answers, at $RUN/hang.sock.
