@@ -77,12 +77,14 @@ there. On the first Mac build, check:
   `peerconnectionfactory_base_objc` find `src/internal/shared_encoder.h` through their
   `include_dirs`;
 - that the framework still exports no other codec (`build-macos.sh` checks it);
-- in a call where the Mac shares its screen to two or three watchers: each watcher's
+- with `FOGATA_SHARED_SCREEN_ENCODE=on` in the Mac copy's environment (on macOS the
+  plugin leaves the trial out without it, until this has been checked once), in a call
+  where the Mac shares its screen to two or three watchers: each watcher's
   `outbound-rtp` names its encoder `... (shared)` (`encoderImplementation`; on macOS the
   real encoder is the `SimulcastEncoderAdapter` the plugin's `VideoEncoderFactorySimulcast`
   makes over libvpx, so the name before " (shared)" may be that adapter's), one
-  `SharedScreenEnc` thread runs for each size, every watcher sees the screen, and with
-  `FOGATA_SHARED_SCREEN_ENCODE=off` each connection has its encoder again;
+  `SharedScreenEnc` thread runs for each size, every watcher sees the screen, and
+  without the variable each connection has its encoder again;
 - that a camera is never shared (its connections keep encoders of their own).
 
 ## The app on it

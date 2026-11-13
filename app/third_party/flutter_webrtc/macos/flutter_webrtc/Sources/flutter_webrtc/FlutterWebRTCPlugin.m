@@ -179,14 +179,17 @@ static NSString* const kFogataFieldTrials =
 
 // Fogata: the connections that send a shared screen at one size share one encoder of
 // it (FOGATA.md, "One encode of a shared screen"): one encode of each frame instead
-// of one for each watcher; nothing on the wire changes. FOGATA_SHARED_SCREEN_ENCODE=off
-// leaves it out, to measure before and after on one build. A framework without
-// Fogata's Apple patch 7 ignores it.
+// of one for each watcher; nothing on the wire changes. On macOS it is off unless
+// FOGATA_SHARED_SCREEN_ENCODE=on is in the environment: the framework builds with it and
+// a Mac receives such a screen in a real call, but a Mac sharing its own screen through
+// it has not been run yet (a test build cannot be given the screen recording permission
+// unattended); until it has, a Mac encodes for each watcher as before. A framework
+// without Fogata's Apple patch 7 ignores the trial.
 static NSString* const kFogataSharedScreenEncodeTrial = @"Fogata-SharedScreenEncode/Enabled/";
 
 static BOOL FogataSharedScreenEncodeTrialOn(void) {
   const char* value = getenv("FOGATA_SHARED_SCREEN_ENCODE");
-  return value == NULL || strcmp(value, "off") != 0;
+  return value != NULL && strcmp(value, "on") == 0;
 }
 
 static void FlutterWebRTCApplyFieldTrials(void) {

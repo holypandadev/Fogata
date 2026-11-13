@@ -169,7 +169,11 @@ encoder of its own, and every watcher gets one when the shared encoder keeps fai
   (`common/cpp/src/flutter_webrtc_base.cc`; `FlutterWebRTCPlugin.m`, both copies). With
   `FOGATA_SHARED_SCREEN_ENCODE=off` in the environment it is left out, in every build (it
   only gives the saving up): `tools/call-lab` measures before and after on one build that
-  way. `FOGATA_WEBRTC_FIELD_TRIALS` (debug builds) replaces it with the others, and can set
+  way. On macOS it is the other way round for now: off unless
+  `FOGATA_SHARED_SCREEN_ENCODE=on`, because a Mac sharing its own screen through the
+  shared encoder has not been run in a call yet (the framework builds with it, and a Mac
+  watching such a screen from Linux was checked); `tools/webrtc/MACOS.md` lists what to
+  check before it is turned on there. `FOGATA_WEBRTC_FIELD_TRIALS` (debug builds) replaces it with the others, and can set
   its parameters, e.g. `Fogata-SharedScreenEncode/Enabled,key_ms:500,threads:2/`
   (`SharedEncodeConfig` in the wrapper's header lists them).
 - Only frames of a source marked as a shared screen are shared: the plugin calls
