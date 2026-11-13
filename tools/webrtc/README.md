@@ -52,6 +52,16 @@ the patches in `patches/`:
   codecs...), destroyed its elements but never freed its array. A vector's array is now
   made and freed by the library alone (on Windows the library and the plugin each have a
   heap of their own), its elements constructed in it and destroyed by whoever holds it.
+- **A shared screen is encoded once for all who watch it** at one size, with the field
+  trial `Fogata-SharedScreenEncode/Enabled/` (the plugin sets it): every connection
+  that sends a screen made its own VP8 encoder (memory, a thread and a whole encode
+  each). A source marked as a shared screen tags its frames; the connections sending
+  them at the same settings share one encoder, each given every image from a key frame
+  on with its own RTP timestamps. Key frames asked for are shared (at most one a
+  second), the bitrate is the lowest watcher's, and a watcher far slower than the
+  others or losing key frames again and again gets an encoder of its own. Each
+  connection still packetizes, encrypts, paces and estimates on its own: nothing on
+  the wire changes, and watchers of any version see no difference.
 - **A shared screen or window is captured at the rate asked** (Linux X11, Windows and macOS): the
   wrapper waited the whole interval after each capture ended, so a capture taking 20 ms made
   30 frames a second into 19, and it compared every frame with the last for a changed region
@@ -71,7 +81,8 @@ first time.
 Rust and sysroot its hooks fetch) and the wrapper, each at its pinned commit.
 `build-linux.sh` resets the tree (`prepare.sh`), applies the patches, builds, runs the
 wrapper's tests of the size check, of the microphone's channels, of the voice engine's
-muted state and of the arrays it hands across, and writes into `<work>/dist`:
+muted state, of the arrays it hands across and of the shared screen encoder, and writes
+into `<work>/dist`:
 
     fogata-libwebrtc.m156.8078.5/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
@@ -233,7 +244,12 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     `free_array`), copies, assigns and moves without losing an array or an element, and
     copies an array it is given instead of taking it; `portable::map` builds on it, and a
     string assigned itself keeps its text; with tests (`test/portable_vector.test.cc`,
-    `test/stats_callback.test.cc`).
+    `test/stats_callback.test.cc`);
+17. a shared screen is encoded once for every connection that sends it at one size
+    (`src/internal/shared_encoder.{h,cc}`, `RTCVideoSource::EnableSharedEncode`), with
+    the field trial `Fogata-SharedScreenEncode/Enabled/`; with its tests
+    (`test/shared_encoder.test.cc`). Untagged sources (cameras), other codecs and
+    simulcast are encoded by each connection as before.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

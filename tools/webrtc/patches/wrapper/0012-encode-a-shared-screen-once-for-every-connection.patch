@@ -1,0 +1,2909 @@
+Encode a shared screen once for every connection
+
+Every connection that sends a track has a VideoStreamEncoder of its own, and each made
+an encoder of its own from the factory: a screen shared to seven watchers was encoded
+seven times, with seven libvpx encoders, their buffers and their threads, although
+every one of them is given the same frames (VideoBroadcaster hands each sink the same
+VideoFrame) at the same settings.
+
+With the field trial Fogata-SharedScreenEncode/Enabled/, the factory's VP8 encoders
+are proxies (src/internal/shared_encoder.{h,cc}). A source marked with
+RTCVideoSource::EnableSharedEncode tags its frames (VideoFrame::id: a source number
+from 1 to 15 and a 12-bit count); proxies given frames of one source at the same
+settings (those VideoStreamEncoder's RequiresEncoderReset compares) form a group with
+one real encoder on a task queue of its own. A frame is encoded once when any member
+asks for it, and the image is given to every member in sync, with the RTP timestamp
+its own VideoStreamEncoder gave or would have given the frame; a member skips no image
+from a key frame on, so each connection's picture ids stay consecutive. Key frames
+asked for are shared and at most one a second; rates are the lowest live member's; a
+member far slower than the others, or one asking for key frames again and again, gets
+an encoder of its own. Untagged frames (cameras), simulcast and other codecs are
+encoded as before. Every connection still packetizes, encrypts, paces and estimates on
+its own: nothing on the wire changes.
+
+Tested by test/shared_encoder.test.cc.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index f7e419b..93105dd 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -118,6 +118,8 @@ rtc_shared_library("libwebrtc") {
+     "src/internal/custom_audio_transport_impl.h",
+     "src/internal/local_audio_track.cc",
+     "src/internal/local_audio_track.h",
++    "src/internal/shared_encoder.cc",
++    "src/internal/shared_encoder.h",
+     "src/internal/vcm_capturer.cc",
+     "src/internal/vcm_capturer.h",
+     "src/internal/video_capturer.cc",
+@@ -293,6 +295,24 @@ rtc_shared_library("libwebrtc") {
+     "//third_party/abseil-cpp/absl/strings",
+     "//third_party/boringssl:boringssl",
+     "//third_party/libyuv",
++
++    # src/internal/shared_encoder.cc
++    "../api:fec_controller_api",
++    "../api:field_trials_view",
++    "../api/environment",
++    "../api/task_queue",
++    "../api/units:data_rate",
++    "../api/units:time_delta",
++    "../api/units:timestamp",
++    "../api/video:encoded_image",
++    "../api/video:resolution",
++    "../api/video:video_frame_type",
++    "../modules/video_coding:video_codec_interface",
++    "../rtc_base:logging",
++    "../rtc_base:macromagic",
++    "../rtc_base/experiments:field_trial_parser",
++    "../rtc_base/synchronization:mutex",
++    "../system_wrappers",
+   ]
+ 
+   # Fogata: cameras through the Camera portal and PipeWire on Linux
+@@ -352,12 +372,15 @@ if (rtc_include_tests) {
+        "test/video_processor.test.cc",
+        "test/vp8_size_gate.test.cc",
+        "test/custom_audio_transport.test.cc",
++       "test/shared_encoder.test.cc",
+ 
+        # Built in again: the library shows only its own API.
+        "src/internal/vp8_size_gate.cc",
+        "src/internal/vp8_size_gate.h",
+        "src/internal/custom_audio_transport_impl.cc",
+        "src/internal/custom_audio_transport_impl.h",
++       "src/internal/shared_encoder.cc",
++       "src/internal/shared_encoder.h",
+     ]
+ 
+     if (is_clang) {
+@@ -379,6 +402,23 @@ if (rtc_include_tests) {
+       "../api/audio:audio_frame_api",
+       "../call:audio_sender_interface",
+       "../modules/audio_mixer:audio_mixer_impl",
++      "../api:fec_controller_api",
++      "../api:field_trials_view",
++      "../api:time_controller",
++      "../api/task_queue",
++      "../api/units:data_rate",
++      "../api/units:time_delta",
++      "../api/units:timestamp",
++      "../api/video:resolution",
++      "../api/video:video_bitrate_allocation",
++      "../api/video:video_frame_type",
++      "../rtc_base:macromagic",
++      "../rtc_base:platform_thread",
++      "../rtc_base:rtc_event",
++      "../rtc_base/experiments:field_trial_parser",
++      "../rtc_base/synchronization:mutex",
++      "../system_wrappers",
++      "../test/time_controller",
+       "../rtc_base:logging",
+       "//third_party/abseil-cpp/absl/strings",
+       "//testing/gtest",
+diff --git a/include/rtc_video_source.h b/include/rtc_video_source.h
+index c56c731..2687887 100644
+--- a/include/rtc_video_source.h
++++ b/include/rtc_video_source.h
+@@ -32,6 +32,13 @@ class RTCVideoSource : public RefCountInterface {
+ 
+   virtual void RemoveProcessor(RTCVideoProcessor* processor) = 0;
+ 
++  // Marks this source as a shared screen: with the field trial
++  // "Fogata-SharedScreenEncode/Enabled/", every connection that sends it at
++  // the same size shares one encoder (one encode per frame), and nothing on
++  // the wire changes. Call it once, right after the source is made; never for
++  // a camera. Sources that cannot be shared ignore it.
++  virtual void EnableSharedEncode() {}
++
+   ~RTCVideoSource() {}
+ };
+ }  // namespace libwebrtc
+diff --git a/src/internal/shared_encoder.cc b/src/internal/shared_encoder.cc
+new file mode 100644
+index 0000000..689bb23
+--- /dev/null
++++ b/src/internal/shared_encoder.cc
+@@ -0,0 +1,1496 @@
++#include "src/internal/shared_encoder.h"
++
++#include <algorithm>
++#include <cstdint>
++#include <cstdlib>
++#include <deque>
++#include <memory>
++#include <optional>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "absl/strings/match.h"
++#include "api/fec_controller_override.h"
++#include "api/task_queue/task_queue_base.h"
++#include "api/task_queue/task_queue_factory.h"
++#include "api/units/data_rate.h"
++#include "api/units/time_delta.h"
++#include "api/units/timestamp.h"
++#include "api/video/encoded_image.h"
++#include "api/video/video_codec_type.h"
++#include "api/video/video_frame.h"
++#include "api/video/video_frame_type.h"
++#include "api/video_codecs/video_codec.h"
++#include "modules/video_coding/include/video_codec_interface.h"
++#include "modules/video_coding/include/video_error_codes.h"
++#include "rtc_base/experiments/struct_parameters_parser.h"
++#include "rtc_base/logging.h"
++#include "rtc_base/synchronization/mutex.h"
++#include "rtc_base/thread_annotations.h"
++#include "system_wrappers/include/clock.h"
++
++namespace libwebrtc {
++
++namespace {
++
++using webrtc::CodecSpecificInfo;
++using webrtc::EncodedImage;
++using webrtc::EncodedImageCallback;
++using webrtc::Environment;
++using webrtc::Mutex;
++using webrtc::MutexLock;
++using webrtc::SdpVideoFormat;
++using webrtc::TimeDelta;
++using webrtc::Timestamp;
++using webrtc::VideoCodec;
++using webrtc::VideoEncoder;
++using webrtc::VideoFrame;
++using webrtc::VideoFrameType;
++
++// Frames of one source whose ids are equal and whose capture times are less
++// than this apart are the same frame. Ids repeat every 4096 frames, which is
++// over 30 s at 120 frames a second.
++constexpr int64_t kSameFrameUs = 1000000;
++// Encoded images a group keeps for members that skipped them.
++constexpr size_t kCachedImages = 8;
++// Frames a member asked for whose RTP timestamps it remembers.
++constexpr size_t kAskedFrames = 32;
++constexpr TimeDelta kKeyRequestWindow = TimeDelta::Seconds(10);
++// A rejoined member isolated again within this long waits twice as long.
++constexpr TimeDelta kRejoinMustLast = TimeDelta::Seconds(20);
++constexpr TimeDelta kRejoinCheckInterval = TimeDelta::Millis(500);
++// RTP video clock: 90 kHz.
++constexpr uint32_t kRtpTicksPerMs = 90;
++
++// ---------------------------------------------------------------------------
++// Source numbers.
++
++struct SlotTable {
++  Mutex mutex;
++  bool used[kSharedEncodeSlots + 1] RTC_GUARDED_BY(mutex) = {};
++  int last RTC_GUARDED_BY(mutex) = 0;
++};
++
++SlotTable& Slots() {
++  // Never destroyed: sources may give their number back at exit.
++  static SlotTable* const table = new SlotTable();
++  return *table;
++}
++
++// ---------------------------------------------------------------------------
++// Frames and groups.
++
++struct FrameKey {
++  uint16_t id = 0;
++  int64_t timestamp_us = 0;
++};
++
++bool SameFrame(const FrameKey& a, const FrameKey& b) {
++  return a.id == b.id &&
++         std::llabs(a.timestamp_us - b.timestamp_us) < kSameFrameUs;
++}
++
++bool NewerFrame(const FrameKey& a, const FrameKey& b) {
++  return !SameFrame(a, b) && a.timestamp_us > b.timestamp_us;
++}
++
++// What must be equal for two connections to share an encoder: the source,
++// and the settings VideoStreamEncoder's RequiresEncoderReset compares (any
++// change of these makes it initialize its encoder again). Min and max bitrate
++// and the frame rate are left out: they only reach SetRates.
++struct GroupKey {
++  int slot = 0;
++  // 0 for the group every member of these settings joins; any other number
++  // for a member on its own (see Isolate below).
++  int isolation = 0;
++  VideoCodec codec;
++  int number_of_cores = 0;
++  std::optional<int> encoder_thread_limit;
++};
++
++bool SameSettings(const VideoCodec& a, const VideoCodec& b) {
++  if (a.codecType != b.codecType || a.width != b.width ||
++      a.height != b.height || a.qpMax != b.qpMax ||
++      a.numberOfSimulcastStreams != b.numberOfSimulcastStreams ||
++      a.mode != b.mode || a.GetFrameDropEnabled() != b.GetFrameDropEnabled() ||
++      a.GetScalabilityMode() != b.GetScalabilityMode() ||
++      a.GetVideoEncoderComplexity() != b.GetVideoEncoderComplexity() ||
++      a.legacy_conference_mode != b.legacy_conference_mode ||
++      a.active != b.active) {
++    return false;
++  }
++  if (a.codecType == webrtc::kVideoCodecVP8 && !(a.VP8() == b.VP8())) {
++    return false;
++  }
++  const webrtc::SimulcastStream& sa = a.simulcastStream[0];
++  const webrtc::SimulcastStream& sb = b.simulcastStream[0];
++  return sa.active == sb.active && sa.width == sb.width &&
++         sa.height == sb.height &&
++         sa.numberOfTemporalLayers == sb.numberOfTemporalLayers &&
++         sa.qpMax == sb.qpMax;
++}
++
++bool SameKey(const GroupKey& a, const GroupKey& b) {
++  return a.slot == b.slot && a.isolation == b.isolation &&
++         a.number_of_cores == b.number_of_cores &&
++         a.encoder_thread_limit == b.encoder_thread_limit &&
++         SameSettings(a.codec, b.codec);
++}
++
++// Only one stream of VP8 is shared; simulcast and other codecs are encoded by
++// each connection as before. Should one connection ever have two proxies of
++// the same settings (calls send no simulcast), both are members of one group
++// and each gets every image: nothing breaks, nothing is saved.
++bool Shareable(const VideoCodec& codec) {
++  return codec.codecType == webrtc::kVideoCodecVP8 &&
++         codec.numberOfSimulcastStreams <= 1;
++}
++
++bool AsksForKeyFrame(const std::vector<VideoFrameType>* frame_types) {
++  if (frame_types == nullptr) {
++    return false;
++  }
++  for (VideoFrameType type : *frame_types) {
++    if (type == VideoFrameType::kVideoFrameKey) {
++      return true;
++    }
++  }
++  return false;
++}
++
++std::atomic<int> next_member_id{1};
++
++// What a group knows of one proxy. The proxy owns it; while the proxy is in a
++// group, every field is read and written under that group's mutex.
++struct Member {
++  struct Asked {
++    FrameKey frame;
++    uint32_t rtp_timestamp = 0;
++    int64_t ntp_time_ms = 0;
++  };
++
++  Member() : id(next_member_id.fetch_add(1)) {}
++
++  const Asked* AskedFor(const FrameKey& frame) const {
++    for (auto it = asked.rbegin(); it != asked.rend(); ++it) {
++      if (SameFrame(it->frame, frame)) {
++        return &*it;
++      }
++    }
++    return nullptr;
++  }
++
++  const int id;
++  EncodedImageCallback* callback = nullptr;
++  std::optional<VideoEncoder::RateControlParameters> rates;
++  // It has had a key frame of this group and every image since.
++  bool in_sync = false;
++  // It asked for nothing while others did; nothing until it asks again.
++  bool paused = false;
++  // It asked for a key frame that has not come yet.
++  bool wants_key = false;
++  // It is to leave for an encoder of its own on its next Encode.
++  bool isolate = false;
++  // An encoder error its next Encode returns.
++  int pending_error = 0;
++  // The capture time of the first image encoded for others since it last
++  // asked for a frame.
++  std::optional<int64_t> first_missed_us;
++  // The frames it asked for last, with the RTP and NTP times its
++  // VideoStreamEncoder gave them.
++  std::deque<Asked> asked;
++  // Images encoded since it is in sync that it has not had yet (group
++  // sequence numbers, oldest first).
++  std::deque<int64_t> held;
++  int64_t last_delivered = 0;
++  std::deque<Timestamp> key_requests;
++  std::optional<Timestamp> low_since;
++};
++
++class SharedEncodeGroup;
++
++}  // namespace
++
++// ---------------------------------------------------------------------------
++// The registry: the inner factory, the groups by key.
++
++class SharedEncodeRegistry {
++ public:
++  explicit SharedEncodeRegistry(
++      std::unique_ptr<webrtc::VideoEncoderFactory> inner)
++      : inner_(std::move(inner)) {}
++
++  webrtc::VideoEncoderFactory& inner() { return *inner_; }
++
++  // The live group of `key`, made when there is none.
++  std::shared_ptr<SharedEncodeGroup> GetOrCreate(
++      const std::shared_ptr<SharedEncodeRegistry>& self,
++      const GroupKey& key,
++      const Environment& env,
++      const SdpVideoFormat& format,
++      const VideoEncoder::Settings& settings,
++      const SharedEncodeConfig& config);
++  // The live group of `key`, if any.
++  std::shared_ptr<SharedEncodeGroup> Find(const GroupKey& key);
++  // Called by a group as it goes.
++  void ForgetDeadGroups();
++  int NewIsolation() {
++    MutexLock lock(&mutex_);
++    return next_isolation_++;
++  }
++  // What the inner factory's encoder says of itself before it is initialized:
++  // what a proxy says until it has an encoder.
++  VideoEncoder::EncoderInfo ProbeInfo(const Environment& env,
++                                      const SdpVideoFormat& format);
++
++ private:
++  // Set at construction. Its Create is called from the threads of every
++  // connection, as it was without this registry.
++  const std::unique_ptr<webrtc::VideoEncoderFactory> inner_;
++  Mutex mutex_;
++  // Weak: the proxies keep their groups. A shared_ptr taken from these is
++  // never let go while `mutex_` is held, as a group's destructor takes it.
++  std::vector<std::pair<GroupKey, std::weak_ptr<SharedEncodeGroup>>> groups_
++      RTC_GUARDED_BY(mutex_);
++  int next_isolation_ RTC_GUARDED_BY(mutex_) = 1;
++  std::optional<VideoEncoder::EncoderInfo> probe_ RTC_GUARDED_BY(mutex_);
++};
++
++namespace {
++
++// One real encoder, one task queue, its members.
++//
++// Threads: the members' methods run on their VideoStreamEncoders' encoder
++// queues; `real_` is used on `queue_` only (made, initialized, given rates,
++// encoding) and, once `queue_` is gone, released in the destructor. Every
++// delivery to a member's callback happens while `mutex_` is held, so one
++// member's images come in encode order, and once Leave() has returned no
++// image reaches that member.
++//
++// Lock order: a member's callback is VideoStreamEncoder::OnEncodedImage,
++// which posts to its own queue and enters SendStatisticsProxy and
++// RtpVideoSender (their own mutexes); none of those calls an encoder. A
++// VideoStreamEncoder calls its proxy with no lock held. The registry's mutex
++// and a group's are never held together.
++//
++// Life: only proxies hold a group, and they let go of it on their own threads.
++// Tasks on `queue_` hold a plain pointer, so the group is never destroyed on
++// `queue_`, which therefore never deletes itself.
++class SharedEncodeGroup final : public EncodedImageCallback {
++ public:
++  enum class Outcome { kDone, kIsolate };
++
++  SharedEncodeGroup(std::shared_ptr<SharedEncodeRegistry> registry,
++                    const GroupKey& key,
++                    const Environment& env,
++                    const SdpVideoFormat& format,
++                    const VideoEncoder::Settings& settings,
++                    const SharedEncodeConfig& config)
++      : registry_(std::move(registry)),
++        key_(key),
++        env_(env),
++        format_(format),
++        settings_(settings),
++        config_(config),
++        // As VideoStreamEncoder does: wall-clock NTP minus monotonic time,
++        // taken once, so the real encoder sees RTP timestamps that only grow.
++        ntp_delta_ms_(env.clock().CurrentNtpInMilliseconds() -
++                      env.clock().TimeInMilliseconds()),
++        queue_(env.task_queue_factory().CreateTaskQueue(
++            // 15 characters: the most a Linux thread name holds.
++            "SharedScreenEnc",
++            webrtc::TaskQueueFactory::Priority::kVideo)) {}
++
++  ~SharedEncodeGroup() override {
++    registry_->ForgetDeadGroups();
++    // Waits for a task that runs; the others are dropped unrun, and they hold
++    // nothing but a plain pointer to this group.
++    queue_ = nullptr;
++    if (real_ != nullptr) {
++      real_->Release();
++      real_ = nullptr;
++    }
++  }
++
++  const GroupKey& key() const { return key_; }
++
++  void Join(Member* member) {
++    MutexLock lock(&mutex_);
++    member->in_sync = false;
++    member->paused = false;
++    member->wants_key = true;
++    member->isolate = false;
++    member->pending_error = init_error_;
++    member->first_missed_us.reset();
++    member->held.clear();
++    member->last_delivered = seq_;
++    member->low_since.reset();
++    members_.push_back(member);
++    // Its first image is a key frame, shared with whoever else waits for one
++    // (unless it can start on one kept, see CatchUp).
++    if (member->callback != nullptr) {
++      key_wanted_ = true;
++    }
++    rates_changed_ = true;
++  }
++
++  // A member released while the group encodes: real_->Encode() runs without
++  // `mutex_`, and the image is delivered under it to whoever is a member
++  // then, so a member gone by then gets nothing. Released while the group
++  // delivers (to it or another): Leave waits for `mutex_`, so it returns once
++  // that delivery ended, and none starts after.
++  void Leave(Member* member) {
++    MutexLock lock(&mutex_);
++    members_.erase(std::remove(members_.begin(), members_.end(), member),
++                   members_.end());
++    member->in_sync = false;
++    member->held.clear();
++    rates_changed_ = true;
++  }
++
++  void SetCallback(Member* member, EncodedImageCallback* callback) {
++    MutexLock lock(&mutex_);
++    if (member->callback != callback) {
++      // Whatever had the images before, the new callback starts on a key
++      // frame.
++      member->callback = callback;
++      member->in_sync = false;
++      member->held.clear();
++    }
++  }
++
++  void SetRates(Member* member,
++                const VideoEncoder::RateControlParameters& rates) {
++    MutexLock lock(&mutex_);
++    member->rates = rates;
++    rates_changed_ = true;
++  }
++
++  // The real encoder's own description, once it is initialized, named for the
++  // group when it is shared ("libvpx (shared 3)"; the app reads it from the
++  // outbound-rtp stats' encoderImplementation).
++  std::optional<VideoEncoder::EncoderInfo> Info() const {
++    MutexLock lock(&mutex_);
++    if (!real_info_) {
++      return std::nullopt;
++    }
++    VideoEncoder::EncoderInfo info = *real_info_;
++    if (key_.isolation == 0) {
++      info.implementation_name += " (shared " +
++                                  std::to_string(members_.size()) + ")";
++    }
++    return info;
++  }
++
++  std::optional<uint32_t> AppliedBitrateBps() const {
++    MutexLock lock(&mutex_);
++    if (!applied_rates_) {
++      return std::nullopt;
++    }
++    return applied_rates_->bitrate.get_sum_bps();
++  }
++
++  // A member's VideoStreamEncoder asks for `frame` to be encoded (from the
++  // member's Encode). Returns kIsolate when the member is to leave for an
++  // encoder of its own instead; `error` gets an encoder error to return.
++  Outcome Request(Member* member,
++                  const VideoFrame& frame,
++                  const std::vector<VideoFrameType>* frame_types,
++                  int* error) {
++    const Timestamp now = env_.clock().CurrentTime();
++    const FrameKey key{frame.id(), frame.timestamp_us()};
++    const bool key_asked = AsksForKeyFrame(frame_types);
++
++    MutexLock lock(&mutex_);
++    *error = std::exchange(member->pending_error, 0);
++    if (init_error_ != WEBRTC_VIDEO_CODEC_OK) {
++      // As with an encoder of its own that failed: VideoStreamEncoder asks
++      // for another.
++      *error = init_error_;
++      return Outcome::kDone;
++    }
++    if (member->isolate) {
++      return Outcome::kIsolate;
++    }
++
++    member->paused = false;
++    member->first_missed_us.reset();
++    member->asked.push_back({key, frame.rtp_timestamp(), frame.ntp_time_ms()});
++    if (member->asked.size() > kAskedFrames) {
++      member->asked.pop_front();
++    }
++
++    if (key_asked && member->in_sync && !member->wants_key) {
++      // A key frame lost on its way: its receiver asked. Asks repeated while
++      // one is due are not counted. A member that keeps asking costs every
++      // other member a key frame each time: it gets an encoder of its own.
++      if (CountKeyRequest(member, now)) {
++        return Outcome::kIsolate;
++      }
++    }
++    if (key_asked || !member->in_sync) {
++      member->wants_key = true;
++      // Encode called before RegisterEncodeCompleteCallback: it could not be
++      // given the key frame, so it costs the others none until it can.
++      if (member->callback != nullptr) {
++        key_wanted_ = true;
++      }
++    }
++
++    // Encoded already: delivered unless it was (pushed, or skipped as the
++    // member was not in sync yet).
++    for (const Cached& cached : cache_) {
++      if (SameFrame(cached.key, key)) {
++        if (!member->in_sync) {
++          CatchUp(member, cached.seq);
++        }
++        if (member->in_sync && cached.seq > member->last_delivered) {
++          DeliverUpTo(member, cached.seq);
++        }
++        return Outcome::kDone;
++      }
++    }
++    // Images it skipped before this frame go first, in order.
++    if (member->in_sync) {
++      while (!member->held.empty()) {
++        const Cached* held = FindCached(member->held.front());
++        if (held != nullptr && !NewerFrame(key, held->key)) {
++          break;
++        }
++        DeliverUpTo(member, member->held.front());
++        if (!member->in_sync) {
++          break;
++        }
++      }
++    }
++    if (encoding_ && SameFrame(*encoding_, key)) {
++      // OnEncodedImage finds it in `asked`.
++      return Outcome::kDone;
++    }
++    if (next_ && SameFrame(next_->key, key)) {
++      if (!frame.has_update_rect()) {
++        next_->rect_unknown = true;
++      } else {
++        next_->rect.Union(frame.update_rect());
++      }
++      return Outcome::kDone;
++    }
++    if ((taken_ && !NewerFrame(key, *taken_)) ||
++        (next_ && !NewerFrame(key, next_->key))) {
++      // Older than what the group encodes: dropped, for this member as by an
++      // encoder (its metadata writer reports it once a newer image comes). Its
++      // changes may be missing from the next frame's update rectangle.
++      dropped_since_taken_ = true;
++      return Outcome::kDone;
++    }
++    if (next_) {
++      // Replaced before it was encoded: dropped for all who asked for it.
++      dropped_since_taken_ = true;
++    }
++    next_ = Next{frame, key, !frame.has_update_rect(), frame.update_rect()};
++    if (!encode_scheduled_) {
++      encode_scheduled_ = true;
++      queue_->PostTask([this] { EncodeNext(); });
++    }
++    return Outcome::kDone;
++  }
++
++  // EncodedImageCallback, for `real_`: inside real_->Encode() on `queue_`.
++  Result OnEncodedImage(const EncodedImage& image,
++                        const CodecSpecificInfo* info) override {
++    const Timestamp now = env_.clock().CurrentTime();
++    MutexLock lock(&mutex_);
++    if (!encoding_) {
++      // Not inside Encode(): an encoder that calls back on its own thread
++      // later than this group expects. Nothing to tell whose frame it is.
++      RTC_LOG(LS_WARNING) << "Shared encoder: image outside Encode() dropped";
++      return Result(Result::OK);
++    }
++    const FrameKey key = *encoding_;
++    // Room for it. A member still holding the oldest image gets it now, so
++    // no member misses one.
++    while (cache_.size() >= kCachedImages) {
++      const int64_t oldest = cache_.front().seq;
++      for (Member* member : members_) {
++        if (!member->held.empty() && member->held.front() <= oldest) {
++          DeliverUpTo(member, oldest);
++        }
++      }
++      cache_.pop_front();
++    }
++    cache_.push_back(Cached{key, ++seq_, image,
++                            info != nullptr
++                                ? std::optional<CodecSpecificInfo>(*info)
++                                : std::nullopt});
++    const Cached& cached = cache_.back();
++    const bool key_frame = image.IsKey();
++    if (key_frame) {
++      last_key_at_ = now;
++      key_wanted_ = false;
++    }
++    const TimeDelta push_after = FrameInterval();
++    for (Member* member : members_) {
++      if (member->callback == nullptr) {
++        continue;
++      }
++      if (!member->in_sync) {
++        // Not in sync: only a key frame starts it; a paused member waits
++        // until it asks again.
++        if (!key_frame || member->paused) {
++          continue;
++        }
++        member->in_sync = true;
++        member->held.clear();
++        member->last_delivered = cached.seq - 1;
++      }
++      if (key_frame) {
++        member->wants_key = false;
++      }
++      if (member->AskedFor(key) != nullptr) {
++        DeliverUpTo(member, cached.seq);
++      } else if (member->first_missed_us &&
++                 key.timestamp_us - *member->first_missed_us >=
++                     int64_t{config_.live_ms} * 1000) {
++        // It has asked for nothing for live_ms while others did: its
++        // connection paused (no bitrate, network down) or stopped sending
++        // this track. A key frame when it asks again.
++        member->in_sync = false;
++        member->paused = true;
++        member->held.clear();
++        rates_changed_ = true;
++      } else {
++        // Skipped by its VideoStreamEncoder (congestion window, a queue
++        // still busy, the first frames at a low bitrate) or not asked for
++        // yet: it gets the image when it asks, or pushed one frame later.
++        // Never missing one keeps its stream decodable: its picture ids
++        // count what it is given.
++        if (!member->first_missed_us) {
++          member->first_missed_us = key.timestamp_us;
++        }
++        member->held.push_back(cached.seq);
++        queue_->PostDelayedTask(
++            [this, id = member->id, seq = cached.seq] { PushHeld(id, seq); },
++            push_after);
++      }
++    }
++    return Result(Result::OK);
++  }
++
++  void OnFrameDropped(uint32_t /* rtp_timestamp */,
++                      int /* spatial_id */,
++                      bool /* is_end_of_temporal_unit */) override {
++    // A frame the real encoder dropped: each member's metadata writer reports
++    // its own frame as dropped when its next image comes.
++  }
++
++ private:
++  struct Next {
++    VideoFrame frame;
++    FrameKey key;
++    bool rect_unknown;
++    VideoFrame::UpdateRect rect;
++  };
++
++  struct Cached {
++    FrameKey key;
++    int64_t seq;
++    // Shares its buffer with every copy given to members.
++    EncodedImage image;
++    std::optional<CodecSpecificInfo> info;
++  };
++
++  // On `queue_`.
++  void EncodeNext() {
++    std::optional<VideoFrame> frame;
++    std::vector<VideoFrameType> frame_types(1, VideoFrameType::kVideoFrameDelta);
++    std::optional<VideoEncoder::RateControlParameters> apply_rates;
++    {
++      MutexLock lock(&mutex_);
++      if (!next_) {
++        encode_scheduled_ = false;
++        return;
++      }
++      const Timestamp now = env_.clock().CurrentTime();
++      Next next = std::move(*next_);
++      next_.reset();
++      CheckSlowMembers(now);
++      std::optional<VideoEncoder::RateControlParameters> rates = GroupRates();
++      if (rates && (real_ == nullptr || !applied_rates_ ||
++                    *rates != *applied_rates_)) {
++        applied_rates_ = rates;
++        apply_rates = rates;
++      } else if (real_ == nullptr && applied_rates_) {
++        apply_rates = applied_rates_;
++      }
++      rates_changed_ = false;
++      const bool key_due =
++          !last_key_at_ ||
++          now - *last_key_at_ >= TimeDelta::Millis(config_.key_ms);
++      if (real_ == nullptr || (key_wanted_ && key_due)) {
++        frame_types[0] = VideoFrameType::kVideoFrameKey;
++      }
++      frame.emplace(next.frame);
++      // The real encoder's own timestamps, as one VideoStreamEncoder would
++      // give them; each member gets its own back with the image.
++      frame->set_rtp_timestamp(
++          kRtpTicksPerMs *
++          static_cast<uint32_t>(frame->render_time_ms() + ntp_delta_ms_));
++      // Every asker's rectangle covers what changed since the frame it asked
++      // for before; a frame the group dropped since its last one leaves a
++      // change no one reports.
++      if (next.rect_unknown || dropped_since_taken_) {
++        frame->clear_update_rect();
++      } else {
++        frame->set_update_rect(next.rect);
++      }
++      dropped_since_taken_ = false;
++      taken_ = next.key;
++      encoding_ = next.key;
++    }
++
++    if (real_ == nullptr) {
++      VideoEncoder::Settings settings = settings_;
++      if (config_.threads) {
++        settings.encoder_thread_limit = *config_.threads;
++      }
++      real_ = registry_->inner().Create(env_, format_);
++      int result = real_ != nullptr
++                       ? real_->InitEncode(&key_.codec, settings)
++                       : WEBRTC_VIDEO_CODEC_ERROR;
++      if (result != WEBRTC_VIDEO_CODEC_OK) {
++        RTC_LOG(LS_ERROR) << "Shared encoder: InitEncode failed: " << result;
++        real_ = nullptr;
++        MutexLock lock(&mutex_);
++        init_error_ = result < 0 ? result : WEBRTC_VIDEO_CODEC_ERROR;
++        encoding_.reset();
++        next_.reset();
++        encode_scheduled_ = false;
++        return;
++      }
++      real_->RegisterEncodeCompleteCallback(this);
++      MutexLock lock(&mutex_);
++      real_info_ = real_->GetEncoderInfo();
++    }
++    if (apply_rates) {
++      real_->SetRates(*apply_rates);
++    }
++    // Calls OnEncodedImage before it returns, or not at all when the encoder
++    // drops the frame itself; then a key frame wanted stays wanted.
++    const int32_t result = real_->Encode(*frame, &frame_types);
++
++    MutexLock lock(&mutex_);
++    encoding_.reset();
++    if (result < 0) {
++      // Each member's VideoStreamEncoder hears of it on its next Encode, as
++      // it would from an encoder of its own.
++      RTC_LOG(LS_ERROR) << "Shared encoder: Encode failed: " << result;
++      for (Member* member : members_) {
++        member->pending_error = result;
++      }
++    }
++    if (next_) {
++      queue_->PostTask([this] { EncodeNext(); });
++    } else {
++      encode_scheduled_ = false;
++    }
++  }
++
++  // On `queue_`: a member that has not asked for an image one frame after it
++  // was encoded gets it anyway.
++  void PushHeld(int member_id, int64_t seq) {
++    MutexLock lock(&mutex_);
++    for (Member* member : members_) {
++      if (member->id == member_id) {
++        if (member->in_sync &&
++            std::find(member->held.begin(), member->held.end(), seq) !=
++                member->held.end()) {
++          DeliverUpTo(member, seq);
++        }
++        return;
++      }
++    }
++  }
++
++  const Cached* FindCached(int64_t seq) const
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    for (const Cached& cached : cache_) {
++      if (cached.seq == seq) {
++        return &cached;
++      }
++    }
++    return nullptr;
++  }
++
++  // Delivers to `member` every image it holds up to `seq`, then `seq` itself,
++  // in order.
++  void DeliverUpTo(Member* member, int64_t seq)
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    while (member->in_sync && !member->held.empty() &&
++           member->held.front() <= seq) {
++      const int64_t held = member->held.front();
++      member->held.pop_front();
++      if (const Cached* cached = FindCached(held)) {
++        Deliver(member, *cached);
++      }
++    }
++    if (member->in_sync && member->last_delivered < seq) {
++      if (const Cached* cached = FindCached(seq)) {
++        Deliver(member, *cached);
++      }
++    }
++  }
++
++  void Deliver(Member* member, const Cached& cached)
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    if (cached.seq <= member->last_delivered) {
++      return;
++    }
++    if (member->callback == nullptr) {
++      LoseSync(member);
++      return;
++    }
++    EncodedImage image(cached.image);
++    // Encode times are its VideoStreamEncoder's to fill in, for the frames it
++    // asked for; for the others the encode took no time of its own.
++    image.timing_ = EncodedImage::Timing();
++    if (const Member::Asked* asked = member->AskedFor(cached.key)) {
++      // Matched by its FrameEncodeMetadataWriter, which fills in capture and
++      // NTP time, rotation and encode timing as for its own encoder's images.
++      image.SetRtpTimestamp(asked->rtp_timestamp);
++    } else if (!member->asked.empty()) {
++      // Not asked for (pushed). VideoStreamEncoder makes RTP timestamps as
++      // 90 * (capture ms + a delta fixed when it was made), so the one it
++      // would have given this frame follows from any frame it did give one.
++      // What its VideoStreamEncoder::OnEncodedImage does with it: its
++      // FrameEncodeMetadataWriter finds no record of the RTP timestamp (it
++      // logs that, throttled), so the image keeps these capture and NTP times
++      // and invalid timing, and the frames it asked for before it are
++      // reported dropped by the encoder (they were, for this member).
++      // SendStatisticsProxy still counts it (framesEncoded, keyFramesEncoded,
++      // bytes, QP) and adds its encode time, 0 here; RtpVideoSender packetizes
++      // and sends it, and the send stream counts it as activity. Stats it
++      // skews: framesEncoded and keyFramesEncoded include key frames others
++      // asked for; totalEncodeTime of a matched image includes the wait for
++      // the group (one encode, counted by every member: the app takes the
++      // largest per size, not the sum). The frame instrumentation generator
++      // (corruption detection) would see images it did not see the frame
++      // of; it is on only with the corruption detection header extension,
++      // which WebRTC offers stopped and calls never enable.
++      const Member::Asked& last = member->asked.back();
++      const int64_t capture_ms = cached.key.timestamp_us / 1000;
++      const int64_t delta_ms = capture_ms - last.frame.timestamp_us / 1000;
++      image.SetRtpTimestamp(last.rtp_timestamp +
++                            kRtpTicksPerMs * static_cast<uint32_t>(delta_ms));
++      image.capture_time_ms_ = capture_ms;
++      image.ntp_time_ms_ = last.ntp_time_ms + delta_ms;
++    } else {
++      LoseSync(member);
++      return;
++    }
++    member->last_delivered = cached.seq;
++    const Result result = member->callback->OnEncodedImage(
++        image, cached.info ? &*cached.info : nullptr);
++    if (result.error != Result::OK) {
++      // Its connection did not send it (not sending at the moment): what it
++      // sends next must not refer to it.
++      LoseSync(member);
++    }
++  }
++
++  // A member out of sync asks for a frame encoded already (it joined, or came
++  // back, a moment after the others asked for it): when a key frame and every
++  // image since are still kept, it starts there instead of waiting for the
++  // next key frame. Up to the frame it asked for it gets them now, the newer
++  // ones one frame later unless it asks first.
++  void CatchUp(Member* member, int64_t seq)
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    if (member->callback == nullptr) {
++      return;
++    }
++    std::optional<int64_t> key_seq;
++    for (const Cached& cached : cache_) {
++      if (cached.seq <= seq && cached.image.IsKey()) {
++        key_seq = cached.seq;
++      }
++    }
++    if (!key_seq) {
++      return;
++    }
++    member->in_sync = true;
++    member->paused = false;
++    member->wants_key = false;
++    member->held.clear();
++    member->last_delivered = *key_seq - 1;
++    const TimeDelta push_after = FrameInterval();
++    for (const Cached& cached : cache_) {
++      if (cached.seq < *key_seq) {
++        continue;
++      }
++      member->held.push_back(cached.seq);
++      if (cached.seq > seq) {
++        queue_->PostDelayedTask(
++            [this, id = member->id, held = cached.seq] { PushHeld(id, held); },
++            push_after);
++      }
++    }
++    UpdateKeyWanted();
++  }
++
++  // Whether a member that can take one waits for a key frame.
++  void UpdateKeyWanted() RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    key_wanted_ = false;
++    for (const Member* member : members_) {
++      if (member->callback != nullptr && !member->paused &&
++          member->wants_key) {
++        key_wanted_ = true;
++      }
++    }
++  }
++
++  void LoseSync(Member* member) RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    if (member->in_sync) {
++      // Counted as a lost key frame: a connection that keeps failing gets an
++      // encoder of its own.
++      if (CountKeyRequest(member, env_.clock().CurrentTime())) {
++        member->isolate = true;
++      }
++    }
++    member->in_sync = false;
++    member->held.clear();
++    member->wants_key = true;
++    if (member->callback != nullptr) {
++      key_wanted_ = true;
++    }
++  }
++
++  // Returns whether `member` asked often enough to be isolated.
++  bool CountKeyRequest(Member* member, Timestamp now)
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    while (!member->key_requests.empty() &&
++           now - member->key_requests.front() >= kKeyRequestWindow) {
++      member->key_requests.pop_front();
++    }
++    member->key_requests.push_back(now);
++    if (members_.size() > 1 &&
++        member->key_requests.size() >=
++            static_cast<size_t>(config_.isolate_keys)) {
++      member->key_requests.clear();
++      member->isolate = true;
++      rates_changed_ = true;
++      return true;
++    }
++    return false;
++  }
++
++  // Members with a say in the rates: not paused, not leaving; those in sync
++  // when there are any (members waiting for their first key frame otherwise).
++  std::vector<const Member*> RatedMembers() const
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    std::vector<const Member*> in_sync;
++    std::vector<const Member*> waiting;
++    for (const Member* member : members_) {
++      if (!member->rates || member->paused || member->isolate) {
++        continue;
++      }
++      (member->in_sync ? in_sync : waiting).push_back(member);
++    }
++    return in_sync.empty() ? waiting : in_sync;
++  }
++
++  // The lowest member's allocation, so every connection carries the stream;
++  // a member far below the others is isolated rather than lowering everyone
++  // for long. Its VideoStreamEncoder never sets a rate of 0 (it just stops
++  // asking), so a paused member is left out by liveness. With no member to
++  // go by, the rates stay as they were.
++  std::optional<VideoEncoder::RateControlParameters> GroupRates() const
++      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    const std::vector<const Member*> rated = RatedMembers();
++    if (rated.empty()) {
++      return std::nullopt;
++    }
++    const Member* lowest = rated.front();
++    webrtc::DataRate bandwidth = rated.front()->rates->bandwidth_allocation;
++    double framerate = rated.front()->rates->framerate_fps;
++    for (const Member* member : rated) {
++      if (member->rates->bitrate.get_sum_bps() <
++          lowest->rates->bitrate.get_sum_bps()) {
++        lowest = member;
++      }
++      bandwidth = std::min(bandwidth, member->rates->bandwidth_allocation);
++      framerate = std::max(framerate, member->rates->framerate_fps);
++    }
++    VideoEncoder::RateControlParameters rates = *lowest->rates;
++    rates.bandwidth_allocation = bandwidth;
++    rates.framerate_fps = framerate;
++    return rates;
++  }
++
++  // A member whose bitrate stays far under the others' is isolated.
++  void CheckSlowMembers(Timestamp now) RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    std::vector<Member*> live;
++    for (Member* member : members_) {
++      if (member->rates && member->in_sync && !member->paused &&
++          !member->isolate) {
++        live.push_back(member);
++      } else {
++        member->low_since.reset();
++      }
++    }
++    for (Member* member : live) {
++      std::vector<uint32_t> others;
++      for (const Member* other : live) {
++        if (other != member) {
++          others.push_back(other->rates->bitrate.get_sum_bps());
++        }
++      }
++      if (others.size() < 2) {
++        member->low_since.reset();
++        continue;
++      }
++      std::sort(others.begin(), others.end());
++      const size_t half = others.size() / 2;
++      const double median =
++          others.size() % 2 == 1
++              ? others[half]
++              : (static_cast<double>(others[half - 1]) + others[half]) / 2;
++      if (member->rates->bitrate.get_sum_bps() >=
++          config_.isolate_ratio * median) {
++        member->low_since.reset();
++      } else if (!member->low_since) {
++        member->low_since = now;
++      } else if (now - *member->low_since >=
++                 TimeDelta::Millis(config_.isolate_ms)) {
++        member->isolate = true;
++        member->low_since.reset();
++        rates_changed_ = true;
++      }
++    }
++  }
++
++  // One frame at the group's frame rate, from 20 to 100 ms.
++  TimeDelta FrameInterval() const RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_) {
++    double fps = applied_rates_ ? applied_rates_->framerate_fps : 30.0;
++    if (!(fps > 0)) {
++      fps = 30.0;
++    }
++    const int64_t ms = static_cast<int64_t>(1000.0 / fps + 0.5);
++    return TimeDelta::Millis(std::clamp<int64_t>(ms, 20, 100));
++  }
++
++  const std::shared_ptr<SharedEncodeRegistry> registry_;
++  const GroupKey key_;
++  const Environment env_;
++  const SdpVideoFormat format_;
++  const VideoEncoder::Settings settings_;
++  const SharedEncodeConfig config_;
++  const int64_t ntp_delta_ms_;
++
++  mutable Mutex mutex_;
++  std::vector<Member*> members_ RTC_GUARDED_BY(mutex_);
++  // The newest frame asked for and not taken for encoding yet.
++  std::optional<Next> next_ RTC_GUARDED_BY(mutex_);
++  bool encode_scheduled_ RTC_GUARDED_BY(mutex_) = false;
++  // The last frame taken for encoding, and the one inside real_->Encode().
++  std::optional<FrameKey> taken_ RTC_GUARDED_BY(mutex_);
++  std::optional<FrameKey> encoding_ RTC_GUARDED_BY(mutex_);
++  bool dropped_since_taken_ RTC_GUARDED_BY(mutex_) = false;
++  std::deque<Cached> cache_ RTC_GUARDED_BY(mutex_);
++  int64_t seq_ RTC_GUARDED_BY(mutex_) = 0;
++  bool key_wanted_ RTC_GUARDED_BY(mutex_) = false;
++  std::optional<Timestamp> last_key_at_ RTC_GUARDED_BY(mutex_);
++  std::optional<VideoEncoder::RateControlParameters> applied_rates_
++      RTC_GUARDED_BY(mutex_);
++  bool rates_changed_ RTC_GUARDED_BY(mutex_) = false;
++  std::optional<VideoEncoder::EncoderInfo> real_info_ RTC_GUARDED_BY(mutex_);
++  int init_error_ RTC_GUARDED_BY(mutex_) = WEBRTC_VIDEO_CODEC_OK;
++
++  // On `queue_` only (and in the destructor once `queue_` is gone).
++  std::unique_ptr<VideoEncoder> real_;
++
++  // Last: made once everything its tasks use is.
++  std::unique_ptr<webrtc::TaskQueueBase, webrtc::TaskQueueDeleter> queue_;
++};
++
++// ---------------------------------------------------------------------------
++// The encoder each VideoStreamEncoder gets.
++
++class SharedEncoderProxy final : public VideoEncoder {
++ public:
++  SharedEncoderProxy(std::shared_ptr<SharedEncodeRegistry> registry,
++                     const Environment& env,
++                     const SdpVideoFormat& format,
++                     const SharedEncodeConfig& config)
++      : registry_(std::move(registry)),
++        env_(env),
++        format_(format),
++        config_(config),
++        rejoin_wait_(TimeDelta::Millis(config.rejoin_ms)) {}
++
++  ~SharedEncoderProxy() override { LeaveGroup(); }
++
++  void SetFecControllerOverride(
++      webrtc::FecControllerOverride* fec_controller_override) override {
++    fec_controller_override_ = fec_controller_override;
++    if (direct_ != nullptr) {
++      direct_->SetFecControllerOverride(fec_controller_override);
++    }
++  }
++
++  // Keeps the settings; no encoder is made before the first frame tells
++  // whether it can be shared. Called again on a live proxy (a new size, a new
++  // quality): it leaves its group, and its next frame finds the group of the
++  // new settings, starting on a key frame as an encoder initialized again
++  // would.
++  int InitEncode(const VideoCodec* codec_settings,
++                 const VideoEncoder::Settings& settings) override {
++    if (codec_settings == nullptr) {
++      return WEBRTC_VIDEO_CODEC_ERR_PARAMETER;
++    }
++    LeaveGroup();
++    codec_ = *codec_settings;
++    settings_ = settings;
++    if (direct_ != nullptr) {
++      return direct_->InitEncode(codec_settings, settings);
++    }
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++
++  int32_t RegisterEncodeCompleteCallback(
++      EncodedImageCallback* callback) override {
++    callback_ = callback;
++    if (direct_ != nullptr) {
++      return direct_->RegisterEncodeCompleteCallback(callback);
++    }
++    if (group_ != nullptr) {
++      group_->SetCallback(&member_, callback);
++    } else {
++      member_.callback = callback;
++    }
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++
++  // Once it returns, no image reaches the callback (a delivery under way is
++  // waited for). When it was the group's last member, the group goes, with
++  // its encoder and thread.
++  int32_t Release() override {
++    LeaveGroup();
++    codec_.reset();
++    if (direct_ != nullptr) {
++      return direct_->Release();
++    }
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++
++  int32_t Encode(const VideoFrame& frame,
++                 const std::vector<VideoFrameType>* frame_types) override {
++    if (!codec_ || !settings_) {
++      return WEBRTC_VIDEO_CODEC_UNINITIALIZED;
++    }
++    const int slot = SharedEncodeSlotOf(frame.id());
++    if (slot == 0 || !Shareable(*codec_)) {
++      return EncodeDirect(frame, frame_types);
++    }
++    if (direct_ != nullptr) {
++      direct_->Release();
++      direct_ = nullptr;
++    }
++    const Timestamp now = env_.clock().CurrentTime();
++    if (isolation_ != 0) {
++      MaybeRejoin(slot, now);
++    }
++    for (int attempt = 0; attempt < 2; ++attempt) {
++      const GroupKey key = KeyFor(slot, isolation_);
++      if (group_ == nullptr || !SameKey(group_->key(), key)) {
++        JoinGroup(key);
++      }
++      int error = WEBRTC_VIDEO_CODEC_OK;
++      if (group_->Request(&member_, frame, frame_types, &error) ==
++          SharedEncodeGroup::Outcome::kDone) {
++        return error;
++      }
++      Isolate(now);
++    }
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++
++  void SetRates(const RateControlParameters& parameters) override {
++    rates_ = parameters;
++    if (direct_ != nullptr) {
++      direct_->SetRates(parameters);
++    } else if (group_ != nullptr) {
++      group_->SetRates(&member_, parameters);
++    } else {
++      member_.rates = parameters;
++    }
++  }
++
++  // A shared encoder makes VP8 of one temporal layer, which takes no use of
++  // these (DefaultTemporalLayers ignores them); an own encoder gets them.
++  void OnPacketLossRateUpdate(float packet_loss_rate) override {
++    if (direct_ != nullptr) {
++      direct_->OnPacketLossRateUpdate(packet_loss_rate);
++    }
++  }
++  void OnRttUpdate(int64_t rtt_ms) override {
++    if (direct_ != nullptr) {
++      direct_->OnRttUpdate(rtt_ms);
++    }
++  }
++  void OnLossNotification(const LossNotification& loss_notification) override {
++    if (direct_ != nullptr) {
++      direct_->OnLossNotification(loss_notification);
++    }
++  }
++
++  // The real encoder's. Until it is initialized, what the inner factory's
++  // encoder says before initialization; VideoStreamEncoder reads it again
++  // with every frame and adapts once it changes.
++  EncoderInfo GetEncoderInfo() const override {
++    if (direct_ != nullptr) {
++      return direct_->GetEncoderInfo();
++    }
++    if (group_ != nullptr) {
++      if (std::optional<EncoderInfo> info = group_->Info()) {
++        return *info;
++      }
++    }
++    return registry_->ProbeInfo(env_, format_);
++  }
++
++ private:
++  // Untagged frames (cameras) or settings that are not shared: an encoder of
++  // its own, used on this thread as without the proxy.
++  int32_t EncodeDirect(const VideoFrame& frame,
++                       const std::vector<VideoFrameType>* frame_types) {
++    LeaveGroup();
++    if (direct_ != nullptr) {
++      return direct_->Encode(frame, frame_types);
++    }
++    direct_ = registry_->inner().Create(env_, format_);
++    if (direct_ == nullptr) {
++      return WEBRTC_VIDEO_CODEC_ERROR;
++    }
++    direct_->SetFecControllerOverride(fec_controller_override_);
++    const int result = direct_->InitEncode(&*codec_, *settings_);
++    if (result != WEBRTC_VIDEO_CODEC_OK) {
++      direct_ = nullptr;
++      return result < 0 ? result : WEBRTC_VIDEO_CODEC_ERROR;
++    }
++    if (callback_ != nullptr) {
++      direct_->RegisterEncodeCompleteCallback(callback_);
++    }
++    if (rates_) {
++      direct_->SetRates(*rates_);
++    }
++    // A new encoder starts on a key frame.
++    std::vector<VideoFrameType> key_frame(
++        frame_types != nullptr && !frame_types->empty() ? frame_types->size()
++                                                        : 1,
++        VideoFrameType::kVideoFrameKey);
++    return direct_->Encode(frame, &key_frame);
++  }
++
++  GroupKey KeyFor(int slot, int isolation) const {
++    GroupKey key;
++    key.slot = slot;
++    key.isolation = isolation;
++    key.codec = *codec_;
++    key.number_of_cores = settings_->number_of_cores;
++    key.encoder_thread_limit = settings_->encoder_thread_limit;
++    return key;
++  }
++
++  void JoinGroup(const GroupKey& key) {
++    LeaveGroup();
++    group_ = registry_->GetOrCreate(registry_, key, env_, format_, *settings_,
++                                    config_);
++    member_.callback = callback_;
++    member_.rates = rates_;
++    group_->Join(&member_);
++  }
++
++  void LeaveGroup() {
++    if (group_ == nullptr) {
++      return;
++    }
++    group_->Leave(&member_);
++    // May destroy the group, here, on this connection's thread: never on the
++    // group's own queue.
++    group_ = nullptr;
++  }
++
++  // Off to an encoder of its own, which drives only its own requests: its
++  // VideoStreamEncoder's drops apply as without sharing, so the app sees its
++  // lower frame rate and steps it down to another size.
++  void Isolate(Timestamp now) {
++    const TimeDelta first_wait = TimeDelta::Millis(config_.rejoin_ms);
++    if (rejoined_at_ && now - *rejoined_at_ < kRejoinMustLast) {
++      rejoin_wait_ = std::min(rejoin_wait_ * 2, first_wait * 16);
++    } else {
++      rejoin_wait_ = first_wait;
++    }
++    rejoined_at_.reset();
++    isolation_ = registry_->NewIsolation();
++    good_since_.reset();
++    last_rejoin_check_ = now;
++    RTC_LOG(LS_INFO) << "Shared encoder: a connection gets its own encoder"
++                     << " for at least " << rejoin_wait_.ms() << " ms";
++  }
++
++  // Back to the shared group once its bitrate has been at least the group's
++  // for long enough (or the group is gone).
++  void MaybeRejoin(int slot, Timestamp now) {
++    if (last_rejoin_check_ && now - *last_rejoin_check_ < kRejoinCheckInterval) {
++      return;
++    }
++    last_rejoin_check_ = now;
++    std::shared_ptr<SharedEncodeGroup> shared =
++        registry_->Find(KeyFor(slot, 0));
++    std::optional<uint32_t> group_bps;
++    if (shared != nullptr) {
++      group_bps = shared->AppliedBitrateBps();
++    }
++    const uint32_t own_bps = rates_ ? rates_->bitrate.get_sum_bps() : 0;
++    if (shared == nullptr || !group_bps || own_bps >= *group_bps) {
++      if (!good_since_) {
++        good_since_ = now;
++      }
++      if (shared == nullptr || now - *good_since_ >= rejoin_wait_) {
++        isolation_ = 0;
++        rejoined_at_ = now;
++        good_since_.reset();
++      }
++    } else {
++      good_since_.reset();
++    }
++    // `shared` may be the last hold on that group: let go of here, on this
++    // thread, holding no lock.
++  }
++
++  const std::shared_ptr<SharedEncodeRegistry> registry_;
++  const Environment env_;
++  const SdpVideoFormat format_;
++  const SharedEncodeConfig config_;
++
++  // All on the VideoStreamEncoder's encoder queue.
++  std::optional<VideoCodec> codec_;
++  std::optional<VideoEncoder::Settings> settings_;
++  EncodedImageCallback* callback_ = nullptr;
++  std::optional<RateControlParameters> rates_;
++  webrtc::FecControllerOverride* fec_controller_override_ = nullptr;
++  std::unique_ptr<VideoEncoder> direct_;
++  std::shared_ptr<SharedEncodeGroup> group_;
++  // Read and written under group_'s mutex while in a group.
++  Member member_;
++  int isolation_ = 0;
++  TimeDelta rejoin_wait_;
++  std::optional<Timestamp> rejoined_at_;
++  std::optional<Timestamp> good_since_;
++  std::optional<Timestamp> last_rejoin_check_;
++};
++
++}  // namespace
++
++// ---------------------------------------------------------------------------
++
++std::shared_ptr<SharedEncodeGroup> SharedEncodeRegistry::GetOrCreate(
++    const std::shared_ptr<SharedEncodeRegistry>& self,
++    const GroupKey& key,
++    const Environment& env,
++    const SdpVideoFormat& format,
++    const VideoEncoder::Settings& settings,
++    const SharedEncodeConfig& config) {
++  std::shared_ptr<SharedEncodeGroup> group;
++  {
++    MutexLock lock(&mutex_);
++    for (auto& [group_key, weak] : groups_) {
++      if (SameKey(group_key, key)) {
++        group = weak.lock();
++        if (group != nullptr) {
++          break;
++        }
++      }
++    }
++    if (group == nullptr) {
++      groups_.erase(std::remove_if(groups_.begin(), groups_.end(),
++                                   [](const auto& entry) {
++                                     return entry.second.expired();
++                                   }),
++                    groups_.end());
++      group = std::make_shared<SharedEncodeGroup>(self, key, env, format,
++                                                  settings, config);
++      groups_.emplace_back(key, group);
++    }
++  }
++  return group;
++}
++
++std::shared_ptr<SharedEncodeGroup> SharedEncodeRegistry::Find(
++    const GroupKey& key) {
++  std::shared_ptr<SharedEncodeGroup> group;
++  {
++    MutexLock lock(&mutex_);
++    for (auto& [group_key, weak] : groups_) {
++      if (SameKey(group_key, key)) {
++        group = weak.lock();
++        if (group != nullptr) {
++          break;
++        }
++      }
++    }
++  }
++  return group;
++}
++
++void SharedEncodeRegistry::ForgetDeadGroups() {
++  MutexLock lock(&mutex_);
++  groups_.erase(std::remove_if(groups_.begin(), groups_.end(),
++                               [](const auto& entry) {
++                                 return entry.second.expired();
++                               }),
++                groups_.end());
++}
++
++VideoEncoder::EncoderInfo SharedEncodeRegistry::ProbeInfo(
++    const Environment& env,
++    const SdpVideoFormat& format) {
++  MutexLock lock(&mutex_);
++  if (!probe_) {
++    std::unique_ptr<VideoEncoder> probe = inner_->Create(env, format);
++    probe_ = probe != nullptr ? probe->GetEncoderInfo()
++                              : VideoEncoder::EncoderInfo();
++  }
++  return *probe_;
++}
++
++// ---------------------------------------------------------------------------
++
++int AcquireSharedEncodeSlot() {
++  SlotTable& table = Slots();
++  MutexLock lock(&table.mutex);
++  for (int i = 1; i <= kSharedEncodeSlots; ++i) {
++    const int slot = (table.last + i - 1) % kSharedEncodeSlots + 1;
++    if (!table.used[slot]) {
++      table.used[slot] = true;
++      table.last = slot;
++      return slot;
++    }
++  }
++  return 0;
++}
++
++void ReleaseSharedEncodeSlot(int slot) {
++  if (slot < 1 || slot > kSharedEncodeSlots) {
++    return;
++  }
++  SlotTable& table = Slots();
++  MutexLock lock(&table.mutex);
++  table.used[slot] = false;
++}
++
++uint16_t SharedEncodeFrameId(int slot, uint32_t seq) {
++  return static_cast<uint16_t>(((slot & 0x0f) << 12) | (seq & 0x0fff));
++}
++
++int SharedEncodeSlotOf(uint16_t id) {
++  return id >> 12;
++}
++
++SharedEncodeTag::SharedEncodeTag() = default;
++
++SharedEncodeTag::~SharedEncodeTag() {
++  ReleaseSharedEncodeSlot(slot_.exchange(0));
++}
++
++bool SharedEncodeTag::Enable() {
++  if (slot_.load(std::memory_order_acquire) != 0) {
++    return true;
++  }
++  const int slot = AcquireSharedEncodeSlot();
++  if (slot == 0) {
++    RTC_LOG(LS_WARNING) << "Shared encoder: no source number free; this "
++                           "source is encoded for each connection";
++    return false;
++  }
++  int expected = 0;
++  if (!slot_.compare_exchange_strong(expected, slot,
++                                     std::memory_order_acq_rel)) {
++    ReleaseSharedEncodeSlot(slot);  // Another call took one first.
++  }
++  return true;
++}
++
++uint16_t SharedEncodeTag::NextFrameId() {
++  const int slot = slot_.load(std::memory_order_acquire);
++  if (slot == 0) {
++    return 0;
++  }
++  return SharedEncodeFrameId(slot, seq_.fetch_add(1));
++}
++
++SharedEncodeConfig SharedEncodeConfig::Parse(
++    const webrtc::FieldTrialsView& trials) {
++  SharedEncodeConfig config;
++  webrtc::StructParametersParser::Create(
++      "key_ms", &config.key_ms,                //
++      "live_ms", &config.live_ms,              //
++      "isolate_ratio", &config.isolate_ratio,  //
++      "isolate_ms", &config.isolate_ms,        //
++      "isolate_keys", &config.isolate_keys,    //
++      "rejoin_ms", &config.rejoin_ms,          //
++      "threads", &config.threads)
++      ->Parse(trials.Lookup(kSharedScreenEncodeTrial));
++  config.key_ms = std::max(config.key_ms, 0);
++  config.live_ms = std::max(config.live_ms, 1);
++  config.isolate_ms = std::max(config.isolate_ms, 0);
++  config.isolate_keys = std::max(config.isolate_keys, 1);
++  config.rejoin_ms = std::max(config.rejoin_ms, 0);
++  if (config.threads && *config.threads < 1) {
++    config.threads.reset();
++  }
++  return config;
++}
++
++SharedEncoderFactory::SharedEncoderFactory(
++    std::unique_ptr<webrtc::VideoEncoderFactory> inner)
++    : registry_(std::make_shared<SharedEncodeRegistry>(std::move(inner))) {}
++
++SharedEncoderFactory::~SharedEncoderFactory() = default;
++
++std::vector<webrtc::SdpVideoFormat> SharedEncoderFactory::GetSupportedFormats()
++    const {
++  return registry_->inner().GetSupportedFormats();
++}
++
++std::vector<webrtc::SdpVideoFormat> SharedEncoderFactory::GetImplementations()
++    const {
++  return registry_->inner().GetImplementations();
++}
++
++webrtc::VideoEncoderFactory::CodecSupport
++SharedEncoderFactory::QueryCodecSupport(
++    const webrtc::SdpVideoFormat& format,
++    std::optional<std::string> scalability_mode,
++    std::optional<webrtc::Resolution> resolution) const {
++  return registry_->inner().QueryCodecSupport(format, scalability_mode,
++                                              resolution);
++}
++
++std::unique_ptr<webrtc::VideoEncoder> SharedEncoderFactory::Create(
++    const webrtc::Environment& env,
++    const webrtc::SdpVideoFormat& format) {
++  if (!env.field_trials().IsEnabled(kSharedScreenEncodeTrial) ||
++      !absl::EqualsIgnoreCase(format.name, "VP8")) {
++    return registry_->inner().Create(env, format);
++  }
++  return std::make_unique<SharedEncoderProxy>(
++      registry_, env, format, SharedEncodeConfig::Parse(env.field_trials()));
++}
++
++std::unique_ptr<webrtc::VideoEncoderFactory::EncoderSelectorInterface>
++SharedEncoderFactory::GetEncoderSelector() const {
++  return registry_->inner().GetEncoderSelector();
++}
++
++}  // namespace libwebrtc
+diff --git a/src/internal/shared_encoder.h b/src/internal/shared_encoder.h
+new file mode 100644
+index 0000000..7ceb900
+--- /dev/null
++++ b/src/internal/shared_encoder.h
+@@ -0,0 +1,133 @@
++#ifndef LIB_WEBRTC_SHARED_ENCODER_H_
++#define LIB_WEBRTC_SHARED_ENCODER_H_
++
++#include <atomic>
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "api/environment/environment.h"
++#include "api/field_trials_view.h"
++#include "api/video/resolution.h"
++#include "api/video_codecs/sdp_video_format.h"
++#include "api/video_codecs/video_encoder.h"
++#include "api/video_codecs/video_encoder_factory.h"
++
++// One encode of a shared screen for every connection that sends it.
++//
++// Every connection that sends a track has a VideoStreamEncoder of its own, and
++// each asks its encoder factory for an encoder of its own: a screen shared to
++// seven watchers was encoded seven times, with seven libvpx encoders and their
++// buffers. Every one of them is given the same frames (VideoBroadcaster hands
++// each sink the same VideoFrame) at, mostly, the same settings.
++//
++// SharedEncoderFactory wraps the factory those encoders come from. With the
++// field trial "Fogata-SharedScreenEncode/Enabled/" each VP8 encoder it makes is
++// a proxy. Proxies of the frames of one screen (frames a source tagged through
++// SharedEncodeTag) and of the same settings form a group with one real
++// encoder: a frame is encoded once when any of them asks for it, and the image
++// is given to each of them with its own RTP timestamp. Each connection still
++// packetizes, encrypts, paces and estimates on its own, so nothing on the wire
++// changes. Untagged frames (cameras) are encoded as before, by an encoder of
++// the proxy's own, on the caller's thread.
++//
++// Only WebRTC's api/ and rtc_base/ are used here, so the macOS framework
++// builds this file too.
++
++namespace libwebrtc {
++
++inline constexpr char kSharedScreenEncodeTrial[] = "Fogata-SharedScreenEncode";
++
++// The sources whose frames can be told apart at once: the top 4 bits of a
++// frame's id (VideoFrame::id(), 0 meaning none) name the source, the other 12
++// count its frames.
++inline constexpr int kSharedEncodeSlots = 15;
++
++// A source number from 1 to kSharedEncodeSlots no other live source has, or 0
++// when all are taken (the source then stays untagged and is never shared).
++// Numbers are handed out in turn, so one given back is not reused at once
++// while frames tagged with it may still be on their way to an encoder.
++int AcquireSharedEncodeSlot();
++void ReleaseSharedEncodeSlot(int slot);
++
++// The id of frame `seq` of source `slot`; never 0 for a slot from 1 up.
++uint16_t SharedEncodeFrameId(int slot, uint32_t seq);
++// The source of a frame id; 0 for an untagged frame.
++int SharedEncodeSlotOf(uint16_t id);
++
++// Tags the frames of one source once enabled. Thread-safe: frames may come
++// from any thread, Enable() from another.
++class SharedEncodeTag {
++ public:
++  SharedEncodeTag();
++  ~SharedEncodeTag();
++  SharedEncodeTag(const SharedEncodeTag&) = delete;
++  SharedEncodeTag& operator=(const SharedEncodeTag&) = delete;
++
++  // Takes a source number, once; false when none was free (frames then stay
++  // untagged).
++  bool Enable();
++  int slot() const { return slot_.load(std::memory_order_acquire); }
++  // The id the next frame carries, or 0 while not enabled.
++  uint16_t NextFrameId();
++
++ private:
++  std::atomic<int> slot_{0};
++  std::atomic<uint32_t> seq_{0};
++};
++
++// The parameters of the trial, e.g.
++// "Fogata-SharedScreenEncode/Enabled,key_ms:500,live_ms:300/".
++struct SharedEncodeConfig {
++  // At least this long between key frames a group makes on request.
++  int key_ms = 1000;
++  // A member that asked for no frame for this long of frame time while others
++  // did is paused: it gets nothing until a key frame once it asks again.
++  int live_ms = 250;
++  // A member whose bitrate stays under isolate_ratio times the median of the
++  // others' (at least two others) for isolate_ms gets an encoder of its own.
++  double isolate_ratio = 0.5;
++  int isolate_ms = 3000;
++  // So does a member that asks for a key frame this many times in 10 s.
++  int isolate_keys = 3;
++  // An isolated member whose bitrate has been at least the group's for this
++  // long rejoins it (doubling, up to 16 times, each time it did not stay 20 s).
++  int rejoin_ms = 10000;
++  // Encoder threads of a group's encoder; unset keeps what the connections ask.
++  std::optional<int> threads;
++
++  static SharedEncodeConfig Parse(const webrtc::FieldTrialsView& trials);
++};
++
++class SharedEncodeRegistry;
++
++// See the top of this file. Thread-safe as the factory it wraps is.
++class SharedEncoderFactory final : public webrtc::VideoEncoderFactory {
++ public:
++  explicit SharedEncoderFactory(
++      std::unique_ptr<webrtc::VideoEncoderFactory> inner);
++  ~SharedEncoderFactory() override;
++
++  using webrtc::VideoEncoderFactory::QueryCodecSupport;
++  std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override;
++  std::vector<webrtc::SdpVideoFormat> GetImplementations() const override;
++  CodecSupport QueryCodecSupport(
++      const webrtc::SdpVideoFormat& format,
++      std::optional<std::string> scalability_mode,
++      std::optional<webrtc::Resolution> resolution) const override;
++  // The inner factory's encoder, unless the trial is on and `format` is VP8.
++  std::unique_ptr<webrtc::VideoEncoder> Create(
++      const webrtc::Environment& env,
++      const webrtc::SdpVideoFormat& format) override;
++  std::unique_ptr<EncoderSelectorInterface> GetEncoderSelector() const override;
++
++ private:
++  // Kept by every proxy and group too, so the inner factory outlives them.
++  std::shared_ptr<SharedEncodeRegistry> registry_;
++};
++
++}  // namespace libwebrtc
++
++#endif  // LIB_WEBRTC_SHARED_ENCODER_H_
+diff --git a/src/internal/video_capturer.cc b/src/internal/video_capturer.cc
+index 88ef99b..0bb6d3e 100644
+--- a/src/internal/video_capturer.cc
++++ b/src/internal/video_capturer.cc
+@@ -11,6 +11,8 @@
+ #include "src/internal/video_capturer.h"
+ 
+ #include <algorithm>
++#include <cstdint>
++#include <optional>
+ 
+ #include "api/scoped_refptr.h"
+ #include "api/video/i420_buffer.h"
+@@ -23,7 +25,21 @@ namespace internal {
+ VideoCapturer::VideoCapturer() = default;
+ VideoCapturer::~VideoCapturer() = default;
+ 
+-void VideoCapturer::OnFrame(const VideoFrame& frame) {
++void VideoCapturer::EnableSharedEncode() {
++  shared_encode_tag_.Enable();
++}
++
++void VideoCapturer::OnFrame(const VideoFrame& captured) {
++  // Tagged before adaptation, which keeps the id: every connection's encoder
++  // then tells the frames of this source and their order apart (the frames
++  // the adapter drops leave gaps in the count, which nothing minds).
++  std::optional<VideoFrame> tagged;
++  if (uint16_t id = shared_encode_tag_.NextFrameId()) {
++    tagged = captured;
++    tagged->set_id(id);
++  }
++  const VideoFrame& frame = tagged ? *tagged : captured;
++
+   int cropped_width = 0;
+   int cropped_height = 0;
+   int out_width = 0;
+diff --git a/src/internal/video_capturer.h b/src/internal/video_capturer.h
+index 4c0c414..8d32390 100644
+--- a/src/internal/video_capturer.h
++++ b/src/internal/video_capturer.h
+@@ -25,6 +25,7 @@
+ #include "rtc_base/synchronization/mutex.h"
+ #include "rtc_base/thread_annotations.h"
+ #include "rtc_video_processor.h"
++#include "src/internal/shared_encoder.h"
+ 
+ namespace webrtc {
+ namespace internal {
+@@ -52,6 +53,11 @@ class VideoCapturer : public webrtc::VideoSourceInterface<VideoFrame> {
+   void AddProcessor(libwebrtc::RTCVideoProcessor* processor);
+   void RemoveProcessor(libwebrtc::RTCVideoProcessor* processor);
+ 
++  // Tags every frame from now on as this source's (a screen), so every
++  // connection that sends it can share one encode of it (see
++  // src/internal/shared_encoder.h). Never called for cameras.
++  void EnableSharedEncode();
++
+  protected:
+   webrtc::VideoSinkWants GetSinkWants();
+ 
+@@ -63,6 +69,7 @@ class VideoCapturer : public webrtc::VideoSourceInterface<VideoFrame> {
+ 
+   webrtc::VideoBroadcaster broadcaster_;
+   webrtc::VideoAdapter video_adapter_;
++  libwebrtc::SharedEncodeTag shared_encode_tag_;
+   webrtc::Mutex processors_lock_;
+   std::vector<libwebrtc::RTCVideoProcessor*> processors_
+       RTC_GUARDED_BY(processors_lock_);
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index 3588ad4..07068e4 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -20,6 +20,7 @@
+ #include "rtc_rtp_capabilities_impl.h"
+ #include "rtc_video_device_impl.h"
+ #include "rtc_video_source_impl.h"
++#include "src/internal/shared_encoder.h"
+ #include "src/internal/vp8_size_gate.h"
+ #if defined(USE_INTEL_MEDIA_SDK)
+ #include "src/win/mediacapabilities.h"
+@@ -55,10 +56,13 @@ namespace {
+ 
+ // Fogata: calls use VP8 and Opus only, so no other codec is built in: one less
+ // decoder for what peers send. Every VP8 decoder refuses pictures larger than
+-// any copy sends before decoding them (see src/internal/vp8_size_gate.h).
++// any copy sends before decoding them (see src/internal/vp8_size_gate.h). With
++// the field trial Fogata-SharedScreenEncode, the connections that send a shared
++// screen at one size share one encoder (see src/internal/shared_encoder.h).
+ std::unique_ptr<webrtc::VideoEncoderFactory> CreateCallVideoEncoderFactory() {
+-  return std::make_unique<webrtc::VideoEncoderFactoryTemplate<
+-      webrtc::LibvpxVp8EncoderTemplateAdapter>>();
++  return std::make_unique<SharedEncoderFactory>(
++      std::make_unique<webrtc::VideoEncoderFactoryTemplate<
++          webrtc::LibvpxVp8EncoderTemplateAdapter>>());
+ }
+ 
+ std::unique_ptr<webrtc::VideoDecoderFactory> CreateCallVideoDecoderFactory() {
+diff --git a/src/rtc_video_source_impl.cc b/src/rtc_video_source_impl.cc
+index a44ef0a..ed42dd7 100644
+--- a/src/rtc_video_source_impl.cc
++++ b/src/rtc_video_source_impl.cc
+@@ -57,6 +57,13 @@ void RTCVideoSourceImpl::AddProcessor(RTCVideoProcessor* processor) {
+   }
+ }
+ 
++void RTCVideoSourceImpl::EnableSharedEncode() {
++  // The capturer every frame of this source goes through, desktop or custom.
++  if (processing_capturer_) {
++    processing_capturer_->EnableSharedEncode();
++  }
++}
++
+ void RTCVideoSourceImpl::RemoveProcessor(RTCVideoProcessor* processor) {
+   if (processing_capturer_) {
+     processing_capturer_->RemoveProcessor(processor);
+diff --git a/src/rtc_video_source_impl.h b/src/rtc_video_source_impl.h
+index ba01241..1eed88c 100644
+--- a/src/rtc_video_source_impl.h
++++ b/src/rtc_video_source_impl.h
+@@ -46,6 +46,8 @@ class RTCVideoSourceImpl : public RTCVideoSource {
+ 
+   void RemoveProcessor(RTCVideoProcessor* processor) override;
+ 
++  void EnableSharedEncode() override;
++
+  private:
+   webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface> rtc_source_track_;
+   // Receives frames from OnCapturedFrame. Null for desktop sources.
+diff --git a/test/shared_encoder.test.cc b/test/shared_encoder.test.cc
+new file mode 100644
+index 0000000..361a5cb
+--- /dev/null
++++ b/test/shared_encoder.test.cc
+@@ -0,0 +1,1013 @@
++#include "src/internal/shared_encoder.h"
++
++#include <algorithm>
++#include <atomic>
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "api/environment/environment.h"
++#include "api/units/data_rate.h"
++#include "api/units/time_delta.h"
++#include "api/units/timestamp.h"
++#include "api/video/encoded_image.h"
++#include "api/video/i420_buffer.h"
++#include "api/video/video_bitrate_allocation.h"
++#include "api/video/video_codec_type.h"
++#include "api/video/video_frame.h"
++#include "api/video/video_frame_type.h"
++#include "api/video_codecs/sdp_video_format.h"
++#include "api/video_codecs/video_codec.h"
++#include "api/video_codecs/video_encoder.h"
++#include "api/video_codecs/video_encoder_factory.h"
++#include "modules/video_coding/include/video_codec_interface.h"
++#include "modules/video_coding/include/video_error_codes.h"
++#include "rtc_base/event.h"
++#include "rtc_base/platform_thread.h"
++#include "rtc_base/synchronization/mutex.h"
++#include "test/create_test_environment.h"
++#include "test/gtest.h"
++#include "test/time_controller/simulated_time_controller.h"
++
++namespace {
++
++using libwebrtc::SharedEncodeFrameId;
++using libwebrtc::SharedEncodeSlotOf;
++using libwebrtc::SharedEncoderFactory;
++using webrtc::CodecSpecificInfo;
++using webrtc::EncodedImage;
++using webrtc::EncodedImageCallback;
++using webrtc::Environment;
++using webrtc::SdpVideoFormat;
++using webrtc::TimeDelta;
++using webrtc::Timestamp;
++using webrtc::VideoCodec;
++using webrtc::VideoEncoder;
++using webrtc::VideoFrame;
++using webrtc::VideoFrameType;
++
++constexpr char kTrial[] = "Fogata-SharedScreenEncode/Enabled/";
++constexpr int64_t kFrameMs = 33;
++constexpr int64_t kFirstFrameMs = 1000;
++
++// What one encoder the inner factory made was asked to do.
++struct EncoderRecord {
++  webrtc::Mutex mutex;
++  int inits = 0;
++  int releases = 0;
++  bool destroyed = false;
++  int width = 0;
++  std::vector<uint16_t> frame_ids;
++  std::vector<bool> keys_made;
++  std::optional<uint32_t> bitrate_bps;
++  bool drop_first = false;
++  // InitEncode waits for it when set.
++  webrtc::Event* init_gate = nullptr;
++};
++
++// Encodes nothing: each image is one byte, the count of images it made,
++// in a buffer of its own. A key frame when asked or first.
++class CountingEncoder : public VideoEncoder {
++ public:
++  explicit CountingEncoder(std::shared_ptr<EncoderRecord> record)
++      : record_(std::move(record)) {}
++  ~CountingEncoder() override {
++    webrtc::MutexLock lock(&record_->mutex);
++    record_->destroyed = true;
++  }
++
++  int InitEncode(const VideoCodec* codec, const Settings&) override {
++    if (record_->init_gate != nullptr) {
++      record_->init_gate->Wait(webrtc::Event::kForever);
++    }
++    webrtc::MutexLock lock(&record_->mutex);
++    ++record_->inits;
++    record_->width = codec->width;
++    width_ = codec->width;
++    height_ = codec->height;
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++  int32_t RegisterEncodeCompleteCallback(
++      EncodedImageCallback* callback) override {
++    callback_ = callback;
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++  int32_t Release() override {
++    webrtc::MutexLock lock(&record_->mutex);
++    ++record_->releases;
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++  int32_t Encode(const VideoFrame& frame,
++                 const std::vector<VideoFrameType>* frame_types) override {
++    bool key_asked = false;
++    for (VideoFrameType type : *frame_types) {
++      key_asked |= type == VideoFrameType::kVideoFrameKey;
++    }
++    const bool key = key_asked || made_ == 0;
++    {
++      webrtc::MutexLock lock(&record_->mutex);
++      record_->frame_ids.push_back(frame.id());
++      if (record_->drop_first) {
++        // Dropped by the encoder itself: no image, no callback.
++        record_->drop_first = false;
++        record_->keys_made.push_back(false);
++        return WEBRTC_VIDEO_CODEC_OK;
++      }
++      record_->keys_made.push_back(key);
++    }
++    const uint8_t count = static_cast<uint8_t>(made_++);
++    EncodedImage image;
++    image.SetEncodedData(webrtc::EncodedImageBuffer::Create(&count, 1));
++    image.SetRtpTimestamp(frame.rtp_timestamp());
++    image._frameType =
++        key ? VideoFrameType::kVideoFrameKey : VideoFrameType::kVideoFrameDelta;
++    image._encodedWidth = width_;
++    image._encodedHeight = height_;
++    CodecSpecificInfo info;
++    info.codecType = webrtc::kVideoCodecVP8;
++    if (callback_ != nullptr) {
++      callback_->OnEncodedImage(image, &info);
++    }
++    return WEBRTC_VIDEO_CODEC_OK;
++  }
++  void SetRates(const RateControlParameters& parameters) override {
++    webrtc::MutexLock lock(&record_->mutex);
++    record_->bitrate_bps = parameters.bitrate.get_sum_bps();
++  }
++  EncoderInfo GetEncoderInfo() const override {
++    EncoderInfo info;
++    info.implementation_name = "fake";
++    return info;
++  }
++
++ private:
++  const std::shared_ptr<EncoderRecord> record_;
++  EncodedImageCallback* callback_ = nullptr;
++  int made_ = 0;
++  uint32_t width_ = 0;
++  uint32_t height_ = 0;
++};
++
++class CountingFactory : public webrtc::VideoEncoderFactory {
++ public:
++  std::vector<SdpVideoFormat> GetSupportedFormats() const override {
++    return {SdpVideoFormat::VP8()};
++  }
++  std::unique_ptr<VideoEncoder> Create(const Environment&,
++                                       const SdpVideoFormat&) override {
++    auto record = std::make_shared<EncoderRecord>();
++    record->drop_first = drop_first_frame;
++    record->init_gate = init_gate;
++    auto encoder = std::make_unique<CountingEncoder>(record);
++    webrtc::MutexLock lock(&mutex);
++    records.push_back(record);
++    last_made = encoder.get();
++    return encoder;
++  }
++
++  // The encoders that were initialized (a proxy may also make one only to
++  // ask what it is).
++  std::vector<std::shared_ptr<EncoderRecord>> Initialized() {
++    webrtc::MutexLock lock(&mutex);
++    std::vector<std::shared_ptr<EncoderRecord>> initialized;
++    for (const auto& record : records) {
++      webrtc::MutexLock record_lock(&record->mutex);
++      if (record->inits > 0) {
++        initialized.push_back(record);
++      }
++    }
++    return initialized;
++  }
++
++  webrtc::Mutex mutex;
++  std::vector<std::shared_ptr<EncoderRecord>> records;
++  VideoEncoder* last_made = nullptr;
++  bool drop_first_frame = false;
++  webrtc::Event* init_gate = nullptr;
++};
++
++class RecordingCallback : public EncodedImageCallback {
++ public:
++  struct Got {
++    uint32_t rtp_timestamp;
++    uint8_t count;
++    bool key;
++    const void* buffer;
++  };
++
++  Result OnEncodedImage(const EncodedImage& image,
++                        const CodecSpecificInfo*) override {
++    webrtc::MutexLock lock(&mutex_);
++    images_.push_back({image.RtpTimestamp(), image.data()[0], image.IsKey(),
++                       image.GetEncodedData().get()});
++    return Result(Result::OK);
++  }
++  void OnFrameDropped(uint32_t, int, bool) override {}
++
++  std::vector<Got> images() {
++    webrtc::MutexLock lock(&mutex_);
++    return images_;
++  }
++  size_t size() {
++    webrtc::MutexLock lock(&mutex_);
++    return images_.size();
++  }
++
++ private:
++  webrtc::Mutex mutex_;
++  std::vector<Got> images_;
++};
++
++VideoCodec Codec(int width,
++                 int height,
++                 webrtc::VideoCodecMode mode =
++                     webrtc::VideoCodecMode::kRealtimeVideo) {
++  VideoCodec codec;
++  codec.codecType = webrtc::kVideoCodecVP8;
++  *codec.VP8() = VideoEncoder::GetDefaultVp8Settings();
++  codec.width = width;
++  codec.height = height;
++  codec.startBitrate = 1000;
++  codec.minBitrate = 30;
++  codec.maxBitrate = 6000;
++  codec.maxFramerate = 30;
++  codec.qpMax = 56;
++  codec.active = true;
++  codec.mode = mode;
++  codec.numberOfSimulcastStreams = 1;
++  codec.simulcastStream[0].width = width;
++  codec.simulcastStream[0].height = height;
++  codec.simulcastStream[0].numberOfTemporalLayers = 1;
++  codec.simulcastStream[0].maxBitrate = 6000;
++  codec.simulcastStream[0].qpMax = 56;
++  codec.simulcastStream[0].active = true;
++  return codec;
++}
++
++VideoEncoder::RateControlParameters Rates(uint32_t bps) {
++  webrtc::VideoBitrateAllocation allocation;
++  allocation.SetBitrate(0, 0, bps);
++  return VideoEncoder::RateControlParameters(
++      allocation, 30.0, webrtc::DataRate::BitsPerSec(bps));
++}
++
++int64_t FrameMs(int n) {
++  return kFirstFrameMs + kFrameMs * n;
++}
++
++// Frame `n` of source `slot` (0: untagged), as the capturer sends it.
++VideoFrame Frame(int slot, int n, int width = 1280, int height = 720) {
++  return VideoFrame::Builder()
++      .set_video_frame_buffer(webrtc::I420Buffer::Create(width, height))
++      .set_timestamp_us(FrameMs(n) * 1000)
++      .set_id(slot == 0 ? uint16_t{0} : SharedEncodeFrameId(slot, n))
++      .build();
++}
++
++// One connection's VideoStreamEncoder, as far as its encoder sees it: its own
++// clock offset for RTP timestamps, a key frame asked for after every
++// InitEncode.
++class Watcher {
++ public:
++  Watcher(webrtc::VideoEncoderFactory& factory,
++          const Environment& env,
++          int64_t ntp_delta_ms)
++      : encoder_(factory.Create(env, SdpVideoFormat::VP8())),
++        ntp_delta_ms_(ntp_delta_ms) {}
++
++  void Init(int width = 1280,
++            int height = 720,
++            webrtc::VideoCodecMode mode =
++                webrtc::VideoCodecMode::kRealtimeVideo,
++            uint32_t bps = 2000000) {
++    const VideoCodec codec = Codec(width, height, mode);
++    ASSERT_EQ(encoder_->InitEncode(
++                  &codec, VideoEncoder::Settings(
++                              VideoEncoder::Capabilities(false), 4, 1200)),
++              WEBRTC_VIDEO_CODEC_OK);
++    encoder_->RegisterEncodeCompleteCallback(&callback);
++    encoder_->SetRates(Rates(bps));
++    key_next_ = true;
++  }
++
++  int Ask(const VideoFrame& captured, bool key = false) {
++    VideoFrame frame = captured;
++    const int64_t ntp_ms = frame.render_time_ms() + ntp_delta_ms_;
++    frame.set_ntp_time_ms(ntp_ms);
++    frame.set_rtp_timestamp(90 * static_cast<uint32_t>(ntp_ms));
++    std::vector<VideoFrameType> types(1, key || key_next_
++                                             ? VideoFrameType::kVideoFrameKey
++                                             : VideoFrameType::kVideoFrameDelta);
++    key_next_ = false;
++    return encoder_->Encode(frame, &types);
++  }
++
++  // The RTP timestamp this connection gives frame `n`.
++  uint32_t Rtp(int n) const {
++    return 90 * static_cast<uint32_t>(FrameMs(n) + ntp_delta_ms_);
++  }
++
++  VideoEncoder& encoder() { return *encoder_; }
++
++  RecordingCallback callback;
++
++ private:
++  std::unique_ptr<VideoEncoder> encoder_;
++  const int64_t ntp_delta_ms_;
++  bool key_next_ = true;
++};
++
++int Keys(const std::vector<RecordingCallback::Got>& images) {
++  int keys = 0;
++  for (const auto& image : images) {
++    keys += image.key ? 1 : 0;
++  }
++  return keys;
++}
++
++// Images 0, 1, 2, ... of one encoder, none missing, none twice.
++void ExpectContinuous(const std::vector<RecordingCallback::Got>& images,
++                      size_t from = 0,
++                      size_t to = SIZE_MAX) {
++  for (size_t i = from + 1; i < std::min(images.size(), to); ++i) {
++    EXPECT_EQ(images[i].count, static_cast<uint8_t>(images[i - 1].count + 1))
++        << "at image " << i;
++  }
++}
++
++class SharedEncoderTest : public ::testing::Test {
++ protected:
++  explicit SharedEncoderTest(const char* trials = kTrial)
++      : time_(Timestamp::Seconds(10000)),
++        env_(webrtc::CreateTestEnvironment(
++            {.field_trials = trials, .time = &time_})) {
++    auto inner = std::make_unique<CountingFactory>();
++    inner_ = inner.get();
++    factory_ = std::make_unique<SharedEncoderFactory>(std::move(inner));
++  }
++
++  std::unique_ptr<Watcher> NewWatcher(int64_t ntp_delta_ms) {
++    return std::make_unique<Watcher>(*factory_, env_, ntp_delta_ms);
++  }
++
++  // Lets the group encode what was asked for, then one frame's time pass.
++  void Encode() { time_.AdvanceTime(TimeDelta::Zero()); }
++  void NextFrame() { time_.AdvanceTime(TimeDelta::Millis(kFrameMs)); }
++
++  webrtc::GlobalSimulatedTimeController time_;
++  const Environment env_;
++  CountingFactory* inner_ = nullptr;
++  std::unique_ptr<SharedEncoderFactory> factory_;
++};
++
++class SharedEncoderTrialOffTest : public SharedEncoderTest {
++ protected:
++  SharedEncoderTrialOffTest() : SharedEncoderTest("") {}
++};
++
++TEST_F(SharedEncoderTest, MembersOfOneSourceAndSizeShareOneEncoder) {
++  std::vector<std::unique_ptr<Watcher>> watchers;
++  for (int64_t delta : {100, 2000, 777777}) {
++    watchers.push_back(NewWatcher(delta));
++    watchers.back()->Init();
++  }
++  for (int n = 0; n < 10; ++n) {
++    for (auto& watcher : watchers) {
++      EXPECT_EQ(watcher->Ask(Frame(1, n)), WEBRTC_VIDEO_CODEC_OK);
++    }
++    NextFrame();
++  }
++
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 1u);
++  EXPECT_EQ(encoders[0]->frame_ids.size(), 10u);  // Each frame once.
++  const auto first = watchers[0]->callback.images();
++  for (auto& watcher : watchers) {
++    const auto images = watcher->callback.images();
++    ASSERT_EQ(images.size(), 10u);
++    EXPECT_TRUE(images[0].key);
++    EXPECT_EQ(Keys(images), 1);
++    for (int n = 0; n < 10; ++n) {
++      EXPECT_EQ(images[n].count, n);
++      EXPECT_EQ(images[n].rtp_timestamp, watcher->Rtp(n));
++      EXPECT_EQ(images[n].buffer, first[n].buffer);  // Not copied.
++    }
++    EXPECT_EQ(watcher->encoder().GetEncoderInfo().implementation_name,
++              "fake (shared 3)");
++  }
++}
++
++TEST_F(SharedEncoderTest, OtherSizesAndSourcesGetTheirOwn) {
++  auto a = NewWatcher(10);
++  auto smaller = NewWatcher(20);
++  auto other_source = NewWatcher(30);
++  auto screenshare = NewWatcher(40);
++  a->Init();
++  smaller->Init(960, 540);
++  other_source->Init();
++  screenshare->Init(1280, 720, webrtc::VideoCodecMode::kScreensharing);
++  for (int n = 0; n < 5; ++n) {
++    a->Ask(Frame(1, n));
++    smaller->Ask(Frame(1, n, 960, 540));
++    other_source->Ask(Frame(2, n));
++    screenshare->Ask(Frame(1, n));
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 4u);
++  for (const auto& encoder : encoders) {
++    EXPECT_EQ(encoder->frame_ids.size(), 5u);
++  }
++  for (Watcher* watcher : {a.get(), smaller.get(), other_source.get(),
++                           screenshare.get()}) {
++    EXPECT_EQ(watcher->callback.size(), 5u);
++  }
++}
++
++TEST_F(SharedEncoderTest, UntaggedFramesAreNeverShared) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  for (int n = 0; n < 10; ++n) {
++    a->Ask(Frame(0, n));
++    if (n % 2 == 0) {
++      b->Ask(Frame(0, n));
++    }
++    // Encoded on the asker's thread, before Encode returns, as by the inner
++    // encoder itself.
++    EXPECT_EQ(a->callback.size(), static_cast<size_t>(n + 1));
++    EXPECT_EQ(b->callback.size(), static_cast<size_t>(n / 2 + 1));
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 2u);
++  EXPECT_EQ(encoders[0]->frame_ids.size() + encoders[1]->frame_ids.size(),
++            15u);
++  EXPECT_EQ(a->encoder().GetEncoderInfo().implementation_name, "fake");
++  const auto images = b->callback.images();
++  for (size_t i = 0; i < images.size(); ++i) {
++    EXPECT_EQ(images[i].rtp_timestamp, b->Rtp(2 * static_cast<int>(i)));
++  }
++}
++
++TEST_F(SharedEncoderTrialOffTest, TrialOffGivesTheInnerEncoder) {
++  std::unique_ptr<VideoEncoder> encoder =
++      factory_->Create(env_, SdpVideoFormat::VP8());
++  ASSERT_NE(encoder, nullptr);
++  EXPECT_EQ(encoder.get(), inner_->last_made);
++}
++
++TEST_F(SharedEncoderTest, OtherCodecsGetTheInnerEncoder) {
++  std::unique_ptr<VideoEncoder> encoder =
++      factory_->Create(env_, SdpVideoFormat("VP9"));
++  ASSERT_NE(encoder, nullptr);
++  EXPECT_EQ(encoder.get(), inner_->last_made);
++}
++
++TEST_F(SharedEncoderTest,
++       ASkippedFrameIsPushedWithTheTimestampItsEncoderWouldHaveGiven) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(98765);
++  a->Init();
++  b->Init();
++  for (int n = 0; n < 10; ++n) {
++    a->Ask(Frame(1, n));
++    if (n != 5) {
++      b->Ask(Frame(1, n));
++    }
++    NextFrame();
++    if (n == 5) {
++      // One frame later it has it anyway.
++      EXPECT_EQ(b->callback.size(), 6u);
++    }
++  }
++  const auto images = b->callback.images();
++  ASSERT_EQ(images.size(), 10u);
++  ExpectContinuous(images);
++  EXPECT_EQ(images[5].count, 5);
++  EXPECT_EQ(images[5].rtp_timestamp, b->Rtp(5));
++  EXPECT_EQ(images[6].rtp_timestamp, b->Rtp(6));
++  EXPECT_EQ(Keys(images), 1);
++  EXPECT_EQ(inner_->Initialized()[0]->frame_ids.size(), 10u);
++}
++
++TEST_F(SharedEncoderTest, AFrameAskedForAfterItWasEncodedIsMatched) {
++  // One connection's encoder thread late by a few milliseconds: the image
++  // waits for it, with its own RTP timestamp.
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  a->Ask(Frame(1, 0));
++  b->Ask(Frame(1, 0));
++  NextFrame();
++  for (int n = 1; n < 6; ++n) {
++    a->Ask(Frame(1, n));
++    Encode();
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  const auto images = b->callback.images();
++  ASSERT_EQ(images.size(), 6u);
++  ExpectContinuous(images);
++  for (int n = 0; n < 6; ++n) {
++    EXPECT_EQ(images[n].rtp_timestamp, b->Rtp(n));
++  }
++}
++
++TEST_F(SharedEncoderTest, ALateJoinerStartsOnAKeptKeyFrame) {
++  // At the start of a share every connection asks for the first frame, one
++  // a little after the other: the group encoded it for the first already.
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  a->Ask(Frame(1, 0));
++  Encode();
++  a->Ask(Frame(1, 1));
++  Encode();
++  b->Ask(Frame(1, 0));
++  // The key frame at once, the frame after it one frame later at most.
++  EXPECT_EQ(b->callback.size(), 1u);
++  NextFrame();
++  EXPECT_EQ(b->callback.size(), 2u);
++  for (int n = 1; n < 40; ++n) {
++    if (n > 1) {
++      a->Ask(Frame(1, n));
++    }
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  const auto images = b->callback.images();
++  ASSERT_EQ(images.size(), 40u);
++  EXPECT_TRUE(images[0].key);
++  EXPECT_EQ(images[0].rtp_timestamp, b->Rtp(0));
++  EXPECT_EQ(images[1].rtp_timestamp, b->Rtp(1));
++  ExpectContinuous(images);
++  // No second key frame was made for it.
++  EXPECT_EQ(Keys(a->callback.images()), 1);
++}
++
++TEST_F(SharedEncoderTest, AJoinerWaitsForAKeyFrame) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  auto c = NewWatcher(30);
++  constexpr int kJoinAt = 10;
++  for (int n = 0; n < 60; ++n) {
++    if (n == kJoinAt) {
++      c->Init();
++    }
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    if (n >= kJoinAt) {
++      c->Ask(Frame(1, n));
++    }
++    NextFrame();
++  }
++  const auto images = c->callback.images();
++  ASSERT_FALSE(images.empty());
++  EXPECT_TRUE(images.front().key);
++  ExpectContinuous(images);
++  // Within key_ms (1 s) of the group's last key frame, which was frame 0.
++  const size_t waited = 60 - kJoinAt - images.size();
++  EXPECT_LE(FrameMs(kJoinAt + waited), FrameMs(0) + 1000 + kFrameMs);
++  // The others got that key frame too, and nothing else was lost.
++  EXPECT_EQ(Keys(a->callback.images()), 2);
++  ExpectContinuous(a->callback.images());
++  EXPECT_EQ(inner_->Initialized().size(), 1u);
++}
++
++TEST_F(SharedEncoderTest, KeyFramesAreRateLimited) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  // Frames 0 to 30 span one second; a asks for a key frame 10 times in it.
++  for (int n = 0; n <= 33; ++n) {
++    a->Ask(Frame(1, n), /*key=*/n > 0 && n % 3 == 0);
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 1u);  // Not isolated: asks while one is due.
++  int keys = 0;
++  for (bool key : encoders[0]->keys_made) {
++    keys += key ? 1 : 0;
++  }
++  EXPECT_LE(keys, 2);
++  EXPECT_EQ(Keys(b->callback.images()), keys);
++  ExpectContinuous(b->callback.images());
++}
++
++TEST_F(SharedEncoderTest, APausedMemberStopsAndComesBackOnAKeyFrame) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  for (int n = 0; n < 10; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  for (int n = 10; n < 30; ++n) {
++    a->Ask(Frame(1, n));  // b asks nothing: no bitrate, or network down.
++    NextFrame();
++  }
++  const auto while_silent = b->callback.images();
++  // At most live_ms (250 ms) of frames pushed, then none.
++  EXPECT_GE(while_silent.size(), 10u);
++  EXPECT_LE(while_silent.size(), 10u + 250 / kFrameMs + 1);
++  ExpectContinuous(while_silent);
++  for (int n = 30; n < 70; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  const auto images = b->callback.images();
++  ASSERT_GT(images.size(), while_silent.size());
++  EXPECT_TRUE(images[while_silent.size()].key);
++  ExpectContinuous(images, while_silent.size());
++  ExpectContinuous(a->callback.images());
++}
++
++TEST_F(SharedEncoderTest, AStillScreenPausesNobody) {
++  std::vector<std::unique_ptr<Watcher>> watchers;
++  for (int64_t delta : {10, 20, 30}) {
++    watchers.push_back(NewWatcher(delta));
++    watchers.back()->Init();
++  }
++  int n = 0;
++  for (; n < 5; ++n) {
++    for (auto& watcher : watchers) {
++      watcher->Ask(Frame(1, n));
++    }
++    NextFrame();
++  }
++  time_.AdvanceTime(TimeDelta::Seconds(5));
++  // After 5 s without a frame, the first to ask makes the group encode before
++  // the others ask.
++  for (; n < 10; ++n) {
++    VideoFrame frame = Frame(1, n);
++    frame.set_timestamp_us(frame.timestamp_us() + 5000000);
++    watchers[0]->Ask(frame);
++    Encode();
++    watchers[1]->Ask(frame);
++    watchers[2]->Ask(frame);
++    NextFrame();
++  }
++  for (auto& watcher : watchers) {
++    const auto images = watcher->callback.images();
++    EXPECT_EQ(images.size(), 10u);
++    EXPECT_EQ(Keys(images), 1);
++    ExpectContinuous(images);
++  }
++}
++
++TEST_F(SharedEncoderTest, RatesAreTheLowestLiveMembers) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  auto c = NewWatcher(30);
++  a->Init(1280, 720, webrtc::VideoCodecMode::kRealtimeVideo, 3000000);
++  b->Init(1280, 720, webrtc::VideoCodecMode::kRealtimeVideo, 2000000);
++  c->Init(1280, 720, webrtc::VideoCodecMode::kRealtimeVideo, 500000);
++  int n = 0;
++  for (; n < 5; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    c->Ask(Frame(1, n));
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 1u);
++  EXPECT_EQ(encoders[0]->bitrate_bps, 500000u);
++  for (; n < 20; ++n) {  // c paused.
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  EXPECT_EQ(encoders[0]->bitrate_bps, 2000000u);
++}
++
++TEST_F(SharedEncoderTest, ASlowMemberIsIsolated) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  auto c = NewWatcher(30);
++  a->Init(1280, 720, webrtc::VideoCodecMode::kRealtimeVideo, 3000000);
++  b->Init(1280, 720, webrtc::VideoCodecMode::kRealtimeVideo, 900000);
++  c->Init(1280, 720, webrtc::VideoCodecMode::kRealtimeVideo, 3000000);
++  for (int n = 0; n < 4000 / kFrameMs; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    c->Ask(Frame(1, n));
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 2u);
++  EXPECT_EQ(encoders[0]->bitrate_bps, 3000000u);
++  EXPECT_EQ(encoders[1]->bitrate_bps, 900000u);
++  EXPECT_EQ(Keys(a->callback.images()), 1);
++  EXPECT_EQ(Keys(c->callback.images()), 1);
++  ExpectContinuous(a->callback.images());
++  // b: its own encoder's images, from a key frame.
++  const auto images = b->callback.images();
++  size_t own = 0;
++  for (size_t i = 1; i < images.size(); ++i) {
++    if (images[i].count == 0) {
++      own = i;
++    }
++  }
++  ASSERT_GT(own, 0u);
++  EXPECT_TRUE(images[own].key);
++  ExpectContinuous(images, own);
++  EXPECT_EQ(b->encoder().GetEncoderInfo().implementation_name, "fake");
++  EXPECT_EQ(a->encoder().GetEncoderInfo().implementation_name,
++            "fake (shared 2)");
++}
++
++TEST_F(SharedEncoderTest, ALossyMemberIsIsolated) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  auto c = NewWatcher(30);
++  a->Init();
++  b->Init();
++  c->Init();
++  const std::set<int> lost = {30, 90, 150};
++  for (int n = 0; n < 180; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n), /*key=*/lost.count(n) > 0);
++    c->Ask(Frame(1, n));
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 2u);
++  // The first two were given to everyone; the third request isolated b.
++  EXPECT_EQ(Keys(a->callback.images()), 3);
++  EXPECT_EQ(Keys(c->callback.images()), 3);
++  for (size_t i = 150; i < encoders[0]->keys_made.size(); ++i) {
++    EXPECT_FALSE(encoders[0]->keys_made[i]) << "frame " << i;
++  }
++  ASSERT_FALSE(encoders[1]->keys_made.empty());
++  EXPECT_TRUE(encoders[1]->keys_made[0]);
++}
++
++TEST_F(SharedEncoderTest, NewSettingsMoveToANewGroupAndTheOldOneGoes) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  int n = 0;
++  for (; n < 5; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  auto old_encoder = inner_->Initialized()[0];
++  // The sharer's window got smaller: each VideoStreamEncoder initializes its
++  // encoder again.
++  a->encoder().Release();
++  a->Init(960, 540);
++  EXPECT_FALSE(old_encoder->destroyed);
++  b->encoder().Release();
++  // Its last member gone, the group went, with its encoder.
++  EXPECT_EQ(old_encoder->releases, 1);
++  EXPECT_TRUE(old_encoder->destroyed);
++  b->Init(960, 540);
++  const size_t before = a->callback.size();
++  for (; n < 10; ++n) {
++    a->Ask(Frame(1, n, 960, 540));
++    b->Ask(Frame(1, n, 960, 540));
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 2u);
++  EXPECT_EQ(encoders[1]->width, 960);
++  EXPECT_EQ(encoders[1]->frame_ids.size(), 5u);
++  const auto images = a->callback.images();
++  ASSERT_EQ(images.size(), before + 5);
++  EXPECT_TRUE(images[before].key);
++}
++
++TEST_F(SharedEncoderTest, TwoSourcesNeverMix) {
++  // The sharer switches screens: each connection moves to the new track in
++  // turn (replaceTrack), while the others still send the old one.
++  std::vector<std::unique_ptr<Watcher>> watchers;
++  for (int64_t delta : {10, 20, 30}) {
++    watchers.push_back(NewWatcher(delta));
++    watchers.back()->Init();
++  }
++  auto moves_at = [](int i) { return 10 + 2 * i; };
++  for (int n = 0; n < 60; ++n) {
++    for (int i = 0; i < 3; ++i) {
++      watchers[i]->Ask(Frame(n >= moves_at(i) ? 2 : 1, n));
++    }
++    NextFrame();
++  }
++  auto encoders = inner_->Initialized();
++  ASSERT_EQ(encoders.size(), 2u);
++  for (const auto& encoder : encoders) {
++    ASSERT_FALSE(encoder->frame_ids.empty());
++    const int slot = SharedEncodeSlotOf(encoder->frame_ids[0]);
++    for (uint16_t id : encoder->frame_ids) {
++      EXPECT_EQ(SharedEncodeSlotOf(id), slot);
++    }
++  }
++  for (int i = 0; i < 3; ++i) {
++    // Every frame of the old screen until it moved, then the new screen's
++    // from a key frame on.
++    const auto images = watchers[i]->callback.images();
++    const size_t moved = static_cast<size_t>(moves_at(i));
++    ASSERT_GT(images.size(), moved);
++    for (size_t k = 0; k < moved; ++k) {
++      EXPECT_EQ(images[k].count, k);
++    }
++    EXPECT_TRUE(images[moved].key);
++    ExpectContinuous(images, moved);
++  }
++}
++
++TEST_F(SharedEncoderTest, AKeyFrameTheEncoderDroppedIsAskedAgain) {
++  inner_->drop_first_frame = true;
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  b->Init();
++  for (int n = 0; n < 5; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  for (Watcher* watcher : {a.get(), b.get()}) {
++    const auto images = watcher->callback.images();
++    ASSERT_EQ(images.size(), 4u);
++    EXPECT_TRUE(images[0].key);
++    EXPECT_EQ(images[0].rtp_timestamp, watcher->Rtp(1));
++  }
++}
++
++TEST_F(SharedEncoderTest, EncodeBeforeTheCallbackWaitsForAKeyFrame) {
++  auto a = NewWatcher(10);
++  auto b = NewWatcher(20);
++  a->Init();
++  const VideoCodec codec = Codec(1280, 720);
++  b->encoder().InitEncode(
++      &codec,
++      VideoEncoder::Settings(VideoEncoder::Capabilities(false), 4, 1200));
++  b->encoder().SetRates(Rates(2000000));
++  int n = 0;
++  for (; n < 5; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  EXPECT_EQ(b->callback.size(), 0u);
++  b->encoder().RegisterEncodeCompleteCallback(&b->callback);
++  for (; n < 50; ++n) {
++    a->Ask(Frame(1, n));
++    b->Ask(Frame(1, n));
++    NextFrame();
++  }
++  const auto images = b->callback.images();
++  ASSERT_FALSE(images.empty());
++  EXPECT_TRUE(images[0].key);
++  ExpectContinuous(images);
++}
++
++// With real threads: the group delivers on its own thread while a connection
++// releases its encoder on another.
++TEST(SharedEncoder, NoDeliveryAfterRelease) {
++  const Environment env = webrtc::CreateTestEnvironment({.field_trials = kTrial});
++  // The group's encoder starts only once both connections asked for the first
++  // frame, so both are its members when it is delivered.
++  webrtc::Event init_gate;
++  auto inner = std::make_unique<CountingFactory>();
++  inner->init_gate = &init_gate;
++  SharedEncoderFactory factory(std::move(inner));
++
++  class GatedCallback : public EncodedImageCallback {
++   public:
++    Result OnEncodedImage(const EncodedImage&,
++                          const CodecSpecificInfo*) override {
++      if (count.fetch_add(1) == 0) {
++        entered.Set();
++        gate.Wait(webrtc::Event::kForever);
++      }
++      return Result(Result::OK);
++    }
++    void OnFrameDropped(uint32_t, int, bool) override {}
++    webrtc::Event entered;
++    webrtc::Event gate;
++    std::atomic<int> count{0};
++  } gated;
++
++  class CountingCallback : public EncodedImageCallback {
++   public:
++    Result OnEncodedImage(const EncodedImage&,
++                          const CodecSpecificInfo*) override {
++      if (count.fetch_add(1) + 1 == 4) {
++        four.Set();
++      }
++      return Result(Result::OK);
++    }
++    void OnFrameDropped(uint32_t, int, bool) override {}
++    webrtc::Event four;
++    std::atomic<int> count{0};
++  } counting;
++
++  const VideoCodec codec = Codec(1280, 720);
++  const VideoEncoder::Settings settings(VideoEncoder::Capabilities(false), 4,
++                                        1200);
++  std::unique_ptr<VideoEncoder> a = factory.Create(env, SdpVideoFormat::VP8());
++  std::unique_ptr<VideoEncoder> b = factory.Create(env, SdpVideoFormat::VP8());
++  for (auto* encoder : {a.get(), b.get()}) {
++    encoder->InitEncode(&codec, settings);
++    encoder->SetRates(Rates(2000000));
++  }
++  a->RegisterEncodeCompleteCallback(&gated);
++  b->RegisterEncodeCompleteCallback(&counting);
++  std::vector<VideoFrameType> key(1, VideoFrameType::kVideoFrameKey);
++  std::vector<VideoFrameType> delta(1, VideoFrameType::kVideoFrameDelta);
++
++  // a joined first, so the group delivers to it first, and waits there.
++  VideoFrame frame = Frame(1, 0);
++  frame.set_rtp_timestamp(1000);
++  a->Encode(frame, &key);
++  b->Encode(frame, &key);
++  init_gate.Set();
++  ASSERT_TRUE(gated.entered.Wait(TimeDelta::Seconds(5)));
++
++  std::atomic<bool> released{false};
++  webrtc::PlatformThread releasing = webrtc::PlatformThread::SpawnJoinable(
++      [&] {
++        a->Release();
++        released = true;
++      },
++      "release");
++  webrtc::Event().Wait(TimeDelta::Millis(100));
++  EXPECT_FALSE(released.load());  // The delivery is still under way.
++  gated.gate.Set();
++  releasing.Finalize();
++  EXPECT_TRUE(released.load());
++
++  for (int n = 1; n < 4; ++n) {
++    VideoFrame next = Frame(1, n);
++    next.set_rtp_timestamp(1000 + 90 * kFrameMs * n);
++    b->Encode(next, &delta);
++  }
++  ASSERT_TRUE(counting.four.Wait(TimeDelta::Seconds(5)));
++  EXPECT_EQ(gated.count.load(), 1);  // Nothing after Release.
++  b->Release();
++}
++
++TEST(SharedEncodeSlots, FifteenThenNone) {
++  std::vector<int> slots;
++  for (int i = 0; i < libwebrtc::kSharedEncodeSlots; ++i) {
++    slots.push_back(libwebrtc::AcquireSharedEncodeSlot());
++  }
++  EXPECT_EQ(std::set<int>(slots.begin(), slots.end()).size(), 15u);
++  for (int slot : slots) {
++    EXPECT_GE(slot, 1);
++    EXPECT_LE(slot, 15);
++  }
++  EXPECT_EQ(libwebrtc::AcquireSharedEncodeSlot(), 0);
++
++  {
++    // The 16th source stays untagged, so it is never shared.
++    libwebrtc::SharedEncodeTag tag;
++    EXPECT_FALSE(tag.Enable());
++    EXPECT_EQ(tag.NextFrameId(), 0);
++    EXPECT_EQ(tag.NextFrameId(), 0);
++
++    libwebrtc::ReleaseSharedEncodeSlot(slots[6]);
++    EXPECT_TRUE(tag.Enable());
++    EXPECT_EQ(tag.slot(), slots[6]);
++    EXPECT_EQ(tag.NextFrameId(), SharedEncodeFrameId(slots[6], 0));
++    EXPECT_EQ(tag.NextFrameId(), SharedEncodeFrameId(slots[6], 1));
++    EXPECT_EQ(SharedEncodeSlotOf(SharedEncodeFrameId(slots[6], 1)), slots[6]);
++  }
++  // Given back as the tag went.
++  EXPECT_EQ(libwebrtc::AcquireSharedEncodeSlot(), slots[6]);
++  for (int slot : slots) {
++    libwebrtc::ReleaseSharedEncodeSlot(slot);
++  }
++}
++
++TEST(SharedEncodeSlots, IdsCountTwelveBitsAndAreNeverZero) {
++  EXPECT_EQ(SharedEncodeFrameId(1, 0), 0x1000);
++  EXPECT_EQ(SharedEncodeFrameId(15, 0x0fff), 0xffff);
++  EXPECT_EQ(SharedEncodeFrameId(3, 0x1000), SharedEncodeFrameId(3, 0));
++  for (int slot = 1; slot <= libwebrtc::kSharedEncodeSlots; ++slot) {
++    for (uint32_t seq : {0u, 1u, 4095u, 4096u, 0xffffffffu}) {
++      EXPECT_NE(SharedEncodeFrameId(slot, seq), 0);
++      EXPECT_EQ(SharedEncodeSlotOf(SharedEncodeFrameId(slot, seq)), slot);
++    }
++  }
++  EXPECT_EQ(SharedEncodeSlotOf(0), 0);
++}
++
++}  // namespace
