@@ -36,7 +36,7 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    frame by frame for an updated region nobody reads, and WebRTC's log says every 10 s what
    a capture cost.
 7. `0007-encode-a-shared-screen-once`: one encoder for every connection that sends a shared
-   screen at one size, as the C++ wrapper's (`patches/wrapper/0012`, built in from
+   screen at one size, as the C++ wrapper's (`patches/wrapper/0017`, built in from
    `//libwebrtc` as `fogata_shared_encoder`, like the size check): the encoder factory given
    to `RTCPeerConnectionFactory` (`initWithAudioDeviceModuleType:...`, which the plugin
    uses, and `initWithEncoderFactory:decoderFactory:audioDevice:`) is wrapped in

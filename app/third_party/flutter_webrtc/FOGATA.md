@@ -152,7 +152,7 @@ thread each, 0.63 cores and 30 (measured with `tools/call-lab`).
 Every connection that sends a track has a `VideoStreamEncoder` of its own, which made an
 encoder of its own: a screen shared to seven watchers was encoded seven times, with seven
 libvpx encoders, their buffers and their threads, although each is given the same frames.
-libwebrtc's `SharedEncoderFactory` (wrapper patch 12, `src/internal/shared_encoder.h`; the
+libwebrtc's `SharedEncoderFactory` (wrapper patch 17, `src/internal/shared_encoder.h`; the
 macOS framework through Apple patch 7) has the connections that send one screen at the same
 settings share one encoder: a frame is encoded once and every connection gets the image with
 its own RTP timestamps. Each connection still packetizes, encrypts, paces and estimates on its

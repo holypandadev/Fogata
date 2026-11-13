@@ -1,5 +1,5 @@
 One encoder for every connection that sends a shared screen at one size, in the
-Objective-C SDK, as the C++ wrapper does (patches/wrapper/0012): the encoder factory the
+Objective-C SDK, as the C++ wrapper does (patches/wrapper/0017): the encoder factory the
 plugin passes is wrapped in //libwebrtc's SharedEncoderFactory (both initializers that
 take an RTCVideoEncoderFactory), ObjCVideoTrackSource tags the frames of a source marked
 with RTCVideoSource's enableFogataSharedEncode, and the field trial
@@ -16,7 +16,7 @@ index 236edc2..7d4230f 100644
  
 +    # Fogata: the connections that send a shared screen at one size share one
 +    # encoder of it, through the C++ wrapper's SharedEncoderFactory (copied in as
-+    # //libwebrtc, patches/wrapper/0012).
++    # //libwebrtc, patches/wrapper/0017).
 +    rtc_library("fogata_shared_encoder") {
 +      visibility = [ "*" ]
 +      include_dirs = [ "//libwebrtc" ]

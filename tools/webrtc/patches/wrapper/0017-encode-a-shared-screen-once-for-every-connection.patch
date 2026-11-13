@@ -24,7 +24,7 @@ its own: nothing on the wire changes.
 Tested by test/shared_encoder.test.cc.
 
 diff --git a/BUILD.gn b/BUILD.gn
-index f7e419b..93105dd 100644
+index 837b458..0bf322b 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
 @@ -118,6 +118,8 @@ rtc_shared_library("libwebrtc") {
@@ -61,10 +61,10 @@ index f7e419b..93105dd 100644
    ]
  
    # Fogata: cameras through the Camera portal and PipeWire on Linux
-@@ -352,12 +372,15 @@ if (rtc_include_tests) {
-        "test/video_processor.test.cc",
-        "test/vp8_size_gate.test.cc",
-        "test/custom_audio_transport.test.cc",
+@@ -355,12 +375,15 @@ if (rtc_include_tests) {
+        "test/voice_engine_muted.test.cc",
+        "test/portable_vector.test.cc",
+        "test/stats_callback.test.cc",
 +       "test/shared_encoder.test.cc",
  
         # Built in again: the library shows only its own API.
@@ -77,30 +77,28 @@ index f7e419b..93105dd 100644
      ]
  
      if (is_clang) {
-@@ -379,6 +402,23 @@ if (rtc_include_tests) {
-       "../api/audio:audio_frame_api",
-       "../call:audio_sender_interface",
-       "../modules/audio_mixer:audio_mixer_impl",
+@@ -390,6 +413,21 @@ if (rtc_include_tests) {
+       "../modules/audio_device:mock_audio_device",
+       "../modules/audio_processing:mocks",
+       "../test:run_loop",
 +      "../api:fec_controller_api",
 +      "../api:field_trials_view",
 +      "../api:time_controller",
 +      "../api/task_queue",
 +      "../api/units:data_rate",
-+      "../api/units:time_delta",
 +      "../api/units:timestamp",
 +      "../api/video:resolution",
 +      "../api/video:video_bitrate_allocation",
 +      "../api/video:video_frame_type",
 +      "../rtc_base:macromagic",
 +      "../rtc_base:platform_thread",
-+      "../rtc_base:rtc_event",
 +      "../rtc_base/experiments:field_trial_parser",
 +      "../rtc_base/synchronization:mutex",
 +      "../system_wrappers",
 +      "../test/time_controller",
        "../rtc_base:logging",
-       "//third_party/abseil-cpp/absl/strings",
-       "//testing/gtest",
+       "../api/units:time_delta",
+       "../rtc_base:rtc_event",
 diff --git a/include/rtc_video_source.h b/include/rtc_video_source.h
 index c56c731..7dc67f3 100644
 --- a/include/rtc_video_source.h
@@ -1841,7 +1839,7 @@ index 4c0c414..8d32390 100644
    std::vector<libwebrtc::RTCVideoProcessor*> processors_
        RTC_GUARDED_BY(processors_lock_);
 diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
-index 3588ad4..07068e4 100644
+index 13eb058..cec792a 100644
 --- a/src/rtc_peerconnection_factory_impl.cc
 +++ b/src/rtc_peerconnection_factory_impl.cc
 @@ -20,6 +20,7 @@
