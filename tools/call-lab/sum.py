@@ -1,5 +1,6 @@
 """Sums up measure.sh runs as Markdown tables: one row a run, and with --copies one row
-for each copy of each run.
+for each copy of each run, and one for each copy's encoders (threads, the shared
+screen's key frames and the key frame requests it got).
 
 Usage: sum.py [--copies] <run folder>...
 """
@@ -41,6 +42,21 @@ def read(run):
                 if kb:
                     peaks[role] = max(peaks.get(role, 0), int(kb) / 1024)
     return copies, mode, lines, load, peaks
+
+
+def encoder_threads(run):
+    """Each copy's encoder threads at every sample of threads.log, as (VideoEncoderQue,
+    SharedScreenEnc) counts, by copy."""
+    counts = {}
+    path = run / "threads.log"
+    if path.exists():
+        for line in path.read_text().splitlines():
+            for part in line.split()[1:]:
+                role, _, rest = part.partition(":")
+                own, _, shared = rest.partition("/")
+                if own.isdigit() and shared.isdigit():
+                    counts.setdefault(role, []).append((int(own), int(shared)))
+    return counts
 
 
 def summary(run):
@@ -134,6 +150,30 @@ def main(argv):
                 f"| {mode} | {copies} | {role} | {show(quantile(cpu, 0.5))}/{show(quantile(cpu, 0.9))} "
                 f"| {show(quantile([l['rss'] for l in ls], 0.5))} | {show(voice_in / seconds if seconds else None)} "
                 f"| {int(lost)} | {show(quantile(fps, 0.5), 1) if fps else '-'} |"
+            )
+    print()
+    print(
+        "| mode | copies | copy | VideoEncoderQue threads p50 | SharedScreenEnc threads p50 "
+        "| screen key frames sent | screen PLIs got | screen encoders |"
+    )
+    print("|---|---|---|---|---|---|---|---|")
+    for run in runs:
+        copies, mode, lines, _, _ = read(run)
+        threads = encoder_threads(run)
+        by_copy = {}
+        for line in lines:
+            by_copy.setdefault(line["role"], []).append(line)
+        for role, ls in sorted(by_copy.items()):
+            sent = [p for l in ls for p in l["peers"].values()]
+            keys = sum(p.get("screenOutKeys") or 0 for p in sent)
+            plis = sum(p.get("screenOutPli") or 0 for p in sent)
+            names = sorted({p["screenEncoder"] for p in sent if p.get("screenEncoder")})
+            counts = threads.get(role, [])
+            print(
+                f"| {mode} | {copies} | {role} "
+                f"| {show(quantile([c[0] for c in counts], 0.5))} "
+                f"| {show(quantile([c[1] for c in counts], 0.5))} "
+                f"| {int(keys)} | {int(plis)} | {', '.join(names) or '-'} |"
             )
 
 

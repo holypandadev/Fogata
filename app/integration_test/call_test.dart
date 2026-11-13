@@ -3740,7 +3740,8 @@ Future<Map<String, Object?>> _measureStats(CallPeer peer) async {
 /// and its resident memory, and for each other copy the round trip, the voice's packets
 /// received and lost, its jitter and how much of it was concealed, and for each picture
 /// that arrives its frames, freezes (as WebRTC counts them) and stalls (2 s without a
-/// frame from someone who sends one). `tools/call-lab/sum.py` turns the lines into tables.
+/// frame from someone who sends one), and for each picture sent its encoder, key frames
+/// and key frame requests. `tools/call-lab/sum.py` turns the lines into tables.
 Future<void> _measureCall(
   WidgetTester tester,
   AppState state,
@@ -3859,6 +3860,14 @@ Future<void> _measureCall(
         );
         record['${channel}OutHeight'] = v['out.$channel.frameHeight'];
         record['${channel}Limit'] = v['out.$channel.qualityLimitationReason'];
+        // Which encoder sends it ("libvpx (shared)": one for every connection that sends
+        // the screen at that size), the key frames it encoded and the requests for one
+        // that came back (PLI), to see what one watcher's losses cost the others.
+        record['${channel}Encoder'] = v['out.$channel.encoderImplementation'];
+        record['${channel}OutKeys'] = _json(
+          delta('out.$channel.keyFramesEncoded'),
+        );
+        record['${channel}OutPli'] = _json(delta('out.$channel.pliCount'));
         final stalled = sends && !(frames > 0);
         record['${channel}Stall'] = stalled;
         if (stalled) stalls++;

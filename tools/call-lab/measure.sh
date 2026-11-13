@@ -7,7 +7,15 @@
 #   screen  the voice, and copy a shares the virtual display, watched by all the others
 # After every picture arrives and 10 s more, each copy writes every 2 s what it receives from
 # each other one and its own processor time and memory (FOGATA_TEST_MEASURE in
-# app/integration_test/call_test.dart); sum.py makes tables of the run folders.
+# app/integration_test/call_test.dart), with what it sends each one: the encoder's name
+# ("libvpx (shared)" when every connection that sends its screen at a size shares one),
+# the key frames it encoded and the key frame requests (PLI) it got. Every 5 s, proc.log
+# has each copy's highest memory so far and the computer's load, and threads.log its
+# encoder threads: VideoStreamEncoders' ("VideoEncoderQue", one for each picture each
+# connection sends) and shared screen encoders' ("SharedScreenEnc", one for each size a
+# shared screen goes out at), as "<copy>:<VideoEncoderQue>/<SharedScreenEnc>".
+# sum.py makes tables of the run folders. MEASURE_ENV=FOGATA_SHARED_SCREEN_ENCODE=off
+# measures without the shared screen encode, for before and after on one build.
 #
 # Usage: tools/call-lab/measure.sh <copies> <idle|voice|camera|screen> [seconds, default 60]
 # Build first: (cd app && flutter build linux --debug -t integration_test/call_test.dart)
@@ -41,6 +49,13 @@ if [ "${1:-}" = --inside ]; then
         line="$line $r:$(awk '/VmHWM/ {print $2}' "/proc/$(cat "$RUN/$r.pid")/status" 2>/dev/null)"
       done
       echo "$line" >> "$RUN/proc.log"
+      # Encoder threads by name (/proc truncates names to 15 characters).
+      line="$(date +%s)"
+      for r in "${roles[@]:0:N}"; do
+        names=$(cat "/proc/$(cat "$RUN/$r.pid")"/task/*/comm 2>/dev/null)
+        line="$line $r:$(grep -c '^VideoEncoderQue' <<< "$names")/$(grep -c '^SharedScreenEnc' <<< "$names")"
+      done
+      echo "$line" >> "$RUN/threads.log"
       sleep 5
     done
   ) &
