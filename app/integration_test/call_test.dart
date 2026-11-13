@@ -4183,10 +4183,26 @@ const _rejoinWithin = Duration(seconds: 6);
 /// Packets of voice that count as voice flowing again: a fifth of a second of it.
 const _flowPackets = 10;
 
-/// The packets of voice received so far on [peer]'s connection (mid 0); 0 without one.
+/// The packets of voice received so far on [peer]'s connection (mid 0); 0 without one, or
+/// when its statistics do not come within [Call.statsWithin]: one asked as the connection
+/// closes (the other left) may never come, and the step would wait for it for ever. Each
+/// such reading is logged.
 Future<int> _voicePacketsFrom(CallPeer? peer) async {
+  final connection = peer?.connection;
+  if (connection == null) return 0;
+  final List<StatsReport> reports;
+  try {
+    reports = await connection.getStats().timeout(Call.statsWithin);
+  } on TimeoutException {
+    _log('statistics of ${peer!.id.substring(0, 8)} not read in time');
+    return 0;
+  } catch (e) {
+    // The connection closed as it was read.
+    _log('statistics of ${peer!.id.substring(0, 8)}: $e');
+    return 0;
+  }
   var packets = 0;
-  for (final r in await peer?.connection?.getStats() ?? const <StatsReport>[]) {
+  for (final r in reports) {
     if (r.type == 'inbound-rtp' && '${r.values['mid']}' == '0') {
       packets += (r.values['packetsReceived'] as num? ?? 0).toInt();
     }
