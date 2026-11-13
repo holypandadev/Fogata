@@ -4570,7 +4570,14 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
   );
   _mark('restart-ready');
   await _rig(tester, 'sound-stopped', seconds: 300);
-  bool told(String text) => state.toasts.list.any((t) => t.text == text);
+  // What it said, as toasts go after a few seconds: looked at every time round.
+  final said = <String>{};
+  void look() => said.addAll(state.toasts.list.map((t) => t.text));
+  bool told(String text) {
+    look();
+    return said.contains(text);
+  }
+
   final suffix = _env['FOGATA_TEST_DEVICES'] ?? '';
   // This copy's own microphone and speaker listed, and how many sound devices are.
   Future<({bool mine, int count})> listed() async {
@@ -4594,6 +4601,7 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
     if (state.callState.call != call) {
       throw StateError('the call ended while the sound server was away');
     }
+    look();
     final now = await listed();
     if (now.count == 0 && !sawNone) {
       sawNone = true;
@@ -4601,9 +4609,10 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
     }
     if (File('$_dir/still-gone').existsSync() && !checkedGone) {
       checkedGone = true;
+      look();
       _log(
         'restart: a minute without a sound server: mic ${call.mic}, told '
-        '${state.toasts.list.map((t) => t.text).toList()}',
+        '$said',
       );
       if (!told(l10n.callSoundSystemLost)) {
         throw StateError('not told the sound system stopped');
@@ -4618,6 +4627,7 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
   bool done() =>
       listedAfter != null && recordingAfter != null && heardAfter != null;
   while (!done() && DateTime.now().difference(back) < _restartWithin) {
+    look();
     final ms = DateTime.now().difference(back).inMilliseconds;
     if (listedAfter == null && (await listed()).mine) listedAfter = ms;
     if (recordingAfter == null && call.speaking) recordingAfter = ms;
@@ -4628,12 +4638,12 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
     }
     await _wait(tester, const Duration(milliseconds: 250));
   }
-  final toasts = state.toasts.list.map((t) => t.text).toList();
+  look();
   _log(
     'restart $how: no device listed meanwhile: $sawNone; own devices '
     'listed again after ${listedAfter ?? 'never'} ms, recording after '
     '${recordingAfter ?? 'never'} ms, ${other.name} heard after '
-    '${heardAfter ?? 'never'} ms; mic ${call.mic}; told $toasts',
+    '${heardAfter ?? 'never'} ms; mic ${call.mic}; told $said',
   );
   if (!call.mic) throw StateError('the microphone was turned off');
   if (listedAfter == null) throw StateError('its devices not listed again');
