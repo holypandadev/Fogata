@@ -15,7 +15,11 @@ it), which:
 - once a context is ready, takes the chosen output and input again by the server's names
   for them where they are still listed (else the default), starts playout and recording
   again as they were (what does not start is tried again every second for 5 s, then
-  every 5 s), and tells the observer again.
+  every 5 s), and tells the observer again;
+- a chosen device not listed yet (the server answers before its devices are back, or it
+  was unplugged meanwhile) is waited for on the default: the new context follows the
+  server's sinks and sources, and playout or recording moves to the chosen device as
+  soon as the server adds it.
 Every wait on the mainloop is bounded: the first connection in Init (5 s; it waited for
 ever for a server that took the connection and never answered, on the worker thread),
 and every question to the server, of the device and of its mixer (5 s, then cancelled;
@@ -42,7 +46,7 @@ index 1205038..407af4f 100644
            "linux/audio_device_pulse_linux.cc",
            "linux/audio_device_pulse_linux.h",
 diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
-index 72f0587..c83ec32 100644
+index 72f0587..982d2ba 100644
 --- a/modules/audio_device/linux/audio_device_pulse_linux.cc
 +++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
 @@ -12,12 +12,17 @@
@@ -115,7 +119,7 @@ index 72f0587..c83ec32 100644
  
  #if defined(WEBRTC_USE_X11)
    // Get X display handle for typing detection
-@@ -247,6 +283,13 @@ int32_t AudioDeviceLinuxPulse::Terminate() {
+@@ -247,6 +283,15 @@ int32_t AudioDeviceLinuxPulse::Terminate() {
    _initialized = false;
    _outputDeviceIsSpecified = false;
    _inputDeviceIsSpecified = false;
@@ -126,10 +130,12 @@ index 72f0587..c83ec32 100644
 +  rec_wanted_ = Wanted::kNo;
 +  play_name_.clear();
 +  rec_name_.clear();
++  play_on_default_ = false;
++  rec_on_default_ = false;
  
    return 0;
  }
-@@ -672,6 +715,12 @@ int32_t AudioDeviceLinuxPulse::MinMicrophoneVolume(uint32_t& minVolume) const {
+@@ -672,6 +717,12 @@ int32_t AudioDeviceLinuxPulse::MinMicrophoneVolume(uint32_t& minVolume) const {
  }
  
  int16_t AudioDeviceLinuxPulse::PlayoutDevices() {
@@ -142,16 +148,17 @@ index 72f0587..c83ec32 100644
    PaLock();
  
    pa_operation* paOperation = nullptr;
-@@ -706,6 +755,8 @@ int32_t AudioDeviceLinuxPulse::SetPlayoutDevice(uint16_t index) {
+@@ -706,6 +757,9 @@ int32_t AudioDeviceLinuxPulse::SetPlayoutDevice(uint16_t index) {
  
    _outputDeviceIndex = index;
    _outputDeviceIsSpecified = true;
 +  // Fogata: by its name too, which stays when the list changes.
 +  play_name_ = DeviceNameAt(false, index);
++  play_on_default_ = false;
  
    return 0;
  }
-@@ -793,6 +844,11 @@ int32_t AudioDeviceLinuxPulse::RecordingDeviceName(
+@@ -793,6 +847,11 @@ int32_t AudioDeviceLinuxPulse::RecordingDeviceName(
  }
  
  int16_t AudioDeviceLinuxPulse::RecordingDevices() {
@@ -163,16 +170,17 @@ index 72f0587..c83ec32 100644
    PaLock();
  
    pa_operation* paOperation = nullptr;
-@@ -827,6 +883,8 @@ int32_t AudioDeviceLinuxPulse::SetRecordingDevice(uint16_t index) {
+@@ -827,6 +886,9 @@ int32_t AudioDeviceLinuxPulse::SetRecordingDevice(uint16_t index) {
  
    _inputDeviceIndex = index;
    _inputDeviceIsSpecified = true;
 +  // Fogata: by its name too, which stays when the list changes.
 +  rec_name_ = DeviceNameAt(true, index);
++  rec_on_default_ = false;
  
    return 0;
  }
-@@ -886,6 +944,16 @@ int32_t AudioDeviceLinuxPulse::InitPlayout() {
+@@ -886,6 +948,16 @@ int32_t AudioDeviceLinuxPulse::InitPlayout() {
      return 0;
    }
  
@@ -189,7 +197,7 @@ index 72f0587..c83ec32 100644
    // Initialize the speaker (devices might have been added or removed)
    if (InitSpeaker() == -1) {
      RTC_LOG(LS_WARNING) << "InitSpeaker() failed";
-@@ -995,6 +1063,15 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
+@@ -995,6 +1067,15 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
      return 0;
    }
  
@@ -205,7 +213,7 @@ index 72f0587..c83ec32 100644
    // Initialize the microphone (devices might have been added or removed)
    if (InitMicrophone() == -1) {
      RTC_LOG(LS_WARNING) << "InitMicrophone() failed";
-@@ -1078,6 +1155,10 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
+@@ -1078,6 +1159,10 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
  
  int32_t AudioDeviceLinuxPulse::StartRecording() {
    RTC_DCHECK(thread_checker_.IsCurrent());
@@ -216,7 +224,7 @@ index 72f0587..c83ec32 100644
    if (!_recIsInitialized) {
      return -1;
    }
-@@ -1123,6 +1204,10 @@ int32_t AudioDeviceLinuxPulse::StartRecording() {
+@@ -1123,6 +1208,10 @@ int32_t AudioDeviceLinuxPulse::StartRecording() {
  
  int32_t AudioDeviceLinuxPulse::StopRecording() {
    RTC_DCHECK(thread_checker_.IsCurrent());
@@ -227,7 +235,7 @@ index 72f0587..c83ec32 100644
    MutexLock lock(&mutex_);
  
    if (!_recIsInitialized) {
-@@ -1196,6 +1281,10 @@ bool AudioDeviceLinuxPulse::PlayoutIsInitialized() const {
+@@ -1196,6 +1285,10 @@ bool AudioDeviceLinuxPulse::PlayoutIsInitialized() const {
  int32_t AudioDeviceLinuxPulse::StartPlayout() {
    RTC_DCHECK(thread_checker_.IsCurrent());
  
@@ -238,7 +246,7 @@ index 72f0587..c83ec32 100644
    if (!_playIsInitialized) {
      return -1;
    }
-@@ -1244,6 +1333,10 @@ int32_t AudioDeviceLinuxPulse::StartPlayout() {
+@@ -1244,6 +1337,10 @@ int32_t AudioDeviceLinuxPulse::StartPlayout() {
  
  int32_t AudioDeviceLinuxPulse::StopPlayout() {
    RTC_DCHECK(thread_checker_.IsCurrent());
@@ -249,7 +257,7 @@ index 72f0587..c83ec32 100644
    MutexLock lock(&mutex_);
  
    if (!_playIsInitialized) {
-@@ -1311,6 +1404,246 @@ bool AudioDeviceLinuxPulse::Playing() const {
+@@ -1311,6 +1408,307 @@ bool AudioDeviceLinuxPulse::Playing() const {
    return (_playing);
  }
  
@@ -274,7 +282,10 @@ index 72f0587..c83ec32 100644
 +//   again by their names where they are still listed, else the default, playout and
 +//   recording start again as they were, and the observer is told (the application
 +//   reads the lists again). What does not start (no device listed yet) is tried again
-+//   every second for 5 s, then every 5 s, while the server stays.
++//   every second for 5 s, then every 5 s, while the server stays. A chosen device not
++//   listed yet (the server answers before its devices are back, or it was unplugged
++//   meanwhile) is waited for on the default: the context follows the server's sinks and
++//   sources, and playout or recording moves to it once it is added (FollowChosen).
 +// Every wait on the server has a limit: a connection and a question 5 s
 +// (InitPulseAudio, WaitForOperationCompletion), a stream starting 9 s
 +// (WaitForPulseStreamReady), which StartPlayout and StartRecording wait for on the
@@ -369,6 +380,7 @@ index 72f0587..c83ec32 100644
 +    // the mixer is given the new one below. Its own disconnect tells nothing.
 +    if (_paContext != nullptr) {
 +      LATE(pa_context_set_state_callback)(_paContext, nullptr, nullptr);
++      LATE(pa_context_set_subscribe_callback)(_paContext, nullptr, nullptr);
 +      LATE(pa_context_disconnect)(_paContext);
 +      LATE(pa_context_unref)(_paContext);
 +    }
@@ -411,6 +423,19 @@ index 72f0587..c83ec32 100644
 +  reconnect_tries_ = 0;
 +  RTC_LOG(LS_INFO) << "PulseAudio sound server back";
 +  _mixerManager.SetPulseAudioObjects(_paMainloop, _paContext);
++  // Hears of the sinks and sources the server adds, for a chosen device not listed
++  // yet (Restore).
++  PaLock();
++  LATE(pa_context_set_subscribe_callback)(_paContext, PaSubscribeCallback, this);
++  pa_operation* subscribed = LATE(pa_context_subscribe)(
++      _paContext,
++      static_cast<pa_subscription_mask_t>(PA_SUBSCRIPTION_MASK_SINK |
++                                          PA_SUBSCRIPTION_MASK_SOURCE),
++      nullptr, nullptr);
++  if (subscribed != nullptr) {
++    LATE(pa_operation_unref)(subscribed);
++  }
++  PaUnLock();
 +  // Another server may run at another rate.
 +  InitSamplingFrequency();
 +  Restore(0);
@@ -425,9 +450,10 @@ index 72f0587..c83ec32 100644
 +  bool failed = false;
 +  restoring_ = true;
 +  if (play_wanted_ != Wanted::kNo && !_playing) {
-+    // The chosen output where it is still listed, else the default.
++    // The chosen output where it is still listed, else the default until it is.
 +    _outputDeviceIndex =
 +        play_name_.empty() ? uint16_t{0} : DeviceIndexOf(false, play_name_);
++    play_on_default_ = !play_name_.empty() && _outputDeviceIndex == 0;
 +    if (InitPlayout() != 0 ||
 +        (play_wanted_ == Wanted::kStarted && StartPlayout() != 0)) {
 +      failed = true;
@@ -436,6 +462,7 @@ index 72f0587..c83ec32 100644
 +  if (rec_wanted_ != Wanted::kNo && !_recording) {
 +    _inputDeviceIndex =
 +        rec_name_.empty() ? uint16_t{0} : DeviceIndexOf(true, rec_name_);
++    rec_on_default_ = !rec_name_.empty() && _inputDeviceIndex == 0;
 +    if (InitRecording() != 0 ||
 +        (rec_wanted_ == Wanted::kStarted && StartRecording() != 0)) {
 +      failed = true;
@@ -455,6 +482,48 @@ index 72f0587..c83ec32 100644
 +          }
 +        },
 +        delay);
++  }
++}
++
++void AudioDeviceLinuxPulse::FollowChosen() {
++  RTC_DCHECK(thread_checker_.IsCurrent());
++  if (!_initialized || !connected_) {
++    return;
++  }
++  bool failed = false;
++  restoring_ = true;
++  if (play_on_default_ && _playing) {
++    const uint16_t index = DeviceIndexOf(false, play_name_);
++    if (index != 0) {
++      RTC_LOG(LS_INFO) << "PulseAudio: the chosen output is back";
++      play_on_default_ = false;
++      StopPlayout();
++      _outputDeviceIndex = index;
++      if (InitPlayout() != 0 ||
++          (play_wanted_ == Wanted::kStarted && StartPlayout() != 0)) {
++        failed = true;
++      }
++    }
++  }
++  if (rec_on_default_ && _recording) {
++    const uint16_t index = DeviceIndexOf(true, rec_name_);
++    if (index != 0) {
++      RTC_LOG(LS_INFO) << "PulseAudio: the chosen input is back";
++      rec_on_default_ = false;
++      StopRecording();
++      _inputDeviceIndex = index;
++      if (InitRecording() != 0 ||
++          (rec_wanted_ == Wanted::kStarted && StartRecording() != 0)) {
++        failed = true;
++      }
++    }
++  }
++  restoring_ = false;
++  // Moved and not started again: tried again as after the server came back. What
++  // was not running before is already Restore's, which looks for the chosen device
++  // by name at each try.
++  if (failed) {
++    Restore(0);
 +  }
 +}
 +
@@ -496,7 +565,26 @@ index 72f0587..c83ec32 100644
  // ============================================================================
  //                                 Private Methods
  // ============================================================================
-@@ -1366,11 +1699,16 @@ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
+@@ -1348,6 +1746,18 @@ void AudioDeviceLinuxPulse::PaStreamStateCallback(pa_stream* p, void* pThis) {
+   static_cast<AudioDeviceLinuxPulse*>(pThis)->PaStreamStateCallbackHandler(p);
+ }
+ 
++void AudioDeviceLinuxPulse::PaSubscribeCallback(pa_context* /*c*/,
++                                                pa_subscription_event_type_t t,
++                                                uint32_t /*index*/,
++                                                void* pThis) {
++  // Fogata: on the mainloop thread; the worker thread looks for the chosen devices.
++  if ((t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) != PA_SUBSCRIPTION_EVENT_NEW) {
++    return;
++  }
++  auto* self = static_cast<AudioDeviceLinuxPulse*>(pThis);
++  self->PostToWorker([self] { self->FollowChosen(); });
++}
++
+ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
+   RTC_LOG(LS_VERBOSE) << "context state cb";
+ 
+@@ -1366,11 +1776,16 @@ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
        RTC_LOG(LS_VERBOSE) << "failed";
        _paStateChanged = true;
        LATE(pa_threaded_mainloop_signal)(_paMainloop, 0);
@@ -513,7 +601,7 @@ index 72f0587..c83ec32 100644
        break;
    }
  }
-@@ -1654,9 +1992,13 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+@@ -1654,9 +2069,13 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
      return -1;
    }
  
@@ -530,7 +618,7 @@ index 72f0587..c83ec32 100644
    }
  
    // Now check to see what final state we reached.
-@@ -1668,9 +2010,8 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+@@ -1668,9 +2087,8 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
      } else if (state == PA_CONTEXT_TERMINATED) {
        RTC_LOG(LS_ERROR) << "PulseAudio connection terminated early";
      } else {
@@ -542,16 +630,17 @@ index 72f0587..c83ec32 100644
      }
      PaUnLock();
      return -1;
-@@ -1709,6 +2050,8 @@ int32_t AudioDeviceLinuxPulse::TerminatePulseAudio() {
+@@ -1709,6 +2127,9 @@ int32_t AudioDeviceLinuxPulse::TerminatePulseAudio() {
  
    // Disconnect the context
    if (_paContext) {
 +    // Fogata: the device's own disconnect is no server going away.
 +    LATE(pa_context_set_state_callback)(_paContext, nullptr, nullptr);
++    LATE(pa_context_set_subscribe_callback)(_paContext, nullptr, nullptr);
      LATE(pa_context_disconnect)(_paContext);
    }
  
-@@ -1814,11 +2157,8 @@ void AudioDeviceLinuxPulse::WaitForOperationCompletion(
+@@ -1814,11 +2235,8 @@ void AudioDeviceLinuxPulse::WaitForOperationCompletion(
      return;
    }
  
@@ -566,7 +655,7 @@ index 72f0587..c83ec32 100644
  
  // ============================================================================
 diff --git a/modules/audio_device/linux/audio_device_pulse_linux.h b/modules/audio_device/linux/audio_device_pulse_linux.h
-index d748dca..ba1aae0 100644
+index d748dca..cc22fae 100644
 --- a/modules/audio_device/linux/audio_device_pulse_linux.h
 +++ b/modules/audio_device/linux/audio_device_pulse_linux.h
 @@ -13,12 +13,18 @@
@@ -588,7 +677,7 @@ index d748dca..ba1aae0 100644
  #include "modules/audio_device/audio_device_buffer.h"
  #include "modules/audio_device/audio_device_generic.h"
  #include "modules/audio_device/linux/audio_mixer_manager_pulse_linux.h"
-@@ -196,7 +202,35 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+@@ -196,7 +202,36 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
  
    void AttachAudioBuffer(AudioDeviceBuffer* audioBuffer) override;
  
@@ -612,6 +701,7 @@ index d748dca..ba1aae0 100644
 +  void Reconnect(int attempt);
 +  void ServerBack();
 +  void Restore(int round);
++  void FollowChosen();
 +  void TellDevicesUpdated();
 +  void PostToWorker(absl::AnyInvocable<void() &&> task,
 +                    TimeDelta delay = TimeDelta::Zero());
@@ -624,7 +714,19 @@ index d748dca..ba1aae0 100644
    void Lock() RTC_EXCLUSIVE_LOCK_FUNCTION(mutex_) { mutex_.Lock(); }
    void UnLock() RTC_UNLOCK_FUNCTION(mutex_) { mutex_.Unlock(); }
    void WaitForOperationCompletion(pa_operation* paOperation) const;
-@@ -338,6 +372,29 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+@@ -217,6 +252,11 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+                                    const pa_server_info* i,
+                                    void* pThis);
+   static void PaStreamStateCallback(pa_stream* p, void* pThis);
++  // Fogata: a sink or source the server added (FollowChosen).
++  static void PaSubscribeCallback(pa_context* c,
++                                  pa_subscription_event_type_t t,
++                                  uint32_t index,
++                                  void* pThis);
+   void PaContextStateCallbackHandler(pa_context* c);
+   void PaSinkInfoCallbackHandler(const pa_sink_info* i, int eol);
+   void PaSourceInfoCallbackHandler(const pa_source_info* i, int eol);
+@@ -338,6 +378,34 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
    pa_buffer_attr _playBufferAttr;
    pa_buffer_attr _recBufferAttr;
  
@@ -647,6 +749,11 @@ index d748dca..ba1aae0 100644
 +  // differ.
 +  std::string play_name_;
 +  std::string rec_name_;
++  // Playout or recording started again on the default because the chosen device
++  // was not listed yet (a server answers before its devices are back): moved to it
++  // as soon as the server adds it.
++  bool play_on_default_ = false;
++  bool rec_on_default_ = false;
 +  Mutex observer_mutex_;
 +  AudioDeviceObserver* observer_ RTC_GUARDED_BY(observer_mutex_) = nullptr;
 +  ScopedTaskSafety task_safety_;
@@ -797,11 +904,15 @@ index bdce949..30cea45 100644
   public:
    int32_t SetPlayStream(pa_stream* playStream);
 diff --git a/modules/audio_device/linux/pulseaudiosymboltable_linux.h b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
-index 2f6a951..18c9f9c 100644
+index 2f6a951..5f4599f 100644
 --- a/modules/audio_device/linux/pulseaudiosymboltable_linux.h
 +++ b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
-@@ -59,6 +59,7 @@ namespace adm_linux_pulse {
+@@ -57,8 +57,11 @@ namespace adm_linux_pulse {
+   X(pa_context_set_source_volume_by_index) \
+   X(pa_context_set_source_mute_by_index)   \
    X(pa_context_set_state_callback)         \
++  X(pa_context_set_subscribe_callback)     \
++  X(pa_context_subscribe)                  \
    X(pa_context_unref)                      \
    X(pa_cvolume_set)                        \
 +  X(pa_operation_cancel)                   \

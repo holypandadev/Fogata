@@ -59,7 +59,8 @@
 #            pipewire-pulse wireplumber`; down20, the three, away 20 s; gone, the three, away
 #            a minute (meanwhile both must stay in the call with the microphone on and say
 #            the sound system stopped). The lab's devices are then made again, as a desktop's
-#            come back. Within 20 s of that each copy must record from its own microphone
+#            come back, one copy's later (RESTART_LATE=<role>:<seconds>, b:8 unless set;
+#            empty, none). Within 20 s of that each copy must record from its own microphone
 #            again (recordings.log), hear the other (its voice's packets and level) and list
 #            its devices; one away over 5 s must be told gone and back
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
@@ -158,7 +159,10 @@ if [ "${1:-}" = --inside ]; then
           *) lab_sound_start pipewire wireplumber pipewire-pulse ;;
         esac
         now > "$M/sound-back"
-        lab_devices 2
+        # One copy's devices come back late (RESTART_LATE, <role>:<seconds>, b:8 unless
+        # set; empty for none): its audio device starts again on the default first and
+        # must move to them once they are there.
+        LAB_LATE_DEVICES=${RESTART_LATE-b:8} lab_devices 2
         now > "$M/devices-back"
       fi
       lab_wait "a b" 300
@@ -208,7 +212,7 @@ for check in "${checks[@]}"; do
   export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/mic-${check/:/-}-$(date +%m%d-%H%M%S)
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
-  [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse}" >> "$RUN/settings.txt"
+  [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10}" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1

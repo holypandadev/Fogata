@@ -956,7 +956,11 @@ voice engine stays, "The voice engine stays", so it was never made again).
   output and input again by the server's own names for them where they are still listed
   (else the default), starts playout and recording again as they were (what does not
   start, as with no device listed yet, is tried again every second for 5 s, then every
-  5 s), and tells its observer again. Every wait of the device on the server is bounded:
+  5 s), and tells its observer again. A chosen device not listed yet (the server answers
+  before its devices are back, or it was unplugged meanwhile) is waited for on the
+  default: the device follows the server's sinks and sources, and moves playout or
+  recording to it as soon as the server adds it; the plugin's own `KeepRecordingDevice`
+  could not, as the input's place in the list was the same as before. Every wait of the device on the server is bounded:
   its first connection (it waited for ever for a server that took the connection and
   never answered) and every question to it are given up after 5 s, as a stream starting
   already was after 9 s.

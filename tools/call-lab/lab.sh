@@ -14,13 +14,17 @@ ROLES=(a b c d e f g h)
 # FogataMic, carrying a tone of its own pitch (with one tone for all, each copy's echo
 # canceller would take the others' voices for its own echo and send almost nothing), and a
 # silent output and input. The session's default input is silent too, so a copy whose
-# microphone goes away records silence.
+# microphone goes away records silence. With LAB_LATE_DEVICES=<role>:<seconds>, that copy's
+# devices are made that long after the others' (a desktop's sound card coming back after
+# its sound server, mic.sh restart).
 lab_devices() { # copies
-  local i r
+  local i r late
   pactl load-module module-null-sink sink_name=lab_default sink_properties=device.description=LabDefault > /dev/null
   pactl load-module module-remap-source source_name=lab_default_mic master=lab_default.monitor source_properties=device.description=LabDefaultMic > /dev/null
   for i in $(seq 0 $(($1 - 1))); do
     r=${ROLES[$i]}
+    late=${LAB_LATE_DEVICES:-}
+    [ -n "$late" ] && [ "${late%%:*}" = "$r" ] && sleep "${late#*:}"
     pactl load-module module-null-sink sink_name=lab${r}_test sink_properties=device.description=FogataTest-lab$r. > /dev/null
     lab_plug "$r"
     pactl load-module module-null-sink sink_name=lab${r}_quiet sink_properties=device.description=FogataQuietOut-lab$r. > /dev/null

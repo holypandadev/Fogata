@@ -161,8 +161,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    PulseAudio device connects again, from WebRTC's worker thread, to a sound server that
    went away (0.5 s after, then after 1, 2 and 4 s, then every 5 s; a server that does not
    answer within 5 s is tried again), lists no device at all meanwhile, takes the chosen
-   output and input again by the server's names for them where they are still listed,
-   starts playout and recording again as they were, and tells its observer both ways;
+   output and input again by the server's names for them where they are still listed (else
+   the default, moving to them once the server adds them), starts playout and recording
+   again as they were, and tells its observer both ways;
    connecting and every question to the server (the mixer's too) are given up after 5 s,
    as a stream starting already was after 9 s.
 7. `0007-keep-the-voice-engine-up-without-its-audio-device` (every system):
