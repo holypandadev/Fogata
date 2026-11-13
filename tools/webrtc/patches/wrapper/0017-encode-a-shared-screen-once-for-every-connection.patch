@@ -2287,10 +2287,10 @@ index ba01241..1eed88c 100644
    // Receives frames from OnCapturedFrame. Null for desktop sources.
 diff --git a/test/shared_encoder.test.cc b/test/shared_encoder.test.cc
 new file mode 100644
-index 0000000..9c98e67
+index 0000000..125a12d
 --- /dev/null
 +++ b/test/shared_encoder.test.cc
-@@ -0,0 +1,1567 @@
+@@ -0,0 +1,1573 @@
 +#include "src/internal/shared_encoder.h"
 +
 +#include <algorithm>
@@ -3618,9 +3618,15 @@ index 0000000..9c98e67
 +  a->Init();
 +  b->Init();
 +  std::set<const void*> black;
++  // Every frame is kept to the end: the encoders' records hold their
++  // buffers' addresses only, and a buffer freed could give its address to
++  // the next one allocated.
++  std::vector<VideoFrame> kept;
 +  for (int n = 0; n < 6; ++n) {
 +    VideoFrame screen = Frame(1, n);
 +    VideoFrame dark = BlackFrame(1, n);
++    kept.push_back(screen);
++    kept.push_back(dark);
 +    black.insert(dark.video_frame_buffer().get());
 +    if (n % 2 == 0) {
 +      b->Ask(dark);
