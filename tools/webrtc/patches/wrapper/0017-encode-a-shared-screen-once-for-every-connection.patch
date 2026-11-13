@@ -2287,10 +2287,10 @@ index ba01241..1eed88c 100644
    // Receives frames from OnCapturedFrame. Null for desktop sources.
 diff --git a/test/shared_encoder.test.cc b/test/shared_encoder.test.cc
 new file mode 100644
-index 0000000..fe3a033
+index 0000000..9c98e67
 --- /dev/null
 +++ b/test/shared_encoder.test.cc
-@@ -0,0 +1,1565 @@
+@@ -0,0 +1,1567 @@
 +#include "src/internal/shared_encoder.h"
 +
 +#include <algorithm>
@@ -2479,7 +2479,9 @@ index 0000000..fe3a033
 +      info.is_hardware_accelerated = record_->hardware;
 +    }
 +    if (inited_) {
-+      info.fps_allocation[0].push_back(EncoderInfo::kMaxFramerateFraction);
++      // libvpx says this only once initialized (EncoderInfo's default has
++      // none).
++      info.mapped_resolution = VideoEncoder::Resolution(width_, height_);
 +    }
 +    return info;
 +  }
@@ -3653,7 +3655,7 @@ index 0000000..fe3a033
 +  // Before any frame, as the inner encoder: initialized, describing itself
 +  // as such, told the round trip time.
 +  EXPECT_EQ(record->inits, 1);
-+  EXPECT_EQ(camera->encoder().GetEncoderInfo().fps_allocation[0].size(), 1u);
++  EXPECT_TRUE(camera->encoder().GetEncoderInfo().mapped_resolution.has_value());
 +  camera->encoder().OnRttUpdate(42);
 +  EXPECT_EQ(record->rtt_ms, 42);
 +  camera->encoder().RegisterEncodeCompleteCallback(&camera->callback);
