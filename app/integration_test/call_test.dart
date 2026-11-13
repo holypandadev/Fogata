@@ -4399,10 +4399,10 @@ Future<void> _rejoin(WidgetTester tester, AppState state) async {
 /// every stretch b marks (`mark-b-<stretch>-start` and `-end`):
 ///
 /// - before: b watches, before leaving;
-/// - gone<n>: b out of the room for the n-th time, with a alone in the call (its own level
+/// - `gone<n>`: b out of the room for the n-th time, with a alone in the call (its own level
 ///   read through a loop of its own meanwhile), the pause less 2 s, when it is 6 s or more;
-/// - between<n>: b back in the call, not watching yet;
-/// - after<n>: b watching again.
+/// - `between<n>`: b back in the call, not watching yet;
+/// - `after<n>`: b watching again.
 ///
 /// mic_check.py judges them: neither copy may play its own pitch, and b must play a's
 /// voice throughout and the screen's sound only while it watches.

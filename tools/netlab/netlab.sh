@@ -429,20 +429,18 @@ short_id() {
     "$BIN" --data-dir "$WORK/data-$1" id | awk '/Short form/ {print $3}'
 }
 
-# With an older B and a newer A, B must refuse A's code as not a code (its format is newer);
-# prints the result and succeeds when that was the case to check.
+# An older B from before the codes grew refuses a newer A's code as not a code (its format
+# is newer): prints the result and succeeds when B did. An older B that knows the format
+# takes the code, and the scenario goes on as with any B.
 refused_newer_code() {
     [[ -n ${OLD_B:-} && -z ${OLD_A:-} ]] && grep -q -E '^FGT-.{5}-' "$WORK/shown" || return 1
+    grep -q 'looks like FGT-XXXX-XXXX' "$WORK/B-add.out" || return 1
     echo "=== $SCENARIO (older B: $OLD_B)"
     echo "--- shown by A: $(cat "$WORK/shown")"
     echo "--- B-add"
     cat "$WORK/B-add.out"
-    if grep -q 'looks like FGT-XXXX-XXXX' "$WORK/B-add.out"; then
-        echo "result: PASS (the older copy refuses the newer code)   logs: $WORK"
-        return 0
-    fi
-    echo "result: FAIL   logs: $WORK"
-    exit 1
+    echo "result: PASS (the older copy refuses the newer code)   logs: $WORK"
+    return 0
 }
 
 # Starts `lab-soak` on device $1 with options $2...; its PID ends up in $SOAK.

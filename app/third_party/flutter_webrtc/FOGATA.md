@@ -273,7 +273,7 @@ others in a call would hear their own voices back. Instead:
   in a screen shared with sound.
 - `common/cpp/test/screen_sound_capture_test.cc` and `silent_input_test.cc` (in
   `run_tests.sh`, with ThreadSanitizer): the capture's and the silent input's own code
-  against a PipeWire server the test plays itself (`pipewire_fake.cc`, linked in place of
+  against a PipeWire server the test plays itself (`pipewire_fake.{h,cc}`, linked in place of
   libpipewire; no daemon is reached): which outputs are linked as the server tells of them
   in any order (the call's own sound made again during a share never is), requests carried
   out in the order asked whatever the server's delays, and PipeWire's thread against the
