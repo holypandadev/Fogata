@@ -66,6 +66,15 @@
 #            (timing.py; ECHO_TIMING=0 for none), and told beside every turn whose echo
 #            got through (which fails, whatever came before it); a load over the number
 #            of processors fails the run as too busy to judge
+#   noise    a enters with noise suppression on and its microphone on, a fan's steady
+#            noise in it (tone.py fan), and b with its own on; a never mutes. a's level as
+#            its processing puts it out (call_test.dart's level log) is taken over four
+#            stretches of NOISE_SECONDS (default 6): as it entered, with noise suppression
+#            turned off, with it on again, and after muting and unmuting. Judged
+#            (mic_check.py, by each stretch's median): the noise must be 10 dB or more lower in each of the three
+#            stretches with noise suppression on than with it off, from the entry on (a
+#            processing that libwebrtc left off until the microphone was muted and
+#            unmuted let it through)
 #   restart  a and b talk and hear each other; the session's sound server is stopped and
 #            started again (restart:<how>, RESTART_HOW): pulse, PipeWire's PulseAudio service
 #            alone; all, the three daemons, as `systemctl --user restart pipewire
@@ -89,6 +98,7 @@ if [ "${1:-}" = --inside ]; then
   # The voices are people's, not other applications': a shared screen taking every
   # application's sound must not take them (see lab_tones).
   [ "$CHECK" = echo ] && export LAB_VOICE_BINARY=$(basename "$BUNDLE") LAB_TURNS=1
+  [ "$CHECK" = noise ] && export LAB_FAN=a
   lab_start 2
   # A room's echo into each copy's microphone (ECHO_ROOM=0 for none).
   [ "$CHECK" = echo ] && [ "${ECHO_ROOM:-1}" = 1 ] && lab_room_echo 2
@@ -122,6 +132,11 @@ if [ "${1:-}" = --inside ]; then
       lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
         FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}" "${mono[@]}"
       lab_phase_recorder b "a b"
+      ;;
+    noise)
+      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=noise FOGATA_TEST_NOISE_SECONDS="${NOISE_SECONDS:-6}" \
+        FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}"
+      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=noise
       ;;
     quit)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"
@@ -208,7 +223,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin echo broken alsa hang quit:0 quit:300 quit:1500 restart:pulse restart:all restart:down20 restart:gone)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin echo noise broken alsa hang quit:0 quit:300 quit:1500 restart:pulse restart:all restart:down20 restart:gone)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }

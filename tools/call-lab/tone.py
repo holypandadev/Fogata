@@ -4,6 +4,7 @@ next period of the turns; or gates the lab's room echoes with the turns.
 
 Usage: tone.py <file.wav> [hertz, default 440] [seconds, default 10]
        tone.py <file.wav> screen
+       tone.py <file.wav> fan
        tone.py <file.wav> turns <slot 0|1> <steady hertz>
        tone.py wait
        tone.py room <loopback module of slot 0> <loopback module of slot 1>
@@ -23,6 +24,10 @@ from 5.3 to 6.5 kHz, above the voices, steady in level, 60 s. Its echo in a room
 steady tone's, is one an echo canceller finds and removes (a pure tone, looped into the
 watcher's microphone, went back to the sharer at -9 dBFS and left the cancellers
 suppressing every voice).
+
+fan: a steady noise as a fan's in a microphone (mic.sh noise): noise from 80 Hz to 2 kHz,
+steady in level, 60 s. A noise suppressor takes it away; echo cancelling and gain control
+leave it as it is.
 
 room: what each copy plays goes back into its own microphone (lab.sh's lab_room_echo)
 only while the other talks (not while either holds its steady tone, which an echo
@@ -55,6 +60,8 @@ FADE = 0.02
 ECHO_AFTER = 0.45
 SCREEN_RMS = 0.05
 SCREEN_SECONDS = 60
+FAN_RMS = 0.05
+FAN_SECONDS = 60
 
 
 def write(path, samples):
@@ -136,6 +143,12 @@ def screen():
     return [SCREEN_RMS * x for x in band_noise(SCREEN_SECONDS, 7, 5300, 6500, order=8)]
 
 
+def fan():
+    """Noise from 80 Hz to 2 kHz (second order on either side), RMS FAN_RMS, FAN_SECONDS
+    long."""
+    return [FAN_RMS * x for x in band_noise(FAN_SECONDS, 11, 80, 2000, order=2)]
+
+
 def sink_input_of(module):
     """The sink input a loopback module plays into its sink through, or None yet."""
     out = subprocess.run(
@@ -186,6 +199,8 @@ elif sys.argv[1] == "room":
     room(sys.argv[2:4])
 elif len(sys.argv) > 2 and sys.argv[2] == "screen":
     write(sys.argv[1], screen())
+elif len(sys.argv) > 2 and sys.argv[2] == "fan":
+    write(sys.argv[1], fan())
 elif len(sys.argv) > 2 and sys.argv[2] == "turns":
     write(sys.argv[1], turns(int(sys.argv[3]), float(sys.argv[4])))
 else:

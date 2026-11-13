@@ -57,7 +57,8 @@
 // FOGATA_TEST_MEASURE=<seconds> measures instead the call as it is, with every copy's voice
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
-// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices)
+// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices,
+// noise)
 // or of the call (rejoin, echo, restart);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
@@ -473,6 +474,10 @@ Future<void> _call(WidgetTester tester) async {
   }
 
   state.prefs.joinWithMic = _mic == '1' || _mic == 'system' || _mic == 'broken';
+  // The noise check: copy a enters as someone who left noise suppression on.
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'noise' && _role == 'a') {
+    state.prefs.noiseSuppression = true;
+  }
   final devices = await navigator.mediaDevices.enumerateDevices();
   _log(
     'devices: ${devices.map((d) => '${d.kind}:${d.label} (${d.deviceId})').join(' | ')}',
@@ -491,10 +496,12 @@ Future<void> _call(WidgetTester tester) async {
     _tone = state.prefs.audioInput = pick('audioinput', 'FogataMic');
     state.prefs.audioOutput = pick('audiooutput', 'FogataTest');
     _quiet = pick('audioinput', 'FogataQuiet');
-    // Measuring, or judging what each copy plays (echo): what the others say plays
-    // into a silent output, not back into the microphone that every copy shares.
+    // Measuring, or judging what each copy plays (echo) or sends (noise): what the
+    // others say plays into a silent output, not back into the microphone that every
+    // copy shares.
     if (_env['FOGATA_TEST_MEASURE'] != null ||
-        _env['FOGATA_TEST_MIC_CASE'] == 'echo') {
+        _env['FOGATA_TEST_MIC_CASE'] == 'echo' ||
+        _env['FOGATA_TEST_MIC_CASE'] == 'noise') {
       state.prefs.audioOutput = pick('audiooutput', 'FogataQuietOut');
     }
     // Were the microphone opened anyway, it would hear only silence.
@@ -3967,6 +3974,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 /// - devices: see [_listedAfterCall]; copy b only stays in the call.
 /// - rejoin: see [_rejoin].
 /// - echo: see [_echo].
+/// - noise: see [_noise].
 /// - restart: see [_soundRestart].
 Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
   final call = state.callState.call!;
@@ -4070,6 +4078,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       await _rejoin(tester, state);
     case 'echo':
       await _echo(tester, state);
+    case 'noise':
+      await _noise(tester, state);
     case 'restart':
       await _soundRestart(tester, state);
     default:
@@ -4432,24 +4442,12 @@ Future<void> _rejoin(WidgetTester tester, AppState state) async {
 /// - `between<n>`: b back in the call, not watching yet;
 /// - `after<n>`: b watching again.
 ///
-/// mic_check.py judges them: neither copy may play its own pitch, and b must play a's
-/// voice throughout and the screen's sound only while it watches.
-Future<void> _echo(WidgetTester tester, AppState state) async {
-  if (_copies != 2) throw StateError('the echo check takes two copies');
-  final first = state.callState.call!;
-  if (!first.mic) {
-    throw StateError('the echo check needs the microphone on in both copies');
-  }
-  final group = first.group;
-  final _Other other = (
-    id: first.peers.keys.single,
-    name: _names[_role == 'a' ? 'b' : 'a']!,
-  );
-  // Every 200 ms, this copy's own voice level as its processing puts it out (the voice
-  // channel's media source, before the codec), for tools/call-lab/mic_check.py's steady
-  // tones: Opus's silence suppression may drop a steady tone on its way to the other copy.
+/// Logs every 200 ms, in `level-<role>.txt` of FOGATA_CALL, this copy's own voice level as
+/// its processing puts it out (the voice channel's media source, before the codec), with
+/// the time in milliseconds since the epoch, until the timer is cancelled.
+Timer _logLevels(AppState state) {
   final levels = File('$_dir/level-$_role.txt');
-  final logging = Timer.periodic(const Duration(milliseconds: 200), (_) async {
+  return Timer.periodic(const Duration(milliseconds: 200), (_) async {
     final connection =
         state.callState.call?.peers.values.firstOrNull?.connection;
     if (connection == null) return;
@@ -4468,6 +4466,74 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
       }
     } catch (_) {}
   });
+}
+
+/// tools/call-lab/mic.sh noise. Copy a entered with noise suppression on and its
+/// microphone on, a steady noise in it (a fan's, from mic.sh), and never muted. It logs
+/// its own level as its processing puts it out ([_logLevels]) and marks four stretches of
+/// FOGATA_TEST_NOISE_SECONDS (6 when left out), `mark-a-<stretch>-start` and `-end`:
+///
+/// - `start`: as it entered, b connected;
+/// - `off`: noise suppression turned off;
+/// - `on`: turned on again;
+/// - `again`: after muting and unmuting.
+///
+/// mic_check.py judges them: the noise must be as low in `start` as in `on` and `again`,
+/// well under `off`. Copy b only stays in the call.
+Future<void> _noise(WidgetTester tester, AppState state) async {
+  if (_copies != 2) throw StateError('the noise check takes two copies');
+  if (_role != 'a') {
+    await _hear(tester, state, ['noise done'], seconds: 300);
+    return;
+  }
+  final call = state.callState.call!;
+  if (!call.mic) throw StateError('the noise check needs the microphone on');
+  if (!call.noiseSuppression) {
+    throw StateError('entered with noise suppression off');
+  }
+  final each = Duration(
+    seconds: int.tryParse(_env['FOGATA_TEST_NOISE_SECONDS'] ?? '') ?? 6,
+  );
+  Future<void> stretch(String name) async {
+    _mark('$name-start');
+    await _wait(tester, each);
+    _mark('$name-end');
+  }
+
+  final logging = _logLevels(state);
+  try {
+    await stretch('start');
+    await state.setNoiseSuppression(false);
+    await stretch('off');
+    await state.setNoiseSuppression(true);
+    await stretch('on');
+    await state.setMic(false);
+    await _wait(tester, const Duration(seconds: 1));
+    await state.setMic(true);
+    await _wait(tester, const Duration(seconds: 1));
+    await stretch('again');
+  } finally {
+    logging.cancel();
+  }
+  await _say(state, 'noise done');
+}
+
+/// mic_check.py judges them: neither copy may play its own pitch, and b must play a's
+/// voice throughout and the screen's sound only while it watches.
+Future<void> _echo(WidgetTester tester, AppState state) async {
+  if (_copies != 2) throw StateError('the echo check takes two copies');
+  final first = state.callState.call!;
+  if (!first.mic) {
+    throw StateError('the echo check needs the microphone on in both copies');
+  }
+  final group = first.group;
+  final _Other other = (
+    id: first.peers.keys.single,
+    name: _names[_role == 'a' ? 'b' : 'a']!,
+  );
+  // For tools/call-lab/mic_check.py's steady tones: Opus's silence suppression may drop a
+  // steady tone on its way to the other copy.
+  final logging = _logLevels(state);
   try {
     await _echoSteps(tester, state, first, group, other);
   } finally {

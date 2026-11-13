@@ -2,7 +2,7 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|echo|broken|alsa|hang|quit|restart>
+Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|echo|noise|broken|alsa|hang|quit|restart>
 """
 
 import json
@@ -981,6 +981,68 @@ elif check == "echo":
     others = sorted({binary for _, binary, _ in taken} - {"pw-cat"})
     if others and "ECHO_FROM=pw-cat (unset)" in (run / "settings.txt").read_text():
         problems.append(f"a's screen took other programs' sound too: {others}")
+elif check == "noise":
+    # Copy a's level as its processing puts it out (call_test.dart's level log: the time
+    # in milliseconds and the level, 0 to 1, every 200 ms), over the stretches it marked:
+    # as it entered with noise suppression on and its microphone on (start), with noise
+    # suppression turned off (off), on again (on), and after muting and unmuting (again).
+    # A fan's steady noise is all its microphone has (tone.py fan).
+    # The application's noise suppression lowers such a noise by 25 dB and more; this
+    # much is asked of every stretch with it on. libwebrtc without WebRTC patch 0008 left
+    # its processing of the microphone off from the entry until the microphone was muted
+    # and unmuted, and the noise suppression with it: start and on as loud as off.
+    NOISE_UNDER = 10.0
+    # The noise suppression takes a moment to settle after a change.
+    SETTLE = 1.5
+    # Weaker than this with noise suppression off, the noise is not there.
+    NOISE_THERE = -60.0
+    path = meet / "level-a.txt"
+    levels = []
+    for line in path.read_text().splitlines() if path.exists() else []:
+        fields = line.split()
+        if len(fields) == 2:
+            levels.append((int(fields[0]) / 1000, float(fields[1])))
+
+    # A level the log gives as 0 (under one step of 16 bits) counts as this.
+    FLOOR = -96.0
+    # With noise suppression on, a reading this loud is the noise getting through for a
+    # moment: counted and told, not judged (the level over a stretch is its median).
+    THROUGH = -40.0
+
+    def stretch(name):
+        """The readings of a stretch in dBFS, or None when a did not mark or log it."""
+        start, end = moment(f"mark-a-{name}-start"), moment(f"mark-a-{name}-end")
+        if start is None or end is None:
+            return None
+        inside = [v for t, v in levels if start + SETTLE <= t <= end]
+        if len(inside) < 5:
+            return None
+        return sorted(20 * math.log10(v) if v > 0 else FLOOR for v in inside)
+
+    names = ("start", "off", "on", "again")
+    read = {name: stretch(name) for name in names}
+    if None in read.values():
+        missing = [name for name in names if read[name] is None]
+        problems.append(f"a's level was not logged in every stretch (not in {missing}): {result('a')}")
+    else:
+        sent = {name: read[name][len(read[name]) // 2] for name in names}
+        notes.append("a's noise as it sends it (median): " + ", ".join(f"{name} {sent[name]:.1f} dBFS" for name in names))
+        through = {name: sum(1 for v in read[name] if v > THROUGH) for name in names if name != "off"}
+        if any(through.values()):
+            notes.append(
+                f"readings over {THROUGH:.0f} dBFS with noise suppression on: "
+                + ", ".join(f"{name} {through[name]} of {len(read[name])}" for name in through)
+            )
+        if sent["off"] < NOISE_THERE:
+            problems.append(f"no noise from a's microphone with noise suppression off ({sent['off']:.1f} dBFS)")
+        for name, when in (("start", "as a entered"), ("on", "turned on again"), ("again", "after muting and unmuting")):
+            lowered = sent["off"] - sent[name]
+            if lowered < NOISE_UNDER:
+                problems.append(
+                    f"noise suppression {when} lowered the noise by {lowered:.1f} dB only "
+                    f"(under {NOISE_UNDER:.0f} dB: {sent[name]:.1f} dBFS, {sent['off']:.1f} dBFS with it off)"
+                )
+    notes += re.findall(r"noise suppression (?:on|off)[^\n]*", (run / "a.out").read_text(errors="replace"))[:6]
 elif check in ("late", "alone"):
     if "laba_mic" not in sources_between("a", 0, 1e12):
         problems.append("a never recorded from its microphone")

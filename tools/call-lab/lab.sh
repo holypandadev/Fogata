@@ -63,6 +63,8 @@ lab_unplug() { # role
 # LAB_TURNS=1 (two copies, mic.sh echo): voices that talk in turns and then hold a steady
 # tone alone (tone.py turns), every player starting on the same 16 s of the clock; each
 # copy's slot and steady tone are written to $RUN/turns.txt for mic_check.py.
+# LAB_FAN=<role> (mic.sh noise): that copy's microphone has a fan's noise (tone.py fan), no
+# tone.
 LAB_TURN_STEADY=(1265 1650)
 
 lab_tones() { # copies
@@ -76,6 +78,9 @@ lab_tones() { # copies
     if [ -n "$turns" ]; then
       python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" turns "$i" "${LAB_TURN_STEADY[$i]}"
       echo "$r slot=$i steady=${LAB_TURN_STEADY[$i]}" >> "$RUN/turns.txt"
+    elif [ "${LAB_FAN:-}" = "$r" ]; then
+      # A fan's noise instead of the copy's tone (mic.sh noise).
+      python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" fan
     else
       python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" $((330 + 55 * i))
     fi
