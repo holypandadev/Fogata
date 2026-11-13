@@ -52,7 +52,7 @@ it case-insensitively with ciopfs, which needs FUSE and libfuse 2: on Ubuntu the
 `libfuse2t64`, or its two libraries unpacked anywhere and named with `LD_LIBRARY_PATH`), applies the patches, builds with
 `args/common.gn` and `args/win-x64.gn`, and writes
 
-    <work>/dist/fogata-libwebrtc.m156.8078.5/libwebrtc-win-x64-release.zip   (+ .sha256)
+    <work>/dist/fogata-libwebrtc.m156.8078.6/libwebrtc-win-x64-release.zip   (+ .sha256)
 
 with `win-x64-release/{lib/libwebrtc.dll, lib/libwebrtc.dll.lib, include, LICENSE,
 NOTICE.md}`, as webrtc-sdk's Windows archives are laid out. Put its SHA-256 into

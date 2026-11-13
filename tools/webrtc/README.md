@@ -85,7 +85,7 @@ wrapper's tests of the size check, of the microphone's channels, of the voice en
 muted state, of the echo controller made anew, of the arrays it hands across and of the
 shared screen encoder, and writes into `<work>/dist`:
 
-    fogata-libwebrtc.m156.8078.5/libwebrtc-linux-x64-release.zip   (+ .sha256)
+    fogata-libwebrtc.m156.8078.6/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
 laid out like webrtc-sdk's archives (`linux-x64-release/{lib,include,LICENSE,NOTICE.md}`).
 `NOTICE.md` holds the licence of WebRTC and of every library built into it, as WebRTC's

@@ -807,7 +807,7 @@ The package downloads webrtc-sdk's prebuilt libwebrtc. Fogata builds its own ins
 and VP8 keyframes larger than 8K refused before they are decoded (see "Pictures too large
 to draw").
 
-- `third_party/libwebrtc_version.ini`: `fogata-libwebrtc.m156.8078.5`, with the SHA-256 of
+- `third_party/libwebrtc_version.ini`: `fogata-libwebrtc.m156.8078.6`, with the SHA-256 of
   every archive (`sha256_<os>-<arch>`); only the systems Fogata ships are listed.
 - `third_party/CMakeLists.txt`: the archive must match that SHA-256, wherever it comes
   from; archives are named after the version, and a stamp in `libwebrtc/` makes a new
@@ -824,7 +824,7 @@ to draw").
   from the copies kept in `tools/notices/libwebrtc` (so it also runs on a Mac, which never
   unpacks the archive), and fails when the unpacked archive's files differ from the copies:
   copy the new ones over when libwebrtc changes.
-- macOS (`macos/flutter_webrtc.podspec`): WebRTC-SDK 156.8078.5, Fogata's own build of the
+- macOS (`macos/flutter_webrtc.podspec`): WebRTC-SDK 156.8078.6, Fogata's own build of the
   same WebRTC (`tools/webrtc/MACOS.md`), which the app's Podfile takes from
   `app/macos/WebRTC-SDK.podspec` (this computer's store, checked by SHA-256). iOS
   (`ios/flutter_webrtc.podspec`, never built) still names webrtc-sdk's 150.7871.04.

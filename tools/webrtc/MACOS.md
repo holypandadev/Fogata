@@ -60,7 +60,7 @@ x64 (`args/common.gn`, `args/mac.gn`, macOS 12 and later), joins them with `lipo
 that the framework exports no class of a codec other than Opus and VP8 and names no source
 file of one (nor of the frame cryptor), makes
 `WebRTC.xcframework` with WebRTC's `LICENSE` and the licences of everything built in
-(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m156.8078.5/WebRTC.xcframework.zip`
+(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m156.8078.6/WebRTC.xcframework.zip`
 with its SHA-256.
 
 To change the port, fix it in `~/webrtc-work/webrtc/src`, build again with `--no-prepare`,
