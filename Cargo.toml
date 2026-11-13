@@ -111,6 +111,7 @@ undocumented_unsafe_blocks = "deny"
 libp2p-quic = { path = "vendor/libp2p-quic" }
 libp2p-mdns = { path = "vendor/libp2p-mdns" }
 libp2p-identify = { path = "vendor/libp2p-identify" }
+libp2p-kad = { path = "vendor/libp2p-kad" }
 libp2p-stream = { path = "vendor/libp2p-stream" }
 turn = { path = "vendor/turn" }
 spake2 = { path = "vendor/spake2" }
