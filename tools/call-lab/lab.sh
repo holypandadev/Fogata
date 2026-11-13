@@ -60,23 +60,109 @@ lab_unplug() { # role
 # LAB_VOICE_BINARY (the app's executable), the players say they are the app: a voice is
 # a person's, never another application's, and a shared screen taking every other
 # application's sound (FOGATA_SCREEN_SOUND_FROM empty) leaves the app's own out.
+# LAB_TURNS=1 (two copies, mic.sh echo): voices that talk in turns and then hold a steady
+# tone alone (tone.py turns), every player starting on the same 16 s of the clock; each
+# copy's slot and steady tone are written to $RUN/turns.txt for mic_check.py.
+LAB_TURN_STEADY=(1265 1650)
+
 lab_tones() { # copies
-  local i r
+  local i r turns=""
   local as=()
   [ -n "${LAB_VOICE_BINARY:-}" ] && as=("PULSE_PROP_OVERRIDE_application.process.binary=$LAB_VOICE_BINARY")
+  [ "${LAB_TURNS:-}" = 1 ] && turns=1
+  [ -n "$turns" ] && : > "$RUN/turns.txt"
   for i in $(seq 0 $(($1 - 1))); do
     r=${ROLES[$i]}
-    python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" $((330 + 55 * i))
+    if [ -n "$turns" ]; then
+      python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" turns "$i" "${LAB_TURN_STEADY[$i]}"
+      echo "$r slot=$i steady=${LAB_TURN_STEADY[$i]}" >> "$RUN/turns.txt"
+    else
+      python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" $((330 + 55 * i))
+    fi
     # A player that fails (no sound server, or its output not made again yet after
     # lab_sound_start) is started again a moment later.
-    ( trap 'kill "$(cat "$RUN/paplay-$r.pid")" 2>/dev/null; exit 0' TERM HUP INT
+    # With turns, a player starts on every period's start whether the last one has ended
+    # or not (one still draining is stopped): waiting for it to end made a player that
+    # ended a moment after the period's start wait for the next one, and that copy said
+    # nothing for a whole period.
+    # The wait for the next period runs in the background: a trap waits for a command in
+    # the foreground to end, and lab_stop's kill -9 came first (bash told "Killed").
+    ( waiter=""
+      trap 'kill "$(cat "$RUN/paplay-$r.pid")" $waiter 2>/dev/null; exit 0' TERM HUP INT
       while true; do
+        if [ -n "$turns" ]; then
+          python3 -I "$LAB_DIR/tone.py" wait &
+          waiter=$!
+          wait $waiter
+          waiter=""
+          [ -e "$RUN/paplay-$r.pid" ] && kill "$(cat "$RUN/paplay-$r.pid")" 2>/dev/null
+        fi
         env "${as[@]}" paplay --device="lab${r}_test" "$RUN/tone-$r.wav" 2>/dev/null &
         echo $! > "$RUN/paplay-$r.pid"
-        wait $! || sleep 0.2
+        [ -n "$turns" ] || wait $! || sleep 0.2
       done ) > /dev/null 2>&1 &
     echo $! > "$RUN/tone-$r.pid"
   done
+}
+
+# A room's echo, as with speakers and a microphone: what each copy plays goes back into its
+# own microphone (its output's monitor looped into the output its microphone hears), 30 ms
+# later and as loud, while the other copy talks (tone.py room mutes each loop in the
+# copy's own turns, on the turns' clock). The echo reaches the audio processing as the playout it was given plus
+# the server's buffers, the loop's 30 ms and the recording's: well under the half second
+# or so of delay WebRTC's echo canceller (AEC3: 5 matched filters over the signal at
+# 4 kHz) looks for; and what a copy plays (the other's voice after its gain control,
+# -5 dBFS at most) comes back short of clipping, in the other's turns only. With the echo canceller working, the other copy hears its own
+# voice back far below its playing of it; without one, about as loud.
+lab_room_echo() { # copies
+  local i r
+  for i in $(seq 0 $(($1 - 1))); do
+    r=${ROLES[$i]}
+    pactl load-module module-loopback source="lab${r}_quiet.monitor" sink="lab${r}_test" \
+      latency_msec=30 source_dont_move=true sink_dont_move=true > "$RUN/mod-room-$r"
+  done
+  python3 -I "$LAB_DIR/tone.py" room "$(cat "$RUN/mod-room-a")" "$(cat "$RUN/mod-room-b")" \
+    > "$RUN/room.log" 2>&1 &
+  echo $! > "$RUN/room.pid"
+}
+
+# Once a second, PipeWire's graph (pw-top: each node's block size, rate and xruns) and
+# every stream's buffer and device latency, to $RUN/timing.log (timing.py).
+# And each copy's output and microphone side by side in one stereo recording per stretch
+# (lab_phase_recorder): its output's monitor linked to the left of a sink of its own,
+# its microphone's to the right, in the same cycle of the graph, so that mic_check.py
+# times the room's loop as it really was (two recordings, one of each, slid against
+# each other by tens of ms under load).
+lab_timing() {
+  local r
+  python3 -I "$LAB_DIR/timing.py" "$RUN/timing.log" > /dev/null 2>&1 &
+  echo $! > "$RUN/timing.pid"
+  for r in a b; do
+    pactl load-module module-null-sink sink_name="lab${r}_probe" channels=2 \
+      channel_map=front-left,front-right sink_properties=device.description=LabProbe-$r \
+      > /dev/null
+    lab_link "lab${r}_quiet" "lab${r}_probe:playback_FL"
+    lab_link "lab${r}_test" "lab${r}_probe:playback_FR"
+  done
+  : > "$RUN/probe"
+}
+
+# Links the first monitor port of sink $1 to port $2, as PipeWire lists them (a's output's
+# monitor was not found by its expected name once in every run), trying for 5 s; what was
+# listed goes to lab.log when it cannot.
+lab_link() { # sink, input port
+  local port _
+  for _ in $(seq 20); do
+    port=$(pw-link -o 2> /dev/null | grep -m 1 "^$1:monitor_")
+    if [ -n "$port" ] && [ -n "$(pw-link -i 2> /dev/null | grep -x "$2")" ] &&
+      pw-link "$port" "$2" 2>> "$RUN/lab.log"; then
+      echo "linked $port to $2" >> "$RUN/lab.log"
+      return 0
+    fi
+    sleep 0.25
+  done
+  { echo "could not link $1's monitor to $2; outputs and inputs:"
+    pw-link -o; pw-link -i; } >> "$RUN/lab.log" 2>&1
 }
 
 # Every 0.2 s, what each process records from: "<time> <pid>:<source name> ..." whenever it
@@ -197,16 +283,15 @@ lab_kill() { # pid word
   kill -9 "$p" 2>/dev/null
 }
 
-# Another application's sound, for a shared screen to take: a tone of its own (880 Hz:
-# neither a copy's voice nor a harmonic of one, all on a 55 Hz grid of odd and even steps
-# that no sum or difference of 880 and 330 reaches) from pw-cat, again and again, into a
-# sink of its own that nothing records. Its node names its program itself (LAB_APP_PROPS),
+# Another application's sound, for a shared screen to take: noise from 5.3 to 6.5 kHz, above
+# the copies' voices (tone.py screen), from pw-cat, again and again, into a sink of its own
+# that nothing records. Its node names its program itself (LAB_APP_PROPS),
 # whatever PipeWire would add.
 LAB_APP_PROPS='{ application.process.binary = pw-cat }'
 
 lab_apps_tone() {
   pactl load-module module-null-sink sink_name=lab_apps sink_properties=device.description=LabApps > /dev/null
-  python3 -I "$LAB_DIR/tone.py" "$RUN/tone-apps.wav" 880 60
+  python3 -I "$LAB_DIR/tone.py" "$RUN/tone-apps.wav" screen
   ( trap 'kill "$(cat "$RUN/pwcat-apps.pid")" 2>/dev/null; exit 0' TERM HUP INT
     while true; do
       pw-cat --playback --target lab_apps -P "$LAB_APP_PROPS" "$RUN/tone-apps.wav" 2>/dev/null &
@@ -219,10 +304,17 @@ lab_apps_tone() {
 # A deliberate echo, to see a check catch one: what copy a plays (the others' voices) is
 # played again by another application (pw-cat, into lab_apps), as a program that records
 # the speakers and plays them on would; a's shared screen then carries it to everyone.
+#
+# With their own buffers (parec's default is about 2 s), b got its voice back 2 s later, in
+# a's next turn, where mic_check.py does not look for it, and its steady tone while it still
+# held it (b's echo canceller then took the tone for an echo of what it played and removed
+# it: -42 to -57 dB). With 20 ms each, the voice comes back within the round trip of the
+# call (about half a second), inside the copy's own turn, as an echo would.
 lab_echo_proof() {
-  ( parec --device=laba_quiet.monitor --format=s16le --rate=48000 --channels=1 --raw 2>/dev/null |
+  ( parec --device=laba_quiet.monitor --format=s16le --rate=48000 --channels=1 --raw \
+      --latency-msec=20 2>/dev/null |
       pw-cat --playback --target lab_apps -P "$LAB_APP_PROPS" --raw --format s16 --rate 48000 \
-        --channels 1 - 2>/dev/null ) &
+        --channels 1 --latency=20ms - 2>/dev/null ) &
   echo $! > "$RUN/echo-proof.pid"
 }
 
@@ -245,9 +337,21 @@ lab_phase_recorder() { # marking role, "roles recorded"
         [ -e "$RUN/sink-inputs.json" ] || pactl -f json list sink-inputs > "$RUN/sink-inputs.json" 2> /dev/null
         pids=""
         for r in $roles; do
+          # When the recording starts, by the clock the turns follow (lab_tones).
+          date +%s.%N > "$RUN/played/$stretch-$r.start"
           parec --device="lab${r}_quiet.monitor" --format=s16le --rate=16000 --channels=1 \
             --raw --latency-msec=50 > "$RUN/played/$stretch-$r.raw" 2> /dev/null &
           pids="$pids $!"
+          # And what its microphone hears, to time the room's echo against what it played
+          # (mic_check.py: whether the loop's delay moves).
+          parec --device="lab${r}_test.monitor" --format=s16le --rate=16000 --channels=1 \
+            --raw --latency-msec=50 > "$RUN/played/$stretch-$r-mic.raw" 2> /dev/null &
+          pids="$pids $!"
+          if [ -e "$RUN/probe" ]; then
+            parec --device="lab${r}_probe.monitor" --format=s16le --rate=16000 --channels=2 \
+              --raw --latency-msec=50 > "$RUN/played/$stretch-$r-probe.raw" 2> /dev/null &
+            pids="$pids $!"
+          fi
         done
         echo "$pids" > "$RUN/played/$stretch.pids"
       done
@@ -276,5 +380,7 @@ lab_stop() {
     [ -e "$f" ] && kill $(cat "$f") 2> /dev/null
   done
   [ -e "$RUN/hang.pid" ] && lab_kill "$(cat "$RUN/hang.pid")" hang.py
+  [ -e "$RUN/room.pid" ] && lab_kill "$(cat "$RUN/room.pid")" tone.py
+  [ -e "$RUN/timing.pid" ] && lab_kill "$(cat "$RUN/timing.pid")" timing.py
   [ -e "$RUN/xvfb.pid" ] && lab_kill "$(cat "$RUN/xvfb.pid")" Xvfb
 }

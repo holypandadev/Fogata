@@ -4445,6 +4445,43 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
     id: first.peers.keys.single,
     name: _names[_role == 'a' ? 'b' : 'a']!,
   );
+  // Every 200 ms, this copy's own voice level as its processing puts it out (the voice
+  // channel's media source, before the codec), for tools/call-lab/mic_check.py's steady
+  // tones: Opus's silence suppression may drop a steady tone on its way to the other copy.
+  final levels = File('$_dir/level-$_role.txt');
+  final logging = Timer.periodic(const Duration(milliseconds: 200), (_) async {
+    final connection =
+        state.callState.call?.peers.values.firstOrNull?.connection;
+    if (connection == null) return;
+    try {
+      final reports = await connection.getStats();
+      final byId = {for (final r in reports) r.id: r};
+      for (final r in reports) {
+        if (r.type != 'outbound-rtp' || '${r.values['mid']}' != '0') continue;
+        final level = byId[r.values['mediaSourceId']]?.values['audioLevel'];
+        if (level is num) {
+          levels.writeAsStringSync(
+            '${DateTime.now().millisecondsSinceEpoch} $level\n',
+            mode: FileMode.append,
+          );
+        }
+      }
+    } catch (_) {}
+  });
+  try {
+    await _echoSteps(tester, state, first, group, other);
+  } finally {
+    logging.cancel();
+  }
+}
+
+Future<void> _echoSteps(
+  WidgetTester tester,
+  AppState state,
+  Call first,
+  String group,
+  _Other other,
+) async {
   if (_role == 'a') {
     final sources = await first.screens();
     await first.shareScreen(
@@ -4470,6 +4507,8 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
       .where((p) => p.isNotEmpty)
       .map(int.parse)
       .toList();
+  // Long enough for a whole period of the copies' turns to be measured after the first
+  // 3 s (tools/call-lab/tone.py: 16 s, with each copy's talk and steady tone in it).
   Future<void> stretch(String name, int seconds) async {
     _mark('$name-start');
     await _wait(tester, Duration(seconds: seconds));
@@ -4508,7 +4547,7 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
 
   await _hearFrom(tester, state, other, 'echo shared');
   await watch('before leaving');
-  await stretch('before', 12);
+  await stretch('before', 24);
   for (var round = 1; round <= pauses.length; round++) {
     final pause = pauses[round - 1];
     await state.leaveRoom();
@@ -4529,9 +4568,9 @@ Future<void> _echo(WidgetTester tester, AppState state) async {
       seconds: 90,
     );
     await _wait(tester, const Duration(seconds: 3));
-    await stretch('between$round', 8);
+    await stretch('between$round', 20);
     await watch('after entering again ($round)');
-    await stretch('after$round', 12);
+    await stretch('after$round', 24);
   }
   await _say(state, 'echo done');
 }

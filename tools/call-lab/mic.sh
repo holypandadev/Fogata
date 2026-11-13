@@ -36,23 +36,36 @@
 #            as many after 1 s and after 5 s, then a does the same; both copies have their
 #            microphone on, and each time both measure from the moment the one leaving
 #            entered until the other's voice reaches them again: any over 6 s fails
-#   echo     a shares its screen with the other applications' sound (a tone of the lab's
-#            own, 880 Hz, from pw-cat), b watches it, leaves the room, enters it again and
+#   echo     a shares its screen with the other applications' sound (the lab's own, noise
+#            from 5.3 to 6.5 kHz, from pw-cat), b watches it, leaves the room, enters it again and
 #            watches it again (ECHO_PAUSES, default "1 10": the seconds out of the room
-#            each time; 6 or more also measures a alone meanwhile); both talk all along,
-#            each with a tone of its own pitch (a 330 Hz, b 385 Hz). What each copy plays
-#            is recorded for every stretch b marks, and judged by the energy at each pitch:
-#            a copy that plays its own voice about as loud as the other plays it (within
-#            6 dB) hears itself, and fails; a weaker trace (an echo canceller's) is told;
-#            b must hear a and the screen's sound while it watches, and not while it does
-#            not; and a's voice must not go out weaker while its screen's sound goes out
-#            (more than 4 dB: its microphone is then processed otherwise). ECHO_MONO=1
-#            has the screen's sound go in one channel, to compare. ECHO_FROM
+#            each time; 6 or more also measures a alone meanwhile); they talk in turns
+#            (speech-like noise), then each holds a steady tone alone (tone.py turns, a
+#            16 s period on the clock), and what each plays goes back into its own
+#            microphone as a room's echo would while the other talks (ECHO_ROOM=0 for
+#            none). Judged (mic_check.py): neither may hear its own voice come back within
+#            10 dB of the other's playing of it (what each plays, recorded for every
+#            stretch b marks: an echo canceller off, the screen's sound carrying the
+#            call); neither may send the other's voice on (its level after its echo
+#            canceller, every 200 ms, call_test.dart's level log) less than 30 dB under its
+#            own voice, 20 dB in the other's first turn of each call; each copy's WebRTC
+#            must have applied, before every stretch, the processing the application asks
+#            for (echo cancelling and gain control on, WebRTC's noise suppressor and
+#            high-pass filter off: its log, FOGATA_WEBRTC_LOG, info unless WEBRTC_LOG says
+#            otherwise); b must hear a and the screen's sound while it watches, and not while
+#            it does not. The steady tones as each copy sends them are told, not judged.
+#            ECHO_MONO=1 has the screen's sound go in one channel, to compare. ECHO_FROM
 #            names the program whose sound a's screen takes (pw-cat when unset; set and
 #            empty, every application's, as on a desktop); CALL_LAB_LOOPBACK=1 adds a
 #            loopback of what a plays into another output and a combined output (with
 #            ECHO_FROM empty, so they could be taken). ECHO_PROOF=1 has another
-#            application play again what a plays (b's voice among it): the check must fail
+#            application play again what a plays (b's voice among it), which a's screen
+#            carries back to b: the check must fail with b hearing itself in every
+#            stretch it watches, and says so when it does not. PipeWire's graph, every
+#            stream's latency and the computer's load are logged once a second
+#            (timing.py; ECHO_TIMING=0 for none), and told beside every turn whose echo
+#            got through (which fails, whatever came before it); a load over the number
+#            of processors fails the run as too busy to judge
 #   restart  a and b talk and hear each other; the session's sound server is stopped and
 #            started again (restart:<how>, RESTART_HOW): pulse, PipeWire's PulseAudio service
 #            alone; all, the three daemons, as `systemctl --user restart pipewire
@@ -75,8 +88,12 @@ if [ "${1:-}" = --inside ]; then
   trap 'lab_stop; exit 1' TERM INT HUP
   # The voices are people's, not other applications': a shared screen taking every
   # application's sound must not take them (see lab_tones).
-  [ "$CHECK" = echo ] && export LAB_VOICE_BINARY=$(basename "$BUNDLE")
+  [ "$CHECK" = echo ] && export LAB_VOICE_BINARY=$(basename "$BUNDLE") LAB_TURNS=1
   lab_start 2
+  # A room's echo into each copy's microphone (ECHO_ROOM=0 for none).
+  [ "$CHECK" = echo ] && [ "${ECHO_ROOM:-1}" = 1 ] && lab_room_echo 2
+  # How the sound server moves the sound along, once a second (ECHO_TIMING=0 for none).
+  [ "$CHECK" = echo ] && [ "${ECHO_TIMING:-1}" = 1 ] && lab_timing
   case "$CHECK" in
     muted) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=muted; lab_copy b 2 off FOGATA_TEST_MIC_CASE=muted ;;
     broken | alsa) lab_copy a 2 broken FOGATA_TEST_MIC_CASE="$CHECK"; lab_copy b 2 off FOGATA_TEST_MIC_CASE="$CHECK" ;;
@@ -95,13 +112,15 @@ if [ "${1:-}" = --inside ]; then
     echo)
       lab_apps_tone
       [ "${ECHO_PROOF:-}" = 1 ] && lab_echo_proof
-      # a's WebRTC log tells how its microphone is processed as channels start sending.
+      # Each copy's WebRTC log tells the processing it applied to its microphone (judged)
+      # and, with WEBRTC_LOG=verbose, what its echo canceller did.
       mono=()
       [ "${ECHO_MONO:-}" = 1 ] && mono=(FOGATA_TEST_SCREEN_SOUND_MONO=1)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
-        FOGATA_SCREEN_SOUND_FROM="${ECHO_FROM-pw-cat}" FOGATA_WEBRTC_LOG=info "${mono[@]}"
-      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
+        FOGATA_SCREEN_SOUND_FROM="${ECHO_FROM-pw-cat}" FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}" \
         "${mono[@]}"
+      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
+        FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}" "${mono[@]}"
       lab_phase_recorder b "a b"
       ;;
     quit)
@@ -214,7 +233,7 @@ for check in "${checks[@]}"; do
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
-  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10}" >> "$RUN/settings.txt"
+  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1
   CALL_LAB_ALSA=$alsa "$HERE/session.sh" "$RUN/session" "$0" --inside "$name"
