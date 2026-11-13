@@ -526,6 +526,9 @@ void FlutterScreenCapture::GetDisplayMedia(
       base_->factory_->CreateDesktopSource(
           desktop_capturer, video_source_label,
           base_->ParseMediaConstraints(video_constraints));
+  // Fogata: every connection that sends this screen at one size shares one encoder
+  // of it (FOGATA.md, "One encode of a shared screen"). One track per source.
+  video_source->EnableSharedEncode();
 
   // TODO: RTCVideoSource -> RTCVideoTrack
 
@@ -763,6 +766,9 @@ void FlutterScreenCapture::GetDisplayMediaFromPortal(
   auto track_id = std::make_shared<std::string>();
   scoped_refptr<RTCVideoSource> source = base_->factory_->CreateCustomVideoSource(
       "screen_capture_input", base_->ParseMediaConstraints(EncodableMap()));
+  // Fogata: one encoder for every connection that sends it at one size, as for the
+  // desktop source above.
+  source->EnableSharedEncode();
   capturer->Start(
       show_cursor, int(fps),
       [source](int width, int height, const uint8_t* y, int stride_y,

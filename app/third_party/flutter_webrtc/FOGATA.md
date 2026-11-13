@@ -121,8 +121,9 @@ delay-based estimate still finds the limit of a congested link.
 ## One thread for each video encoder (all platforms)
 
 libvpx gives a VP8 encoder of more than 640×480 pixels three threads (on a computer with six
-or more), which wait for each other by spinning. Each person watching a camera or a screen has
-an encoder of their own, so a call of four with cameras at 540p ran nine such threads: on a
+or more), which wait for each other by spinning. Each person watching a camera has an encoder
+of their own (a shared screen has one for all who watch it at one size: "One encode of a
+shared screen" below), so a call of four with cameras at 540p ran nine such threads: on a
 16-thread desktop they took 2.1 cores and the cameras went out at 21 frames a second; with one
 thread each, 0.63 cores and 30 (measured with `tools/call-lab`).
 
@@ -134,16 +135,54 @@ thread each, 0.63 cores and 30 (measured with `tools/call-lab`).
   it. Another codec, if one is ever added, needs its own look.
 - The limit holds for a shared screen too, and one thread may not encode a moving 1080p
   screen at 60 frames a second: WebRTC then says the processor holds it back, and the app
-  lowers the screen's rate (`ScreenLoad` in `lib/src/call/fitting.dart`). Nothing here can
-  give the screen more threads than the cameras: `VideoStreamEncoder` reads the field trial
-  once, from the factory's (or a whole connection's) field trials, and hands the same
-  limit to every encoder; the wrapper's API makes no encoder factory of the plugin's own;
-  and a desktop source is not marked as a screen (`is_screencast()` is false in the
-  wrapper's `ScreenCapturerTrackSource`, and the portal's capture is a custom source), so
-  WebRTC encodes it as a camera. A limit of its own for the screen needs a patch of
-  WebRTC (`tools/webrtc/patches/webrtc`: in `VideoStreamEncoder`, another limit when the
-  content type is a screen) and the desktop sources marked as screens (a wrapper patch,
-  and the portal's source), then new libwebrtc builds for every system.
+  lowers the screen's rate (`ScreenLoad` in `lib/src/call/fitting.dart`).
+  `VideoStreamEncoder` reads the field trial once, from the factory's (or a whole
+  connection's) field trials, and hands the same limit to every encoder, and the wrapper's
+  API makes no encoder factory of the plugin's own. On Linux and Windows a desktop source
+  is not marked as a screen (`is_screencast()` is false in the wrapper's
+  `ScreenCapturerTrackSource`, and the portal's capture is a custom source), so WebRTC
+  encodes it as a camera. On macOS it is one: the plugin asks for
+  `videoSourceForScreenCast:YES`, whose `ObjCVideoTrackSource` answers `is_screencast()`
+  true, so the screen is encoded as screen content there. The one encoder a shared screen
+  now has can be given more threads alone, through the shared encode's `threads`
+  parameter (below); that is to be measured before it is set.
+
+## One encode of a shared screen (all platforms)
+
+Every connection that sends a track has a `VideoStreamEncoder` of its own, which made an
+encoder of its own: a screen shared to seven watchers was encoded seven times, with seven
+libvpx encoders, their buffers and their threads, although each is given the same frames.
+libwebrtc's `SharedEncoderFactory` (wrapper patch 12, `src/internal/shared_encoder.h`; the
+macOS framework through Apple patch 7) has the connections that send one screen at the same
+settings share one encoder: a frame is encoded once and every connection gets the image with
+its own RTP timestamps. Each connection still packetizes, encrypts, paces and estimates on its
+own, so nothing on the wire changes and a watcher of any version sees no difference. Key
+frames one watcher asks for are given to all (at most one a second); the bitrate is the
+lowest watcher's; a watcher far slower than the others, or losing key frames again and
+again, gets an encoder of its own.
+
+- The field trial `Fogata-SharedScreenEncode/Enabled/` is set with Fogata's own
+  (`common/cpp/src/flutter_webrtc_base.cc`; `FlutterWebRTCPlugin.m`, both copies). With
+  `FOGATA_SHARED_SCREEN_ENCODE=off` in the environment it is left out, in every build (it
+  only gives the saving up): `tools/call-lab` measures before and after on one build that
+  way. `FOGATA_WEBRTC_FIELD_TRIALS` (debug builds) replaces it with the others, and can set
+  its parameters, e.g. `Fogata-SharedScreenEncode/Enabled,key_ms:500,threads:2/`
+  (`SharedEncodeConfig` in the wrapper's header lists them).
+- Only frames of a source marked as a shared screen are shared: the plugin calls
+  `RTCVideoSource::EnableSharedEncode()` on the desktop source and on the portal's custom
+  source (`common/cpp/src/flutter_screen_capture.cc`), and `enableFogataSharedEncode` on
+  the screen's `RTCVideoSource` on macOS (`FlutterRTCDesktopCapturer.m`, both copies,
+  identical; asked with `respondsToSelector:`, so a framework without Apple patch 7 still
+  builds and runs, without sharing). Cameras are never marked. One video track per marked
+  source: a disabled track's black frames carry the source's frame ids.
+- `fogataSharedScreenEncode` answers whether it is on: the trial is set (and, on macOS, the
+  framework has Apple patch 7; on Linux and Windows `libwebrtc_version.ini` pins a library
+  that has it). The app then counts the shared encode once per size in its processor load
+  (`ScreenLoad` in `lib/src/call/fitting.dart`).
+- A connection's `outbound-rtp` statistics name the encoder `libvpx (shared)` while it shares
+  one (`encoderImplementation`); its `totalEncodeTime` then includes the wait for the shared
+  encode, and its `framesEncoded` and `keyFramesEncoded` the frames and key frames made for
+  all.
 
 ## libwebrtc's log and field trials for tests (Linux, Windows, macOS)
 

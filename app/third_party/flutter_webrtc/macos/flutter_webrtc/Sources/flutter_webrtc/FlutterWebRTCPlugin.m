@@ -171,6 +171,23 @@ static NSString* const kFogataFieldTrials =
     @"WebRTC-Bwe-LossBasedBweV2/Enabled:false/"
     @"WebRTC-VideoEncoderSettings/encoder_thread_limit:1/";
 
+// Fogata: the connections that send a shared screen at one size share one encoder of
+// it (FOGATA.md, "One encode of a shared screen"): one encode of each frame instead
+// of one for each watcher; nothing on the wire changes. FOGATA_SHARED_SCREEN_ENCODE=off
+// leaves it out, to measure before and after on one build. A framework without
+// Fogata's Apple patch 7 ignores it.
+static NSString* const kFogataSharedScreenEncodeTrial = @"Fogata-SharedScreenEncode/Enabled/";
+
+static BOOL FogataSharedScreenEncodeTrialOn(void) {
+  const char* value = getenv("FOGATA_SHARED_SCREEN_ENCODE");
+  return value == NULL || strcmp(value, "off") != 0;
+}
+
+// What RTCVideoSource answers with Fogata's Apple patch 7 (FlutterRTCDesktopCapturer.m).
+@protocol FogataSharedEncodeSource
+- (void)enableFogataSharedEncode;
+@end
+
 static void FlutterWebRTCApplyFieldTrials(void) {
   // "Key/Value/" pairs. +configureFieldTrials: replaces the whole string and is
   // read when the factory creates its environment, so every trial has to be in
@@ -178,6 +195,9 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   NSMutableString* fieldTrials = [NSMutableString
       stringWithFormat:@"%@/%@/", kRTCFieldTrialUseNWPathMonitor, kRTCFieldTrialEnabledValue];
   [fieldTrials appendString:kFogataFieldTrials];
+  if (FogataSharedScreenEncodeTrialOn()) {
+    [fieldTrials appendString:kFogataSharedScreenEncodeTrial];
+  }
   if (gWarpEnabled) {
     [fieldTrials
         appendFormat:@"%@/%@/", kRTCFieldTrialIceHandshakeDtlsKey, kRTCFieldTrialEnabledValue];
@@ -640,6 +660,11 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     const BOOL on = [argsMap[@"on"] boolValue];
     const int64_t api = [argsMap[@"api"] longLongValue];
     result(@([FogataDenoise suppress:on api:api]));
+  } else if ([@"fogataSharedScreenEncode" isEqualToString:call.method]) {
+    // Fogata: whether the connections that send a shared screen share one encoder of
+    // it: the trial is on and the framework has Fogata's Apple patch 7.
+    result(@(FogataSharedScreenEncodeTrialOn() &&
+             [RTCVideoSource instancesRespondToSelector:@selector(enableFogataSharedEncode)]));
   } else if ([@"fogataScreenRefresh" isEqualToString:call.method]) {
     // Fogata: gives the encoders of a screen shared through ScreenCaptureKit its last
     // frame again (one that stays still gives no new one); NO for any other track.

@@ -89,6 +89,13 @@ const char kFogataFieldTrials[] =
     "WebRTC-Bwe-LossBasedBweV2/Enabled:false/"
     "WebRTC-VideoEncoderSettings/encoder_thread_limit:1/";
 
+// Fogata: the connections that send a shared screen at one size share one encoder of
+// it (libwebrtc's src/internal/shared_encoder.h, FOGATA.md "One encode of a shared
+// screen"): one encode of each frame instead of one for each watcher. Nothing on the
+// wire changes. FOGATA_SHARED_SCREEN_ENCODE=off leaves it out, in every build (it only
+// gives the saving up), to measure before and after on one build.
+const char kFogataSharedScreenEncodeTrial[] = "Fogata-SharedScreenEncode/Enabled/";
+
 // Builds a "Key/Value/" field trial entry.
 static std::string FieldTrial(const std::string& key,
                               const std::string& value) {
@@ -98,6 +105,19 @@ static std::string FieldTrial(const std::string& key,
 // Builds a "Key/Enabled/" field trial entry.
 static std::string EnabledFieldTrial(const std::string& key) {
   return FieldTrial(key, kRTCFieldTrialEnabledValue);
+}
+
+bool FlutterWebRTCBase::SharedScreenEncode() {
+#ifdef NDEBUG
+  const std::string trials;
+#else
+  const std::string trials = Env("FOGATA_WEBRTC_FIELD_TRIALS");
+#endif
+  if (!trials.empty()) {
+    // The trials given replace Fogata's own: on only if they turn it on.
+    return trials.find("Fogata-SharedScreenEncode/Enabled") != std::string::npos;
+  }
+  return Env("FOGATA_SHARED_SCREEN_ENCODE") != "off";
 }
 
 FlutterWebRTCBase::FlutterWebRTCBase(BinaryMessenger* messenger,
@@ -151,6 +171,9 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
   std::vector<libwebrtc::string> field_trials;
   field_trials.push_back(trials.empty() ? std::string(kFogataFieldTrials)
                                         : trials);
+  if (trials.empty() && SharedScreenEncode()) {
+    field_trials.push_back(std::string(kFogataSharedScreenEncodeTrial));
+  }
   if (enable_warp) {
     field_trials.push_back(
         EnabledFieldTrial(kRTCFieldTrialIceHandshakeDtlsKey));

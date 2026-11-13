@@ -56,6 +56,11 @@ class FlutterWebRTCBase {
   void EnsureWebRTCInitialized(bool enable_warp = false,
                                bool zero_playout_delay = false);
 
+  // Fogata: whether the connections that send a shared screen share one encoder of
+  // it: the field trial EnsureWebRTCInitialized sets, as the environment decides it
+  // (FOGATA_SHARED_SCREEN_ENCODE=off, or FOGATA_WEBRTC_FIELD_TRIALS in debug builds).
+  static bool SharedScreenEncode();
+
   virtual scoped_refptr<RTCAudioProcessing> audio_processing() {
     EnsureWebRTCInitialized();
     return audio_processing_;

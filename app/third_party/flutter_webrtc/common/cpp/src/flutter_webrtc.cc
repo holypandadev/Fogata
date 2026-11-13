@@ -262,6 +262,11 @@ void FlutterWebRTC::HandleMethodCall(
       rate->second(fps);
       result->Success(EncodableValue(true));
     }
+  } else if (method_call.method_name().compare("fogataSharedScreenEncode") == 0) {
+    // Fogata: whether the connections that send a shared screen share one encoder of
+    // it (FOGATA.md, "One encode of a shared screen"). The library has it: the ini
+    // pins the version that does.
+    result->Success(EncodableValue(SharedScreenEncode()));
   } else if (method_call.method_name().compare("fogataScreenRefresh") == 0) {
     // Fogata: gives the encoders of a screen captured through the portal its last frame
     // again (one that stays still gives no new one); false for any other track, whose

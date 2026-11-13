@@ -13,6 +13,14 @@
 #import "FlutterScreenCaptureKitCapturer.h"
 #endif
 
+// Fogata: what WebRTC.framework's RTCVideoSource answers once Fogata's Apple patch 7
+// is in (tools/webrtc/patches/apple): every connection that sends the screen at one
+// size shares one encoder of it (FOGATA.md, "One encode of a shared screen"). Asked
+// with respondsToSelector:, so this builds and runs with a framework without it.
+@protocol FogataSharedEncodeSource
+- (void)enableFogataSharedEncode;
+@end
+
 #if TARGET_OS_OSX
 RTCDesktopMediaList* _screen = nil;
 RTCDesktopMediaList* _window = nil;
@@ -28,6 +36,10 @@ NSMutableDictionary<NSString*, FlutterScreenCaptureKitCapturer*>* _refreshable =
   NSString* mediaStreamId = [[NSUUID UUID] UUIDString];
   RTCMediaStream* mediaStream = [self.peerConnectionFactory mediaStreamWithStreamId:mediaStreamId];
   RTCVideoSource* videoSource = [self.peerConnectionFactory videoSourceForScreenCast:YES];
+  // Fogata: one track per source, as the shared encode wants.
+  if ([videoSource respondsToSelector:@selector(enableFogataSharedEncode)]) {
+    [(id<FogataSharedEncodeSource>)videoSource enableFogataSharedEncode];
+  }
   NSString* trackUUID = [[NSUUID UUID] UUIDString];
   VideoProcessingAdapter *videoProcessingAdapter = [[VideoProcessingAdapter alloc] initWithRTCVideoSource:videoSource];
   
