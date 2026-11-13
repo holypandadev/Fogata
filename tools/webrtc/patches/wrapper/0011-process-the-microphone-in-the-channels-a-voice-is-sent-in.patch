@@ -1,0 +1,167 @@
+Process the microphone in the channels a voice is sent in
+
+What the microphone records goes only to the microphone's own sources; a shared screen's
+sound comes from a custom source of its own and never passes through the audio
+processing. The transport still processed the microphone in the most channels any
+sending stream had (AudioState::UpdateAudioTransportWithSendingStreams passes their
+maximum): when a screen's sound started going out in stereo, the microphone was
+processed in two channels (AudioTransportImpl::RecordedDataIsAvailable, then
+AudioProcessingImpl::MaybeInitializeCapture, which initializes the processing again for
+a new stream format), and in one again when it stopped. Each time the echo canceller
+and the gain control started anew: the sharer's voice went out about 10 dB weaker while
+its screen's sound went out, and the others' voices came back as echo for the first
+seconds. The microphone is now processed in one channel always; the screen's sound stays
+stereo. Tested by test/custom_audio_transport.test.cc.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 26918e1..f7e419b 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -351,10 +351,13 @@ if (rtc_include_tests) {
+        "test/peerconnection_factory.test.cc",
+        "test/video_processor.test.cc",
+        "test/vp8_size_gate.test.cc",
++       "test/custom_audio_transport.test.cc",
+ 
+        # Built in again: the library shows only its own API.
+        "src/internal/vp8_size_gate.cc",
+        "src/internal/vp8_size_gate.h",
++       "src/internal/custom_audio_transport_impl.cc",
++       "src/internal/custom_audio_transport_impl.h",
+     ]
+ 
+     if (is_clang) {
+@@ -372,6 +375,10 @@ if (rtc_include_tests) {
+       "../api/video:video_frame",
+       "../api/video_codecs:video_codecs_api",
+       "../modules/video_coding:video_codec_interface",
++      "../audio",
++      "../api/audio:audio_frame_api",
++      "../call:audio_sender_interface",
++      "../modules/audio_mixer:audio_mixer_impl",
+       "../rtc_base:logging",
+       "//third_party/abseil-cpp/absl/strings",
+       "//testing/gtest",
+diff --git a/src/internal/custom_audio_transport_impl.cc b/src/internal/custom_audio_transport_impl.cc
+index b14d136..3697540 100644
+--- a/src/internal/custom_audio_transport_impl.cc
++++ b/src/internal/custom_audio_transport_impl.cc
+@@ -51,17 +51,22 @@ void CustomAudioTransportImpl::PullRenderData(
+ 
+ void CustomAudioTransportImpl::UpdateAudioSenders(
+     std::vector<AudioSender*> senders, int send_sample_rate_hz,
+-    size_t send_num_channels) {
++    size_t /*send_num_channels*/) {
++  // Fogata: what the microphone records goes only to the microphone's own sources
++  // (AddAudioSender); every other channel of sound that sends, such as a shared
++  // screen's sound from a custom source, is fed by its own source and never
++  // passes here. So the microphone is processed in the channels a voice is sent
++  // in, not in the most any channel sends (`send_num_channels`, what AudioState
++  // gives): with a screen's sound sent in stereo, WebRTC processed the microphone
++  // in two channels while that sound went out and in one again after it,
++  // starting its echo canceller and gain control anew each time (the voice came
++  // out 10 dB weaker, and others' voices came back as echo for a few seconds).
++  std::vector<AudioSender*> snds = std::vector<AudioSender*>();
+   if (senders.size() > 0) {
+-    std::vector<AudioSender*> snds = std::vector<AudioSender*>();
+     snds.push_back(this);
+-    audio_transport_impl_->UpdateAudioSenders(
+-        std::move(snds), send_sample_rate_hz, send_num_channels);
+-  } else {
+-    std::vector<AudioSender*> snds = std::vector<AudioSender*>();
+-    audio_transport_impl_->UpdateAudioSenders(
+-        std::move(snds), send_sample_rate_hz, send_num_channels);
+   }
++  audio_transport_impl_->UpdateAudioSenders(
++      std::move(snds), send_sample_rate_hz, kMicrophoneChannels);
+ }
+ 
+ void CustomAudioTransportImpl::AddAudioSender(AudioSender* sender) {
+diff --git a/src/internal/custom_audio_transport_impl.h b/src/internal/custom_audio_transport_impl.h
+index c666d0e..bb3d5e2 100644
+--- a/src/internal/custom_audio_transport_impl.h
++++ b/src/internal/custom_audio_transport_impl.h
+@@ -17,6 +17,10 @@ namespace webrtc {
+ 
+ class CustomAudioTransportImpl : public AudioTransport, public AudioSender {
+  public:
++  // Fogata: the channels the microphone is processed in, whatever other sources
++  // send (UpdateAudioSenders): a voice is sent in one.
++  static constexpr size_t kMicrophoneChannels = 1;
++
+   CustomAudioTransportImpl(
+       AudioMixer* mixer, AudioProcessing* audio_processing,
+       AsyncAudioProcessing::Factory* async_audio_processing_factory);
+diff --git a/test/custom_audio_transport.test.cc b/test/custom_audio_transport.test.cc
+new file mode 100644
+index 0000000..b0b4256
+--- /dev/null
++++ b/test/custom_audio_transport.test.cc
+@@ -0,0 +1,67 @@
++#include "src/internal/custom_audio_transport_impl.h"
++
++#include <cstddef>
++#include <cstdint>
++#include <memory>
++#include <vector>
++
++#include "api/audio/audio_frame.h"
++#include "call/audio_sender.h"
++#include "modules/audio_mixer/audio_mixer_impl.h"
++#include "test/gtest.h"
++
++namespace {
++
++// Keeps how many channels the last frame it was given had.
++class Sender : public webrtc::AudioSender {
++ public:
++  void SendAudioData(std::unique_ptr<webrtc::AudioFrame> frame) override {
++    channels = frame->num_channels();
++    ++frames;
++  }
++
++  size_t channels = 0;
++  int frames = 0;
++};
++
++// 10 ms of two channels at 48 kHz, as the audio device records a microphone that
++// can record stereo.
++void Record(webrtc::CustomAudioTransportImpl& transport) {
++  std::vector<int16_t> samples(480 * 2, 1000);
++  uint32_t new_level = 0;
++  transport.RecordedDataIsAvailable(samples.data(), 480, 4, 2, 48000, 0, 0, 0,
++                                    false, new_level);
++}
++
++// The microphone is processed in the channels a voice is sent in, whatever the
++// other channels of sound send: a screen's sound starting to go out in stereo made
++// it two channels, and the audio processing started over each time.
++TEST(CustomAudioTransport, MicrophoneStaysInOneChannelWhileStereoSends) {
++  auto mixer = webrtc::AudioMixerImpl::Create();
++  webrtc::CustomAudioTransportImpl transport(mixer.get(), nullptr, nullptr);
++  // The microphone's own source, which the transport feeds.
++  Sender microphone;
++  transport.AddAudioSender(&microphone);
++  // The streams sending, as AudioState gives them: the voice, then a screen's
++  // sound too.
++  Sender voice;
++  Sender screen;
++
++  transport.UpdateAudioSenders({&voice}, 48000, 1);
++  Record(transport);
++  EXPECT_EQ(microphone.frames, 1);
++  EXPECT_EQ(microphone.channels, 1u);
++
++  transport.UpdateAudioSenders({&voice, &screen}, 48000, 2);
++  Record(transport);
++  EXPECT_EQ(microphone.frames, 2);
++  EXPECT_EQ(microphone.channels, 1u);
++
++  // What the microphone records reaches only its own source.
++  EXPECT_EQ(voice.frames, 0);
++  EXPECT_EQ(screen.frames, 0);
++
++  transport.RemoveAudioSender(&microphone);
++}
++
++}  // namespace

@@ -61,9 +61,10 @@ NOTICE.md}`, as webrtc-sdk's Windows archives are laid out. Put its SHA-256 into
 
 ## 3. Check it on Windows
 
-1. The size check's tests: copy `<work>/out/win-x64/libwebrtc_cpp_api_unittests.exe` and
+1. The wrapper's tests: copy `<work>/out/win-x64/libwebrtc_cpp_api_unittests.exe` and
    `libwebrtc.dll` into one folder on Windows and run
-   `libwebrtc_cpp_api_unittests.exe --gtest_filter=Vp8SizeGate.*` (five tests pass).
+   `libwebrtc_cpp_api_unittests.exe --gtest_filter=Vp8SizeGate.*:CustomAudioTransport.*`
+   (six tests pass).
 2. Build the app with that archive: copy it from the Linux store
    (`~/fogata-libwebrtc/<version>/`) into the same folder under `%USERPROFILE%` on Windows,
    then `flutter build windows`.

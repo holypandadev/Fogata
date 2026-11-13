@@ -34,6 +34,10 @@ the patches in `patches/`:
   again what was running, and tells the wrapper's `OnDeviceChange` both ways. No wait on the
   server is longer than 5 s (the first connection waited for ever on a server that never
   answered), and the voice engine stays up without a device instead of ending the process.
+- **The microphone is processed in one channel**, whatever the other channels of sound
+  send: a shared screen's sound starting to go out in stereo made WebRTC process the
+  microphone in two channels, and its echo canceller and gain control started over each
+  time it started and stopped.
 - **A shared screen or window is captured at the rate asked** (Linux X11, Windows and macOS): the
   wrapper waited the whole interval after each capture ended, so a capture taking 20 ms made
   30 frames a second into 19, and it compared every frame with the last for a changed region
@@ -52,7 +56,8 @@ first time.
 `fetch.sh` downloads depot_tools, WebRTC and its dependencies (gclient, with the clang,
 Rust and sysroot its hooks fetch) and the wrapper, each at its pinned commit.
 `build-linux.sh` resets the tree (`prepare.sh`), applies the patches, builds, runs the
-wrapper's tests of the size check, and writes into `<work>/dist`:
+wrapper's tests of the size check and of the microphone's channels, and writes into
+`<work>/dist`:
 
     fogata-libwebrtc.m156.8078.5/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
@@ -191,7 +196,10 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    Elsewhere, and on Linux by default, nothing changes.
 10. the audio device's lists are counted on the worker thread, as every other call of the
     audio device module, its device change listener is set and called under a lock (a
-    null one stops it), and it is taken off the module as it goes.
+    null one stops it), and it is taken off the module as it goes;
+11. the microphone is processed in one channel whatever the other channels of sound send
+    (`CustomAudioTransportImpl::UpdateAudioSenders`), with its test
+    (`test/custom_audio_transport.test.cc`).
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of
