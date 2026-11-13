@@ -197,6 +197,36 @@ mod tests {
             .collect()
     }
 
+    /// A fan's noise, the same on every run: white noise through two low-pass filters
+    /// of one pole at about 1 kHz. RNNoise lowers it by 40 dB and more at every rate
+    /// (white noise up to 16 or 24 kHz, by a few dB only).
+    struct Fan {
+        seed: u64,
+        a: f32,
+        y: [f32; 2],
+    }
+
+    impl Fan {
+        fn new(rate: usize) -> Self {
+            Fan {
+                seed: 7,
+                a: 1.0 - (-2.0 * std::f32::consts::PI * 1000.0 / rate as f32).exp(),
+                y: [0.0; 2],
+            }
+        }
+
+        fn frame(&mut self, n: usize) -> Vec<f32> {
+            noise(n, &mut self.seed, 12000.0)
+                .into_iter()
+                .map(|x| {
+                    self.y[0] += self.a * (x - self.y[0]);
+                    self.y[1] += self.a * (self.y[0] - self.y[1]);
+                    self.y[1]
+                })
+                .collect()
+        }
+    }
+
     fn rms(xs: &[f32]) -> f32 {
         (xs.iter().map(|x| x * x).sum::<f32>() / xs.len() as f32).sqrt()
     }
@@ -227,6 +257,76 @@ mod tests {
             }
             let lowered = db(rms(&before) / rms(&after));
             assert!(lowered > 10.0, "{rate} Hz: only {lowered:.1} dB lower");
+        }
+    }
+
+    /// A gap of silence in a fan's noise, as a microphone that opens again or a sound
+    /// server that drops a moment leaves: the gap stays quiet, and the noise that
+    /// follows is as low as before it from its first 100 ms on, whether the gap holds
+    /// nothing at all or a last bit of dither. (RNNoise, hearing the gap, let the noise
+    /// back whole for up to a second after as little as 20 ms of nothing.)
+    #[test]
+    fn noise_stays_lowered_after_a_gap_of_silence() {
+        for rate in RATES {
+            for gap in [1, 2, 5, 20, 100, 300] {
+                for dither in [0.0, 1.0] {
+                    let mut d = Denoiser::new();
+                    let mut fan = Fan::new(rate);
+                    let mut seed = 5;
+                    let len = rate / 100;
+                    for _ in 0..300 {
+                        d.process(true, rate, &mut fan.frame(len));
+                    }
+                    for _ in 0..gap {
+                        let mut frame = noise(len, &mut seed, dither);
+                        d.process(true, rate, &mut frame);
+                        let loudest = frame.iter().fold(0.0f32, |m, x| m.max(x.abs()));
+                        assert!(loudest < 30.0, "{rate} Hz: {loudest} in a gap");
+                    }
+                    for tenth in 0..3 {
+                        let mut before = Vec::new();
+                        let mut after = Vec::new();
+                        for _ in 0..10 {
+                            let mut frame = fan.frame(len);
+                            before.extend_from_slice(&frame);
+                            d.process(true, rate, &mut frame);
+                            assert!(frame.iter().all(|x| x.is_finite()));
+                            after.extend_from_slice(&frame);
+                        }
+                        let lowered = db(rms(&before) / rms(&after).max(1e-3));
+                        assert!(
+                            lowered > 30.0,
+                            "{rate} Hz, {tenth}00 ms after a gap of {gap} frames \
+                             (dither {dither}): only {lowered:.1} dB lower"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// The fan's noise alone is lowered that much once RNNoise has heard a second of it,
+    /// at every rate: what the test of the gap compares with.
+    #[test]
+    fn a_fans_noise_is_lowered_by_30_db() {
+        for rate in RATES {
+            let mut d = Denoiser::new();
+            let mut fan = Fan::new(rate);
+            let len = rate / 100;
+            let mut before = Vec::new();
+            let mut after = Vec::new();
+            for i in 0..300 {
+                let mut frame = fan.frame(len);
+                if i >= 100 {
+                    before.extend_from_slice(&frame);
+                }
+                d.process(true, rate, &mut frame);
+                if i >= 100 {
+                    after.extend_from_slice(&frame);
+                }
+            }
+            let lowered = db(rms(&before) / rms(&after).max(1e-3));
+            assert!(lowered > 30.0, "{rate} Hz: only {lowered:.1} dB lower");
         }
     }
 
