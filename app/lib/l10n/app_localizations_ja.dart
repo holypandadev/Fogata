@@ -1128,6 +1128,12 @@ class L10nJa extends L10n {
   String get callMicBack => 'マイクが再び接続されました。';
 
   @override
+  String get callSoundSystemLost => 'このパソコンのサウンドシステムが停止しました。復帰するまで通話の音声は出ません。';
+
+  @override
+  String get callSoundSystemBack => 'このパソコンのサウンドシステムが復帰しました。';
+
+  @override
   String callMicSilent(String system) {
     String _temp0 = intl.Intl.selectLogic(system, {
       'macos':

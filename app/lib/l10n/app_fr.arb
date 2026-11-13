@@ -266,6 +266,8 @@
   "callNoSoundSystem": "Impossible d’accéder au système audio de cet ordinateur : l’appel ne peut pas commencer.",
   "callMicGone": "Ton micro a été déconnecté : {name} est utilisé maintenant.",
   "callMicBack": "Ton micro est de retour.",
+  "callSoundSystemLost": "Le système audio de cet ordinateur s’est arrêté : l’appel n’a plus de son jusqu’à son retour.",
+  "callSoundSystemBack": "Le système audio de cet ordinateur est de retour.",
   "callMicSilent": "{system, select, macos{Impossible d’utiliser le micro. Vérifie qu’il est branché et autorisé dans Réglages Système › Confidentialité et sécurité.} windows{Impossible d’utiliser le micro. Vérifie qu’il est branché et autorisé dans Paramètres › Confidentialité et sécurité › Microphone.} other{Impossible d’utiliser le micro. Vérifie qu’il est branché.}}",
   "callNoMicrophone": "Aucun micro n’est branché.",
   "callMicFailed": "{system, select, macos{Impossible d’utiliser le micro. Autorise-le dans Réglages Système › Confidentialité et sécurité.} windows{Impossible d’utiliser le micro. Autorise-le dans Paramètres › Confidentialité et sécurité › Microphone.} other{Impossible d’utiliser le micro.}}",

@@ -196,6 +196,21 @@ void main() {
     expect(engine.asked.length, after);
   });
 
+  test('a silent input gone with the sound server is made and chosen '
+      'again', () async {
+    final call = _sharing();
+    await call.setShareSound(true);
+    expect(engine.recording, 'silence');
+    // PipeWire restarted: the node went with its connection, and the list read as the
+    // devices change no longer has it.
+    engine.silence = false;
+    engine.asked.clear();
+    call.takeDevices(await navigator.mediaDevices.enumerateDevices());
+    await _until(() => engine.asked.contains('select silence'));
+    expect(engine.asked, ['silence on', 'select silence']);
+    expect(engine.silence, isTrue);
+  });
+
   test('a call with the system default records from a real input, never a '
       'silent one left by the call before', () async {
     engine.silence = true;

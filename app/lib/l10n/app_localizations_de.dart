@@ -1222,6 +1222,14 @@ class L10nDe extends L10n {
   String get callMicBack => 'Dein Mikrofon ist wieder da.';
 
   @override
+  String get callSoundSystemLost =>
+      'Das Tonsystem dieses Computers wurde beendet: Der Anruf hat keinen Ton, bis es wieder da ist.';
+
+  @override
+  String get callSoundSystemBack =>
+      'Das Tonsystem dieses Computers ist wieder da.';
+
+  @override
   String callMicSilent(String system) {
     String _temp0 = intl.Intl.selectLogic(system, {
       'macos': 'Mikrofon konnte nicht verwendet werden. Prüfe, ob es angeschlossen und unter Systemeinstellungen › Datenschutz & Sicherheit erlaubt ist.',

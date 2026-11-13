@@ -266,6 +266,8 @@
   "callNoSoundSystem": "Não foi possível acessar o sistema de som deste computador, então a chamada não pode começar.",
   "callMicGone": "Seu microfone foi desconectado: usando {name} agora.",
   "callMicBack": "Seu microfone voltou.",
+  "callSoundSystemLost": "O sistema de som deste computador parou: a chamada fica sem som até ele voltar.",
+  "callSoundSystemBack": "O sistema de som deste computador voltou.",
   "callMicSilent": "{system, select, macos{Não foi possível usar o microfone. Verifique se ele está conectado e permitido em Ajustes do Sistema › Privacidade e Segurança.} windows{Não foi possível usar o microfone. Verifique se ele está conectado e permitido em Configurações › Privacidade e segurança › Microfone.} other{Não foi possível usar o microfone. Verifique se ele está conectado.}}",
   "callNoMicrophone": "Nenhum microfone está conectado.",
   "callMicFailed": "{system, select, macos{Não foi possível usar o microfone. Permita em Ajustes do Sistema › Privacidade e Segurança.} windows{Não foi possível usar o microfone. Permita em Configurações › Privacidade e segurança › Microfone.} other{Não foi possível usar o microfone.}}",

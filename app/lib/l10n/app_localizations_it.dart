@@ -1214,6 +1214,14 @@ class L10nIt extends L10n {
   String get callMicBack => 'Il tuo microfono è di nuovo collegato.';
 
   @override
+  String get callSoundSystemLost =>
+      'Il sistema audio di questo computer si è fermato: la chiamata resta senza audio finché non torna.';
+
+  @override
+  String get callSoundSystemBack =>
+      'Il sistema audio di questo computer è di nuovo attivo.';
+
+  @override
   String callMicSilent(String system) {
     String _temp0 = intl.Intl.selectLogic(system, {
       'macos': 'Impossibile usare il microfono. Controlla che sia collegato e consentito in Impostazioni di Sistema › Privacy e sicurezza.',

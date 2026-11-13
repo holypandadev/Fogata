@@ -1109,6 +1109,12 @@ class L10nZh extends L10n {
   String get callMicBack => '你的麦克风已重新连接。';
 
   @override
+  String get callSoundSystemLost => '这台电脑的声音系统已停止：恢复之前通话没有声音。';
+
+  @override
+  String get callSoundSystemBack => '这台电脑的声音系统已恢复。';
+
+  @override
   String callMicSilent(String system) {
     String _temp0 = intl.Intl.selectLogic(system, {
       'macos': '无法使用麦克风。请检查它是否已连接，并在“系统设置 › 隐私与安全性”中允许。',

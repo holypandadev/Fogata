@@ -266,6 +266,8 @@
   "callNoSoundSystem": "无法连接到这台电脑的声音系统，因此无法开始通话。",
   "callMicGone": "你的麦克风已断开：现在使用{name}。",
   "callMicBack": "你的麦克风已重新连接。",
+  "callSoundSystemLost": "这台电脑的声音系统已停止：恢复之前通话没有声音。",
+  "callSoundSystemBack": "这台电脑的声音系统已恢复。",
   "callMicSilent": "{system, select, macos{无法使用麦克风。请检查它是否已连接，并在“系统设置 › 隐私与安全性”中允许。} windows{无法使用麦克风。请检查它是否已连接，并在“设置 › 隐私和安全性 › 麦克风”中允许。} other{无法使用麦克风。请检查它是否已连接。}}",
   "callNoMicrophone": "未连接麦克风。",
   "callMicFailed": "{system, select, macos{无法使用麦克风。请在“系统设置 › 隐私与安全性”中允许。} windows{无法使用麦克风。请在“设置 › 隐私和安全性 › 麦克风”中允许。} other{无法使用麦克风。}}",

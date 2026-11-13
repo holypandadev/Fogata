@@ -220,6 +220,48 @@ class MicCheck {
   }
 }
 
+/// Whether WebRTC's voice engine reaches the sound server, from the devices it lists
+/// (Linux): while it reaches none (PipeWire or PulseAudio restarting, as after a system
+/// update) it lists no input and no output at all, not even the system's default, and
+/// plays and records nothing; it connects again by itself and starts again as it was
+/// (flutter_webrtc's FOGATA.md, "A sound server that goes away and comes back"). The
+/// person is told once it has been gone for [tellAfter], and then told when it is back:
+/// a server restarting is back within a moment, with nothing to tell.
+@visibleForTesting
+class SoundServerWatch {
+  static const tellAfter = Duration(seconds: 5);
+
+  /// When the lists were first seen without a device, while they still are.
+  DateTime? lostSince;
+
+  /// The person was told it is gone.
+  bool told = false;
+
+  bool get lost => lostSince != null;
+
+  /// Takes the devices listed [now], on Linux ([linux]; elsewhere a list may well be
+  /// empty, and says nothing of a server); returns what to tell, or null.
+  String? take(
+    List<MediaDeviceInfo> devices, {
+    required bool linux,
+    required DateTime now,
+  }) {
+    final listed = devices.any(
+      (d) => d.kind == 'audioinput' || d.kind == 'audiooutput',
+    );
+    if (linux && !listed) {
+      final since = lostSince ??= now;
+      if (told || now.difference(since) < tellAfter) return null;
+      told = true;
+      return l10n.callSoundSystemLost;
+    }
+    final wasTold = told;
+    lostSince = null;
+    told = false;
+    return wasTold ? l10n.callSoundSystemBack : null;
+  }
+}
+
 /// Whether the microphone chosen for the call ([take]'s `input`) is among the inputs the
 /// system lists, from one list to the next: when it goes away (a headset unplugged) WebRTC
 /// records from the system's default input until it comes back, and the person is told

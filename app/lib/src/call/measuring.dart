@@ -287,7 +287,8 @@ extension _Measuring on Call {
     if (only == null && sharing) _fitScreenLoad(encoders);
     if (only == null &&
         _micCheck.take(
-          on: mic && _micStream != null,
+          // Nothing records while no sound server answers (Linux): nothing to judge.
+          on: mic && _micStream != null && !_soundServer.lost,
           sending: voiceSending,
           read: voiceRead,
           sent: voiceSent,

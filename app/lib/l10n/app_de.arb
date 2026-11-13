@@ -266,6 +266,8 @@
   "callNoSoundSystem": "Das Tonsystem dieses Computers ist nicht erreichbar, daher kann der Anruf nicht beginnen.",
   "callMicGone": "Dein Mikrofon wurde getrennt: Jetzt wird {name} verwendet.",
   "callMicBack": "Dein Mikrofon ist wieder da.",
+  "callSoundSystemLost": "Das Tonsystem dieses Computers wurde beendet: Der Anruf hat keinen Ton, bis es wieder da ist.",
+  "callSoundSystemBack": "Das Tonsystem dieses Computers ist wieder da.",
   "callMicSilent": "{system, select, macos{Mikrofon konnte nicht verwendet werden. Prüfe, ob es angeschlossen und unter Systemeinstellungen › Datenschutz & Sicherheit erlaubt ist.} windows{Mikrofon konnte nicht verwendet werden. Prüfe, ob es angeschlossen und unter Einstellungen › Datenschutz und Sicherheit › Mikrofon erlaubt ist.} other{Mikrofon konnte nicht verwendet werden. Prüfe, ob es angeschlossen ist.}}",
   "callNoMicrophone": "Es ist kein Mikrofon angeschlossen.",
   "callMicFailed": "{system, select, macos{Mikrofon konnte nicht verwendet werden. Erlaube den Zugriff unter Systemeinstellungen › Datenschutz & Sicherheit.} windows{Mikrofon konnte nicht verwendet werden. Erlaube den Zugriff unter Einstellungen › Datenschutz und Sicherheit › Mikrofon.} other{Mikrofon konnte nicht verwendet werden.}}",

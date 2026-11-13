@@ -204,6 +204,73 @@ void main() {
     });
   });
 
+  group('the sound server going away (Linux)', () {
+    final mic = input('headset', 'USB Headset');
+    final speaker = MediaDeviceInfo(
+      kind: 'audiooutput',
+      label: 'Speakers',
+      deviceId: 'speakers',
+    );
+    final start = DateTime(2026, 11, 12, 12);
+    DateTime at(int s) => start.add(Duration(seconds: s));
+
+    test('one back within a moment is told nothing', () {
+      final watch = SoundServerWatch();
+      expect(watch.take([mic, speaker], linux: true, now: at(0)), isNull);
+      // No device at all, not even the default: the voice engine reaches no server.
+      expect(watch.take(const [], linux: true, now: at(1)), isNull);
+      expect(watch.lost, isTrue);
+      expect(watch.take(const [], linux: true, now: at(5)), isNull);
+      expect(watch.take([mic, speaker], linux: true, now: at(5)), isNull);
+      expect(watch.lost, isFalse);
+    });
+
+    test('one gone 5 s is told once, and told again when back', () {
+      final watch = SoundServerWatch();
+      expect(watch.take(const [], linux: true, now: at(0)), isNull);
+      expect(
+        watch.take(const [], linux: true, now: at(5)),
+        l10n.callSoundSystemLost,
+      );
+      expect(watch.take(const [], linux: true, now: at(60)), isNull);
+      expect(
+        watch.take([speaker], linux: true, now: at(61)),
+        l10n.callSoundSystemBack,
+      );
+      expect(watch.take([speaker], linux: true, now: at(62)), isNull);
+    });
+
+    test('elsewhere an empty list says nothing of a server', () {
+      final watch = SoundServerWatch();
+      expect(watch.take(const [], linux: false, now: at(0)), isNull);
+      expect(watch.take(const [], linux: false, now: at(10)), isNull);
+      expect(watch.lost, isFalse);
+    });
+
+    test('the call says nothing of its microphone while nothing is listed', () {
+      final c = Call(group: 'g', me: me, input: 'headset');
+      final told = <String>[];
+      c.onNotice = told.add;
+      c.takeDevices([mic, speaker]);
+      c.takeDevices(const []);
+      // Back with its microphone: nothing to tell either.
+      c.takeDevices([mic, speaker]);
+      expect(told, isEmpty);
+    });
+
+    test('the call tells it once gone 5 s, reading the list again', () async {
+      final c = Call(group: 'g', me: me, input: 'headset');
+      final told = <String>[];
+      c.onNotice = told.add;
+      c.listDevices = () async => const <MediaDeviceInfo>[];
+      c.takeDevices(const []);
+      await Future<void>.delayed(const Duration(milliseconds: 5400));
+      expect(told, [l10n.callSoundSystemLost]);
+      c.takeDevices([mic, speaker]);
+      expect(told, [l10n.callSoundSystemLost, l10n.callSoundSystemBack]);
+    });
+  });
+
   group('a microphone that reads nothing', () {
     final start = DateTime(2026, 11, 5, 12);
     DateTime at(int s) => start.add(Duration(seconds: s));

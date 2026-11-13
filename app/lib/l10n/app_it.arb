@@ -266,6 +266,8 @@
   "callNoSoundSystem": "Impossibile raggiungere il sistema audio di questo computer, quindi la chiamata non può iniziare.",
   "callMicGone": "Il tuo microfono è stato scollegato: ora si usa {name}.",
   "callMicBack": "Il tuo microfono è di nuovo collegato.",
+  "callSoundSystemLost": "Il sistema audio di questo computer si è fermato: la chiamata resta senza audio finché non torna.",
+  "callSoundSystemBack": "Il sistema audio di questo computer è di nuovo attivo.",
   "callMicSilent": "{system, select, macos{Impossibile usare il microfono. Controlla che sia collegato e consentito in Impostazioni di Sistema › Privacy e sicurezza.} windows{Impossibile usare il microfono. Controlla che sia collegato e consentito in Impostazioni › Privacy e sicurezza › Microfono.} other{Impossibile usare il microfono. Controlla che sia collegato.}}",
   "callNoMicrophone": "Nessun microfono collegato.",
   "callMicFailed": "{system, select, macos{Impossibile usare il microfono. Consenti l’accesso in Impostazioni di Sistema › Privacy e sicurezza.} windows{Impossibile usare il microfono. Consenti l’accesso in Impostazioni › Privacy e sicurezza › Microfono.} other{Impossibile usare il microfono.}}",

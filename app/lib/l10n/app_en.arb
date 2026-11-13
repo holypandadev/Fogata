@@ -1631,6 +1631,14 @@
   "@callMicBack": {
     "description": "Toast in a call: the microphone chosen came back and is used again."
   },
+  "callSoundSystemLost": "This computer's sound system stopped: the call has no sound until it is back.",
+  "@callSoundSystemLost": {
+    "description": "Toast in a call (Linux): the computer's sound server (PipeWire or PulseAudio) went away, as when it restarts after an update, and has not come back for 5 s; nothing plays or records until it does. The app connects again by itself."
+  },
+  "callSoundSystemBack": "This computer's sound system is back.",
+  "@callSoundSystemBack": {
+    "description": "Toast in a call (Linux), after the one saying the computer's sound system stopped: it is back, and the call plays and records again."
+  },
   "callMicSilent": "{system, select, macos{Could not use the microphone. Check that it is connected and allowed in System Settings › Privacy & Security.} windows{Could not use the microphone. Check that it is connected and allowed in Settings › Privacy & security › Microphone.} other{Could not use the microphone. Check that it is connected.}}",
   "@callMicSilent": {
     "description": "Error toast in a call: the microphone is on but nothing was read from it for a while (refused by the system, or not connected). On macOS ({system} = macos) and Windows ({system} = windows) it also says where it is allowed; keep the settings' names as each system has them in the language.",

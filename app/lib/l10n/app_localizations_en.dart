@@ -1209,6 +1209,13 @@ class L10nEn extends L10n {
   String get callMicBack => 'Your microphone is back.';
 
   @override
+  String get callSoundSystemLost =>
+      'This computer\'s sound system stopped: the call has no sound until it is back.';
+
+  @override
+  String get callSoundSystemBack => 'This computer\'s sound system is back.';
+
+  @override
   String callMicSilent(String system) {
     String _temp0 = intl.Intl.selectLogic(system, {
       'macos': 'Could not use the microphone. Check that it is connected and allowed in System Settings › Privacy & Security.',

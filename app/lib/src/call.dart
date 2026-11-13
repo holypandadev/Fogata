@@ -548,6 +548,7 @@ class Call extends ChangeNotifier {
     _closed = true;
     // Only a call that started follows the devices (one made for tests never touches them).
     _devicesSoon?.cancel();
+    _soundServerAgain?.cancel();
     if (_followingDevices &&
         navigator.mediaDevices.ondevicechange == _devicesChanged) {
       navigator.mediaDevices.ondevicechange = null;
@@ -1477,6 +1478,12 @@ class Call extends ChangeNotifier {
   /// The microphone chosen going away and coming back, told once each way.
   final _micWatch = MicWatch();
 
+  /// The sound server going away and coming back (Linux), told once each way.
+  final _soundServer = SoundServerWatch();
+
+  /// Reads the list again once the sound server has been gone long enough to tell.
+  Timer? _soundServerAgain;
+
   bool _checkingDevices = false;
   bool _followingDevices = false;
 
@@ -1504,13 +1511,53 @@ class Call extends ChangeNotifier {
   void devicesChangedForTests() => _devicesChanged(null);
 
   /// Takes a list of the system's devices, as read when they change: tells the person when
-  /// the microphone chosen went away or came back.
+  /// the sound server or the microphone chosen went away or came back, and makes the
+  /// silent input again if it went (PipeWire restarted).
   @visibleForTesting
   void takeDevices(List<MediaDeviceInfo> devices) {
+    final wasLost = _soundServer.lost;
+    final sound = _soundServer.take(
+      devices,
+      linux: onLinux,
+      now: DateTime.now(),
+    );
+    if (sound != null) {
+      _trace('sound server, said: $sound');
+      onNotice?.call(sound);
+    }
+    if (_soundServer.lost) {
+      // Nothing is listed, so nothing to say of the microphone; the list is read again
+      // when the server is back (the voice engine tells), or to tell it is still gone.
+      if (!wasLost) {
+        _trace('sound server went away');
+        _micCheck.reset();
+        _soundServerAgain?.cancel();
+        _soundServerAgain = Timer(
+          SoundServerWatch.tellAfter,
+          () => unawaited(_readDevices()),
+        );
+      }
+      return;
+    }
+    if (wasLost) {
+      _trace('sound server back');
+      _soundServerAgain?.cancel();
+      // Judged from the start again: nothing was recorded meanwhile.
+      _micCheck.reset();
+    }
     final notice = _micWatch.take(input, devices);
     if (notice != null) {
       _trace('microphone: $notice');
       onNotice?.call(notice);
+    }
+    // The silent input in use went away with PipeWire: WebRTC records from the default
+    // microphone until it is made again and chosen.
+    final silenceListed = devices.any(
+      (d) => d.kind == 'audioinput' && d.label.contains(_ownSilence),
+    );
+    if (_silent && !silenceListed) {
+      _trace('silent input gone: made again');
+      unawaited(_quietInput());
     }
   }
 

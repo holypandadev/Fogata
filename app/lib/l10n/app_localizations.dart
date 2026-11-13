@@ -1707,6 +1707,18 @@ abstract class L10n {
   /// **'Your microphone is back.'**
   String get callMicBack;
 
+  /// Toast in a call (Linux): the computer's sound server (PipeWire or PulseAudio) went away, as when it restarts after an update, and has not come back for 5 s; nothing plays or records until it does. The app connects again by itself.
+  ///
+  /// In en, this message translates to:
+  /// **'This computer\'s sound system stopped: the call has no sound until it is back.'**
+  String get callSoundSystemLost;
+
+  /// Toast in a call (Linux), after the one saying the computer's sound system stopped: it is back, and the call plays and records again.
+  ///
+  /// In en, this message translates to:
+  /// **'This computer\'s sound system is back.'**
+  String get callSoundSystemBack;
+
   /// Error toast in a call: the microphone is on but nothing was read from it for a while (refused by the system, or not connected). On macOS ({system} = macos) and Windows ({system} = windows) it also says where it is allowed; keep the settings' names as each system has them in the language.
   ///
   /// In en, this message translates to:
