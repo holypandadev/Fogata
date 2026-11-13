@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "binary_messenger_impl.h"
+#include "binary_reply.h"
 #include "include/flutter/engine_method_result.h"
 #include "include/flutter/texture_registrar.h"
 #include "retired_textures.h"
@@ -159,24 +160,20 @@ static void ForwardToHandler(FlBinaryMessenger* messenger,
                              GBytes* message,
                              FlBinaryMessengerResponseHandle* response_handle,
                              gpointer user_data) {
-  auto handler = g_object_ref(response_handle);
-  BinaryReply reply_handler = [messenger, handler](const uint8_t* reply,
-                                                   size_t reply_size) mutable {
-    if (!handler) {
-      std::cerr << "Error: Response can be set only once. Ignoring "
-                   "duplicate response."
-                << std::endl;
-      return;
-    }
-
-    g_autoptr(GBytes) response = g_bytes_new(reply, reply_size);
-    GError* error = nullptr;
-    if (!fl_binary_messenger_send_response(
-            messenger, (FlBinaryMessengerResponseHandle*)handler, response,
-            &error)) {
-      g_warning("Failed to send binary response: %s", error->message);
-    }
-  };
+  // Fogata: the handle is let go of once the reply is sent (binary_reply.h).
+  gpointer held = g_object_ref(response_handle);
+  BinaryReply reply_handler = ReplyOnce(
+      held,
+      [messenger](gpointer handle, const uint8_t* reply, size_t reply_size) {
+        g_autoptr(GBytes) response = g_bytes_new(reply, reply_size);
+        g_autoptr(GError) error = nullptr;
+        if (!fl_binary_messenger_send_response(
+                messenger, (FlBinaryMessengerResponseHandle*)handle, response,
+                &error)) {
+          g_warning("Failed to send binary response: %s", error->message);
+        }
+      },
+      [](gpointer handle) { g_object_unref(handle); });
 
   const BinaryMessageHandler& message_handler =
       *static_cast<BinaryMessageHandler*>(user_data);

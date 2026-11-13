@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
-# renderer's, a connection's received tracks', the retired textures', a shared screen's sound
+# renderer's, a connection's received tracks', a reply's response handle, the retired
+# textures', a shared screen's sound
 # and the silent input against a PipeWire server of the tests' own (no daemon is reached),
 # an event channel's, a desktop capture's end and the Windows screen sound's start
 # with ThreadSanitizer, the check of the
@@ -38,6 +39,11 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/video_renderer_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/common/cpp/include" \
   "$here/remote_tracks_test.cc" -lpthread -o "$out/remote_tracks_test"
 TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/remote_tracks_test"
+# A message's response handle let go of once its reply is sent (linux/flutter/binary_reply.h):
+# plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/linux/flutter" \
+  "$here/binary_reply_test.cc" -o "$out/binary_reply_test"
+"$out/binary_reply_test"
 # Unregistered textures kept until the engine is done with them, while a raster thread
 # copies (linux/flutter/retired_textures.h): ThreadSanitizer, plain C++.
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/linux/flutter" \

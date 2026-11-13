@@ -782,6 +782,24 @@ to draw").
   `app/pubspec.yaml`, which `tools/test_repo_checks.py` pins; without a Package.swift the
   plugin is built through its podspec even if that setting were lost).
 
+## What a method call and a statistics read keep (Linux, Windows)
+
+- `linux/flutter/core_implementations.cc`, `linux/flutter/binary_reply.h` (new; Linux): the
+  package took a reference to the response handle of every method called from Dart and
+  never gave it back, so each call kept the engine's handle (about 40 bytes) for good, and
+  `getStats` is called every few hundred milliseconds in a call. The handle is now let go
+  of once the call's one reply is sent; one never replied to stays held, as before (the
+  engine complains about a handle let go of unanswered, on whichever thread that happens).
+  `common/cpp/test/binary_reply_test.cc` tests it. Windows uses Flutter's own channel code.
+- `getStats` (`common/cpp/src/flutter_peerconnection.cc`) is unchanged, but libwebrtc now
+  lets go of what it is given (`tools/webrtc/patches/wrapper`, the statistics callback and
+  `portable::vector`; see `tools/webrtc/README.md`): its callback kept the two closures,
+  and in them the shared pointer to the call's result and the result itself, and every
+  array of reports and of their members was never freed, about 1.9 KB for each read in all.
+  macOS uses WebRTC's Objective-C SDK instead, whose statistics callback lets go of its
+  block once the report is delivered (`RTCPeerConnection+Stats.mm`); nothing was changed
+  there.
+
 ## Pictures too large to draw (all platforms)
 
 The renderer copies each picture of a remote track into a buffer of width * height * 4
