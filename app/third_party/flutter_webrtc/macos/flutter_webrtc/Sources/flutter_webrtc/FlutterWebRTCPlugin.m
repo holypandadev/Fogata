@@ -36,6 +36,12 @@
 #import "LocalAudioTrack.h"
 #import "LocalVideoTrack.h"
 
+// Fogata: what RTCVideoSource answers with Fogata's Apple patch 7 (see
+// FlutterRTCDesktopCapturer.m), asked with instancesRespondToSelector:.
+@protocol FogataSharedEncodeSource
+- (void)enableFogataSharedEncode;
+@end
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wprotocol"
 
@@ -182,11 +188,6 @@ static BOOL FogataSharedScreenEncodeTrialOn(void) {
   const char* value = getenv("FOGATA_SHARED_SCREEN_ENCODE");
   return value == NULL || strcmp(value, "off") != 0;
 }
-
-// What RTCVideoSource answers with Fogata's Apple patch 7 (FlutterRTCDesktopCapturer.m).
-@protocol FogataSharedEncodeSource
-- (void)enableFogataSharedEncode;
-@end
 
 static void FlutterWebRTCApplyFieldTrials(void) {
   // "Key/Value/" pairs. +configureFieldTrials: replaces the whole string and is
