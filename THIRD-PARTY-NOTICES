@@ -7977,7 +7977,7 @@ SOFTWARE.
 libp2p-kad 0.49.0
 https://github.com/libp2p/rust-libp2p
 Licence: MIT
-Licence text: the same as libp2p 0.57.1's, above.
+Licence text: the same as libp2p-identify 0.48.0's, above.
 
 -------------------------------------------------------------------------------
 
