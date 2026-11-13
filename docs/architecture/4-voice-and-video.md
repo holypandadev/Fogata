@@ -290,8 +290,9 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   shows the worse of the connection and their own network, and the details say whose side
   the trouble is on. Readings redraw only what shows the quality, never the whole room.
 - **A shared screen keeps its resolution** and drops frames when the network falls short,
-  so text stays readable, until that leaves it choppy. Each person who watches gets an
-  encoder of their own, and the sharer reads each connection's statistics every 2 s: under
+  so text stays readable, until that leaves it choppy. Each person who watches gets a
+  connection of their own (those sent the screen at one size share one encoder of it, see
+  below), and the sharer reads each connection's statistics every 2 s: under
   10 frames a second (or half the rate captured) three readings in a row, the screen goes
   to that person a step smaller (1080, then 720, then 540 lines, below its chosen size);
   once a smaller size goes out at 80 % of the captured rate for 10 s, the size above is
@@ -313,25 +314,30 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   encoder is held back by the processor (`cpu`) and sends well under its level's rate, or
   when the encoders together keep 1.5 cores busy, and back up a level once the one above
   would fit. A single step from 60 straight to 15 once left a screen there: to come back,
-  the encoders had to fit in a quarter of what they took. A share starts lower the more
-  watch, and goes there at once when someone starts watching (not at the next reading):
-  the full screen for one or two, 15 frames a second for three, 720 lines at 15 for four,
-  540 lines at 15 from five. In the lab (a 1600x900 screen, a loaded computer), three
-  watchers kept 15 frames a second at full size, while five started at 720 lines fell to
-  10 and seven to under 10.
+  the encoders had to fit in a quarter of what they took. With an encoder for each watcher
+  (the shared encode below off), a share starts lower the more watch, and goes there at
+  once when someone starts watching (not at the next reading): the full screen for one or
+  two, 15 frames a second for three, 720 lines at 15 for four, 540 lines at 15 from five.
+  In the lab (a 1600x900 screen, a loaded computer), three watchers kept 15 frames a
+  second at full size, while five started at 720 lines fell to 10 and seven to under 10.
+  With the shared encode a share starts at the full screen whatever the number, and the
+  processor's load counts the one encode of each size once, however many connections
+  report its time.
   The number watching also sets a ceiling on the size, on top of the quality chosen (never
   more than chosen, nor than the screen is): one or two watchers get the quality chosen,
   three or four at most 1080 lines, five or more at most 720 (each in a 16:9 box, as the
-  qualities are). The mesh encodes the screen once per watcher, and each encoder's memory
-  and work grow with its pixels: shared to seven, a 1600x900 screen took the sharer about
-  1 GB of memory and a core (`VideoEncoderQueue` threads and one allocator arena of 27-40
-  MB each), and a screen shared at its own size (1440 lines, 4K) would take two to four
-  times as much per encoder. Under the ceiling a level that sends the same as the one
-  below it is passed over, so when the processor allows more, a big room gets frames back
-  rather than size. The ceiling comes down as soon as more watch, before the new watcher's
-  encoder starts, and goes back up only once fewer have watched for 20 s (to what the most
-  that watched meanwhile allow), so someone coming and going does not make every encoder
-  change size each time. Like the levels it changes only what each connection is told
+  qualities are). Before the shared encode, the mesh encoded the screen once per watcher,
+  and each encoder's memory and work grew with its pixels: shared to seven, a 1600x900
+  screen took the sharer about 1 GB of memory and a core (`VideoEncoderQueue` threads and
+  one allocator arena of 27-40 MB each), and a screen shared at its own size (1440 lines,
+  4K) would take two to four times as much per encoder. The ceiling stays as it was until
+  the lab has measured the shared encode: the upload still grows with each watcher, as
+  each connection sends the whole stream. Under the ceiling a level that sends the same as
+  the one below it is passed over, so when the processor allows more, a big room gets
+  frames back rather than size. The ceiling comes down as soon as more watch, before the
+  new watcher's encoder starts, and goes back up only once fewer have watched for 20 s (to
+  what the most that watched meanwhile allow), so someone coming and going does not make
+  every encoder change size each time. Like the levels it changes only what each connection is told
   (`scaleResolutionDownBy`, `maxBitrate`): no capture again, no new agreement. Someone who
   starts watching is told how the screen goes out now; before, their connection kept what
   it was told when it was made. The quality card shows what each watcher gets as measured;
@@ -343,6 +349,28 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   balance: 800x450 at 26); on a fast link full size at 26 (the balance shrank it to
   1200x675 even there, so it is not used). The camera is asked for at 1280x720 and 30 fps,
   in plain numbers, which macOS needs.
+- **A shared screen is encoded once for all who watch it at one size.** WebRTC gives every
+  connection that sends a track an encoder of its own; Fogata's libwebrtc (wrapper patch
+  12 on Linux and Windows, Apple patch 7 on macOS, `tools/webrtc`) has the connections
+  that send one screen at the same settings share one: the screen's source tags its
+  frames, each frame is encoded once when any of them asks, and every connection gets the
+  image with its own RTP timestamps. Each connection still packetizes, encrypts, paces and
+  estimates its bandwidth on its own: **nothing on the wire changes**, and watchers of any
+  version see no difference; an older sharer just keeps an encoder per watcher. A watcher
+  joining gets the next key frame made for all, at most a second after it asks (or one
+  just made); key frames a watcher's receiver asks for are given to all, at most one a
+  second; the bitrate is the lowest watcher's. So one slow or lossy watcher costs the
+  others for a few seconds (a blurrier picture, at most a key frame a second) until it is
+  isolated: a watcher under half the others' bitrate for 3 s, or one asking for a key
+  frame three times in 10 s, gets an encoder of its own, and the screen's steps (above)
+  then judge it as before; it rejoins once its bitrate has been the group's for 10 s
+  (twice as long, up to 160 s, each time that did not last 20 s). A watcher whose
+  connection pauses (no bitrate, network down) gets the frames of the next 250 ms and then
+  nothing until a key frame once it asks again. Cameras are never shared. It is a field
+  trial the plugin sets (`Fogata-SharedScreenEncode`), which
+  `FOGATA_SHARED_SCREEN_ENCODE=off` leaves out, to measure before and after on one build
+  (`tools/call-lab`); each connection's statistics then name its encoder
+  `libvpx (shared)`.
 - **No camera, no picture.** Turning the camera on where the computer has none (Linux and
   Windows answer with a stream without a picture, macOS with `NotFoundError`) says that no
   camera is connected and leaves it off. A tile shows the avatar until its camera or screen
