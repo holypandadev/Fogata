@@ -44,6 +44,14 @@ the patches in `patches/`:
   channels, starting its echo canceller and gain control over. The processing now counts
   every channel's senders, takes a microphone source's options, and processes the
   microphone in one channel always.
+- **A statistics read keeps nothing once answered** (Linux, Windows): every `getStats`
+  kept about 2 KB for good, more with more people in a call. The wrapper's callback took
+  one reference more than WebRTC gives back, keeping its closures (and the plugin's answer
+  to Dart in them), and `portable::vector`, the arrays handed across the library's border
+  (a report's statistics and their members, and lists of devices, senders, receivers,
+  codecs...), destroyed its elements but never freed its array. A vector's array is now
+  made and freed by the library alone (on Windows the library and the plugin each have a
+  heap of their own), its elements constructed in it and destroyed by whoever holds it.
 - **A shared screen or window is captured at the rate asked** (Linux X11, Windows and macOS): the
   wrapper waited the whole interval after each capture ended, so a capture taking 20 ms made
   30 frames a second into 19, and it compared every frame with the last for a changed region
@@ -62,8 +70,8 @@ first time.
 `fetch.sh` downloads depot_tools, WebRTC and its dependencies (gclient, with the clang,
 Rust and sysroot its hooks fetch) and the wrapper, each at its pinned commit.
 `build-linux.sh` resets the tree (`prepare.sh`), applies the patches, builds, runs the
-wrapper's tests of the size check, of the microphone's channels and of the voice
-engine's muted state, and writes into `<work>/dist`:
+wrapper's tests of the size check, of the microphone's channels, of the voice engine's
+muted state and of the arrays it hands across, and writes into `<work>/dist`:
 
     fogata-libwebrtc.m156.8078.5/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
@@ -219,7 +227,13 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
 14. the test of WebRTC's patch 0008 (`test/voice_engine_muted.test.cc`), with the media
     engine, its fakes and mocks built in;
 15. the audio processing is made with the factory's environment, so its field trials
-    reach it.
+    reach it;
+16. a statistics read lets go of its callback once the report is delivered, and
+    `portable::vector` makes and frees its arrays in the library (`allocate_array`,
+    `free_array`), copies, assigns and moves without losing an array or an element, and
+    copies an array it is given instead of taking it; `portable::map` builds on it, and a
+    string assigned itself keeps its text; with tests (`test/portable_vector.test.cc`,
+    `test/stats_callback.test.cc`).
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

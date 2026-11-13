@@ -1,0 +1,847 @@
+Let go of what every statistics read made: its callback and the arrays it hands across
+
+Every getStats kept about 2 KB for good. WebRTCStatsCollectorCallback::Create took one
+reference more than WebRTC gives back, so the callback stayed with its two closures and
+whatever their caller captured in them (the plugin's answer to Dart). And
+portable::vector, the arrays handed across the library's border (the reports, the
+members of each, lists of devices, senders, receivers, codecs...), destroyed its
+elements but never freed its array; its copy assignment lost the old array, or left
+elements alive past the new size, a copy of an empty one held an undefined pointer, and
+a vector moved from with move() was left holding the array too.
+
+A vector's array is now made and freed by the library alone (allocate_array,
+free_array; on Windows the library and its users may each have a heap of their own),
+its elements constructed in it and destroyed by whoever holds the vector; its layout is
+the same. It copies, assigns (itself too) and moves without losing an array or an
+element, and copies an array it is given instead of taking it over (portable::map, the
+one user, built on it). A string assigned itself keeps its text. Tested by
+test/portable_vector.test.cc and test/stats_callback.test.cc.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index b7ee72c..837b458 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -353,6 +353,8 @@ if (rtc_include_tests) {
+        "test/vp8_size_gate.test.cc",
+        "test/custom_audio_transport.test.cc",
+        "test/voice_engine_muted.test.cc",
++       "test/portable_vector.test.cc",
++       "test/stats_callback.test.cc",
+ 
+        # Built in again: the library shows only its own API.
+        "src/internal/vp8_size_gate.cc",
+@@ -389,6 +391,8 @@ if (rtc_include_tests) {
+       "../modules/audio_processing:mocks",
+       "../test:run_loop",
+       "../rtc_base:logging",
++      "../api/units:time_delta",
++      "../rtc_base:rtc_event",
+       "//third_party/abseil-cpp/absl/strings",
+       "//testing/gtest",
+       "//test:test_support",
+diff --git a/include/base/portable.h b/include/base/portable.h
+index 6f42380..01aa867 100644
+--- a/include/base/portable.h
++++ b/include/base/portable.h
+@@ -11,9 +11,11 @@
+ #define LIB_PORTABLE_API
+ #endif
+ 
++#include <cstddef>
+ #include <cstdlib>
+ #include <cstring>
+ #include <map>
++#include <new>
+ #include <string>
+ #include <type_traits>
+ #include <vector>
+@@ -59,8 +61,11 @@ class string {
+   }
+ 
+   inline string& operator=(const string& o) {
+-    destroy();
+-    init(o.m_dynamic == 0 ? o.m_buf : o.m_dynamic, o.m_length);
++    // A string given itself would read what destroy() freed.
++    if (this != &o) {
++      destroy();
++      init(o.m_dynamic == 0 ? o.m_buf : o.m_dynamic, o.m_length);
++    }
+     return *this;
+   }
+ 
+@@ -87,14 +92,32 @@ inline std::string to_std_string(const string& str) { return str.std_string(); }
+ 
+ template <typename T>
+ class identity {
+-  T operator()(const T& x) { return x; }
++ public:
++  T operator()(const T& x) const { return x; }
+ };
+ 
+-template <typename T>
+-class vector {
+- protected:
+-  using raw_type = typename std::aligned_storage<sizeof(T), alignof(T)>::type;
++// The arrays of vectors are made and freed by these two, inside the library, whichever
++// side of it the vector is on: on Windows the library and the program using it may each
++// have a C runtime, and a heap, of their own. allocate_array gives room for `count`
++// elements of `size` bytes, aligned for any standard type (null for none), and ends the
++// program when there is no memory for it; free_array takes null.
++LIB_PORTABLE_API void* allocate_array(size_t count, size_t size);
++LIB_PORTABLE_API void free_array(void* array);
++
++// Where a vector's array comes from: the library's functions above.
++struct library_arrays {
++  static void* allocate(size_t count, size_t size) {
++    return allocate_array(count, size);
++  }
++  static void release(void* array) { free_array(array); }
++};
+ 
++// `size()` elements in one array. The array is made and freed by `Arrays` (the
++// library); the elements are constructed in it and destroyed by the code of whoever
++// holds the vector, each freeing what it holds through its own type (a string through
++// the library too).
++template <typename T, typename Arrays = library_arrays>
++class vector {
+  private:
+   T* m_array;
+   size_t m_size;
+@@ -104,80 +127,82 @@ class vector {
+     friend class vector;
+ 
+    private:
+-    vector<T>& m_ref;
+-    move_ref(vector<T>& ref) : m_ref(ref) {}
++    vector& m_ref;
++    move_ref(vector& ref) : m_ref(ref) {}
+   };
+ 
+   vector() : m_array(0), m_size(0) {}
+-  vector(T* array, size_t s) : m_array(array), m_size(s) {}
++
++  // Copy the `s` elements at `array`, which stays the caller's (it used to be taken
++  // over, and was never freed). Two of them, so that no array, const or not, goes to
++  // the converting constructor below.
++  vector(const T* array, size_t s) : m_array(make_array(s)), m_size(0) {
++    for (size_t i = 0; i < s; ++i) {
++      construct_next(array[i]);
++    }
++  }
++  vector(T* array, size_t s)
++      : vector(static_cast<const T*>(array), s) {}
+ 
+   template <typename Iterable>
+-  vector(const Iterable& v) {
+-    m_size = v.size();
+-    if (v.size() == 0) {
+-      m_array = 0;
+-    } else {
+-      m_array = new T[v.size()];
+-      size_t i = 0;
+-      for (typename Iterable::const_iterator it = v.begin(); it != v.end();
+-           ++it) {
+-        m_array[i++] = *it;
+-      }
++  vector(const Iterable& v) : m_array(make_array(v.size())), m_size(0) {
++    for (typename Iterable::const_iterator it = v.begin(); it != v.end();
++         ++it) {
++      construct_next(*it);
+     }
+   }
+ 
+   template <typename Iterable, typename Converter>
+-  vector(const Iterable& v, Converter convert) {
+-    m_size = v.size();
+-    if (v.size() == 0) {
+-      m_array = 0;
+-    } else {
+-      m_array = new T[v.size()];
+-      size_t i = 0;
+-      for (typename Iterable::const_iterator it = v.begin(); it != v.end();
+-           ++it) {
+-        m_array[i++] = convert(*it);
+-      }
++  vector(const Iterable& v, Converter convert)
++      : m_array(make_array(v.size())), m_size(0) {
++    for (typename Iterable::const_iterator it = v.begin(); it != v.end();
++         ++it) {
++      construct_next(convert(*it));
+     }
+   }
+ 
+-  vector(const vector<T>& o) {
+-    m_size = o.m_size;
+-    if (m_size != 0) {
+-      m_array = new T[o.m_size];
+-      for (size_t i = 0; i < o.m_size; ++i) {
+-        m_array[i] = o.m_array[i];
+-      }
++  vector(const vector& o) : m_array(make_array(o.m_size)), m_size(0) {
++    for (size_t i = 0; i < o.m_size; ++i) {
++      construct_next(o.m_array[i]);
+     }
+   }
+ 
++  vector(vector&& o) : m_array(o.m_array), m_size(o.m_size) {
++    o.m_array = 0;
++    o.m_size = 0;
++  }
++
+   ~vector() { destroy_all(); }
+ 
+-  vector<T>& operator=(const vector<T>& o) {
+-    if (m_size < o.m_size) {
+-      destroy_all();
+-      m_array = new T[o.m_size];
+-    } else if (o.m_size == 0 && m_size != 0) {
+-      destroy_all();
+-    }
+-    m_size = o.m_size;
+-    for (size_t i = 0; i < o.m_size; ++i) {
+-      m_array[i] = o.m_array[i];
++  // The copy is made before the elements held are let go of, so that a vector given
++  // itself (or a part of itself) keeps what it had.
++  vector& operator=(const vector& o) {
++    if (this != &o) {
++      vector copy(o);
++      swap(copy);
+     }
+     return *this;
+   }
+ 
+-  vector(move_ref mr) : m_array(mr.m_ref.m_array), m_size(mr.m_ref.m_size) {}
+-  vector<T>& operator=(move_ref mr) {
+-    if (m_size != 0) {
++  vector& operator=(vector&& o) {
++    if (this != &o) {
+       destroy_all();
++      m_array = o.m_array;
++      m_size = o.m_size;
++      o.m_array = 0;
++      o.m_size = 0;
+     }
+-    m_size = mr.m_ref.m_size;
+-    m_array = mr.m_ref.m_array;
+-    mr.m_ref.m_size = 0;
+-    mr.m_ref.m_array = 0;
+     return *this;
+   }
++
++  // Take the elements of the vector move() was called on, which is left empty.
++  vector(move_ref mr) : m_array(mr.m_ref.m_array), m_size(mr.m_ref.m_size) {
++    mr.m_ref.m_array = 0;
++    mr.m_ref.m_size = 0;
++  }
++  vector& operator=(move_ref mr) {
++    return *this = static_cast<vector&&>(mr.m_ref);
++  }
+   /**
+    * Not really safe - can't be used as vector(something).move(),
+    * but vector tmp(something); other = tmp.move();
+@@ -203,14 +228,43 @@ class vector {
+ 
+   void clear() { destroy_all(); }
+ 
+- protected:
+-  void destroy(T* rt) { reinterpret_cast<const T*>(rt)->~T(); }
++ private:
++  static T* make_array(size_t count) {
++    static_assert(alignof(T) <= alignof(std::max_align_t),
++                  "the library's arrays are aligned for standard types only");
++    return count == 0 ? 0
++                      : static_cast<T*>(Arrays::allocate(count, sizeof(T)));
++  }
++
++  // Constructs the element after the last one, in room make_array made for it.
++  template <typename U>
++  void construct_next(const U& value) {
++    new (static_cast<void*>(m_array + m_size)) T(value);
++    ++m_size;
++  }
+ 
++  void swap(vector& o) {
++    T* array = m_array;
++    size_t size = m_size;
++    m_array = o.m_array;
++    m_size = o.m_size;
++    o.m_array = array;
++    o.m_size = size;
++  }
++
++  // Destroys every element, then frees the array, once: the vector is empty before
++  // any element's destructor runs.
+   void destroy_all() {
+-    for (size_t i = 0; i < m_size; ++i) {
+-      destroy(&m_array[i]);
+-    }
++    T* array = m_array;
++    size_t size = m_size;
++    m_array = 0;
+     m_size = 0;
++    for (size_t i = 0; i < size; ++i) {
++      array[i].~T();
++    }
++    if (array != 0) {
++      Arrays::release(array);
++    }
+   }
+ };
+ 
+@@ -228,32 +282,15 @@ class map {
+ 
+   vector<my_pair> m_vec;
+ 
+-  /*template<typename K2, typename V2>
+-  static pair *to_array(const std::map<K2, V2> &m,
+-      K (*convertKey)(const K2 &),
+-      V (*convertValue)(const V2 &))
+-  {
+-      my_pair *data = new my_pair[m.size()];
+-      my_pair *dp = data;
+-      for (std::map<K2, V2>::const_iterator it = m.begin(); it != m.end(); ++it)
+-  { dp->key = convertKey(it->first); dp->value = convertValue(it->second);
+-          ++dp;
+-      }
+-      return data;
+-  }*/
+-
+   template <typename K2, typename KC, typename V2, typename VC>
+-  static my_pair* to_array(const std::map<K2, V2>& m, KC convertKey,
+-                           VC convertValue) {
+-    my_pair* data = new my_pair[m.size()];
+-    my_pair* dp = data;
+-    for (typename std::map<K2, V2>::const_iterator it = m.begin();
+-         it != m.end(); ++it) {
+-      dp->key = convertKey(it->first);
+-      dp->value = convertValue(it->second);
+-      ++dp;
+-    }
+-    return data;
++  static vector<my_pair> to_vector(const std::map<K2, V2>& m, KC convertKey,
++                                   VC convertValue) {
++    return vector<my_pair>(
++        m, [&](const typename std::map<K2, V2>::value_type& item) {
++          my_pair converted = {convertKey(item.first),
++                               convertValue(item.second)};
++          return converted;
++        });
+   }
+ 
+  public:
+@@ -267,20 +304,15 @@ class map {
+ 
+   map() {}
+ 
+-  /*    template<typename K2, typename V2> map(const std::map<K2, V2> &m,
+-          K (*convertKey)(const K2 &) = identity<K>,
+-          V (*convertValue)(const V2 &) = identity<V>):
+-          m_vec(to_array(m, convertKey, convertValue), m.size()) {}*/
+-
+   map(const std::map<K, V>& m)
+-      : m_vec(to_array(m, identity<K>(), identity<V>()), m.size()) {}
++      : m_vec(to_vector(m, identity<K>(), identity<V>())) {}
+ 
+   template <typename K2, typename KC, typename V2, typename VC>
+   map(const std::map<K2, V2>& m, KC convertKey = identity<K>(),
+       VC convertValue = identity<V>())
+-      : m_vec(to_array(m, convertKey, convertValue), m.size()) {}
++      : m_vec(to_vector(m, convertKey, convertValue)) {}
+ 
+-  map(const map<K, V>& o) { m_vec = o.m_vec; }
++  map(const map<K, V>& o) : m_vec(o.m_vec) {}
+ 
+   map<K, V>& operator=(const map<K, V>& o) {
+     m_vec = o.m_vec;
+diff --git a/src/base/portable.cc b/src/base/portable.cc
+index 70b6390..b3b0191 100644
+--- a/src/base/portable.cc
++++ b/src/base/portable.cc
+@@ -1,5 +1,8 @@
+ #include "include/base/portable.h"
+ 
++#include <cstdint>
++#include <cstdlib>
++
+ namespace portable {
+ 
+ static int strncpy_safe(char* dest, size_t numberOfElements, const char* src,
+@@ -41,4 +44,16 @@ void string::destroy() {
+ string ::~string() {
+   if (m_dynamic != 0) delete[] m_dynamic;
+ }
++
++void* allocate_array(size_t count, size_t size) {
++  if (count == 0 || size == 0) return 0;
++  if (count > SIZE_MAX / size) std::abort();
++  // malloc's memory is aligned for any standard type, as vector asks.
++  void* array = std::malloc(count * size);
++  if (array == 0) std::abort();
++  return array;
++}
++
++void free_array(void* array) { std::free(array); }
++
+ }  // namespace portable
+\ No newline at end of file
+diff --git a/src/rtc_media_stream_impl.h b/src/rtc_media_stream_impl.h
+index 13d924e..72bd59f 100644
+--- a/src/rtc_media_stream_impl.h
++++ b/src/rtc_media_stream_impl.h
+@@ -18,14 +18,14 @@ class WebRTCStatsCollectorCallback : public webrtc::RTCStatsCollectorCallback {
+       : success_(success), failure_(failure) {}
+   ~WebRTCStatsCollectorCallback() {}
+ 
++  // Held by WebRTC until the report is delivered, then let go of with the closures
++  // it holds (and what their caller captured in them). One more reference was taken
++  // here, and never given back: every statistics read kept its callback for good.
+   static webrtc::scoped_refptr<WebRTCStatsCollectorCallback> Create(
+       OnStatsCollectorSuccess success, OnStatsCollectorFailure failure) {
+-    webrtc::scoped_refptr<WebRTCStatsCollectorCallback> rtc_stats_observer =
+-        webrtc::scoped_refptr<WebRTCStatsCollectorCallback>(
+-            new webrtc::RefCountedObject<WebRTCStatsCollectorCallback>(success,
+-                                                                    failure));
+-    rtc_stats_observer->AddRef();
+-    return rtc_stats_observer;
++    return webrtc::scoped_refptr<WebRTCStatsCollectorCallback>(
++        new webrtc::RefCountedObject<WebRTCStatsCollectorCallback>(success,
++                                                                failure));
+   }
+ 
+   virtual void OnStatsDelivered(
+diff --git a/test/portable_vector.test.cc b/test/portable_vector.test.cc
+new file mode 100644
+index 0000000..1f75eed
+--- /dev/null
++++ b/test/portable_vector.test.cc
+@@ -0,0 +1,342 @@
++#include <cstddef>
++#include <cstdint>
++#include <initializer_list>
++#include <map>
++#include <set>
++#include <string>
++#include <utility>
++#include <vector>
++
++#include "base/portable.h"
++#include "rtc_types.h"
++#include "test/gtest.h"
++
++namespace {
++
++// Every array the vectors under test make, through the library's own functions,
++// which every vector uses: each made and freed exactly once.
++struct Arrays {
++  std::set<void*> live;
++  int made = 0;
++  int freed = 0;
++};
++Arrays arrays;
++
++struct CountedArrays {
++  static void* allocate(size_t count, size_t size) {
++    void* array = portable::allocate_array(count, size);
++    EXPECT_NE(nullptr, array);
++    EXPECT_TRUE(arrays.live.insert(array).second);
++    ++arrays.made;
++    return array;
++  }
++  static void release(void* array) {
++    EXPECT_EQ(1u, arrays.live.erase(array))
++        << "an array freed twice, or one never made";
++    ++arrays.freed;
++    portable::free_array(array);
++  }
++};
++
++// An element that knows which of its kind are alive: each constructed once and
++// destroyed once, never copied from nor assigned to when not alive. It has no
++// default constructor, so a vector never makes elements it was not given.
++class Element {
++ public:
++  explicit Element(int value) : value_(value) { Born(); }
++  Element(const Element& o) : value_(o.value()) { Born(); }
++  Element& operator=(const Element& o) {
++    EXPECT_TRUE(Alive()) << "assigned to while not alive";
++    value_ = o.value();
++    return *this;
++  }
++  ~Element() {
++    EXPECT_EQ(1u, Live().erase(this))
++        << "destroyed twice, or never constructed";
++  }
++
++  int value() const {
++    EXPECT_TRUE(Alive()) << "read while not alive";
++    return value_;
++  }
++
++  static size_t Count() { return Live().size(); }
++
++ private:
++  static std::set<const Element*>& Live() {
++    static std::set<const Element*> live;
++    return live;
++  }
++  void Born() { EXPECT_TRUE(Live().insert(this).second); }
++  bool Alive() const { return Live().count(this) == 1; }
++
++  int value_;
++};
++
++using Vector = portable::vector<Element, CountedArrays>;
++
++std::vector<Element> Elements(std::initializer_list<int> values) {
++  std::vector<Element> elements;
++  elements.reserve(values.size());
++  for (int value : values) {
++    elements.emplace_back(value);
++  }
++  return elements;
++}
++
++Vector Make(std::initializer_list<int> values) {
++  return Vector(Elements(values));
++}
++
++std::vector<int> Values(const Vector& v) {
++  std::vector<int> values;
++  for (size_t i = 0; i < v.size(); ++i) {
++    values.push_back(v[i].value());
++  }
++  return values;
++}
++
++// Each test starts with no array and no element, and must end so.
++class PortableVector : public ::testing::Test {
++ protected:
++  void SetUp() override {
++    arrays = Arrays();
++    ASSERT_EQ(0u, Element::Count());
++  }
++
++  void TearDown() override {
++    EXPECT_EQ(0u, Element::Count()) << "elements left alive";
++    EXPECT_TRUE(arrays.live.empty()) << "arrays never freed";
++    EXPECT_EQ(arrays.made, arrays.freed);
++  }
++};
++
++TEST_F(PortableVector, FreesItsArrayWhenDestroyed) {
++  {
++    Vector v = Make({1, 2, 3});
++    EXPECT_EQ((std::vector<int>{1, 2, 3}), Values(v));
++    EXPECT_EQ(3u, Element::Count());
++    EXPECT_EQ(1, arrays.made);
++    EXPECT_EQ(0, arrays.freed);
++  }
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, EmptyVectorsMakeNoArray) {
++  {
++    Vector none;
++    Vector from_empty = Vector(std::vector<Element>());
++    Vector copy(none);
++    Vector assigned = Make({1});
++    assigned = none;
++    EXPECT_EQ(0u, none.size());
++    EXPECT_EQ(nullptr, none.data());
++    EXPECT_EQ(0u, from_empty.size());
++    EXPECT_EQ(nullptr, from_empty.data());
++    EXPECT_EQ(0u, copy.size());
++    EXPECT_EQ(0u, assigned.size());
++    EXPECT_EQ(nullptr, assigned.data());
++  }
++  EXPECT_EQ(1, arrays.made);
++}
++
++TEST_F(PortableVector, CopiesIntoAnArrayOfItsOwn) {
++  Vector a = Make({1, 2, 3});
++  {
++    Vector b(a);
++    EXPECT_NE(a.data(), b.data());
++    EXPECT_EQ(Values(a), Values(b));
++    EXPECT_EQ(6u, Element::Count());
++    EXPECT_EQ(2, arrays.made);
++  }
++  EXPECT_EQ(1, arrays.freed);
++  EXPECT_EQ((std::vector<int>{1, 2, 3}), Values(a));
++}
++
++TEST_F(PortableVector, AssignsABiggerOne) {
++  Vector a = Make({1, 2});
++  Vector b = Make({3, 4, 5, 6});
++  a = b;
++  EXPECT_EQ((std::vector<int>{3, 4, 5, 6}), Values(a));
++  EXPECT_EQ((std::vector<int>{3, 4, 5, 6}), Values(b));
++  EXPECT_EQ(8u, Element::Count());
++  EXPECT_EQ(2u, arrays.live.size());
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, AssignsASmallerOne) {
++  Vector a = Make({1, 2, 3, 4});
++  Vector b = Make({5, 6});
++  a = b;
++  EXPECT_EQ((std::vector<int>{5, 6}), Values(a));
++  EXPECT_EQ(4u, Element::Count());
++  EXPECT_EQ(2u, arrays.live.size());
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, AssignsAnEmptyOne) {
++  Vector a = Make({1, 2, 3});
++  Vector empty;
++  a = empty;
++  EXPECT_EQ(0u, a.size());
++  EXPECT_EQ(nullptr, a.data());
++  EXPECT_EQ(0u, Element::Count());
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, AssignsToAnEmptyOne) {
++  Vector a;
++  Vector b = Make({1, 2});
++  a = b;
++  EXPECT_EQ((std::vector<int>{1, 2}), Values(a));
++  EXPECT_EQ(4u, Element::Count());
++  EXPECT_EQ(2u, arrays.live.size());
++}
++
++TEST_F(PortableVector, AssignedItselfKeepsWhatItHad) {
++  Vector a = Make({1, 2, 3});
++  const Element* array = a.data();
++  Vector& same = a;
++  a = same;
++  EXPECT_EQ(array, a.data());
++  EXPECT_EQ((std::vector<int>{1, 2, 3}), Values(a));
++  EXPECT_EQ(3u, Element::Count());
++  EXPECT_EQ(1, arrays.made);
++  EXPECT_EQ(0, arrays.freed);
++}
++
++TEST_F(PortableVector, MovesItsArray) {
++  Vector a = Make({1, 2, 3});
++  const Element* array = a.data();
++  Vector b(std::move(a));
++  EXPECT_EQ(array, b.data());
++  EXPECT_EQ(0u, a.size());
++  EXPECT_EQ(nullptr, a.data());
++
++  Vector c = Make({4});
++  c = std::move(b);
++  EXPECT_EQ(array, c.data());
++  EXPECT_EQ((std::vector<int>{1, 2, 3}), Values(c));
++  EXPECT_EQ(0u, b.size());
++  EXPECT_EQ(3u, Element::Count());
++  EXPECT_EQ(2, arrays.made);
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, MoveRefTakesTheArrayAndEmptiesItsSource) {
++  Vector a = Make({1, 2, 3});
++  const Element* array = a.data();
++  Vector b(a.move());
++  EXPECT_EQ(array, b.data());
++  EXPECT_EQ(0u, a.size());
++  EXPECT_EQ(nullptr, a.data());
++
++  Vector c = Make({4, 5});
++  c = b.move();
++  EXPECT_EQ(array, c.data());
++  EXPECT_EQ((std::vector<int>{1, 2, 3}), Values(c));
++  EXPECT_EQ(0u, b.size());
++
++  c = c.move();
++  EXPECT_EQ(array, c.data());
++  EXPECT_EQ(3u, Element::Count());
++  EXPECT_EQ(2, arrays.made);
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, ClearFreesOnce) {
++  Vector a = Make({1, 2, 3});
++  a.clear();
++  EXPECT_EQ(0u, a.size());
++  EXPECT_EQ(nullptr, a.data());
++  EXPECT_EQ(0u, Element::Count());
++  EXPECT_EQ(1, arrays.freed);
++  a.clear();
++  EXPECT_EQ(1, arrays.freed);
++}
++
++TEST_F(PortableVector, CopiesAnArrayItIsGiven) {
++  std::vector<Element> elements = Elements({1, 2});
++  {
++    Vector v(elements.data(), elements.size());
++    const Element* constant = elements.data();
++    Vector w(constant, elements.size());
++    EXPECT_NE(elements.data(), v.data());
++    EXPECT_EQ((std::vector<int>{1, 2}), Values(v));
++    EXPECT_EQ((std::vector<int>{1, 2}), Values(w));
++  }
++  EXPECT_EQ(2u, Element::Count());
++  EXPECT_EQ(2, arrays.freed);
++}
++
++TEST_F(PortableVector, ConvertsWhatItIsGiven) {
++  Vector v(std::vector<int>{1, 2, 3}, [](int i) { return Element(i * 10); });
++  EXPECT_EQ((std::vector<int>{10, 20, 30}), Values(v));
++  EXPECT_EQ(3u, Element::Count());
++}
++
++TEST_F(PortableVector, GivesAStdVector) {
++  Vector v = Make({1, 2});
++  std::vector<Element> copy = v.std_vector();
++  ASSERT_EQ(2u, copy.size());
++  EXPECT_EQ(2, copy[1].value());
++  EXPECT_EQ(4u, Element::Count());
++}
++
++// The library's own arrays, as every vector takes them.
++TEST_F(PortableVector, LibraryArrays) {
++  EXPECT_EQ(nullptr, portable::allocate_array(0, sizeof(Element)));
++  portable::free_array(nullptr);
++  void* array = portable::allocate_array(3, 24);
++  ASSERT_NE(nullptr, array);
++  EXPECT_EQ(0u, reinterpret_cast<uintptr_t>(array) % alignof(std::max_align_t));
++  portable::free_array(array);
++  {
++    portable::vector<Element> v(Elements({1, 2, 3}));
++    portable::vector<Element> w(v);
++    w = v;
++    w.clear();
++    w = v;
++    EXPECT_EQ(3, w[2].value());
++    EXPECT_EQ(6u, Element::Count());
++  }
++}
++
++// Strings longer than a string holds in itself, copied and assigned in vectors, and
++// a string given itself.
++TEST_F(PortableVector, Strings) {
++  const std::string long_text(100, 'x');
++  libwebrtc::vector<libwebrtc::string> v(std::vector<std::string>{long_text, "short"});
++  libwebrtc::vector<libwebrtc::string> w;
++  w = v;
++  ASSERT_EQ(2u, w.size());
++  EXPECT_EQ(long_text, w[0].std_string());
++  EXPECT_EQ("short", w[1].std_string());
++  libwebrtc::string s(long_text);
++  libwebrtc::string& same = s;
++  s = same;
++  EXPECT_EQ(long_text, s.std_string());
++}
++
++TEST_F(PortableVector, Map) {
++  std::map<int, Element> elements;
++  elements.emplace(1, Element(10));
++  elements.emplace(2, Element(20));
++  {
++    portable::map<int, Element> m(elements);
++    ASSERT_EQ(2u, m.size());
++    EXPECT_EQ(1, m.data()[0].key);
++    EXPECT_EQ(20, m.data()[1].value.value());
++    portable::map<int, Element> copy(m);
++    portable::map<int, Element> taken(copy.move());
++    EXPECT_EQ(0u, copy.size());
++    ASSERT_EQ(2u, taken.size());
++    EXPECT_EQ(10, taken.data()[0].value.value());
++    copy = m;
++    EXPECT_EQ(2u, copy.size());
++    EXPECT_EQ(8u, Element::Count());
++  }
++  EXPECT_EQ(2u, Element::Count());
++}
++
++}  // namespace
+diff --git a/test/stats_callback.test.cc b/test/stats_callback.test.cc
+new file mode 100644
+index 0000000..146fa1d
+--- /dev/null
++++ b/test/stats_callback.test.cc
+@@ -0,0 +1,82 @@
++#include <cstddef>
++#include <memory>
++
++#include "api/units/time_delta.h"
++#include "libwebrtc.h"
++#include "rtc_base/event.h"
++#include "rtc_mediaconstraints.h"
++#include "rtc_peerconnection.h"
++#include "rtc_peerconnection_factory.h"
++#include "test/gtest.h"
++
++using libwebrtc::LibWebRTC;
++using libwebrtc::MediaRTCStats;
++using libwebrtc::scoped_refptr;
++
++namespace {
++
++constexpr webrtc::TimeDelta kWait = webrtc::TimeDelta::Seconds(10);
++
++// A statistics read lets go of its callback, and of whatever its closures hold,
++// once the report was delivered and the caller let go: the callback kept one more
++// reference than WebRTC gave back, so every read kept its closures for good (in the
++// plugin, the method's result and the shared pointer to it).
++TEST(StatsCallback, LetGoOfOnceTheReportIsDelivered) {
++  ASSERT_TRUE(LibWebRTC::Initialize());
++  scoped_refptr<libwebrtc::RTCPeerConnectionFactory> factory =
++      LibWebRTC::CreateRTCPeerConnectionFactory();
++  ASSERT_TRUE(factory.get() != nullptr);
++  ASSERT_TRUE(factory->Initialize());
++  libwebrtc::RTCConfiguration config{};
++  scoped_refptr<libwebrtc::RTCPeerConnection> pc =
++      factory->Create(config, libwebrtc::RTCMediaConstraints::Create());
++  ASSERT_TRUE(pc.get() != nullptr);
++
++  // Captured by both closures, as the plugin captures its result.
++  auto held = std::make_shared<int>(0);
++  std::weak_ptr<int> watched = held;
++  webrtc::Event delivered;
++  size_t reports = 0;
++  size_t members = 0;
++  pc->GetStats(
++      [held, &delivered, &reports, &members](
++          const libwebrtc::vector<scoped_refptr<MediaRTCStats>> stats) {
++        reports = stats.size();
++        for (size_t i = 0; i < stats.size(); ++i) {
++          members += stats[i]->Members().size();
++        }
++        delivered.Set();
++      },
++      [held, &delivered](const char* error) {
++        ADD_FAILURE() << error;
++        delivered.Set();
++      });
++  held.reset();
++  ASSERT_TRUE(delivered.Wait(kWait));
++  EXPECT_GT(reports, 0u);
++  EXPECT_GT(members, 0u);
++
++  // The first report is delivered by a task on the signalling thread, which lets
++  // go of the request (and its callback) as it ends; the second read is delivered
++  // by a later task on that thread, so the first callback is gone by then.
++  webrtc::Event second;
++  pc->GetStats(
++      [&second](const libwebrtc::vector<scoped_refptr<MediaRTCStats>>) {
++        second.Set();
++      },
++      [&second](const char* error) {
++        ADD_FAILURE() << error;
++        second.Set();
++      });
++  ASSERT_TRUE(second.Wait(kWait));
++  EXPECT_TRUE(watched.expired())
++      << "the first read's callback and its closures are still held";
++
++  factory->Delete(pc);
++  pc = nullptr;
++  factory->Terminate();
++  factory = nullptr;
++  LibWebRTC::Terminate();
++}
++
++}  // namespace

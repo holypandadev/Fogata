@@ -25,7 +25,7 @@ cat "$here/args/common.gn" "$here/args/linux-x64.gn" > "$out/args.gn"
 (cd "$src" && gn gen "$out")
 (cd "$src" && nice -n 10 ninja -C "$out" -j "${JOBS:-8}" libwebrtc libwebrtc_cpp_api_unittests)
 LD_LIBRARY_PATH="$out" "$out/libwebrtc_cpp_api_unittests" \
-    --gtest_filter='Vp8SizeGate.*:CustomAudioTransport.*:VoiceEngineMuted.*'
+    --gtest_filter='Vp8SizeGate.*:CustomAudioTransport.*:VoiceEngineMuted.*:PortableVector.*'
 python3 -I "$here/package.py" --os linux --arch x64 --src "$src" --out "$out" \
     --into "$work/dist"
 store=${FOGATA_LIBWEBRTC_DIR:-$HOME/fogata-libwebrtc}/$LIBWEBRTC_VERSION
