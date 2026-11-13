@@ -60,17 +60,21 @@ void main() {
     return (small, large);
   }
 
-  /// The offers the smaller side sent since [at]: one may have gone out as the link came
-  /// back, made by a try while it was down; then none more is needed.
-  int offersSince(DateTime at) => net.sent
-      .where((s) => s.from == _small && s.type == 'offer' && s.at.isAfter(at))
+  /// The offers the smaller side sent after the first [mark] signals (`net.sent.length`
+  /// at that moment, not a time: a clock that steps a millisecond or more at once, as on
+  /// Windows, gives a signal sent right away the very time of the mark): one may have
+  /// gone out as the link came back, made by a try while it was down; then none more is
+  /// needed.
+  int offersSince(int mark) => net.sent
+      .skip(mark)
+      .where((s) => s.from == _small && s.type == 'offer')
       .length;
 
   /// The link goes down: the connection fails on both sides, and the core says so to
   /// each. It stays down past the tries after the failure (a few seconds on), which go
   /// nowhere.
   Future<void> outage(Call small, Call large) async {
-    final cut = DateTime.now();
+    final cut = net.sent.length;
     net.cut(_small, _large);
     small.memberGone(_large);
     large.memberGone(_small);
@@ -99,6 +103,7 @@ void main() {
     await outage(small, large);
     net.mend(_small, _large);
     final back = DateTime.now();
+    final sentBefore = net.sent.length;
     small.memberBack(_large);
     large.memberBack(_small);
     await until(() => up(small, large), what: 'connected again');
@@ -108,7 +113,7 @@ void main() {
       DateTime.now().difference(back),
       lessThan(const Duration(seconds: 2)),
     );
-    expect(offersSince(back), lessThanOrEqualTo(1));
+    expect(offersSince(sentBefore), lessThanOrEqualTo(1));
   });
 
   for (final asksFirst in [true, false]) {
@@ -118,15 +123,15 @@ void main() {
       await outage(small, large);
       final answers = net.madeBy(_large).length;
       net.mend(_small, _large);
-      final back = DateTime.now();
+      final back = net.sent.length;
       if (asksFirst) {
         // The larger side hears of the link first, and its asking reaches the other
         // before the core tells the other of the link.
         large.memberBack(_small);
         await until(
-          () => net.sent.any(
-            (s) => s.from == _large && s.type == 'again' && s.at.isAfter(back),
-          ),
+          () => net.sent
+              .skip(back)
+              .any((s) => s.from == _large && s.type == 'again'),
           what: 'the asking',
         );
         await Future<void>.delayed(net.latency * 2);
@@ -162,7 +167,7 @@ void main() {
         call.peers[id]!.connected = false;
         call.memberGone(id);
       }
-      final back = DateTime.now();
+      final back = net.sent.length;
       // The core may tell of each twice (a link, then a better way to it).
       for (var i = 0; i < 2; i++) {
         for (final id in others) {
@@ -171,12 +176,11 @@ void main() {
       }
       await Future<void>.delayed(const Duration(seconds: 1));
       for (final id in others) {
-        final tries = net.sent.where(
-          (s) =>
-              s.to == id &&
-              s.at.isAfter(back) &&
-              (s.type == 'offer' || s.type == 'again'),
-        );
+        final tries = net.sent
+            .skip(back)
+            .where(
+              (s) => s.to == id && (s.type == 'offer' || s.type == 'again'),
+            );
         expect(tries.length, 1, reason: 'tries to $id');
       }
     },
