@@ -351,22 +351,28 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   in plain numbers, which macOS needs.
 - **A shared screen is encoded once for all who watch it at one size.** WebRTC gives every
   connection that sends a track an encoder of its own; Fogata's libwebrtc (wrapper patch
-  12 on Linux and Windows, Apple patch 7 on macOS, `tools/webrtc`) has the connections
+  17 on Linux and Windows, Apple patch 7 on macOS, `tools/webrtc`) has the connections
   that send one screen at the same settings share one: the screen's source tags its
   frames, each frame is encoded once when any of them asks, and every connection gets the
   image with its own RTP timestamps. Each connection still packetizes, encrypts, paces and
   estimates its bandwidth on its own: **nothing on the wire changes**, and watchers of any
   version see no difference; an older sharer just keeps an encoder per watcher. A watcher
-  joining gets the next key frame made for all, at most a second after it asks (or one
-  just made); key frames a watcher's receiver asks for are given to all, at most one a
-  second; the bitrate is the lowest watcher's. So one slow or lossy watcher costs the
+  joining gets a key frame at once (made for all, or one just made), as its own encoder
+  made one; key frames a watcher's receiver asks for are given to all, at most one a
+  second, and one owed while the screen stays still is made of its last picture again;
+  the bitrate is the lowest watcher's. So one slow or lossy watcher costs the
   others for a few seconds (a blurrier picture, at most a key frame a second) until it is
   isolated: a watcher under half the others' bitrate for 3 s, or one asking for a key
   frame three times in 10 s, gets an encoder of its own, and the screen's steps (above)
   then judge it as before; it rejoins once its bitrate has been the group's for 10 s
   (twice as long, up to 160 s, each time that did not last 20 s). A watcher whose
   connection pauses (no bitrate, network down) gets the frames of the next 250 ms and then
-  nothing until a key frame once it asks again. Cameras are never shared. It is a field
+  nothing; when it asks again it takes up where it was if every picture it missed is still
+  kept (eight), and waits for a key frame otherwise. A connection that stops sending costs
+  the others no key frame. An encoder that fails three times in a row, or cannot start,
+  gives every watcher an encoder of its own for a minute; one frame that fails is a frame
+  dropped for all. Cameras, a disabled track's black frames and hardware encoders are
+  never shared, and a camera's connection has its encoder as without it. It is a field
   trial the plugin sets (`Fogata-SharedScreenEncode`), which
   `FOGATA_SHARED_SCREEN_ENCODE=off` leaves out, to measure before and after on one build
   (`tools/call-lab`); each connection's statistics then name its encoder

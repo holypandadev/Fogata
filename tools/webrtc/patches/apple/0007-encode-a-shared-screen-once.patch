@@ -1,16 +1,17 @@
 One encoder for every connection that sends a shared screen at one size, in the
 Objective-C SDK, as the C++ wrapper does (patches/wrapper/0017): the encoder factory the
 plugin passes is wrapped in //libwebrtc's SharedEncoderFactory (both initializers that
-take an RTCVideoEncoderFactory), ObjCVideoTrackSource tags the frames of a source marked
-with RTCVideoSource's enableFogataSharedEncode, and the field trial
-Fogata-SharedScreenEncode/Enabled/ turns it on. Without the trial, or for a source not
-marked (cameras), nothing changes.
+take an RTCVideoEncoderFactory), ObjCVideoTrackSource tags and marks the frames of a source
+marked with RTCVideoSource's enableFogataSharedEncode (MarkSharedEncodeFrame: the mark
+tells them from the black frames VideoBroadcaster makes for a disabled track), and the
+field trial Fogata-SharedScreenEncode/Enabled/ turns it on. Without the trial, or for a
+source not marked (cameras), nothing changes.
 
 diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
-index 236edc2..7d4230f 100644
+index 236edc2..5d8d59b 100644
 --- a/sdk/BUILD.gn
 +++ b/sdk/BUILD.gn
-@@ -623,6 +623,39 @@ if (is_ios || is_mac) {
+@@ -623,6 +623,40 @@ if (is_ios || is_mac) {
        ]
      }
  
@@ -40,6 +41,7 @@ index 236edc2..7d4230f 100644
 +        "../modules/video_coding:video_codec_interface",
 +        "../rtc_base:logging",
 +        "../rtc_base:macromagic",
++        "../rtc_base:timeutils",
 +        "../rtc_base/experiments:field_trial_parser",
 +        "../rtc_base/synchronization:mutex",
 +        "../system_wrappers",
@@ -50,7 +52,7 @@ index 236edc2..7d4230f 100644
      rtc_library("videoframebuffer_objc") {
        visibility = [ "*" ]
        sources = [
-@@ -1232,11 +1265,15 @@ if (is_ios || is_mac) {
+@@ -1232,11 +1266,15 @@ if (is_ios || is_mac) {
        ]
        public_configs = [ ":common_config_objc" ]
  
@@ -66,7 +68,7 @@ index 236edc2..7d4230f 100644
          ":helpers_objc",
          ":mediaconstraints_objc",
          ":mediasource_objc",
-@@ -1903,8 +1940,12 @@ if (is_ios || is_mac) {
+@@ -1903,8 +1941,12 @@ if (is_ios || is_mac) {
  
        public_configs = [ ":common_config_objc" ]
  
@@ -208,7 +210,7 @@ index 35d3190..4fab315 100644
  
  }  // namespace webrtc
 diff --git a/sdk/objc/native/src/objc_video_track_source.mm b/sdk/objc/native/src/objc_video_track_source.mm
-index 9586e31..5241029 100644
+index 9586e31..2a73b32 100644
 --- a/sdk/objc/native/src/objc_video_track_source.mm
 +++ b/sdk/objc/native/src/objc_video_track_source.mm
 @@ -16,6 +16,7 @@
@@ -251,16 +253,29 @@ index 9586e31..5241029 100644
  void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
                                             frame) {
 +  // Fogata: counted before adaptation, as the C++ wrapper's VideoCapturer does; 0
-+  // (no id) unless this is a shared screen.
++  // (untagged) unless this is a shared screen.
 +  const uint16_t frame_id = shared_encode_tag_->NextFrameId();
    const int64_t timestamp_us =
        frame.timeStampNs / webrtc::kNumNanosecsPerMicrosec;
    const int64_t translated_timestamp_us = timestamp_aligner_.TranslateTimestamp(
-@@ -136,6 +150,7 @@ void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
-               .set_video_frame_buffer(buffer)
-               .set_rotation(rotation)
-               .set_timestamp_us(translated_timestamp_us)
-+              .set_id(frame_id)
-               .build());
+@@ -132,11 +146,15 @@ void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
+     rotation = kVideoRotation_0;
+   }
+ 
+-  OnFrame(VideoFrame::Builder()
+-              .set_video_frame_buffer(buffer)
+-              .set_rotation(rotation)
+-              .set_timestamp_us(translated_timestamp_us)
+-              .build());
++  VideoFrame video_frame = VideoFrame::Builder()
++                               .set_video_frame_buffer(buffer)
++                               .set_rotation(rotation)
++                               .set_timestamp_us(translated_timestamp_us)
++                               .build();
++  // Fogata: the id, and the mark that tells this source's frames from the
++  // black frames VideoBroadcaster makes for a disabled track.
++  libwebrtc::MarkSharedEncodeFrame(video_frame, frame_id);
++  OnFrame(video_frame);
  }
  
+ }  // namespace webrtc

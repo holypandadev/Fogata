@@ -156,10 +156,14 @@ libwebrtc's `SharedEncoderFactory` (wrapper patch 17, `src/internal/shared_encod
 macOS framework through Apple patch 7) has the connections that send one screen at the same
 settings share one encoder: a frame is encoded once and every connection gets the image with
 its own RTP timestamps. Each connection still packetizes, encrypts, paces and estimates on its
-own, so nothing on the wire changes and a watcher of any version sees no difference. Key
-frames one watcher asks for are given to all (at most one a second); the bitrate is the
-lowest watcher's; a watcher far slower than the others, or losing key frames again and
-again, gets an encoder of its own.
+own, so nothing on the wire changes and a watcher of any version sees no difference. A
+watcher's first key frame is made at once; key frames one watcher asks for are given to
+all (at most one a second), and one owed on a still screen is made of its last picture
+again. A new watcher's encoder still needs one frame to ask for (`fogataScreenRefresh` gives
+it on a still screen); that frame now brings its key frame at once; the bitrate is the
+lowest watcher's;
+a watcher far slower than the others, or losing key frames again and again, gets an
+encoder of its own, and every watcher gets one when the shared encoder keeps failing.
 
 - The field trial `Fogata-SharedScreenEncode/Enabled/` is set with Fogata's own
   (`common/cpp/src/flutter_webrtc_base.cc`; `FlutterWebRTCPlugin.m`, both copies). With
@@ -173,8 +177,10 @@ again, gets an encoder of its own.
   source (`common/cpp/src/flutter_screen_capture.cc`), and `enableFogataSharedEncode` on
   the screen's `RTCVideoSource` on macOS (`FlutterRTCDesktopCapturer.m`, both copies,
   identical; asked with `respondsToSelector:`, so a framework without Apple patch 7 still
-  builds and runs, without sharing). Cameras are never marked. One video track per marked
-  source: a disabled track's black frames carry the source's frame ids.
+  builds and runs, without sharing). Cameras are never marked; a camera's connection has
+  its encoder from `InitEncode` on, as without the trial. The source also marks its frames
+  as its own (`MarkSharedEncodeFrame`): the black frames VideoBroadcaster makes for a
+  disabled track carry the frame ids but not the mark, and are never shared.
 - `fogataSharedScreenEncode` answers whether it is on: the trial is set (and, on macOS, the
   framework has Apple patch 7; on Linux and Windows `libwebrtc_version.ini` pins a library
   that has it). The app then counts the shared encode once per size in its processor load

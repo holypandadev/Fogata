@@ -248,8 +248,12 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
 17. a shared screen is encoded once for every connection that sends it at one size
     (`src/internal/shared_encoder.{h,cc}`, `RTCVideoSource::EnableSharedEncode`), with
     the field trial `Fogata-SharedScreenEncode/Enabled/`; with its tests
-    (`test/shared_encoder.test.cc`). Untagged sources (cameras), other codecs and
-    simulcast are encoded by each connection as before.
+    (`test/shared_encoder.test.cc`). Untagged sources (cameras), black frames of a
+    disabled track, other codecs, simulcast and hardware encoders are encoded by each
+    connection as before (its encoder made and initialized in `InitEncode`, as without
+    the trial). A joiner gets a key frame at once; one owed on a still screen is made of
+    the last frame again; one failed encode is a dropped frame, three in a row give every
+    connection an encoder of its own.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of
