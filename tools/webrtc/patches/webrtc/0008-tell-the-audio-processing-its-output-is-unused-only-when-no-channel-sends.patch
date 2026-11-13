@@ -1,0 +1,132 @@
+Tell the audio processing its output is unused only when no channel sends sound
+
+WebRtcVoiceSendChannel::MuteStream told the engine's one audio processing that its output
+will be muted when all of THAT channel's send streams were muted. With unified plan every
+audio section has a send channel of its own (a call's voice and a shared screen's sound,
+one for each connection), so the channel touched last decided for all of them: a
+connection closed while another one kept sending the microphone stopped its voice sender
+(AudioRtpSender::ClearSend, SetAudioSend(ssrc, false), MuteStream(ssrc, true), "all 1 of
+1 muted") and the processing took its output for unused. With
+minimize_processing_for_unused_output (on unless WebRTC-MutedStateKillSwitch) it then
+passed the microphone through untouched: no echo cancelling, no noise suppression and no
+gain control, until some audio sender got a track again (a shared screen's sound starting
+to go out to a watcher), which turned all three on in the middle of the call.
+
+The engine now keeps the send streams that send sound, of every channel, by channel and
+ssrc (on the worker thread, where every channel calls it), and tells the processing its
+output will be muted only while there is none. A stream that goes (RemoveSendStream,
+also as its channel goes) leaves the set, telling the processing only if it was the last
+one sending. Channels never outlive the engine (the connection context holds it until
+every connection is gone). Tested by the wrapper's test/voice_engine_muted.test.cc
+(WebRTC's own webrtc_voice_engine_unittest.cc no longer builds since 0002 changed the
+engine's constructor).
+
+diff --git a/media/engine/webrtc_voice_engine.cc b/media/engine/webrtc_voice_engine.cc
+index e6312c2..fba1984 100644
+--- a/media/engine/webrtc_voice_engine.cc
++++ b/media/engine/webrtc_voice_engine.cc
+@@ -842,6 +842,36 @@ AudioProcessing* WebRtcVoiceEngine::apm() const {
+   return apm_.get();
+ }
+ 
++void WebRtcVoiceEngine::SetSendStreamMuted(const void* channel,
++                                           uint32_t ssrc,
++                                           bool muted) {
++  RTC_DCHECK_RUN_ON(&worker_thread_checker_);
++  const std::pair<const void*, uint32_t> stream(channel, ssrc);
++  if (muted) {
++    unmuted_send_streams_.erase(stream);
++  } else {
++    unmuted_send_streams_.insert(stream);
++  }
++  AudioProcessing* ap = apm();
++  if (ap) {
++    ap->set_output_will_be_muted(unmuted_send_streams_.empty());
++  }
++}
++
++void WebRtcVoiceEngine::ForgetSendStream(const void* channel, uint32_t ssrc) {
++  RTC_DCHECK_RUN_ON(&worker_thread_checker_);
++  // A stream that sent nothing changes nothing; the last one that sent sound
++  // going leaves nothing sending.
++  if (unmuted_send_streams_.erase(std::make_pair(channel, ssrc)) == 0 ||
++      !unmuted_send_streams_.empty()) {
++    return;
++  }
++  AudioProcessing* ap = apm();
++  if (ap) {
++    ap->set_output_will_be_muted(true);
++  }
++}
++
+ AudioState* WebRtcVoiceEngine::audio_state() {
+   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+   RTC_DCHECK(audio_state_);
+@@ -1698,6 +1728,8 @@ bool WebRtcVoiceSendChannel::RemoveSendStream(uint32_t ssrc) {
+   }
+ 
+   it->second->SetSend(false);
++  // Fogata: no longer counted as sending sound (WebRtcVoiceEngine).
++  engine()->ForgetSendStream(this, ssrc);
+ 
+   delete it->second;
+   send_streams_.erase(it);
+@@ -1821,14 +1853,9 @@ bool WebRtcVoiceSendChannel::MuteStream(uint32_t ssrc, bool muted) {
+   // This implementation is not ideal, instead we should signal the AGC when
+   // the mic channel is muted/unmuted. We can't do it today because there
+   // is no good way to know which stream is mapping to the mic channel.
+-  bool all_muted = muted;
+-  for (const auto& kv : send_streams_) {
+-    all_muted = all_muted && kv.second->muted();
+-  }
+-  AudioProcessing* ap = engine()->apm();
+-  if (ap) {
+-    ap->set_output_will_be_muted(all_muted);
+-  }
++  // Fogata: all the channels of the engine, not only this one's streams (see
++  // WebRtcVoiceEngine::unmuted_send_streams_).
++  engine()->SetSendStreamMuted(this, ssrc, muted);
+ 
+   return true;
+ }
+diff --git a/media/engine/webrtc_voice_engine.h b/media/engine/webrtc_voice_engine.h
+index 7b788ac..94e503b 100644
+--- a/media/engine/webrtc_voice_engine.h
++++ b/media/engine/webrtc_voice_engine.h
+@@ -19,6 +19,7 @@
+ #include <optional>
+ #include <set>
+ #include <string>
++#include <utility>
+ #include <vector>
+ 
+ #include "absl/base/nullability.h"
+@@ -137,6 +138,13 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+ 
+   AudioDeviceModule* adm();
+   AudioProcessing* apm() const;
++
++  // Fogata: whether the send stream `ssrc` of `channel` sends sound (`muted` false)
++  // or not, and when it goes; the audio processing is told its output will be muted
++  // only while no send stream of any channel sends sound.
++  void SetSendStreamMuted(const void* channel, uint32_t ssrc, bool muted);
++  void ForgetSendStream(const void* channel, uint32_t ssrc);
++
+   std::vector<RtpHeaderExtensionCapability> GetRtpHeaderExtensions(
+       const FieldTrialsView* field_trials) const override;
+ 
+@@ -172,6 +180,14 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+   const scoped_refptr<AudioDecoderFactory> decoder_factory_;
+   // The audio processing module.
+   scoped_refptr<AudioProcessing> apm_ RTC_GUARDED_BY(worker_thread_checker_);
++  // Fogata: the send streams that send sound, of every channel, by channel and ssrc.
++  // With unified plan every audio section has a send channel of its own (a call's
++  // voice, a shared screen's sound, one per connection), while the audio processing
++  // is the engine's: one channel muting or letting go of its only stream (a
++  // connection closed) told it that all sound was muted while another channel's
++  // microphone still sent, and the microphone went out unprocessed.
++  std::set<std::pair<const void*, uint32_t>> unmuted_send_streams_
++      RTC_GUARDED_BY(worker_thread_checker_);
+   // The primary instance of WebRtc VoiceEngine.
+   const scoped_refptr<AudioState> audio_state_;
+   const std::vector<Codec> legacy_send_codecs_;

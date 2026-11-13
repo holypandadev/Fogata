@@ -1,0 +1,35 @@
+Have a microphone's options set the voice engine's audio processing
+
+In M156 a channel's AudioOptions no longer reach the audio processing
+(WebRtcVoiceSendChannel::SetOptions only keeps them): WebRTC's own factory applies them
+as global options when it makes an audio source (PeerConnectionFactory::CreateAudioSource,
+ConnectionContext::ApplyGlobalAudioOptions, kept and applied once the engine starts). The
+wrapper makes its sources itself and never did, so the processing kept the engine's
+defaults (echo cancelling, gain control, noise suppression at its highest level and the
+high-pass filter, all on) whatever the application asked. A microphone source's options
+now go through the factory's CreateAudioSource, whose source is not used; a custom
+source's (a shared screen's sound, which never goes through the processing) never do.
+
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index 3588ad4..38af33c 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -255,6 +255,18 @@ scoped_refptr<RTCAudioSource> RTCPeerConnectionFactoryImpl::CreateAudioSource(
+   rtc_options.auto_gain_control = options.auto_gain_control;
+   rtc_options.noise_suppression = options.noise_suppression;
+   rtc_options.highpass_filter = options.highpass_filter;
++  // Fogata: a microphone's options set the voice engine's one audio processing, as
++  // WebRTC's own factory does when it makes an audio source (it keeps them as global
++  // options, applied at once or when the engine starts). The wrapper makes its
++  // sources itself and never did: the processing kept the engine's defaults (noise
++  // suppression and the high-pass filter on) whatever the application asked. Only
++  // through the factory's CreateAudioSource can they reach the engine; the source it
++  // makes is not used. Never a custom source's (a shared screen's sound), which never
++  // goes through the processing and must not change the microphone's.
++  if (source_type == RTCAudioSource::SourceType::kMicrophone &&
++      rtc_peerconnection_factory_) {
++    rtc_peerconnection_factory_->CreateAudioSource(rtc_options);
++  }
+   webrtc::scoped_refptr<libwebrtc::LocalAudioSource> rtc_source_track =
+       CreateAudioSourceWithOptions(
+           &rtc_options, source_type == RTCAudioSource::SourceType::kCustom);

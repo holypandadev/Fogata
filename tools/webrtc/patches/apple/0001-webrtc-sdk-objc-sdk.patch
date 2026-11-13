@@ -2956,7 +2956,7 @@ index 1cfeae8012..f9c7410fba 100644
      bool IsDefaultStream() const;
  
 diff --git a/media/engine/webrtc_voice_engine.cc b/media/engine/webrtc_voice_engine.cc
-index e6312c25f8..61c2b692cc 100644
+index fba1984..da0a725 100644
 --- a/media/engine/webrtc_voice_engine.cc
 +++ b/media/engine/webrtc_voice_engine.cc
 @@ -84,6 +84,7 @@
@@ -3072,11 +3072,21 @@ index e6312c25f8..61c2b692cc 100644
 -  }
 -
 -  AudioProcessing::Config apm_config = ap->GetConfig();
--
++  // Jitter buffer options are not engine-level state; they are applied per
++  // receive channel (see WebRtcVoiceReceiveChannel's constructor and
++  // SetOptions).
+ 
 -  if (options.echo_cancellation) {
 -    apm_config.echo_canceller.enabled = *options.echo_cancellation;
--  }
--
++  AudioProcessingApplyResult apply_result = ApplyAudioProcessingOptions(apm(), adm(), options);
++  if (!apply_result.result.ok()) {
++    RTC_LOG(LS_WARNING) << "Audio processing options were not fully applied: " << apply_result.result.message;
+   }
++  last_requested_audio_processing_options_ = options_in;
++  options = apply_result.resolved_options;
++  last_resolved_audio_processing_options_ = options;
++  RTC_LOG(LS_INFO) << "Applied audio processing options: " << options.ToString();
+ 
 -  if (options.auto_gain_control) {
 -    const bool enabled = *options.auto_gain_control;
 -    apm_config.gain_controller1.enabled = enabled;
@@ -3088,21 +3098,11 @@ index e6312c25f8..61c2b692cc 100644
 -        AudioProcessing::Config::GainController1::kAdaptiveAnalog;
 -#endif
 -  }
-+  // Jitter buffer options are not engine-level state; they are applied per
-+  // receive channel (see WebRtcVoiceReceiveChannel's constructor and
-+  // SetOptions).
- 
+-
 -  if (options.highpass_filter) {
 -    apm_config.high_pass_filter.enabled = *options.highpass_filter;
-+  AudioProcessingApplyResult apply_result = ApplyAudioProcessingOptions(apm(), adm(), options);
-+  if (!apply_result.result.ok()) {
-+    RTC_LOG(LS_WARNING) << "Audio processing options were not fully applied: " << apply_result.result.message;
-   }
-+  last_requested_audio_processing_options_ = options_in;
-+  options = apply_result.resolved_options;
-+  last_resolved_audio_processing_options_ = options;
-+  RTC_LOG(LS_INFO) << "Applied audio processing options: " << options.ToString();
- 
+-  }
+-
 -  if (options.noise_suppression) {
 -    const bool enabled = *options.noise_suppression;
 -    apm_config.noise_suppression.enabled = enabled;
@@ -3120,7 +3120,7 @@ index e6312c25f8..61c2b692cc 100644
  }
  
  const std::vector<Codec>& WebRtcVoiceEngine::LegacySendCodecs() const {
-@@ -1022,7 +937,7 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
+@@ -1052,7 +967,7 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
      muted_ = muted;
    }
  
@@ -3129,7 +3129,7 @@ index e6312c25f8..61c2b692cc 100644
      RTC_DCHECK_RUN_ON(&worker_thread_checker_);
      return muted_;
    }
-@@ -1049,6 +964,11 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
+@@ -1079,6 +994,11 @@ class WebRtcVoiceSendChannel::WebRtcAudioSendStream : public AudioSource::Sink {
      UpdateSendState();
    }
  
@@ -3141,17 +3141,13 @@ index e6312c25f8..61c2b692cc 100644
    // Stops sending by setting the sink of the AudioSource to nullptr. No data
    // callback will be received after this method.
    // This method is called on the libjingle worker thread.
-@@ -1821,13 +1741,46 @@ bool WebRtcVoiceSendChannel::MuteStream(uint32_t ssrc, bool muted) {
+@@ -1853,9 +1773,47 @@ bool WebRtcVoiceSendChannel::MuteStream(uint32_t ssrc, bool muted) {
    // This implementation is not ideal, instead we should signal the AGC when
    // the mic channel is muted/unmuted. We can't do it today because there
    // is no good way to know which stream is mapping to the mic channel.
--  bool all_muted = muted;
--  for (const auto& kv : send_streams_) {
--    all_muted = all_muted && kv.second->muted();
--  }
--  AudioProcessing* ap = engine()->apm();
--  if (ap) {
--    ap->set_output_will_be_muted(all_muted);
+-  // Fogata: all the channels of the engine, not only this one's streams (see
+-  // WebRtcVoiceEngine::unmuted_send_streams_).
+-  engine()->SetSendStreamMuted(this, ssrc, muted);
 +  if (send_streams_.size() > 0) {
 +    // This will be true if MuteStream is called from
 +    // AudioRtpSender::ClearSend().
@@ -3192,14 +3188,15 @@ index e6312c25f8..61c2b692cc 100644
 +        }
 +      }
 +    }
-   }
++  }
  
    return true;
+ }
 diff --git a/media/engine/webrtc_voice_engine.h b/media/engine/webrtc_voice_engine.h
-index 7b788ac104..43493ddf30 100644
+index 94e503b..4c30186 100644
 --- a/media/engine/webrtc_voice_engine.h
 +++ b/media/engine/webrtc_voice_engine.h
-@@ -28,6 +28,9 @@
+@@ -29,6 +29,9 @@
  #include "api/audio/audio_frame_processor.h"
  #include "api/audio/audio_mixer.h"
  #include "api/audio/audio_processing.h"
@@ -3209,7 +3206,7 @@ index 7b788ac104..43493ddf30 100644
  #include "api/audio_codecs/audio_decoder_factory.h"
  #include "api/audio_codecs/audio_encoder_factory.h"
  #include "api/audio_codecs/audio_format.h"
-@@ -62,6 +65,8 @@
+@@ -63,6 +66,8 @@
  #include "media/base/media_config.h"
  #include "media/base/media_engine.h"
  #include "media/base/stream_params.h"
@@ -3218,7 +3215,7 @@ index 7b788ac104..43493ddf30 100644
  #include "modules/rtp_rtcp/source/rtp_packet_received.h"
  #include "rtc_base/checks.h"
  #include "rtc_base/network/sent_packet.h"
-@@ -126,9 +131,6 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+@@ -127,9 +132,6 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
      return decoder_factory_;
    }
  
@@ -3228,7 +3225,7 @@ index 7b788ac104..43493ddf30 100644
    // Applies global engine-level processing options (e.g. APM settings like AEC,
    // AGC, NS). Global options govern all processing; local channel-level
    // settings for these fields are ignored and do not override the global
-@@ -149,15 +151,22 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+@@ -157,15 +159,22 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
    // Stops AEC dump.
    void StopAecDump() override;
  
@@ -3253,7 +3250,7 @@ index 7b788ac104..43493ddf30 100644
  
    SequenceChecker signal_thread_checker_{SequenceChecker::kDetached};
    SequenceChecker worker_thread_checker_{SequenceChecker::kDetached};
-@@ -177,6 +186,8 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+@@ -193,6 +202,8 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
    const std::vector<Codec> legacy_send_codecs_;
    const std::vector<Codec> legacy_recv_codecs_;
    bool initialized_ RTC_GUARDED_BY(worker_thread_checker_) = false;

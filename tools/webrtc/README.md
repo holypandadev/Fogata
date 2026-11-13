@@ -35,10 +35,15 @@ the patches in `patches/`:
   every question to the server are given up after 5 s (the first connection waited for
   ever on a server that never answered), and the voice engine stays up without a device
   instead of ending the process.
-- **The microphone is processed in one channel**, whatever the other channels of sound
-  send: a shared screen's sound starting to go out in stereo made WebRTC process the
-  microphone in two channels, and its echo canceller and gain control started over each
-  time it started and stopped.
+- **The microphone is processed as the application asks, all through a call**: WebRTC
+  took its audio processing's output for unused (and passed the microphone through with
+  no echo cancelling, noise suppression or gain control) whenever the last channel
+  touched had no sender with a track, which happened at every entry into a room; the
+  application's settings for the microphone never reached the processing; and a shared
+  screen's sound starting to go out in stereo made WebRTC process the microphone in two
+  channels, starting its echo canceller and gain control over. The processing now counts
+  every channel's senders, takes a microphone source's options, and processes the
+  microphone in one channel always.
 - **A shared screen or window is captured at the rate asked** (Linux X11, Windows and macOS): the
   wrapper waited the whole interval after each capture ended, so a capture taking 20 ms made
   30 frames a second into 19, and it compared every frame with the last for a changed region
@@ -57,8 +62,8 @@ first time.
 `fetch.sh` downloads depot_tools, WebRTC and its dependencies (gclient, with the clang,
 Rust and sysroot its hooks fetch) and the wrapper, each at its pinned commit.
 `build-linux.sh` resets the tree (`prepare.sh`), applies the patches, builds, runs the
-wrapper's tests of the size check and of the microphone's channels, and writes into
-`<work>/dist`:
+wrapper's tests of the size check, of the microphone's channels and of the voice
+engine's muted state, and writes into `<work>/dist`:
 
     fogata-libwebrtc.m156.8078.5/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
@@ -169,6 +174,12 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
 7. `0007-keep-the-voice-engine-up-without-its-audio-device` (every system):
    `adm_helpers::Init` logs a device that does not initialize instead of ending the
    process.
+8. `0008-tell-the-audio-processing-its-output-is-unused-only-when-no-channel-sends`: the
+   voice engine keeps the send streams that send sound, of every channel, and tells the
+   audio processing its output will be muted only while there is none (each channel told
+   it from its own streams, so the one touched last decided for all). On macOS
+   `patches/apple/0001` keeps webrtc-sdk's own rule in `MuteStream`, which never takes a
+   sender with no track for muted.
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -201,7 +212,14 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     null one stops it), and it is taken off the module as it goes;
 11. the microphone is processed in one channel whatever the other channels of sound send
     (`CustomAudioTransportImpl::UpdateAudioSenders`), with its test
-    (`test/custom_audio_transport.test.cc`).
+    (`test/custom_audio_transport.test.cc`);
+13. a microphone source's options (echo cancelling, gain control, noise suppression,
+    high-pass filter) set the voice engine's audio processing, as WebRTC's own factory
+    does through `CreateAudioSource`; a custom source's never do;
+14. the test of WebRTC's patch 0008 (`test/voice_engine_muted.test.cc`), with the media
+    engine, its fakes and mocks built in;
+15. the audio processing is made with the factory's environment, so its field trials
+    reach it.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

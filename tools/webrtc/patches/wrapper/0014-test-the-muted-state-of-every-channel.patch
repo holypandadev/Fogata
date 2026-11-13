@@ -1,0 +1,151 @@
+Test that the audio processing follows the muted state of every channel
+
+The voice engine with WebRTC's patch 0008, two send channels on a fake call and a mock
+audio processing: one channel's stream muted or let go of while another's sends leaves
+the output in use; muted only once nothing sends. Built in again with the media
+engine, its fakes and mocks: the library shows only its own API.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index f7e419b..b7ee72c 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -352,6 +352,7 @@ if (rtc_include_tests) {
+        "test/video_processor.test.cc",
+        "test/vp8_size_gate.test.cc",
+        "test/custom_audio_transport.test.cc",
++       "test/voice_engine_muted.test.cc",
+ 
+        # Built in again: the library shows only its own API.
+        "src/internal/vp8_size_gate.cc",
+@@ -379,6 +380,14 @@ if (rtc_include_tests) {
+       "../api/audio:audio_frame_api",
+       "../call:audio_sender_interface",
+       "../modules/audio_mixer:audio_mixer_impl",
++      "../api/audio_codecs:audio_codecs_api",
++      "../api/audio_codecs/opus:audio_decoder_opus",
++      "../api/audio_codecs/opus:audio_encoder_opus",
++      "../media:rtc_audio_video",
++      "../media:rtc_media_tests_utils",
++      "../modules/audio_device:mock_audio_device",
++      "../modules/audio_processing:mocks",
++      "../test:run_loop",
+       "../rtc_base:logging",
+       "//third_party/abseil-cpp/absl/strings",
+       "//testing/gtest",
+diff --git a/test/voice_engine_muted.test.cc b/test/voice_engine_muted.test.cc
+new file mode 100644
+index 0000000..bae66df
+--- /dev/null
++++ b/test/voice_engine_muted.test.cc
+@@ -0,0 +1,111 @@
++// WebRTC's voice engine with Fogata's patches (tools/webrtc/patches/webrtc/0008): its
++// audio processing is told that its output will be muted only while no send stream of
++// any channel sends sound. Built in again with fakes: the library shows only its own
++// API.
++
++#include <memory>
++#include <vector>
++
++#include "api/audio_codecs/audio_decoder_factory_template.h"
++#include "api/audio_codecs/audio_encoder_factory_template.h"
++#include "api/audio_codecs/opus/audio_decoder_opus.h"
++#include "api/audio_codecs/opus/audio_encoder_opus.h"
++#include "api/audio_options.h"
++#include "api/crypto/crypto_options.h"
++#include "api/environment/environment.h"
++#include "api/make_ref_counted.h"
++#include "api/scoped_refptr.h"
++#include "media/base/audio_source.h"
++#include "media/base/media_channel.h"
++#include "media/base/media_config.h"
++#include "media/base/stream_params.h"
++#include "media/engine/fake_webrtc_call.h"
++#include "media/engine/webrtc_voice_engine.h"
++#include "modules/audio_device/include/mock_audio_device.h"
++#include "modules/audio_processing/include/mock_audio_processing.h"
++#include "test/create_test_environment.h"
++#include "test/gmock.h"
++#include "test/gtest.h"
++#include "test/run_loop.h"
++
++namespace {
++
++using ::testing::_;
++using ::testing::NiceMock;
++
++constexpr uint32_t kVoice = 0x99;
++constexpr uint32_t kScreenSound = 0x17;
++
++// A track's source; what it carries does not matter here.
++class Source : public webrtc::AudioSource {
++ public:
++  void SetSink(Sink* /*sink*/) override {}
++};
++
++// With unified plan every audio section (a call's voice, a shared screen's sound, one
++// for each connection) has a send channel of its own, and the audio processing is the
++// engine's: a connection closed while another kept sending the microphone made the
++// processing pass the microphone through untouched.
++TEST(VoiceEngineMuted, OutputWillBeMutedOnlyWhenNoChannelSends) {
++  webrtc::test::RunLoop run_loop;
++  webrtc::Environment env = webrtc::CreateTestEnvironment();
++  auto adm = webrtc::test::MockAudioDeviceModule::CreateNice();
++  auto apm = webrtc::make_ref_counted<
++      NiceMock<webrtc::test::MockAudioProcessing>>();
++  std::vector<bool> told;
++  ON_CALL(*apm, set_output_will_be_muted(_))
++      .WillByDefault([&told](bool muted) { told.push_back(muted); });
++  webrtc::WebRtcVoiceEngine engine(
++      env, adm,
++      webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>(),
++      webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>(),
++      /*audio_mixer=*/nullptr, apm, /*audio_frame_processor=*/nullptr,
++      /*audio_transport_factory=*/nullptr);
++  engine.Init();
++  {
++    webrtc::FakeCall call(env);
++    Source source;
++    // The connection that stays, sending the voice, and one that goes.
++    std::unique_ptr<webrtc::VoiceMediaSendChannelInterface> stays =
++        engine.CreateSendChannel(env, &call, webrtc::MediaConfig(),
++                                 webrtc::AudioOptions(),
++                                 webrtc::CryptoOptions());
++    std::unique_ptr<webrtc::VoiceMediaSendChannelInterface> goes =
++        engine.CreateSendChannel(env, &call, webrtc::MediaConfig(),
++                                 webrtc::AudioOptions(),
++                                 webrtc::CryptoOptions());
++    ASSERT_TRUE(
++        stays->AddSendStream(webrtc::StreamParams::CreateLegacy(kVoice)));
++    ASSERT_TRUE(
++        goes->AddSendStream(webrtc::StreamParams::CreateLegacy(kVoice + 1)));
++    ASSERT_TRUE(goes->SetAudioSend(kVoice + 1, true, nullptr, &source));
++    ASSERT_TRUE(stays->SetAudioSend(kVoice, true, nullptr, &source));
++    // The one that goes stops its sender, then goes: the voice still sends.
++    ASSERT_TRUE(goes->SetAudioSend(kVoice + 1, false, nullptr, nullptr));
++    EXPECT_EQ(told, (std::vector<bool>{false, false, false}));
++    goes.reset();
++    EXPECT_EQ(told, (std::vector<bool>{false, false, false}));
++
++    // A screen's sound on a section of its own, muted while the voice sends.
++    ASSERT_TRUE(stays->AddSendStream(
++        webrtc::StreamParams::CreateLegacy(kScreenSound)));
++    ASSERT_TRUE(stays->SetAudioSend(kScreenSound, false, nullptr, nullptr));
++    EXPECT_EQ(told.back(), false);
++
++    // Nothing sends any more: muted. Sending again: not.
++    ASSERT_TRUE(stays->SetAudioSend(kVoice, false, nullptr, nullptr));
++    EXPECT_EQ(told.back(), true);
++    ASSERT_TRUE(stays->SetAudioSend(kVoice, true, nullptr, &source));
++    EXPECT_EQ(told.back(), false);
++
++    // The last stream that sends sound going leaves nothing sending.
++    told.clear();
++    ASSERT_TRUE(stays->RemoveSendStream(kScreenSound));
++    EXPECT_TRUE(told.empty());
++    ASSERT_TRUE(stays->RemoveSendStream(kVoice));
++    EXPECT_EQ(told, (std::vector<bool>{true}));
++  }
++  engine.Terminate();
++}
++
++}  // namespace

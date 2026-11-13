@@ -5,7 +5,8 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
 `patches/apple` carries it to WebRTC M156:
 
 1. `0001-webrtc-sdk-objc-sdk`: webrtc-sdk/webrtc's m150_release (2a0b277) moved to
-   branch-head 8078, without Android and the tvOS/visionOS build fork, and without what
+   branch-head 8078 (on top of `patches/webrtc`, which the Mac's build applies first: its
+   voice engine keeps webrtc-sdk's own rule for a muted sender, beside `patches/webrtc/0008`), without Android and the tvOS/visionOS build fork, and without what
    Fogata never uses: the frame and data packet cryptor, H.265, its changes to the
    VideoToolbox H.264 encoder and decoder, and its OpenGL view.
 2. `0002-vp8-size-gate`: every VP8 decoder of the SDK refuses keyframes larger than 8K before

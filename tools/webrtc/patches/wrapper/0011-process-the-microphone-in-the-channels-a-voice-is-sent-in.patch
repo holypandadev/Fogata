@@ -7,11 +7,11 @@ sending stream had (AudioState::UpdateAudioTransportWithSendingStreams passes th
 maximum): when a screen's sound started going out in stereo, the microphone was
 processed in two channels (AudioTransportImpl::RecordedDataIsAvailable, then
 AudioProcessingImpl::MaybeInitializeCapture, which initializes the processing again for
-a new stream format), and in one again when it stopped. Each time the echo canceller
-and the gain control started anew: the sharer's voice went out about 10 dB weaker while
-its screen's sound went out, and the others' voices came back as echo for the first
-seconds. The microphone is now processed in one channel always; the screen's sound stays
-stereo. Tested by test/custom_audio_transport.test.cc.
+a new stream format), and in one again when it stopped, the echo canceller and the gain
+control starting from nothing each time. The microphone is now processed in one channel
+always; the screen's sound stays stereo. (The sharer's voice going out quieter while its
+screen's sound went out had another cause: see WebRTC's patch 0008.) Tested by
+test/custom_audio_transport.test.cc.
 
 diff --git a/BUILD.gn b/BUILD.gn
 index 26918e1..f7e419b 100644

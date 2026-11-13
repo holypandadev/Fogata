@@ -1,0 +1,73 @@
+Make the audio processing with the factory's environment
+
+The wrapper built its audio processing with an empty environment, so no field trial set
+through RTCFieldTrials ever reached it (WebRTC-MutedStateKillSwitch, for one, had no
+effect). It now takes the factory's, as everything else the factory makes does.
+
+diff --git a/src/rtc_audio_processing_impl.cc b/src/rtc_audio_processing_impl.cc
+index d0b460e..39cf151 100644
+--- a/src/rtc_audio_processing_impl.cc
++++ b/src/rtc_audio_processing_impl.cc
+@@ -74,7 +74,7 @@ class CustomProcessingAdapter : public webrtc::CustomProcessing {
+   int num_channels_ = 0;
+ };
+ 
+-RTCAudioProcessingImpl::RTCAudioProcessingImpl() {
++RTCAudioProcessingImpl::RTCAudioProcessingImpl(const webrtc::Environment& env) {
+   capture_post_processor_ = new CustomProcessingAdapter();
+   std::unique_ptr<webrtc::CustomProcessing> capture_post_processor(
+       capture_post_processor_);
+@@ -86,7 +86,7 @@ RTCAudioProcessingImpl::RTCAudioProcessingImpl() {
+   apm_ = webrtc::BuiltinAudioProcessingBuilder()
+              .SetCapturePostProcessing(std::move(capture_post_processor))
+              .SetRenderPreProcessing(std::move(render_pre_processor))
+-             .Build(webrtc::CreateEnvironment());
++             .Build(env);
+ 
+   webrtc::AudioProcessing::Config config;
+   apm_->ApplyConfig(config);
+diff --git a/src/rtc_audio_processing_impl.h b/src/rtc_audio_processing_impl.h
+index d85c1b4..ce18fd1 100644
+--- a/src/rtc_audio_processing_impl.h
++++ b/src/rtc_audio_processing_impl.h
+@@ -3,6 +3,7 @@
+ 
+ #include <memory>
+ 
++#include "api/environment/environment.h"
+ #include "modules/audio_processing/include/audio_processing.h"
+ #include "rtc_audio_processing.h"
+ 
+@@ -12,7 +13,9 @@ class CustomProcessingAdapter;
+ 
+ class RTCAudioProcessingImpl : public RTCAudioProcessing {
+  public:
+-  RTCAudioProcessingImpl();
++  // Fogata: with the factory's environment, so that its field trials reach the
++  // processing too (an empty one left them out).
++  explicit RTCAudioProcessingImpl(const webrtc::Environment& env);
+   ~RTCAudioProcessingImpl();
+   void SetCapturePostProcessing(
+       RTCAudioProcessing::CustomProcessing* capture_post_processing) override;
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index 38af33c..13eb058 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -101,7 +101,7 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
+ 
+   if (!audio_processing_impl_) {
+     worker_thread_->BlockingCall([this] {
+-      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>();
++      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>(env_);
+     });
+   }
+ 
+@@ -208,7 +208,7 @@ scoped_refptr<RTCAudioProcessing>
+ RTCPeerConnectionFactoryImpl::GetAudioProcessing() {
+   if (!audio_processing_impl_) {
+     worker_thread_->BlockingCall([this] {
+-      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>();
++      audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>(env_);
+     });
+   }
+ 
