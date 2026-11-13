@@ -156,6 +156,15 @@ function(_libwebrtc_extract_and_normalize zip_path dest_dir)
   endif()
 
   file(REMOVE_RECURSE "${_staging}")
+
+  # Fogata: every file of an archive carries one fixed date (the same sources give the
+  # same archive), so another archive unpacked over the last one looked unchanged to the
+  # build: objects compiled against the old headers were kept and linked with the new
+  # library. What is unpacked gets the time of its unpacking.
+  file(GLOB_RECURSE _unpacked LIST_DIRECTORIES false "${dest_dir}/libwebrtc/*")
+  if(_unpacked)
+    file(TOUCH_NOCREATE ${_unpacked})
+  endif()
 endfunction()
 
 if(EXISTS "${ZIPFILE}")

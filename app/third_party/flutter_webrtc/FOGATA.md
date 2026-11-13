@@ -802,7 +802,10 @@ to draw").
 - `third_party/CMakeLists.txt`: the archive must match that SHA-256, wherever it comes
   from; archives are named after the version, and a stamp in `libwebrtc/` makes a new
   version or archive be extracted again (the package kept using whatever archive it had
-  downloaded first). The build takes them from this computer's store,
+  downloaded first). What is extracted gets the time of its extraction: every file of an
+  archive carries one fixed date, so headers of another archive looked unchanged and a
+  build that was not clean kept objects compiled against the old ones (seen as a failed
+  link when the wrapper's types changed). The build takes them from this computer's store,
   `<home>/fogata-libwebrtc/<version>/` (or `FOGATA_LIBWEBRTC_DIR`), where `tools/webrtc`
   puts what it builds, or from `FOGATA_LIBWEBRTC_ARCHIVE`, naming one archive; the ini's
   `download_url`, the releases of holypandadev/fogata-libwebrtc, is the last place tried.
