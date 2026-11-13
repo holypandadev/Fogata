@@ -104,9 +104,11 @@ undocumented_unsafe_blocks = "deny"
 # libp2p-quic with QUIC datagrams enabled and exposed (see vendor/libp2p-quic/src/datagram.rs),
 # libp2p-mdns whose expiry timer cannot overflow (see vendor/libp2p-mdns/src/behaviour/timer.rs),
 # libp2p-identify that lists Fogata's protocols only to members and friends (see
-# vendor/libp2p-identify/FOGATA.md), libp2p-stream that keeps a burst of inbound streams rather
-# than dropping all but one (see vendor/libp2p-stream/FOGATA.md), and turn whose nonces never
-# used do not pile up (see vendor/turn/FOGATA.md).
+# vendor/libp2p-identify/FOGATA.md), libp2p-kad whose lookups go on through the DHT nodes
+# answers name, not through the providers they name (see vendor/libp2p-kad/FOGATA.md),
+# libp2p-stream that keeps a burst of inbound streams rather than dropping all but one (see
+# vendor/libp2p-stream/FOGATA.md), and turn whose nonces never used do not pile up (see
+# vendor/turn/FOGATA.md).
 [patch.crates-io]
 libp2p-quic = { path = "vendor/libp2p-quic" }
 libp2p-mdns = { path = "vendor/libp2p-mdns" }

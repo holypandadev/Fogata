@@ -2367,9 +2367,17 @@ where
                 provider_peers,
                 query_id,
             } => {
-                let peers = closer_peers.iter().chain(provider_peers.iter());
-                self.discovered(&query_id, &source, peers);
+                // Fogata: providers are no DHT nodes, and a node on the way may name any number
+                // of made-up ones at an address that never answers: only the closer peers go
+                // on into the lookup. The providers' addresses are kept for the query, so that
+                // a dial to one while it runs finds them (see FOGATA.md).
+                self.discovered(&query_id, &source, closer_peers.iter());
+                let local_id = *self.kbuckets.local_key().preimage();
                 if let Some(query) = self.queries.get_mut(&query_id) {
+                    for provider in provider_peers.iter().filter(|p| p.node_id != local_id) {
+                        let addrs = provider.multiaddrs.iter().cloned().collect();
+                        query.peers.addresses.insert(provider.node_id, addrs);
+                    }
                     let stats = *query.stats();
                     if let QueryInfo::GetProviders {
                         ref key,

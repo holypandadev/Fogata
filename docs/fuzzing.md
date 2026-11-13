@@ -70,8 +70,8 @@ crate of that lock the main lock has too is there at a version the main lock has
 (`tools/fuzz_lock.py`), so the targets fuzz the crates the app ships, and runs `cargo deny`
 over it too (its sources, the RustSec advisories and yanked versions; not its licences:
 `libfuzzer-sys` is NCSA, and nothing of `fuzz/` ships). Its `[patch.crates-io]` must name every patch of the main `Cargo.toml` (the
-vendored `libp2p-quic`, `libp2p-mdns`, `libp2p-identify`, `libp2p-stream`, `turn` and
-`spake2`), or the targets would not
+vendored `libp2p-quic`, `libp2p-mdns`, `libp2p-identify`, `libp2p-kad`, `libp2p-stream`,
+`turn` and `spake2`), or the targets would not
 compile, or would fuzz other code than the app ships: `tools/check.sh` fails when the two
 lists differ, and `tools/ci.sh` builds the targets (`cargo +nightly fuzz build`) without
 running them. It needs the nightly toolchain and cargo-fuzz, installed once:

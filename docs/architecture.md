@@ -153,8 +153,8 @@ Fogata/
     fogata-ffi/           The flutter_rust_bridge surface over fogata-core.
   app/                    The Flutter application.
   vendor/                 Crates Fogata keeps a fork of (libp2p-quic, libp2p-mdns,
-                          libp2p-identify, libp2p-stream, turn, spake2), each with a FOGATA.md
-                          of its changes.
+                          libp2p-identify, libp2p-kad, libp2p-stream, turn,
+                          spake2), each with a FOGATA.md of its changes.
   fuzz/                   The libFuzzer targets, a workspace of their own (docs/fuzzing.md).
   tools/check.sh, ci.sh   The checks before every commit and every push (docs/ci.md).
   tools/netlab/           Simulated home and carrier NATs in Linux network namespaces.
