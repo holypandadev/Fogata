@@ -172,6 +172,14 @@ Future<void> _until(
   _log(what);
 }
 
+/// Presses Escape. The physical key is named here: left out, flutter_test looks it up by
+/// the keys' debug names, which only a debug build has, so a profile build (the one the
+/// calls are tried with) would stop there.
+Future<void> _escape(WidgetTester tester) => tester.sendKeyEvent(
+  LogicalKeyboardKey.escape,
+  physicalKey: PhysicalKeyboardKey.escape,
+);
+
 Future<void> _tap(WidgetTester tester, Finder finder) async {
   await _until(tester, 'shown: $finder', () => finder.evaluate().isNotEmpty);
   await tester.ensureVisible(finder.first);
@@ -844,7 +852,7 @@ Future<void> _connectionQuality(WidgetTester tester, AppState state) async {
     await _tap(tester, bars);
     await _wait(tester, const Duration(milliseconds: 700));
     await _shot(tester, name);
-    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await _escape(tester);
     await _wait(tester, const Duration(milliseconds: 300));
   }
 
@@ -1082,7 +1090,7 @@ Future<void> _video(WidgetTester tester, AppState state) async {
       seconds: 120,
     );
     await _shot(tester, 'video-b-playing');
-    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await _escape(tester);
     await _wait(tester, const Duration(milliseconds: 600));
     await state.setDeafened(false);
     await _say(state, 'video played');
