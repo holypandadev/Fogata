@@ -359,6 +359,10 @@ pub struct DirectStore {
     /// How many times a chat was read whole, for tests.
     #[cfg(test)]
     pub(crate) loads: std::sync::atomic::AtomicUsize,
+    /// How many records of journals were read back from their end ([`Self::scan_back`]),
+    /// for tests.
+    #[cfg(test)]
+    pub(crate) records_back: std::sync::atomic::AtomicUsize,
 }
 
 /// How a sealed journal or pins ends: how many records it has, and the last one's tag,
@@ -427,6 +431,8 @@ impl DirectStore {
             refused: Default::default(),
             #[cfg(test)]
             loads: Default::default(),
+            #[cfg(test)]
+            records_back: Default::default(),
         }
     }
 
@@ -1565,18 +1571,7 @@ impl DirectStore {
         let context = chain_context(JOURNAL, &chat_name(friend));
         if self.key.is_some() {
             // Ends as its tails say: nothing cut off its end, no older copy put back.
-            let tails = match self
-                .tails
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(friend)
-                .cloned()
-            {
-                Some(tails) => tails,
-                None => self
-                    .read_tails(friend)?
-                    .context("no tails to check the journal by")?,
-            };
+            let tails = self.tails_now(friend)?;
             let last = match records.last() {
                 Some(&(start, size)) => {
                     let mut tag = [0u8; TAG_LEN];
@@ -1599,9 +1594,13 @@ impl DirectStore {
         let mut played: HashSet<FileId> = HashSet::new();
         let mut not_voice: HashSet<FileId> = HashSet::new();
         let mut not_picture: HashSet<FileId> = HashSet::new();
+        let mut seen: HashSet<ItemId> = HashSet::new();
         let mut given = 0;
         let mut bytes = Vec::new();
         for (k, &(start, size)) in records.iter().enumerate().rev() {
+            #[cfg(test)]
+            self.records_back
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             bytes.resize(size, 0);
             file.seek(SeekFrom::Start(start))?;
             file.read_exact(&mut bytes)?;
@@ -1626,7 +1625,10 @@ impl DirectStore {
             // What a later record says of an item is what stands now: the first one met.
             match record {
                 Record::Item { mut item } => {
-                    if gone.contains(&item.id) {
+                    // An item is given once, its newest copy. A journal written here holds
+                    // each item once (a chat keeps an item it has only once); were one there
+                    // twice, the chat read whole would keep its first copy instead.
+                    if gone.contains(&item.id) || !seen.insert(item.id) {
                         continue;
                     }
                     item.delivered |= delivered.contains(&item.id);
@@ -1698,6 +1700,117 @@ impl DirectStore {
         })?;
         page.reverse();
         Ok((page, more))
+    }
+
+    /// How a chat's sealed journal and pins end, as last written here.
+    fn tails_now(&self, friend: &DevicePublicKey) -> Result<Tails> {
+        let known = self
+            .tails
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(friend)
+            .cloned();
+        match known {
+            Some(tails) => Ok(tails),
+            None => self
+                .read_tails(friend)?
+                .context("no tails to check the journal by"),
+        }
+    }
+
+    /// A chat's pins, unpins and deletions for both as the chat read whole holds them, oldest
+    /// first, read from its pins alone (a small file: the last change of each message). As
+    /// with [`Self::scan_back`], sealed pins must end as their tails say, and pins that do
+    /// not read so (damaged, cut short, an older copy, another chat's, of the earlier form)
+    /// are an error: the chat is read whole instead. Blocking, and for a chat none of whose
+    /// records are being written.
+    pub fn read_pins(&self, friend: &DevicePublicKey) -> Result<Vec<Item>> {
+        let path = self.pins_path(friend);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+        };
+        if self.key.is_some() && !bytes.is_empty() && sealed_form(&bytes) != Some(Form::Chain) {
+            bail!("{} is not a chain of records", path.display());
+        }
+        let (records, tags, broken) =
+            read_records(self.key.as_ref(), PINS, &chat_name(friend), &bytes)
+                .with_context(|| format!("cannot read {}", path.display()))?;
+        if broken {
+            bail!("{} is damaged", path.display());
+        }
+        if self.key.is_some() && self.tails_now(friend)?.pins != Tail::of(&tags) {
+            bail!("{} is not as it was last written", path.display());
+        }
+        // Applied as reading the chat whole applies them, after the journal: what they say
+        // of the journal's items (deliveries, what went) is said in the journal too.
+        let mut aside = Chat::default();
+        let mut ended = None;
+        for record in &records {
+            record.apply(&mut aside, &mut ended);
+        }
+        Ok(aside.items().to_vec())
+    }
+
+    /// Walks a chat's items back from the place `before` (an item's `seq` and id; the end
+    /// when not given), the newest first, as the chat read whole holds them: the items of its
+    /// journal ([`Self::scan_back`]) and `aside`, its pins, unpins and deletions for both
+    /// ([`Self::read_pins`]), in the chat's one order. `take` gets how many were taken so far
+    /// and the next one; the walk stops at the first it does not take. Returns those taken,
+    /// oldest first, and whether one was left. A journal whose items are not in the chat's
+    /// order is an error, as the chat read whole puts them in it.
+    pub fn walk_back(
+        &self,
+        friend: &DevicePublicKey,
+        aside: &[Item],
+        before: Option<(u64, ItemId)>,
+        mut take: impl FnMut(usize, &Item) -> bool,
+    ) -> Result<(Vec<Item>, bool)> {
+        let order = |item: &Item| (item.seq, item.id);
+        let below = |item: &Item| before.is_none_or(|b| order(item) < b);
+        let mut pins = aside.iter().rev().filter(|i| below(i)).peekable();
+        let mut taken: Vec<Item> = Vec::new();
+        let mut left = false;
+        let mut last: Option<(u64, ItemId)> = None;
+        let mut out_of_order = false;
+        self.scan_back(friend, |item| {
+            if last.is_some_and(|l| order(&item) >= l) {
+                out_of_order = true;
+                return false;
+            }
+            last = Some(order(&item));
+            if !below(&item) {
+                return true;
+            }
+            while let Some(pin) = pins.next_if(|p| order(p) > order(&item)) {
+                if !take(taken.len(), pin) {
+                    left = true;
+                    return false;
+                }
+                taken.push(pin.clone());
+            }
+            if !take(taken.len(), &item) {
+                left = true;
+                return false;
+            }
+            taken.push(item);
+            true
+        })?;
+        if out_of_order {
+            bail!("the journal's items are not in the chat's order");
+        }
+        if !left {
+            for pin in pins {
+                if !take(taken.len(), pin) {
+                    left = true;
+                    break;
+                }
+                taken.push(pin.clone());
+            }
+        }
+        taken.reverse();
+        Ok((taken, left))
     }
 
     /// Removes a chat's folder: its messages, files, group and the friend's profile.
@@ -2326,12 +2439,198 @@ mod tests {
         }
     }
 
-    /// Random changes of a chat, as the core makes them: messages both ways with files,
-    /// deliveries, reads, files that come or go, played voice messages, files that were not
-    /// what they said, charges, pins and unpins, deletions, the two no longer friends and
-    /// again. After each, the summary kept is the one the chat read whole gives, plain and
-    /// sealed; and now and then the journal read back from its end, whole or by pages,
-    /// gives the chat's items as the chat read whole holds them.
+    /// Random changes of a chat at step `step`, as the core makes them: messages both ways
+    /// with files, deliveries, reads, files that come or go, played voice messages, files
+    /// that were not what they said, charges, pins and unpins, deletions, the two no longer
+    /// friends and again. `ids` and `files` are the messages and files made so far.
+    fn random_records(
+        dice: &mut Dice,
+        step: u64,
+        now: u64,
+        chat: &Chat,
+        ids: &mut Vec<ItemId>,
+        files: &mut Vec<FileId>,
+    ) -> Vec<Record> {
+        let pick = |dice: &mut Dice, list: &[[u8; 16]]| {
+            (!list.is_empty()).then(|| list[dice.next(list.len() as u64) as usize])
+        };
+        match dice.next(12) {
+            0..=3 => {
+                let mut id = [0u8; 16];
+                id[..8].copy_from_slice(&step.to_be_bytes());
+                id[8] = 1;
+                let mine = dice.chance(5);
+                let attached: Vec<Attachment> = (0..dice.next(3))
+                    .map(|n| {
+                        let file = if !files.is_empty() && dice.chance(3) {
+                            files[dice.next(files.len() as u64) as usize]
+                        } else {
+                            let mut f = [0u8; 32];
+                            f[..8].copy_from_slice(&step.to_be_bytes());
+                            f[8] = n as u8;
+                            files.push(f);
+                            f
+                        };
+                        Attachment {
+                            id: file,
+                            name: format!(
+                                "f{}.{}",
+                                dice.next(3),
+                                ["jpg", "ogg", "pdf"][n as usize % 3]
+                            ),
+                            size: 1 + dice.next(20 << 20),
+                            kind: [FileKind::Picture, FileKind::File, FileKind::Video]
+                                [dice.next(3) as usize],
+                            video: None,
+                            local: [Local::Missing, Local::Here, Local::Removed]
+                                [dice.next(3) as usize],
+                            voice: dice.chance(2).then(|| super::super::model::VoiceInfo {
+                                duration_ms: 1000,
+                                bars: vec![1; 40],
+                                played: false,
+                            }),
+                        }
+                    })
+                    .collect();
+                ids.push(id);
+                vec![Record::Item {
+                    item: Item {
+                        id,
+                        mine,
+                        sent_ms: now - 1000 + step,
+                        got_ms: now - 1000 + step,
+                        seq: chat.next_seq(),
+                        at_ms: now - 1000 + step,
+                        body: Body::Message {
+                            text: format!("message {step}"),
+                            files: attached,
+                        },
+                        ttl_ms: if dice.chance(3) { model_day() } else { 0 },
+                        delivered: !mine,
+                    },
+                }]
+            }
+            4 => pick(dice, ids)
+                .map(|id| vec![Record::Delivered { ids: vec![id] }])
+                .unwrap_or_default(),
+            5 => vec![Record::Read {
+                seq: dice.next(chat.next_seq()),
+            }],
+            6 if !files.is_empty() => vec![Record::File {
+                file: files[dice.next(files.len() as u64) as usize],
+                local: [Local::Missing, Local::Here, Local::Removed][dice.next(3) as usize],
+            }],
+            7 if !files.is_empty() => {
+                let file = files[dice.next(files.len() as u64) as usize];
+                vec![
+                    [
+                        Record::Played { file },
+                        Record::NotVoice { file },
+                        Record::NotPicture { file },
+                    ][dice.next(3) as usize]
+                        .clone(),
+                ]
+            }
+            8 => vec![Record::FileCharge {
+                at_ms: now - dice.next(1000),
+                bytes: dice.next(1 << 20),
+                file: [step as u8; 32],
+            }],
+            9 => pick(dice, ids)
+                .map(|target| {
+                    let mut id = [0u8; 16];
+                    id[..8].copy_from_slice(&step.to_be_bytes());
+                    id[8] = 2;
+                    vec![Record::Item {
+                        item: Item {
+                            id,
+                            mine: dice.chance(5),
+                            sent_ms: now + step,
+                            got_ms: now,
+                            seq: chat.next_seq(),
+                            at_ms: now,
+                            body: Body::Pin {
+                                target,
+                                pinned: dice.chance(7),
+                            },
+                            ttl_ms: 0,
+                            delivered: dice.chance(5),
+                        },
+                    }]
+                })
+                .unwrap_or_default(),
+            10 => pick(dice, ids)
+                .map(|id| {
+                    ids.retain(|i| *i != id);
+                    vec![Record::Gone { ids: vec![id] }]
+                })
+                .unwrap_or_default(),
+            _ => vec![Record::Ended {
+                ms: dice.chance(5).then_some(now),
+            }],
+        }
+    }
+
+    /// Checks that the chat with `friend` read back from the end of its journal, whole or by
+    /// pages, gives the chat's items as the chat read whole holds them; that its pins read
+    /// alone give its pins, unpins and deletions for both; and that the two walked back
+    /// together by pages give every item.
+    fn read_back(
+        store: &DirectStore,
+        dir: &Path,
+        key: Option<&DataKey>,
+        friend: &DevicePublicKey,
+        at: &str,
+    ) {
+        let all: Vec<Item> = DirectStore::open_sealed(dir, key.cloned())
+            .load(friend)
+            .unwrap()
+            .chat
+            .items()
+            .to_vec();
+        let (aside, whole): (Vec<Item>, Vec<Item>) = all.iter().cloned().partition(Item::is_aside);
+        let mut back = Vec::new();
+        store
+            .scan_back(friend, |item| {
+                back.push(item);
+                true
+            })
+            .unwrap();
+        back.reverse();
+        assert_eq!(back, whole, "{at}");
+        // By pages of 7, each before the oldest of the last.
+        let mut paged: Vec<Item> = Vec::new();
+        let mut before = None;
+        loop {
+            let (page, more) = store.page_back(friend, before, 7).unwrap();
+            before = page.first().map(|i| (i.seq, i.id));
+            paged.splice(0..0, page);
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(paged, whole, "{at}, by pages");
+        assert_eq!(store.read_pins(friend).unwrap(), aside, "{at}, pins");
+        let mut walked: Vec<Item> = Vec::new();
+        let mut before = None;
+        loop {
+            let (page, more) = store
+                .walk_back(friend, &aside, before, |n, _| n < 7)
+                .unwrap();
+            before = page.first().map(|i| (i.seq, i.id));
+            walked.splice(0..0, page);
+            if !more {
+                break;
+            }
+        }
+        assert_eq!(walked, all, "{at}, with the pins by pages");
+    }
+
+    /// Random changes of a chat, as the core makes them ([`random_records`]). After each, the
+    /// summary kept is the one the chat read whole gives, plain and sealed; and now and then
+    /// the journal read back from its end, whole or by pages, gives the chat's items as the
+    /// chat read whole holds them, and so do its pins read alone and the two walked back
+    /// together by pages. An item whose record is there twice is read back once.
     #[test]
     fn the_summary_and_the_journal_read_back_are_the_chat_s_read_whole() {
         let now = crate::now_ms();
@@ -2352,124 +2651,8 @@ mod tests {
             let mut ids: Vec<ItemId> = Vec::new();
             let mut files: Vec<FileId> = Vec::new();
             for step in 0..300u64 {
-                let pick = |dice: &mut Dice, list: &[[u8; 16]]| {
-                    (!list.is_empty()).then(|| list[dice.next(list.len() as u64) as usize])
-                };
-                let records = match dice.next(12) {
-                    0..=3 => {
-                        let mut id = [0u8; 16];
-                        id[..8].copy_from_slice(&step.to_be_bytes());
-                        id[8] = 1;
-                        let mine = dice.chance(5);
-                        let attached: Vec<Attachment> = (0..dice.next(3))
-                            .map(|n| {
-                                let file = if !files.is_empty() && dice.chance(3) {
-                                    files[dice.next(files.len() as u64) as usize]
-                                } else {
-                                    let mut f = [0u8; 32];
-                                    f[..8].copy_from_slice(&step.to_be_bytes());
-                                    f[8] = n as u8;
-                                    files.push(f);
-                                    f
-                                };
-                                Attachment {
-                                    id: file,
-                                    name: format!(
-                                        "f{}.{}",
-                                        dice.next(3),
-                                        ["jpg", "ogg", "pdf"][n as usize % 3]
-                                    ),
-                                    size: 1 + dice.next(20 << 20),
-                                    kind: [FileKind::Picture, FileKind::File, FileKind::Video]
-                                        [dice.next(3) as usize],
-                                    video: None,
-                                    local: [Local::Missing, Local::Here, Local::Removed]
-                                        [dice.next(3) as usize],
-                                    voice: dice.chance(2).then(|| super::super::model::VoiceInfo {
-                                        duration_ms: 1000,
-                                        bars: vec![1; 40],
-                                        played: false,
-                                    }),
-                                }
-                            })
-                            .collect();
-                        ids.push(id);
-                        vec![Record::Item {
-                            item: Item {
-                                id,
-                                mine,
-                                sent_ms: now - 1000 + step,
-                                got_ms: now - 1000 + step,
-                                seq: chat.chat.next_seq(),
-                                at_ms: now - 1000 + step,
-                                body: Body::Message {
-                                    text: format!("message {step}"),
-                                    files: attached,
-                                },
-                                ttl_ms: if dice.chance(3) { model_day() } else { 0 },
-                                delivered: !mine,
-                            },
-                        }]
-                    }
-                    4 => pick(&mut dice, &ids)
-                        .map(|id| vec![Record::Delivered { ids: vec![id] }])
-                        .unwrap_or_default(),
-                    5 => vec![Record::Read {
-                        seq: dice.next(chat.chat.next_seq()),
-                    }],
-                    6 if !files.is_empty() => vec![Record::File {
-                        file: files[dice.next(files.len() as u64) as usize],
-                        local: [Local::Missing, Local::Here, Local::Removed][dice.next(3) as usize],
-                    }],
-                    7 if !files.is_empty() => {
-                        let file = files[dice.next(files.len() as u64) as usize];
-                        vec![
-                            [
-                                Record::Played { file },
-                                Record::NotVoice { file },
-                                Record::NotPicture { file },
-                            ][dice.next(3) as usize]
-                                .clone(),
-                        ]
-                    }
-                    8 => vec![Record::FileCharge {
-                        at_ms: now - dice.next(1000),
-                        bytes: dice.next(1 << 20),
-                        file: [step as u8; 32],
-                    }],
-                    9 => pick(&mut dice, &ids)
-                        .map(|target| {
-                            let mut id = [0u8; 16];
-                            id[..8].copy_from_slice(&step.to_be_bytes());
-                            id[8] = 2;
-                            vec![Record::Item {
-                                item: Item {
-                                    id,
-                                    mine: dice.chance(5),
-                                    sent_ms: now + step,
-                                    got_ms: now,
-                                    seq: chat.chat.next_seq(),
-                                    at_ms: now,
-                                    body: Body::Pin {
-                                        target,
-                                        pinned: dice.chance(7),
-                                    },
-                                    ttl_ms: 0,
-                                    delivered: dice.chance(5),
-                                },
-                            }]
-                        })
-                        .unwrap_or_default(),
-                    10 => pick(&mut dice, &ids)
-                        .map(|id| {
-                            ids.retain(|i| *i != id);
-                            vec![Record::Gone { ids: vec![id] }]
-                        })
-                        .unwrap_or_default(),
-                    _ => vec![Record::Ended {
-                        ms: dice.chance(5).then_some(now),
-                    }],
-                };
+                let records =
+                    random_records(&mut dice, step, now, &chat.chat, &mut ids, &mut files);
                 if records.is_empty() {
                     continue;
                 }
@@ -2480,46 +2663,44 @@ mod tests {
                     "seed {seed}, step {step}: {records:?}"
                 );
                 if step % 20 == 0 || step == 299 {
-                    let whole: Vec<Item> = DirectStore::open_sealed(&dir, key.clone())
-                        .load(&chat.friend)
-                        .unwrap()
-                        .chat
-                        .items()
-                        .iter()
-                        .filter(|i| !i.is_aside())
-                        .cloned()
-                        .collect();
-                    let mut back = Vec::new();
-                    store
-                        .scan_back(&chat.friend, |item| {
-                            back.push(item);
-                            true
-                        })
-                        .unwrap();
-                    back.reverse();
-                    assert_eq!(back, whole, "seed {seed}, step {step}");
-                    // By pages of 7, each before the oldest of the last.
-                    let mut paged: Vec<Item> = Vec::new();
-                    let mut before = None;
-                    loop {
-                        let (page, more) = store.page_back(&chat.friend, before, 7).unwrap();
-                        before = page.first().map(|i| (i.seq, i.id));
-                        paged.splice(0..0, page);
-                        if !more {
-                            break;
-                        }
-                    }
-                    assert_eq!(paged, whole, "seed {seed}, step {step}, by pages");
+                    read_back(
+                        &store,
+                        &dir,
+                        key.as_ref(),
+                        &chat.friend,
+                        &format!("seed {seed}, step {step}"),
+                    );
                 }
             }
             assert!(chat.chat.items().len() > 20);
+            // The newest item of the journal written again as it stands (as a write done
+            // again would): read back once, as it stands. A copy that differed would read
+            // back as its newest, where the chat read whole keeps its first.
+            let newest = chat
+                .chat
+                .items()
+                .iter()
+                .rfind(|i| !i.is_aside())
+                .unwrap()
+                .clone();
+            store
+                .append(&chat.friend, &[Record::Item { item: newest }], &chat.chat)
+                .unwrap();
+            read_back(
+                &store,
+                &dir,
+                key.as_ref(),
+                &chat.friend,
+                &format!("seed {seed}, twice"),
+            );
             fs::remove_dir_all(&dir).unwrap();
         }
     }
 
     /// A journal that does not read back as written is not read back: cut short in a record
-    /// or by whole records, an older copy put back, another chat's put in its place. The
-    /// chat read whole instead keeps every record before the damage, and puts a copy aside.
+    /// or by whole records, an older copy put back, another chat's put in its place; nor are
+    /// pins that do not. The chat read whole instead keeps every record before the damage,
+    /// and puts a copy aside.
     #[test]
     fn a_journal_that_is_not_as_written_is_not_read_back() {
         for key in [None, Some(DataKey::generate().unwrap())] {
@@ -2554,6 +2735,49 @@ mod tests {
             let whole = fs::read(&path).unwrap();
             let (page, more) = store.page_back(&friend, None, 2).unwrap();
             assert_eq!((page.len(), more), (2, true));
+            // So with a chat's pins: cut inside a record, and, sealed, its last record cut
+            // off (as an older copy put back), or another chat's put in their place.
+            let pin = |id: u8, target: u8| Item {
+                body: Body::Pin {
+                    target: [target; 16],
+                    pinned: true,
+                },
+                mine: true,
+                ..item(id, true, vec![])
+            };
+            let mut pinning = Written {
+                store: &store,
+                friend: DeviceIdentity::generate().unwrap().public_key(),
+                chat: Chat::default(),
+                ended: None,
+            };
+            for n in 1..=2 {
+                pinning.add(&[Record::Item {
+                    item: item(n, false, vec![]),
+                }]);
+            }
+            pinning.add(&[Record::Item { item: pin(3, 1) }]);
+            other_chat.add(&[Record::Item { item: pin(6, 1) }]);
+            let pins = store.pins_path(&pinning.friend);
+            let older = fs::read(&pins).unwrap();
+            pinning.add(&[Record::Item { item: pin(4, 2) }]);
+            let both = fs::read(&pins).unwrap();
+            let read_pins = |store: &DirectStore| store.read_pins(&pinning.friend);
+            assert_eq!(read_pins(&store).unwrap(), [pin(3, 1), pin(4, 2)]);
+            fs::write(&pins, &both[..both.len() - 3]).unwrap();
+            assert!(read_pins(&store).is_err(), "pins cut inside a record");
+            if sealed {
+                let reader = DirectStore::open_sealed(&dir, key.clone());
+                fs::write(&pins, &older).unwrap();
+                assert!(
+                    read_pins(&reader).is_err(),
+                    "pins with their last record cut off"
+                );
+                fs::write(&pins, fs::read(store.pins_path(&other)).unwrap()).unwrap();
+                assert!(read_pins(&reader).is_err(), "another chat's pins");
+            }
+            fs::write(&pins, &both).unwrap();
+            assert_eq!(read_pins(&store).unwrap().len(), 2);
             // Cut inside its last record.
             fs::write(&path, &whole[..whole.len() - 3]).unwrap();
             assert!(count(&store).is_err());
