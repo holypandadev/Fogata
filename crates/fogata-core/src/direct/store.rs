@@ -2697,6 +2697,109 @@ mod tests {
         }
     }
 
+    /// A chat of random changes as the core makes them ([`random_records`]), not held, read by
+    /// pages as a screen reads it: its newest, then each page before the oldest of the last,
+    /// down to an item asked for, from an item on whole, and what changed since a view read
+    /// while it was not held. Each page is the one the chat read whole gives, and none reads
+    /// the chat whole.
+    #[test]
+    fn a_chat_not_held_read_by_pages_is_the_chat_read_whole() {
+        use super::super::{Chats, Page, Pick, model};
+        use std::sync::{Arc, atomic::Ordering::Relaxed};
+        let now = crate::now_ms();
+        for (seed, key) in [(7, None), (11, Some(DataKey::generate().unwrap()))] {
+            let dir = folder(&format!("paged-{seed}"));
+            let store = DirectStore::open_sealed(&dir, key.clone());
+            let mut chat = Written {
+                store: &store,
+                friend: DeviceIdentity::generate().unwrap().public_key(),
+                chat: Chat::default(),
+                ended: None,
+            };
+            let mut dice = Dice(seed);
+            let (mut ids, mut files) = (Vec::new(), Vec::new());
+            for step in 0..300u64 {
+                let records =
+                    random_records(&mut dice, step, now, &chat.chat, &mut ids, &mut files);
+                if !records.is_empty() {
+                    chat.add(&records);
+                }
+            }
+            let friend = chat.friend;
+            let writer = Arc::new(crate::writer::Writer::start().unwrap());
+            let chats = Chats::open(&dir, key.clone(), writer);
+            assert!(chats.lock().chats[&friend].chat.is_away());
+            let paged = |pick: Pick| -> Page {
+                let state = chats.lock();
+                chats
+                    .paged_view(&state, &friend, &pick)
+                    .unwrap_or_else(|| panic!("seed {seed}: {pick:?} not read by pages"))
+            };
+            let mut pages = vec![(Pick::Newest(7), paged(Pick::Newest(7)))];
+            while let Some((_, last)) = pages.last().filter(|(_, page)| page.more) {
+                // As a screen asks: before the oldest it holds, or all when it holds none.
+                let pick = match last.items.first() {
+                    Some(v) => Pick::Older {
+                        before: (v.item.seq, v.item.id),
+                        count: 7,
+                        down_to: None,
+                    },
+                    None => Pick::Older {
+                        before: (u64::MAX, [0xff; 16]),
+                        count: 7,
+                        down_to: Some(0),
+                    },
+                };
+                pages.push((pick, paged(pick)));
+            }
+            assert!(pages.len() > 5, "seed {seed}");
+            let newest = &pages[0].1.items[0].item;
+            let middle = &pages[pages.len() / 2].1.items[0].item;
+            let (newest, middle) = ((newest.seq, newest.id), (middle.seq, middle.id));
+            for pick in [
+                Pick::Older {
+                    before: newest,
+                    count: 3,
+                    down_to: Some(middle.0),
+                },
+                Pick::Changes {
+                    since: 0,
+                    from: Some(middle),
+                    count: 7,
+                },
+                Pick::Changes {
+                    since: 0,
+                    from: None,
+                    count: 7,
+                },
+            ] {
+                pages.push((pick, paged(pick)));
+            }
+            // Nothing changed since a view read now: nothing comes, only whether items are
+            // before the view's oldest.
+            let since = model::version();
+            let unchanged = paged(Pick::Changes {
+                since,
+                from: Some(middle),
+                count: 7,
+            });
+            assert!(unchanged.items.is_empty() && !unchanged.whole && unchanged.more);
+            assert_eq!(
+                chats.store.loads.load(Relaxed),
+                0,
+                "seed {seed}: read whole"
+            );
+            let whole = |pick: &Pick| -> Page {
+                let state = chats.lock();
+                chats.held_page(&state, &friend, &state.chats[&friend], pick)
+            };
+            for (pick, page) in &pages {
+                assert_eq!(page.shown(), whole(pick).shown(), "seed {seed}: {pick:?}");
+            }
+            fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
     /// A journal that does not read back as written is not read back: cut short in a record
     /// or by whole records, an older copy put back, another chat's put in its place; nor are
     /// pins that do not. The chat read whole instead keeps every record before the damage,

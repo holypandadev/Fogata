@@ -375,7 +375,7 @@ static STAMPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(
 /// A new stamp for a change to a chat, later than every stamp and [`version`] before it.
 /// One count for every chat, so a chat made or read again has only stamps later than any
 /// view of the chat it replaced.
-fn stamp() -> u64 {
+pub(crate) fn stamp() -> u64 {
     STAMPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
