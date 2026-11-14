@@ -209,6 +209,11 @@ impl<P: Provider> GenTransport<P> {
         Ok(socket.into())
     }
 
+    /// Fogata: the socket of a dial that goes out from no listener.
+    fn dialling_socket(socket_addr: SocketAddr) -> io::Result<UdpSocket> {
+        UdpSocket::bind(socket_addr)
+    }
+
     fn bound_socket(&mut self, socket_addr: SocketAddr) -> Result<quinn::Endpoint, Error> {
         let socket_family = socket_addr.ip().into();
         if let Some(waker) = self.waker.take() {
@@ -218,7 +223,7 @@ impl<P: Provider> GenTransport<P> {
             SocketFamily::Ipv4 => SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0),
             SocketFamily::Ipv6 => SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
         };
-        let socket = UdpSocket::bind(listen_socket_addr)?;
+        let socket = Self::dialling_socket(listen_socket_addr)?;
         let endpoint_config = self.quinn_config.endpoint_config.clone();
         let endpoint = Self::new_endpoint(endpoint_config, None, socket)?;
         Ok(endpoint)
@@ -976,6 +981,32 @@ mod tests {
             )
             .unwrap();
         assert!(!transport.dialer.contains_key(&SocketFamily::Ipv4));
+    }
+
+    /// Fogata: on Linux a socket's packets to an address on the local network that no host
+    /// answers for wait in the kernel, up to one default send buffer of them for each such
+    /// address, and count against the socket until they are dropped. The socket asks for
+    /// room for at least twice that, so one such address cannot stop it from sending.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    #[test]
+    fn the_send_buffer_has_room_past_the_packets_one_silent_address_holds() {
+        let keypair = libp2p_identity::Keypair::generate_ed25519();
+        let transport = crate::tokio::Transport::new(Config::new(&keypair));
+        let plain = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let default = socket2::SockRef::from(&plain).send_buffer_size().unwrap();
+
+        let listening = transport
+            .create_socket("127.0.0.1:0".parse().unwrap())
+            .unwrap();
+        let dialling = GenTransport::<crate::tokio::Provider>::dialling_socket(
+            "127.0.0.1:0".parse().unwrap(),
+        )
+        .unwrap();
+
+        for socket in [&listening, &dialling] {
+            let room = socket2::SockRef::from(socket).send_buffer_size().unwrap();
+            assert!(room >= 2 * default, "{room} bytes, the default is {default}");
+        }
     }
 
     #[cfg(feature = "tokio")]
