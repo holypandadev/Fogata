@@ -6,7 +6,7 @@ use std::{collections::HashSet, time::Instant};
 use libp2p::{Multiaddr, PeerId, kad::RecordKey};
 
 use super::{
-    LOOKUP_CONNECTED, LOOKUP_IDLE, LOOKUP_NOBODY_MISSING, Node, PUNCH_SLOT,
+    LOOKUP_CONNECTED, LOOKUP_IDLE, LOOKUP_NOBODY_MISSING, Node, SEARCH_AT_START, SEARCH_PACE,
     friends::{FriendContext, Target},
     now_ms,
 };
@@ -32,6 +32,27 @@ impl Node {
             f.last_lookup = None;
             f.look_for_the_away_again();
         }
+    }
+
+    /// This device announced for the first time: the groups it found nobody of, and its
+    /// friends, are looked up at the next slot and at every slot for [`SEARCH_AT_START`],
+    /// rather than once and then at the next lookup, half a minute or more away. Those who
+    /// started at about the same time announced a moment ago too, after the lookups made at
+    /// the start found nobody, and their record may not be found yet at the first look.
+    pub(super) fn look_again_from_the_start(&mut self) {
+        let until = Instant::now() + SEARCH_AT_START;
+        let later = |old: Option<Instant>| Some(old.map_or(until, |old| old.max(until)));
+        for slot in self.groups.values_mut() {
+            if slot.members.is_empty() {
+                slot.last_lookup = None;
+                slot.searching_until = later(slot.searching_until);
+            }
+        }
+        if let Some(f) = self.friends.as_mut() {
+            f.searching_until = later(f.searching_until);
+        }
+        self.friends_look_again();
+        self.seek_again();
     }
 
     /// This device's friend rendezvous secret, under which it seals its local addresses for
@@ -104,7 +125,7 @@ impl Node {
             let forgot_removals = f.book.forget_old_removals(now);
             forgot = f.book.forget_previous(now) | forgot_removals;
             let interval = if f.searching_until.is_some_and(|t| Instant::now() < t) {
-                PUNCH_SLOT
+                SEARCH_PACE
             } else if f.in_a_hurry() {
                 LOOKUP_IDLE
             } else if f.nobody_missing() {
@@ -249,5 +270,60 @@ mod tests {
         // A link without the maker's identity is found by the DHT alone.
         assert!(may_own_link(Target::LinkOwner, None, other));
         assert!(may_own_link(Target::Accepting, Some(maker), other));
+    }
+
+    /// After its first announcement a device looks up a group it found nobody of at the
+    /// next slot and at the two after it, and not a group it has someone of; a longer search
+    /// under way is not cut short.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_first_announcement_is_followed_by_a_look_at_every_slot_for_a_while() {
+        use std::time::Duration;
+
+        use crate::node::{
+            PUNCH_SLOT, SEARCH_HARD,
+            tests::{inspect, lone_member},
+        };
+        let (node, group) = lone_member();
+        let (before, due, pace, window, longer, with_someone) = inspect(&node, move |n| {
+            // The lookup made at the start found nobody.
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.last_lookup = Some(Instant::now());
+            let before = slot.lookup_interval(0);
+            n.look_again_from_the_start();
+            let slot = n.groups.get_mut(&group).unwrap();
+            let due = slot.last_lookup.is_none();
+            let pace = slot.lookup_interval(0);
+            let window = slot.searching_until.unwrap() - Instant::now();
+            // A search for someone who just went lasts longer: it stays.
+            slot.searching_until = Some(Instant::now() + SEARCH_HARD);
+            n.look_again_from_the_start();
+            let slot = n.groups.get_mut(&group).unwrap();
+            let longer = slot.searching_until.unwrap() - Instant::now();
+            // With a member there, the group is looked up as it was.
+            slot.searching_until = None;
+            slot.last_lookup = Some(Instant::now());
+            slot.members.insert(PeerId::random());
+            n.look_again_from_the_start();
+            let slot = &n.groups[&group];
+            let with_someone = slot.last_lookup.is_some() && slot.searching_until.is_none();
+            (before, due, pace, window, longer, with_someone)
+        })
+        .await;
+        assert!(before > PUNCH_SLOT, "{before:?}");
+        assert!(due, "no lookup at the next slot");
+        // Under a slot's length, so the lookup of each slot is due at the next one.
+        assert!(pace < PUNCH_SLOT, "{pace:?}");
+        // The slot that follows and the two after it, and no more than one beyond.
+        assert!(
+            window > 3 * PUNCH_SLOT - Duration::from_secs(1),
+            "{window:?}"
+        );
+        assert!(
+            window <= 3 * PUNCH_SLOT + Duration::from_secs(1),
+            "{window:?}"
+        );
+        assert!(longer > SEARCH_HARD - Duration::from_secs(1), "{longer:?}");
+        assert!(with_someone);
+        node.shutdown().await.unwrap();
     }
 }

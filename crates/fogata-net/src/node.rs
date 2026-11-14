@@ -127,6 +127,19 @@ const ADDRESSES_WAIT: Duration = Duration::from_secs(5);
 /// side has to learn it to punch through to it.
 const SEARCH_HARD: Duration = Duration::from_secs(120);
 
+/// After this device's first announcement, how long the groups it found nobody of, and its
+/// friends, are looked up at every slot: the slot that follows and the two after it. Those
+/// who started in the same seconds announced a moment ago too, and a lookup made before
+/// their record can be found comes back empty: with one look and then the usual half
+/// minute, two devices started together could take 30 to 50 s to find each other.
+const SEARCH_AT_START: Duration = Duration::from_secs(31);
+
+/// The least time between two lookups made at every slot. Under a slot's length: a slot is
+/// handled a few milliseconds after it begins, a different few each time, and a lookup
+/// asked for one slot after the last would otherwise be found too early by them and wait
+/// for the slot after.
+const SEARCH_PACE: Duration = Duration::from_millis(9_000);
+
 /// How long a QUIC connection waits without hearing anything before it is closed.
 const QUIC_IDLE: Duration = Duration::from_secs(30);
 /// Message ids remembered to drop duplicates.
@@ -923,7 +936,7 @@ impl GroupSlot {
     /// addresses, and it is lost with that member.
     fn lookup_interval(&self, relayed: usize) -> Duration {
         if self.searching_until.is_some_and(|t| Instant::now() < t) {
-            PUNCH_SLOT
+            SEARCH_PACE
         } else if self.ctx.joining().is_some() {
             LOOKUP_IDLE
         } else if self.ctx.member_count() + relayed <= self.members.len() + 1 {

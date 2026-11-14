@@ -283,16 +283,7 @@ impl Node {
                 self.info("announced on the DHT");
                 if !self.announced {
                     self.announced = true;
-                    // Those who started at about the same time announced a moment ago too,
-                    // after the lookups made at the start found nobody: look again now
-                    // rather than at the next lookup, half a minute or more away.
-                    for slot in self.groups.values_mut() {
-                        if slot.members.is_empty() {
-                            slot.last_lookup = None;
-                        }
-                    }
-                    self.friends_look_again();
-                    self.seek_again();
+                    self.look_again_from_the_start();
                 }
             }
             QueryResult::GetProviders(Err(e)) => {
