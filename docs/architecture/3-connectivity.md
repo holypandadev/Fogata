@@ -990,15 +990,41 @@ calls, and their pictures are not dimmed; they show a moon instead of the green 
   (`RoomTracker::keeping_pictures`); the screens get the room they show with every picture
   read again from its share's message, opened with the key of its epoch (some 9 ms for 47
   of the largest pictures, a person's whole part of a one-room group, in a release build on
-  a Mac; at that rate about 75 ms for a whole room's 24 MiB), and the pictures of that room alone stay
-  read, until another is shown (`ShownPictures`). A file of the room shared on from here
-  goes with that picture. Measured (`measure_device_room_memory_*`, ten groups each with
-  eight devices of a flooding member in all ten rooms, macOS release build): 633 MiB of
-  chat and 200 MiB of shares as counted, 1.28 GB resident, with each group's bounds alone;
-  127 MiB of chat and the same shares, 0.78 GB resident, within the bound of all the chat
-  with the pictures kept read and the latest events copied as before; 0.55 GB resident
-  with both kept once. What is left grows with the groups by their shares as sent, bounded
-  per group, the same on every member.
+  a Mac, 14 ms with most of them read back from disk; at that rate about 75 ms for a whole
+  room's 24 MiB), and the pictures of that room alone stay read, until another is shown
+  (`ShownPictures`). A file of the room shared on from here goes with that picture.
+  What a device holds of those messages in memory is bounded across all its groups: past
+  32 MiB of them (`ROOM_SHARE_BYTES`, each weighed as sent), checked every punch slot as
+  the chat is, the messages go to a file, the sender with the most held first, its oldest
+  first; one still among its room's latest events goes once it has left them, as moving it
+  would free nothing. Every share stays kept, with its time, its cost and where its
+  message is, and is read back when the room is asked for or shown, so the rooms take,
+  list and answer the same, byte for byte and in the same parts (`node::room` test
+  `devices_keeping_shares_on_disk_still_agree_on_the_room`). A device so holds at most
+  32 MiB of shares' messages in memory however many groups it is in, besides each share's
+  listing and the place of its message in the file. The file is `rooms/shares` in the data folder, made new at
+  each start in a folder only its owner opens, readable by its owner only, never through a
+  link, and removed when the node stops; each message is sealed (XChaCha20-Poly1305) under a
+  key made for that run and held in memory only, bound to its number there, so the file reads as
+  nothing to anyone else, nor once the program ends, sealed folder or not, and does not
+  move with the data folder. It is cut in 1 KiB pages; a message takes the free ones first,
+  the lowest first, and free pages at the end are cut off, so it is never longer than the
+  most messages it held at once, each sealed and rounded up to a page. A message that
+  cannot be read back (the file deleted or damaged) is not left out of an answer: the
+  device refuses to give the room of any group that has messages there until it starts
+  again, and the member asks the others, while the pictures it cannot read show as none.
+  Reading back one part of an answer (11 messages, 950 KiB) takes about 1.5 ms in a release
+  build on a Mac, against 0.1 ms from memory, on the node's own task: short against a
+  slot, and only when a member asks. Measured (`measure_device_room_memory_*`, ten groups
+  each with eight devices of a flooding member in all ten rooms, macOS release build):
+  633 MiB of chat and 200 MiB of shares as counted, 1.28 GB resident, with each group's
+  bounds alone; 127 MiB of chat and the same shares, 0.78 GB resident, within the bound of
+  all the chat with the pictures kept read and the latest events copied as before; 0.55
+  GB resident with both kept once. And of shares alone (`measure_device_share_memory_*`,
+  ten groups of one room, eight devices of a flooding member in each sharing 47 videos with
+  the largest pictures: 3760 shares, 235 MiB as counted, 317 MiB of messages as sent):
+  370 MiB resident with all of them in memory; 87 MiB with all past 32 MiB on disk, 285
+  MiB of messages in a file of 287 MiB.
 - Another member fetches it over a stream (`/fogata/file/1`) from any participant that has
   it: the request names the id and an offset, so an interrupted download resumes from its
   `.part` file (named after the file's id too, so two files of one name never mix). The connection's own encryption covers the transfer end to end, also when a
