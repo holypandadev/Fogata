@@ -1,0 +1,110 @@
+# How much memory each file of the Flutter tests takes on Windows, one file at a time: the
+# most any one test process (flutter_tester) held while the file ran, and how long it took.
+# A lab run, by hand, to find a test that grows without bound.
+name: Test memory
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [lab/test-memory]
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.8
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 240
+    steps:
+      - name: Keep line endings as committed
+        run: git config --global core.autocrlf false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: false
+      - name: Fetch the Dart packages
+        shell: pwsh
+        run: |
+          Push-Location app
+          flutter pub get
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Each test file by itself
+        shell: pwsh
+        run: |
+          Push-Location app
+          $rows = @()
+          $files = Get-ChildItem test -Filter *_test.dart | Sort-Object Name
+          foreach ($file in $files) {
+            $started = Get-Date
+            $log = Join-Path $env:RUNNER_TEMP ($file.BaseName + '.log')
+            $run = Start-Process -FilePath 'cmd.exe' -PassThru -NoNewWindow `
+              -ArgumentList '/c', "flutter test --no-pub test\$($file.Name) > `"$log`" 2>&1"
+            $peak = 0; $all = 0
+            while (-not $run.HasExited) {
+              Start-Sleep -Milliseconds 500
+              $testers = @(Get-Process -Name flutter_tester -ErrorAction SilentlyContinue)
+              foreach ($t in $testers) { if ($t.WorkingSet64 -gt $peak) { $peak = $t.WorkingSet64 } }
+              $sum = ($testers | Measure-Object WorkingSet64 -Sum).Sum
+              if ($sum -gt $all) { $all = $sum }
+              if (((Get-Date) - $started).TotalMinutes -gt 20) {
+                Write-Output "STUCK $($file.Name): over 20 minutes, ended here"
+                Get-Process -Name flutter_tester, dart -ErrorAction SilentlyContinue | Stop-Process -Force
+                break
+              }
+            }
+            $left = @(Get-Process -Name flutter_tester -ErrorAction SilentlyContinue)
+            $row = [pscustomobject]@{
+              File = $file.Name
+              PeakMB = [math]::Round($peak / 1MB)
+              AllMB = [math]::Round($all / 1MB)
+              Seconds = [math]::Round(((Get-Date) - $started).TotalSeconds)
+              Exit = $run.ExitCode
+              LeftBehind = $left.Count
+            }
+            $rows += $row
+            Write-Output ("{0,-44} peak {1,6} MB  all {2,6} MB  {3,4} s  exit {4}  left {5}" -f `
+              $row.File, $row.PeakMB, $row.AllMB, $row.Seconds, $row.Exit, $row.LeftBehind)
+            foreach ($t in $left) { Stop-Process -Id $t.Id -Force -ErrorAction SilentlyContinue }
+          }
+          Write-Output ''
+          Write-Output 'The ten that held the most:'
+          $rows | Sort-Object PeakMB -Descending | Select-Object -First 10 | Format-Table -AutoSize | Out-String | Write-Output
+          $rows | Export-Csv -NoTypeInformation (Join-Path $env:RUNNER_TEMP 'test-memory.csv')
+      - name: The whole suite at once
+        shell: pwsh
+        run: |
+          Push-Location app
+          $log = Join-Path $env:RUNNER_TEMP 'whole.log'
+          $started = Get-Date
+          $run = Start-Process -FilePath 'cmd.exe' -PassThru -NoNewWindow `
+            -ArgumentList '/c', "flutter test --no-pub > `"$log`" 2>&1"
+          $peak = 0; $all = 0
+          while (-not $run.HasExited) {
+            Start-Sleep -Seconds 1
+            $testers = @(Get-Process -Name flutter_tester -ErrorAction SilentlyContinue)
+            foreach ($t in $testers) { if ($t.WorkingSet64 -gt $peak) { $peak = $t.WorkingSet64 } }
+            $sum = ($testers | Measure-Object WorkingSet64 -Sum).Sum
+            if ($sum -gt $all) { $all = $sum; Write-Output ("{0,5} s: {1} testers, {2} MB in all, the largest {3} MB" -f `
+              [math]::Round(((Get-Date) - $started).TotalSeconds), $testers.Count, [math]::Round($sum / 1MB), [math]::Round($peak / 1MB)) }
+            if (((Get-Date) - $started).TotalMinutes -gt 60) { Write-Output 'over an hour: ended here'; Get-Process -Name flutter_tester, dart -ErrorAction SilentlyContinue | Stop-Process -Force; break }
+          }
+          Write-Output "exit $($run.ExitCode); the largest test process held $([math]::Round($peak / 1MB)) MB, all together $([math]::Round($all / 1MB)) MB at most"
+          Get-Content $log -Tail 5
+          Write-Output "left behind: $(@(Get-Process -Name flutter_tester -ErrorAction SilentlyContinue).Count)"
+      - name: Keep the numbers
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-memory
+          path: |
+            ${{ runner.temp }}/test-memory.csv
+            ${{ runner.temp }}/whole.log
+          if-no-files-found: ignore
+          retention-days: 14
