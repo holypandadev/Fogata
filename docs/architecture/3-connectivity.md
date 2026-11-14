@@ -94,6 +94,18 @@ therefore treats DHT nodes as strangers:
   friend's found this way is forgotten with it. Until one is seen on the local network,
   its local addresses are not dialled (members' own come sealed, 3.3) and at most 8 of its
   others are.
+  The dials of one lookup's candidates, 64 at once at most, must not stop the device's one
+  UDP socket. On Linux a packet to an address on the device's own network that no host
+  answers for waits in the kernel while the neighbour is looked for, and counts against
+  the socket's send buffer until it is dropped; some 90 dials to one such address filled
+  the default buffer, and the socket sent nothing to anyone for seconds. The socket asks
+  for a larger buffer there (`vendor/libp2p-quic`, change 4). In `dht-liars` the made-up
+  members' address is on the devices' network and answers even ARP only after 12 s: with
+  the default buffer the requests to the real DHT nodes went unsent for 8 s and timed out.
+  A limit: the kernel gives at most what `net.core.wmem_max` allows, twice the default
+  buffer where that is left at its default, and each such address holds up to one default
+  buffer of packets, so made-up members spread over three or more addresses of the
+  device's own network that no host answers for could still fill it for a few seconds.
 - **Candidates that never answer** (announcements of sessions that ended, members that
   closed the app) are tried six times, rested for ten minutes, and forgotten after three
   such rests; a later lookup that still finds them announced brings them back. While

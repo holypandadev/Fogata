@@ -205,13 +205,16 @@ impl<P: Provider> GenTransport<P> {
         }
 
         socket.bind(&socket_addr.into())?;
+        widen_send_buffer(socket2::SockRef::from(&socket));
 
         Ok(socket.into())
     }
 
     /// Fogata: the socket of a dial that goes out from no listener.
     fn dialling_socket(socket_addr: SocketAddr) -> io::Result<UdpSocket> {
-        UdpSocket::bind(socket_addr)
+        let socket = UdpSocket::bind(socket_addr)?;
+        widen_send_buffer(socket2::SockRef::from(&socket));
+        Ok(socket)
     }
 
     fn bound_socket(&mut self, socket_addr: SocketAddr) -> Result<quinn::Endpoint, Error> {
@@ -229,6 +232,28 @@ impl<P: Provider> GenTransport<P> {
         Ok(endpoint)
     }
 }
+
+/// Fogata: the send buffer a socket asks for on Linux. A packet to an address on the local
+/// network that no host answers for waits in the kernel for the neighbour to be found: up
+/// to one default send buffer of packets for each such address, dropped after three
+/// seconds, and counted against the socket's send buffer all the while. Dials to made-up
+/// peers at such an address (a DHT node can name any number, at an address inside the
+/// device's own network) filled a buffer of the default size, and the one socket then sent
+/// nothing to any peer until they were dropped, calls' media included. The kernel gives
+/// what `net.core.wmem_max` allows: with its default, twice the default buffer, so the
+/// packets one such address holds leave half of it free.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+const SEND_BUFFER: usize = 2 * 1024 * 1024;
+
+/// Fogata: asks for [`SEND_BUFFER`] where packets that wait for a neighbour count against
+/// the socket. A refusal leaves the default buffer.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn widen_send_buffer(socket: socket2::SockRef<'_>) {
+    let _ = socket.set_send_buffer_size(SEND_BUFFER);
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android")))]
+fn widen_send_buffer(_socket: socket2::SockRef<'_>) {}
 
 impl<P: Provider> Transport for GenTransport<P> {
     type Output = (PeerId, Connection);

@@ -43,6 +43,15 @@ QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
    `an_unproven_address_past_the_limit_is_retried_and_then_accepted`.
 3. `Cargo.toml`: a note only, on why quinn stays on aws-lc-rs (libp2p-tls uses it for the
    post-quantum X25519MLKEM768 exchange, which ring lacks).
+4. On Linux a packet to an address on the local network that no host answers for waits in
+   the kernel for the neighbour to be found (up to one default send buffer of packets for
+   each such address, dropped after three seconds) and counts against the socket's send
+   buffer meanwhile. Dials to some 90 made-up peers at one such address filled the default
+   buffer, and the socket sent nothing to any peer for seconds. `src/transport.rs`: every
+   socket asks for a 2 MiB send buffer on Linux (`SEND_BUFFER`; the kernel gives what
+   `net.core.wmem_max` allows, with its default twice the default buffer, which packets
+   to three or more such addresses could still fill). Test:
+   `the_send_buffer_has_room_past_the_packets_one_silent_address_holds`.
 
 To move to a new upstream version: download it, apply these changes again, keep this list
 true, and run `tools/vendor_diff.py libp2p-quic` to see that nothing else differs.
