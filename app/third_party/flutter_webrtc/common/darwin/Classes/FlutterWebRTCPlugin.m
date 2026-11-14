@@ -179,17 +179,14 @@ static NSString* const kFogataFieldTrials =
 
 // Fogata: the connections that send a shared screen at one size share one encoder of
 // it (FOGATA.md, "One encode of a shared screen"): one encode of each frame instead
-// of one for each watcher; nothing on the wire changes. On macOS it is off unless
-// FOGATA_SHARED_SCREEN_ENCODE=on is in the environment: the framework builds with it and
-// a Mac receives such a screen in a real call, but a Mac sharing its own screen through
-// it has not been run yet (a test build cannot be given the screen recording permission
-// unattended); until it has, a Mac encodes for each watcher as before. A framework
-// without Fogata's Apple patch 7 ignores the trial.
+// of one for each watcher; nothing on the wire changes. FOGATA_SHARED_SCREEN_ENCODE=off
+// in the environment leaves it out, as on Linux and Windows (it only gives the saving
+// up). A framework without Fogata's Apple patch 7 ignores the trial.
 static NSString* const kFogataSharedScreenEncodeTrial = @"Fogata-SharedScreenEncode/Enabled/";
 
 static BOOL FogataSharedScreenEncodeTrialOn(void) {
   const char* value = getenv("FOGATA_SHARED_SCREEN_ENCODE");
-  return value != NULL && strcmp(value, "on") == 0;
+  return value == NULL || strcmp(value, "off") != 0;
 }
 
 static void FlutterWebRTCApplyFieldTrials(void) {
@@ -445,6 +442,15 @@ static void FlutterWebRTCApplyFieldTrials(void) {
 
         VideoEncoderFactorySimulcast* simulcastFactory =
             [[VideoEncoderFactorySimulcast alloc] initWithPrimary:encoderFactory fallback:encoderFactory];
+        // Fogata: with the shared encode of a screen on, VP8's own encoder and no simulcast
+        // adapter over it. The shared encode asks an encoder, before it is initialized,
+        // whether it encodes in software, and the adapter does not say until then (WebRTC's
+        // default answer is "hardware"), so with it no screen was ever shared: measured on
+        // a Mac sharing to two watchers, each had its encoder and the trial changed
+        // nothing. Calls send one stream of VP8, which the adapter only passed on to that
+        // same encoder. With the shared encode off, the adapter as before.
+        id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)> videoEncoderFactory =
+            FogataSharedScreenEncodeTrialOn() ? encoderFactory : simulcastFactory;
 
         // Use the AVAudioEngine audio device module on iOS devices and macOS.
         //
@@ -466,7 +472,7 @@ static void FlutterWebRTCApplyFieldTrials(void) {
         _peerConnectionFactory =
             [[RTCPeerConnectionFactory alloc] initWithAudioDeviceModuleType:audioDeviceModuleType
                                                       bypassVoiceProcessing:bypassVoiceProcessing
-                                                             encoderFactory:simulcastFactory
+                                                             encoderFactory:videoEncoderFactory
                                                              decoderFactory:decoderFactory
                                                       audioProcessingModule:_audioManager.audioProcessingModule];
 

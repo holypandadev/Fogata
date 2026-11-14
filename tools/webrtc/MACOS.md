@@ -42,9 +42,8 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    uses, and `initWithEncoderFactory:decoderFactory:audioDevice:`) is wrapped in
    `SharedEncoderFactory`, `ObjCVideoTrackSource` tags the frames of a source marked with
    `RTCVideoSource`'s `enableFogataSharedEncode` (the plugin marks its ScreenCaptureKit
-   source), and the field trial `Fogata-SharedScreenEncode/Enabled/` turns it on. Written
-   without a Mac at hand: it applies after 0001-0006, but its first build is on a Mac (see
-   "Checking patch 7" below).
+   source), and the field trial `Fogata-SharedScreenEncode/Enabled/` turns it on (see
+   "Checking patch 7" below for what it took to share on a Mac).
 
 The macOS framework is all these patches are for: the iOS framework and WebRTC's own
 Objective-C tests, which still name the VideoToolbox codecs, are not built from them.
@@ -69,23 +68,33 @@ the tree `prepare.sh` made).
 
 ## Checking patch 7
 
-Patch 7 was written on Linux against the tree the other patches make, and never built
-there. On the first Mac build, check:
+Patch 7 was written on Linux against the tree the other patches make. It builds on a Mac
+(the framework of version 8078.6 has it), and was run there on 2026-11-14, in a call of
+three copies of a profile build on one Mac (Apple silicon, macOS 27), one sharing its
+screen at 1080p to the other two for 40 s (`app/integration_test/call_test.dart` with
+`FOGATA_TEST_MEASURE=40`, `FOGATA_TEST_SCREEN=1` on the sharer):
 
-- that `sdk/BUILD.gn`'s `fogata_shared_encoder` compiles `//libwebrtc/src/internal/shared_encoder.cc`
-  with the deps it lists (as `fogata_vp8_size_gate` does), and that `native_video` and
-  `peerconnectionfactory_base_objc` find `src/internal/shared_encoder.h` through their
-  `include_dirs`;
-- that the framework still exports no other codec (`build-macos.sh` checks it);
-- with `FOGATA_SHARED_SCREEN_ENCODE=on` in the Mac copy's environment (on macOS the
-  plugin leaves the trial out without it, until this has been checked once), in a call
-  where the Mac shares its screen to two or three watchers: each watcher's
-  `outbound-rtp` names its encoder `... (shared)` (`encoderImplementation`; on macOS the
-  real encoder is the `SimulcastEncoderAdapter` the plugin's `VideoEncoderFactorySimulcast`
-  makes over libvpx, so the name before " (shared)" may be that adapter's), one
-  `SharedScreenEnc` thread runs for each size, every watcher sees the screen, and
-  without the variable each connection has its encoder again;
-- that a camera is never shared (its connections keep encoders of their own).
+- With the trial on and the plugin's simulcast factory, nothing was shared: each
+  connection's `outbound-rtp` named its encoder `libvpx`, two encoder queues encoded, and
+  the sharer took 87 % of one core, as with the trial off (87 %). The shared encode asks
+  an encoder before it is initialized whether it is software, and WebRTC's
+  `SimulcastEncoderAdapter` does not say until then (the default answer is "hardware").
+- With the plugin giving its VP8 factory itself (what it does now while the shared encode
+  is on): both connections name `libvpx (shared)`, one `SharedScreenEnc` thread runs, the
+  sharer takes 60 % of one core, and both watchers get 1080p at 29 frames a second with no
+  freeze, as before.
+- Without the saving (`FOGATA_SHARED_SCREEN_ENCODE=off`) each connection has its encoder
+  again, through the adapter as before.
+
+With the variable left out (what the application does by itself) the same run names
+`libvpx (shared)` again, with one `SharedScreenEnc` thread and 60 % of one core, and the
+whole call test passes with one copy native and one under Rosetta. So it is on by default
+on macOS, as on Linux and Windows. A test build shares the screen
+only once macOS lets it record: signed with the certificate the installed application
+has, it has the application's own permission (System Settings, Privacy & Security, Screen
+& System Audio Recording); an ad-hoc build is another program to macOS and is refused.
+Still to check there: that a camera is never shared (its connections keep encoders of
+their own), which the frames' mark decides as on the other systems.
 
 ## The app on it
 

@@ -376,8 +376,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   trial the plugin sets (`Fogata-SharedScreenEncode`), which
   `FOGATA_SHARED_SCREEN_ENCODE=off` leaves out, to measure before and after on one build
   (`tools/call-lab`); each connection's statistics then name its encoder
-  `libvpx (shared)`. On macOS the plugin sets it only with `FOGATA_SHARED_SCREEN_ENCODE=on`
-  until a Mac sharing its screen through it has been checked in a call.
+  `libvpx (shared)`. On macOS too, where the plugin then gives libvpx's own encoder and no
+  simulcast adapter over it (the adapter does not say it encodes in software before it is
+  initialized, and nothing was shared through it): a Mac sharing its screen to two watchers
+  took 60 % of one core instead of 87 % (`tools/webrtc/MACOS.md`, "Checking patch 7").
 - **No camera, no picture.** Turning the camera on where the computer has none (Linux and
   Windows answer with a stream without a picture, macOS with `NotFoundError`) says that no
   camera is connected and leaves it off. A tile shows the avatar until its camera or screen

@@ -169,13 +169,19 @@ encoder of its own, and every watcher gets one when the shared encoder keeps fai
   (`common/cpp/src/flutter_webrtc_base.cc`; `FlutterWebRTCPlugin.m`, both copies). With
   `FOGATA_SHARED_SCREEN_ENCODE=off` in the environment it is left out, in every build (it
   only gives the saving up): `tools/call-lab` measures before and after on one build that
-  way. On macOS it is the other way round for now: off unless
-  `FOGATA_SHARED_SCREEN_ENCODE=on`, because a Mac sharing its own screen through the
-  shared encoder has not been run in a call yet (the framework builds with it, and a Mac
-  watching such a screen from Linux was checked); `tools/webrtc/MACOS.md` lists what to
-  check before it is turned on there. `FOGATA_WEBRTC_FIELD_TRIALS` (debug builds) replaces it with the others, and can set
+  way. On macOS too, since it was run there (`tools/webrtc/MACOS.md`, "Checking patch 7"):
+  until then it was off unless `FOGATA_SHARED_SCREEN_ENCODE=on`, and with that set it
+  shared nothing, for the reason the next point gives. `FOGATA_WEBRTC_FIELD_TRIALS` (debug builds) replaces it with the others, and can set
   its parameters, e.g. `Fogata-SharedScreenEncode/Enabled,key_ms:500,threads:2/`
   (`SharedEncodeConfig` in the wrapper's header lists them).
+- An encoder is shared only if it says, before it is initialized, that it encodes in
+  software (`SharedInner`). On macOS the plugin's factory gave WebRTC's
+  `SimulcastEncoderAdapter` over libvpx, which says nothing of its own until it is
+  initialized, so WebRTC's default stood ("hardware") and every connection kept an encoder
+  of its own. With the shared encode on, the macOS plugin gives the peer connection
+  factory its VP8 factory itself (`FlutterWebRTCPlugin.m`, both copies): libvpx's own
+  encoder, which says it is software. Calls send one stream of VP8, which the adapter only
+  passed on. With `FOGATA_SHARED_SCREEN_ENCODE=off` the adapter is used as before.
 - Only frames of a source marked as a shared screen are shared: the plugin calls
   `RTCVideoSource::EnableSharedEncode()` on the desktop source and on the portal's custom
   source (`common/cpp/src/flutter_screen_capture.cc`), and `enableFogataSharedEncode` on
