@@ -16,6 +16,10 @@ on:
         description: Scenarios, separated by spaces (empty, every connection scenario)
         required: false
         default: ""
+      liars:
+        description: How many times to run dht-liars after them
+        required: false
+        default: "30"
   push:
     branches: [lab/netlab]
 
@@ -63,17 +67,33 @@ jobs:
 
       - name: The network lab
         env:
-          SCENARIOS: ${{ inputs.scenarios || 'direct-apart friends-later friends-later-code transfer-cone-cone transfer-lan transfer-cone-symmetric transfer-two-routers transfer-two-routers-back update-chain update-refusals' }}
+          SCENARIOS: ${{ inputs.scenarios }}
         run: |
           set -o pipefail
           # shellcheck disable=SC2086  # the scenarios, one word each
           tools/netlab/netlab.sh $SCENARIOS 2>&1 | tee "$RUNNER_TEMP/netlab.log"
 
+      # Two devices that start in the same seconds and find each other through the DHT: how
+      # long each run took, and how many missed the scenario's limit.
+      - name: dht-liars, again and again
+        if: always()
+        env:
+          TIMES: ${{ inputs.liars || '30' }}
+        run: |
+          bin=$PWD/target/netlab/release/fogata
+          [[ -x $bin ]] || { echo "no lab program built"; exit 1; }
+          failed=0
+          for i in $(seq "$TIMES"); do
+            FOGATA_BIN=$bin tools/netlab/netlab.sh dht-liars > "$RUNNER_TEMP/liars-$i.log" 2>&1 || failed=$((failed + 1))
+            echo "run $i: $(grep -E 'connected after|^result:' "$RUNNER_TEMP/liars-$i.log" | tr '\n' ' ')"
+          done
+          echo "dht-liars: $failed of $TIMES failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ $failed == 0 ]]
+
       - name: What passed and what did not
         if: always()
         run: |
-          grep -E '^(PASS|FAIL|ok|not ok|=== |--- )' "$RUNNER_TEMP/netlab.log" | tail -n 200 \
-            >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E '^(=== |result: )' "$RUNNER_TEMP/netlab.log" >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Keep the log
         if: always()

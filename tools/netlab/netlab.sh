@@ -77,6 +77,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# A program left running (`... &`) is started with `ip netns exec` itself, not through this
+# function: `$!` is then the program (or the `timeout` over it), which a scenario may stop,
+# kill, interrupt or look at; through the function it would be the shell that runs it, on a
+# bash that keeps that shell, and the program would never get the signal.
 in_ns() { local ns=$1; shift; ip netns exec "$ns" "$@"; }
 
 # The "internet": one bridge that every public interface plugs into.
@@ -268,7 +272,7 @@ EOF2
 # to $WORK/$1.identified, as a stranger's DHT node sees them.
 start_dht() {
     local ns=$1 port=$2; shift 2
-    in_ns "$ns" "$BIN" lab-dht --port "$port" --records "$WORK/$ns.records" \
+    ip netns exec "$ns" "$BIN" lab-dht --port "$port" --records "$WORK/$ns.records" \
         --identified "$WORK/$ns.identified" "$@" \
         > "$WORK/$ns.out" 2>&1 &
     PIDS+=($!)
@@ -298,11 +302,11 @@ run_probe() {
     local receiver=$1 sender=$2
     local to
     to=$("$BIN" --data-dir "$WORK/data-$receiver" id | awk '/Short form/ {print $3}')
-    in_ns "$receiver" timeout 240 "$BIN" --data-dir "$WORK/data-$receiver" media-probe lab \
+    ip netns exec "$receiver" timeout 240 "$BIN" --data-dir "$WORK/data-$receiver" media-probe lab \
         --mode "$PROBE_MODE" --no-mdns $BOOT --packets "$PROBE_PACKETS" ${PROBE_EXTRA:-} \
         > "$WORK/$receiver.out" 2>&1 &
     PIDS+=($!)
-    in_ns "$sender" timeout 240 "$BIN" --data-dir "$WORK/data-$sender" media-probe lab --send \
+    ip netns exec "$sender" timeout 240 "$BIN" --data-dir "$WORK/data-$sender" media-probe lab --send \
         --mode "$PROBE_MODE" --to "$to" --no-mdns $BOOT --packets "$PROBE_PACKETS" \
         ${PROBE_EXTRA:-} > "$WORK/$sender.out" 2>&1 &
     PIDS+=($!)
@@ -314,7 +318,7 @@ run_device() {
     local name=$1; shift
     local data="$WORK/data-$name"
     (sleep "$SAY_AT"; echo "hello from $name"; sleep 8; echo /members; sleep "${STAY:-2}") |
-        in_ns "$name" timeout "$DURATION" "$BIN" --data-dir "$data" chat lab --nick "$name" \
+        ip netns exec "$name" timeout "$DURATION" "$BIN" --data-dir "$data" chat lab --nick "$name" \
             --no-mdns $BOOT "$@" > "$WORK/$name.out" 2>&1 &
     PIDS+=($!)
 }
@@ -386,7 +390,7 @@ members() {
 # Makes devices $1 and $2 friends: $1 shows a friend link, $2 sends the request with it.
 befriend() {
     local a=$1 b=$2 link
-    in_ns "$a" timeout 200 "$BIN" --data-dir "$WORK/data-$a" friends invite --accept-first \
+    ip netns exec "$a" timeout 200 "$BIN" --data-dir "$WORK/data-$a" friends invite --accept-first \
         --no-mdns $BOOT > "$WORK/$a-invite-$b.out" 2>&1 &
     PIDS+=($!)
     for _ in $(seq 300); do
@@ -444,9 +448,7 @@ refused_newer_code() {
 }
 
 # Starts `lab-soak` on device $1 with options $2...; its PID ends up in $SOAK.
-# $SOAK is the program itself: `ip netns exec` becomes it, where `in_ns ... &` would give
-# the shell that runs the function, and a signal sent to that one (a stop, a kill, an
-# interrupt) never reaches the program on a bash that keeps that shell.
+# $SOAK is the program itself (see in_ns).
 soak() {
     local device=$1; shift
     ip netns exec "$device" "$BIN" --data-dir "$WORK/data-$device" lab-soak --no-mdns $BOOT "$@" \
@@ -527,7 +529,7 @@ if [[ $SCENARIO == transfer-* ]]; then
     "$BIN" --data-dir "$WORK/data-C" profile --name Leo > /dev/null
     members A C
     before=$("$BIN" --data-dir "$WORK/data-A" id | awk '/Device key/ {print $3}')
-    in_ns B timeout 300 "$BIN" --data-dir "$WORK/data-B" transfer receive --yes "${nolan[@]}" \
+    ip netns exec B timeout 300 "$BIN" --data-dir "$WORK/data-B" transfer receive --yes "${nolan[@]}" \
         "${boot[@]}" "${recv_extra[@]}" --name "new computer" > "$WORK/B-receive.out" 2>&1 &
     RECEIVE=$!
     PIDS+=($RECEIVE)
@@ -600,13 +602,13 @@ case $SCENARIO in
         befriend B C
         release_setup
         "$BIN" --data-dir "$WORK/data-A" release publish "$WORK/rel2" > "$WORK/A-publish.out"
-        in_ns A timeout 300 "$BIN" --data-dir "$WORK/data-A" update run --for 280 --no-mdns \
+        ip netns exec A timeout 300 "$BIN" --data-dir "$WORK/data-A" update run --for 280 --no-mdns \
             $BOOT > "$WORK/A.out" 2>&1 &
         PIDS+=($!)
-        in_ns B timeout 300 "$BIN" --data-dir "$WORK/data-B" update run --for 280 --port 4100 \
+        ip netns exec B timeout 300 "$BIN" --data-dir "$WORK/data-B" update run --for 280 --port 4100 \
             --no-mdns $BOOT > "$WORK/B.out" 2>&1 &
         PIDS+=($!)
-        in_ns C timeout 300 "$BIN" --data-dir "$WORK/data-C" update run --for 280 --until-ready \
+        ip netns exec C timeout 300 "$BIN" --data-dir "$WORK/data-C" update run --for 280 --until-ready \
             --platform windows-x64 --no-mdns $BOOT > "$WORK/C.out" 2>&1 &
         c_pid=$!
         PIDS+=($c_pid)
@@ -671,7 +673,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         "$BIN" release --lab sign --key "$WORK/key/release-key" --build $((REL + 1)) --version "0.1.0-beta.$((REL + 1))" \
             --min-build 1 --out "$WORK/rel3" linux-flatpak="$WORK/linux3.pack" > /dev/null
         "$BIN" --data-dir "$WORK/data-B" release publish "$WORK/rel2" > "$WORK/B-publish.out"
-        in_ns B timeout 600 "$BIN" --data-dir "$WORK/data-B" update run --for 580 --port 4100 \
+        ip netns exec B timeout 600 "$BIN" --data-dir "$WORK/data-B" update run --for 580 --port 4100 \
             --no-mdns $BOOT > "$WORK/B.out" 2>&1 &
         b_pid=$!
         PIDS+=($b_pid)
@@ -681,7 +683,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
             local name=$1 from=$2 expect=$3 pid; shift 3
             rm -rf "${WORK:?}/data-L/updates"
             "$BIN" --data-dir "$WORK/data-L" lab-plant-release "$from" > /dev/null
-            in_ns L timeout 110 "$BIN" --data-dir "$WORK/data-L" update run --lab-unchecked \
+            ip netns exec L timeout 110 "$BIN" --data-dir "$WORK/data-L" update run --lab-unchecked \
                 --for 105 --no-mdns $BOOT "$@" > "$WORK/L-$name.out" 2>&1 &
             pid=$!
             for _ in $(seq 100); do
@@ -787,7 +789,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         "$BIN" --data-dir "$WORK/data-A" group create club > /dev/null
         "$BIN" --data-dir "$WORK/data-A" group invite club | tail -n1 > "$WORK/invite-B"
         (sleep 110; echo "hello from A"; sleep 30) |
-            in_ns A timeout 150 "$BIN" --data-dir "$WORK/data-A" chat club --nick A --accept-joins --no-mdns $BOOT \
+            ip netns exec A timeout 150 "$BIN" --data-dir "$WORK/data-A" chat club --nick A --accept-joins --no-mdns $BOOT \
             > "$WORK/A.out" 2>&1 &
         PIDS+=($!)
         in_ns B timeout 90 "$BIN" --data-dir "$WORK/data-B" group join "$(cat "$WORK/invite-B")" \
@@ -835,7 +837,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         "$BIN" --data-dir "$WORK/data-A" group invite club | tail -n1 > "$WORK/invite-B"
         # A says hello every 15 s, so B hears one whenever its join ends.
         (for _ in $(seq 24); do sleep 15; echo "hello from A"; done) |
-            in_ns A timeout 370 "$BIN" --data-dir "$WORK/data-A" chat club --nick A --accept-joins --no-mdns $BOOT \
+            ip netns exec A timeout 370 "$BIN" --data-dir "$WORK/data-A" chat club --nick A --accept-joins --no-mdns $BOOT \
             > "$WORK/A.out" 2>&1 &
         PIDS+=($!)
         started=$(date +%s)
@@ -868,7 +870,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         if [[ $SCENARIO == friends-code ]]; then
             flag=(--code) pattern='FGT-[0-9A-Z]{4,5}-[0-9A-Z]{4,5}'
         fi
-        in_ns A timeout 200 "$BIN_A" --data-dir "$WORK/data-A" friends invite "${flag[@]}" \
+        ip netns exec A timeout 200 "$BIN_A" --data-dir "$WORK/data-A" friends invite "${flag[@]}" \
             --accept-first --no-mdns $BOOT > "$WORK/A-invite.out" 2>&1 &
         PIDS+=($!)
         for _ in $(seq 300); do
@@ -887,7 +889,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         for device in A B; do
             bin=$BIN_A
             [[ $device == B ]] && bin=$BIN_B
-            in_ns "$device" timeout 100 "$bin" --data-dir "$WORK/data-$device" friends online \
+            ip netns exec "$device" timeout 100 "$bin" --data-dir "$WORK/data-$device" friends online \
                 --no-mdns $BOOT > "$WORK/$device-online.out" 2>&1 &
             PIDS+=($!)
         done
@@ -919,7 +921,7 @@ table inet block {
 }
 EOF
         for device in A B C; do
-            in_ns "$device" timeout 60 "$BIN" --data-dir "$WORK/data-$device" network --no-mdns \
+            ip netns exec "$device" timeout 60 "$BIN" --data-dir "$WORK/data-$device" network --no-mdns \
                 $BOOT > "$WORK/$device.out" 2>&1 &
             PIDS+=($!)
         done
@@ -927,7 +929,7 @@ EOF
         for dht in "$DHT1" "$DHT2" "$DHT3"; do
             tcp_boot+=(--bootstrap "${dht/\/udp\/4001\/quic-v1//tcp/4001}")
         done
-        in_ns D timeout 60 "$BIN" --data-dir "$WORK/data-D" network --no-mdns "${tcp_boot[@]}" \
+        ip netns exec D timeout 60 "$BIN" --data-dir "$WORK/data-D" network --no-mdns "${tcp_boot[@]}" \
             > "$WORK/D.out" 2>&1 &
         PIDS+=($!)
         wait "${PIDS[-1]}" "${PIDS[-2]}" "${PIDS[-3]}" "${PIDS[-4]}" 2>/dev/null || true
@@ -968,10 +970,10 @@ EOF
         for dht in "$DHT1" "$DHT2" "$DHT3"; do
             tcp_boot+=(--bootstrap "${dht/\/udp\/4001\/quic-v1//tcp/4001}")
         done
-        in_ns E timeout 60 "$BIN" --data-dir "$WORK/data-E" network --no-mdns "${tcp_boot[@]}" \
+        ip netns exec E timeout 60 "$BIN" --data-dir "$WORK/data-E" network --no-mdns "${tcp_boot[@]}" \
             > "$WORK/E.out" 2>&1 &
         PIDS+=($!)
-        in_ns F timeout 60 "$BIN" --data-dir "$WORK/data-F" network --no-mdns $BOOT \
+        ip netns exec F timeout 60 "$BIN" --data-dir "$WORK/data-F" network --no-mdns $BOOT \
             > "$WORK/F.out" 2>&1 &
         PIDS+=($!)
         wait "${PIDS[-1]}" "${PIDS[-2]}" 2>/dev/null || true
@@ -999,11 +1001,11 @@ EOF
         head -c 3000000 /dev/urandom > "$WORK/photo.bin"
         mkdir -p "$WORK/dl-B"
         (sleep 150) |
-            in_ns C timeout 150 "$BIN" --data-dir "$WORK/data-C" chat lab --nick C --no-mdns $BOOT \
+            ip netns exec C timeout 150 "$BIN" --data-dir "$WORK/data-C" chat lab --nick C --no-mdns $BOOT \
             > "$WORK/C.out" 2>&1 &
         PIDS+=($!)
         (sleep 50; echo "/share $WORK/photo.bin"; sleep 95) |
-            in_ns A timeout 150 "$BIN" --data-dir "$WORK/data-A" chat lab --nick A --no-mdns $BOOT \
+            ip netns exec A timeout 150 "$BIN" --data-dir "$WORK/data-A" chat lab --nick A --no-mdns $BOOT \
             > "$WORK/A.out" 2>&1 &
         PIDS+=($!)
         sleep 30
@@ -1034,7 +1036,7 @@ EOF
             "$BIN" --data-dir "$WORK/data-$device" profile --name "$device" > /dev/null
         done
         for device in B C; do
-            in_ns A timeout 200 "$BIN" --data-dir "$WORK/data-A" friends invite --accept-first \
+            ip netns exec A timeout 200 "$BIN" --data-dir "$WORK/data-A" friends invite --accept-first \
                 --no-mdns $BOOT > "$WORK/A-invite-$device.out" 2>&1 &
             PIDS+=($!)
             for _ in $(seq 300); do
@@ -1048,7 +1050,7 @@ EOF
         done
         "$BIN" --data-dir "$WORK/data-A" friends remove C > "$WORK/A-remove.out"
         for device in A B C; do
-            in_ns "$device" timeout 150 "$BIN" --data-dir "$WORK/data-$device" friends online \
+            ip netns exec "$device" timeout 150 "$BIN" --data-dir "$WORK/data-$device" friends online \
                 --no-mdns $BOOT > "$WORK/$device-online.out" 2>&1 &
             PIDS+=($!)
         done
@@ -1081,7 +1083,7 @@ EOF
         befriend() {
             local inviter=$1 invited=$2 bin=$BIN
             [[ $inviter == A ]] && bin=$BIN_A
-            in_ns "$inviter" timeout 200 "$bin" --data-dir "$WORK/data-$inviter" friends invite \
+            ip netns exec "$inviter" timeout 200 "$bin" --data-dir "$WORK/data-$inviter" friends invite \
                 --accept-first --no-mdns $BOOT > "$WORK/$inviter-invite-$invited.out" 2>&1 &
             PIDS+=($!)
             for _ in $(seq 300); do
@@ -1099,12 +1101,12 @@ EOF
         "$BIN_A" --data-dir "$WORK/data-A" friends remove E > "$WORK/A-remove.out"
         cat "$WORK/dht1.records" "$WORK/dht2.records" > "$WORK/records-before"
         # A comes back first and waits a while for M, announcing for it.
-        in_ns A timeout 180 "$BIN_A" --data-dir "$WORK/data-A" friends online --no-mdns $BOOT \
+        ip netns exec A timeout 180 "$BIN_A" --data-dir "$WORK/data-A" friends online --no-mdns $BOOT \
             > "$WORK/A-online.out" 2>&1 &
         PIDS+=($!)
         sleep 80
         for device in M E; do
-            in_ns "$device" timeout 100 "$BIN" --data-dir "$WORK/data-$device" friends online \
+            ip netns exec "$device" timeout 100 "$BIN" --data-dir "$WORK/data-$device" friends online \
                 --no-mdns $BOOT > "$WORK/$device-online.out" 2>&1 &
             PIDS+=($!)
         done
@@ -1144,7 +1146,7 @@ EOF
         if [[ $SCENARIO == friends-later-code ]]; then
             flag=(--code) pattern='FGT-[0-9A-Z]{4,5}-[0-9A-Z]{4,5}'
         fi
-        in_ns A timeout 150 "$BIN_A" --data-dir "$WORK/data-A" friends invite "${flag[@]}" \
+        ip netns exec A timeout 150 "$BIN_A" --data-dir "$WORK/data-A" friends invite "${flag[@]}" \
             --no-mdns $BOOT > "$WORK/A-invite.out" 2>&1 &
         PIDS+=($!)
         for _ in $(seq 300); do
@@ -1161,7 +1163,7 @@ EOF
         for device in A B; do
             bin=$BIN_A
             [[ $device == B ]] && bin=$BIN_B
-            in_ns "$device" timeout 120 "$bin" --data-dir "$WORK/data-$device" friends online \
+            ip netns exec "$device" timeout 120 "$bin" --data-dir "$WORK/data-$device" friends online \
                 --no-mdns $BOOT > "$WORK/$device-online.out" 2>&1 &
             PIDS+=($!)
         done
@@ -1241,13 +1243,13 @@ EOF
         members D
         real=/ip4/203.0.113.50/udp/41000/quic-v1
         (sleep 90) |
-            in_ns D env RUST_LOG=warn,fogata_net=debug timeout 85 "$BIN" --data-dir "$WORK/data-D" \
+            ip netns exec D env RUST_LOG=warn,fogata_net=debug timeout 85 "$BIN" --data-dir "$WORK/data-D" \
                 chat lab --nick D --port 41000 --no-mdns $BOOT > "$WORK/D.out" 2>&1 &
         PIDS+=($!)
         device=$!
         sleep 2
         liar() { # namespace, address it says
-            in_ns "$1" timeout 75 "$BIN" lab-liar --dial "$real" --says "$2" > "$WORK/$1.out" 2>&1 &
+            ip netns exec "$1" timeout 75 "$BIN" lab-liar --dial "$real" --says "$2" > "$WORK/$1.out" 2>&1 &
             PIDS+=($!)
         }
         liar L1 /ip4/203.0.113.66/udp/41000/quic-v1
@@ -1307,13 +1309,13 @@ EOF
         for i in $(seq 101 115); do in_ns F ip addr add "203.0.113.$i/24" dev wan; done
         real=/ip4/203.0.113.50/udp/41000/quic-v1
         (sleep 150) |
-            in_ns D env RUST_LOG=warn,fogata_net=debug timeout 160 "$BIN" --data-dir "$WORK/data-D" \
+            ip netns exec D env RUST_LOG=warn,fogata_net=debug timeout 160 "$BIN" --data-dir "$WORK/data-D" \
                 chat lab --nick D --port 41000 --no-mdns $BOOT > "$WORK/D.out" 2>&1 &
         PIDS+=($!)
         sleep 2
         for i in $(seq 100 115); do
             for k in 1 2 3 4; do
-                in_ns F timeout 155 "$BIN" lab-flood --dial "$real" --connections 8 \
+                ip netns exec F timeout 155 "$BIN" lab-flood --dial "$real" --connections 8 \
                     --listen "/ip4/203.0.113.$i/udp/0/quic-v1" > "$WORK/F$i-$k.out" 2>&1 &
                 PIDS+=($!)
             done
@@ -1360,7 +1362,7 @@ EOF
         lan_n=$(in_ns N ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1)
         quiet_device() { # name, seconds
             (sleep "$2") |
-                in_ns "$1" bash -c 'ulimit -n 2048; exec "$@"' - env RUST_LOG=warn,fogata_net=debug \
+                ip netns exec "$1" bash -c 'ulimit -n 2048; exec "$@"' - env RUST_LOG=warn,fogata_net=debug \
                     timeout "$2" "$BIN" --data-dir "$WORK/data-$1" chat lab --nick "$1" \
                     --port 41000 --no-mdns $BOOT > "$WORK/$1.out" 2>&1 &
             PIDS+=($!)
@@ -1370,10 +1372,10 @@ EOF
         quiet_device E 130
         e_pid=$!
         sleep 2
-        in_ns F timeout 125 "$BIN" lab-silent --dial 203.0.113.50:41000 --per-address 512 \
+        ip netns exec F timeout 125 "$BIN" lab-silent --dial 203.0.113.50:41000 --per-address 512 \
             $(for i in $(seq 1 8); do echo "--from 198.18.0.$i"; done) > "$WORK/F.out" 2>&1 &
         PIDS+=($!)
-        in_ns N timeout 125 "$BIN" lab-silent --dial "$lan_e:41000" --per-address 4096 \
+        ip netns exec N timeout 125 "$BIN" lab-silent --dial "$lan_e:41000" --per-address 4096 \
             --from "$lan_n" > "$WORK/N.out" 2>&1 &
         PIDS+=($!)
         # The open files of a device's process (the child of `timeout`).
@@ -1434,7 +1436,7 @@ EOF
         done
         for i in 101 102 103; do in_ns F ip addr add "203.0.113.$i/24" dev wan; done
         (sleep 200) |
-            in_ns D bash -c 'ulimit -n 2048; exec "$@"' - env RUST_LOG=warn,fogata_net=debug \
+            ip netns exec D bash -c 'ulimit -n 2048; exec "$@"' - env RUST_LOG=warn,fogata_net=debug \
                 timeout 200 "$BIN" --data-dir "$WORK/data-D" chat lab --nick D --port 41000 \
                 --no-mdns $BOOT > "$WORK/D.out" 2>&1 &
         d_pid=$!
@@ -1456,7 +1458,7 @@ EOF
         for block in 198.18 198.19 198.20; do
             for i in 1 2 3 4; do from+=(--from "$block.0.$i"); done
         done
-        in_ns F timeout 150 "$BIN" lab-silent --dial 203.0.113.50:41000 --per-address 512 \
+        ip netns exec F timeout 150 "$BIN" lab-silent --dial 203.0.113.50:41000 --per-address 512 \
             "${from[@]}" > "$WORK/F.out" 2>&1 &
         PIDS+=($!)
         # The most files D's process (the child of `timeout`) had open while flooded.
@@ -1522,7 +1524,7 @@ EOF2
         started=$(date -u +%s)
         lan_device() { # name
             (sleep 40; echo "hello from $1"; sleep 15) |
-                in_ns "$1" env RUST_LOG=warn,libp2p_mdns=debug,fogata_net=debug timeout 60 "$BIN" --data-dir "$WORK/data-$1" chat lab --nick "$1" \
+                ip netns exec "$1" env RUST_LOG=warn,libp2p_mdns=debug,fogata_net=debug timeout 60 "$BIN" --data-dir "$WORK/data-$1" chat lab --nick "$1" \
                     --no-dht > "$WORK/$1.out" 2>&1 &
             PIDS+=($!)
         }
@@ -1675,7 +1677,7 @@ table inet block {
 EOF2
         trials=${TRIALS:-20}
         (sleep $((trials * 16 + 10))) |
-            in_ns D env RUST_LOG=warn,libp2p_swarm=debug timeout $((trials * 16 + 10)) "$BIN" \
+            ip netns exec D env RUST_LOG=warn,libp2p_swarm=debug timeout $((trials * 16 + 10)) "$BIN" \
                 --data-dir "$WORK/data-D" chat lab --nick D --port 41000 --no-mdns --no-dht \
                 > "$WORK/D.out" 2>&1 &
         PIDS+=($!)
@@ -1705,12 +1707,12 @@ EOF2
         nat_hosts_shared 203.0.113.60 A B N
         members A B
         lan_n=$(in_ns N ip -4 -o addr show dev eth0 | awk '{print $4}' | cut -d/ -f1)
-        in_ns N timeout 100 "$BIN" lab-mdns-flood --interface "$lan_n" > "$WORK/N.out" 2>&1 &
+        ip netns exec N timeout 100 "$BIN" lab-mdns-flood --interface "$lan_n" > "$WORK/N.out" 2>&1 &
         PIDS+=($!)
         sleep 1
         lan_device() { # name
             (sleep 30; echo "hello from $1"; sleep 55) |
-                in_ns "$1" env RUST_LOG=warn,fogata_net=debug,libp2p_mdns=info timeout 90 "$BIN" \
+                ip netns exec "$1" env RUST_LOG=warn,fogata_net=debug,libp2p_mdns=info timeout 90 "$BIN" \
                     --data-dir "$WORK/data-$1" chat lab --nick "$1" --no-dht > "$WORK/$1.out" 2>&1 &
             PIDS+=($!)
         }
@@ -1757,7 +1759,7 @@ EOF2
         "$BIN" --data-dir "$WORK/data-B" profile --name Bea > /dev/null
         "$BIN" --data-dir "$WORK/data-S" profile --name Sofia > /dev/null
         "$BIN" --data-dir "$WORK/data-S" group create other > /dev/null
-        in_ns A timeout 200 "$BIN" --data-dir "$WORK/data-A" friends invite --accept-first \
+        ip netns exec A timeout 200 "$BIN" --data-dir "$WORK/data-A" friends invite --accept-first \
             --no-mdns $BOOT > "$WORK/A-invite.out" 2>&1 &
         PIDS+=($!)
         for _ in $(seq 300); do
