@@ -63,7 +63,7 @@ jobs:
 
       - name: The network lab
         env:
-          SCENARIOS: ${{ inputs.scenarios }}
+          SCENARIOS: ${{ inputs.scenarios || 'direct-apart friends-later friends-later-code transfer-cone-cone transfer-lan transfer-cone-symmetric transfer-two-routers transfer-two-routers-back update-chain update-refusals' }}
         run: |
           set -o pipefail
           # shellcheck disable=SC2086  # the scenarios, one word each

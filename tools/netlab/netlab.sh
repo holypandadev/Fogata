@@ -444,12 +444,39 @@ refused_newer_code() {
 }
 
 # Starts `lab-soak` on device $1 with options $2...; its PID ends up in $SOAK.
+# $SOAK is the program itself: `ip netns exec` becomes it, where `in_ns ... &` would give
+# the shell that runs the function, and a signal sent to that one (a stop, a kill, an
+# interrupt) never reaches the program on a bash that keeps that shell.
 soak() {
     local device=$1; shift
-    in_ns "$device" "$BIN" --data-dir "$WORK/data-$device" lab-soak --no-mdns $BOOT "$@" \
+    ip netns exec "$device" "$BIN" --data-dir "$WORK/data-$device" lab-soak --no-mdns $BOOT "$@" \
         >> "$WORK/$device.out" 2>&1 < /dev/null &
     SOAK=$!
     PIDS+=($SOAK)
+}
+
+# Waits for the programs $@ to end, 30 s at most; one still there then is killed, so a
+# scenario never waits for ever.
+wait_end() {
+    local pid running
+    for _ in $(seq 60); do
+        running=0
+        for pid in "$@"; do
+            # One that ended and waits to be asked after is no longer running.
+            if [[ -r /proc/$pid/status ]] && ! grep -q '^State:[[:space:]]*Z' "/proc/$pid/status"; then
+                running=1
+            fi
+        done
+        [[ $running == 0 ]] && break
+        sleep 0.5
+    done
+    for pid in "$@"; do
+        if [[ -r /proc/$pid/status ]] && ! grep -q '^State:[[:space:]]*Z' "/proc/$pid/status"; then
+            echo "netlab: $pid did not end when asked to; killed" >&2
+            kill -9 "$pid" 2> /dev/null || true
+        fi
+    done
+    wait "$@" 2> /dev/null || true
 }
 
 # Whether everything device $1 wrote to $3 (named $4 there) reached it once, in order, and
@@ -1177,7 +1204,7 @@ EOF
         pid_a=$SOAK
         sleep 100
         kill -INT "$pid_a" "$pid_b" 2>/dev/null
-        wait "$pid_a" "$pid_b" 2>/dev/null || true
+        wait_end "$pid_a" "$pid_b"
         for device in A B; do
             "$BIN" --data-dir "$WORK/data-$device" lab-soak --dump > "$WORK/$device.dump" 2>&1
         done
