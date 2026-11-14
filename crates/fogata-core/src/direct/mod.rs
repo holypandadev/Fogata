@@ -390,7 +390,26 @@ struct Held {
     /// An attachment's download, which shows with its messages without reading the chat,
     /// moves it on.
     away_since: u64,
+    /// Records its views may still open while it is not held ([`AWAY_RECORDS`]); at none,
+    /// the next view reads it whole and holds it.
+    budget: std::cell::Cell<usize>,
+    /// Whether items are before a place, as last read while it is not held (the place, the
+    /// count asked for when the place is none, and the answer): what a screen that changed
+    /// nothing asks again and again, which cannot change until the chat is read.
+    before: std::cell::Cell<Option<Before>>,
 }
+
+/// Whether items are before a place of a chat ([`Held::before`]).
+type Before = (Option<(u64, ItemId)>, usize, bool);
+
+/// Records a chat not held may have opened for its views (its pages, older pages, pins and
+/// attachments) since it was let go of. About four of the screen's pages of 200 items: past
+/// them, scrolling back in it, refreshes of a view from far back or a pin of a message gone
+/// (looked for back to the start) would cost more than reading the chat whole, so the view
+/// that would pass them reads it whole and holds it, as every view did before chats were
+/// read by pages. So a chat shown costs at most these records more than it did then, each
+/// time it is let go of.
+const AWAY_RECORDS: usize = 800;
 
 /// Counts uses of chats (see [`Held::used`]).
 static USES: AtomicU64 = AtomicU64::new(0);
@@ -412,6 +431,7 @@ impl Held {
             // Later than any view read before (of a core started before this one, say), as
             // a chat read now is.
             away_since: model::stamp(),
+            budget: std::cell::Cell::new(AWAY_RECORDS),
             ..Self::default()
         }
     }
@@ -463,6 +483,8 @@ impl Held {
             // Any change of the chat took a stamp up to now: a view read at this one is
             // still the chat as it is.
             self.away_since = model::version();
+            self.budget.set(AWAY_RECORDS);
+            self.before.set(None);
         }
     }
 }
@@ -1339,12 +1361,14 @@ impl Chats {
     /// The view `pick` asks for of the chat with `friend` while its items are not held, read
     /// by pages back from the end of its journal, with its pins, in place of the chat whole:
     /// opening a long chat and scrolling back in it read about what shows. The chat is not
-    /// held after it (which chats are held is as before).
+    /// held after it, until its views opened [`AWAY_RECORDS`] records: the view that would
+    /// pass them reads it whole and holds it, as every view did before.
     ///
-    /// `None` when the chat is held (or new), when its journal or pins do not read back as
-    /// last written (read whole, the chat keeps what can be kept and says it was altered), or
-    /// when they are from before items kept their time in the chat, which only a read from
-    /// the start works out: the view comes from the chat read whole then.
+    /// `None` when the chat is held (or new), when its views opened that many records since
+    /// it was let go of, when its journal or pins do not read back as last written where
+    /// they are read (read whole, the chat keeps what can be kept and says it was altered),
+    /// or when they are from before items kept their time in the chat, which only a read
+    /// from the start works out: the view comes from the chat read whole then.
     ///
     /// With the chats held, as reading a chat whole is: a chat not held has no record being
     /// written, as one is let go of only with none to write, and anything that writes to it
@@ -1360,42 +1384,82 @@ impl Chats {
             return None;
         }
         debug_assert_eq!(entry.chat.pending.load(Ordering::Acquire), 0);
-        self.away_page(state, friend, entry, pick)
-            .inspect_err(|e| tracing::debug!("a chat is read whole, not by pages: {e:#}"))
+        let mut budget = entry.chat.budget.get();
+        let page = self.away_page(state, friend, entry, pick, &mut budget);
+        entry.chat.budget.set(budget);
+        page.inspect_err(|e| tracing::debug!("a chat is read whole, not by pages: {e:#}"))
             .ok()
             .flatten()
     }
 
-    /// [`Self::paged_view`] of a chat not held.
+    /// [`Self::paged_view`] of a chat not held, opening at most `budget` records, counted
+    /// down from it.
     fn away_page(
         &self,
         state: &ChatsState,
         friend: &DevicePublicKey,
         entry: &Entry,
         pick: &Pick,
+        budget: &mut usize,
     ) -> Result<Option<Page>> {
         let store = &self.store;
+        let held = &entry.chat;
         let order = |item: &Item| (item.seq, item.id);
-        let aside = store.read_pins(friend)?;
-        let walk = |before, take: &mut dyn FnMut(usize, &Item) -> bool| {
-            store.walk_back(friend, &aside, before, take)
+        let summary = &held.summary;
+        let mut usage = summary.usage;
+        usage.messages = store.journal_bytes(friend);
+        let page = |items, more, whole, pinned| Page {
+            items,
+            more,
+            removed: Vec::new(),
+            whole,
+            pinned,
+            timer_ms: summary.timer_ms.max(if summary.is_empty() {
+                state.settings.timer_ms
+            } else {
+                0
+            }),
+            usage,
+            // A chat not held was taken from its summary (its files as last written), or let
+            // go of after it was read whole, which made its files as last written again: read
+            // whole now, it would not say it was altered either. Files changed since and read
+            // here do not read by pages, and the chat is read whole.
+            altered: false,
+        };
+        // A chat not held changes only once read: nothing changed since a view read after it
+        // was let go of. Only whether items are before the view's oldest is told: as read
+        // last for that place, or read back to it.
+        if let Pick::Changes { since, from, count } = *pick
+            && since >= held.away_since
+            && since <= model::version()
+        {
+            let more = match held.before.get() {
+                Some((at, n, more)) if at == from && (from.is_some() || n == count) => more,
+                _ => {
+                    let aside = store.read_pins_within(friend, budget)?;
+                    let (_, more) = match from {
+                        Some(from) => {
+                            store.walk_back(friend, &aside, Some(from), budget, |_, _| false)?
+                        }
+                        None => store.walk_back(friend, &aside, None, budget, |n, _| n < count)?,
+                    };
+                    held.before.set(Some((from, count, more)));
+                    more
+                }
+            };
+            return Ok(Some(page(Vec::new(), more, false, None)));
+        }
+        if *budget == 0 {
+            bail!("its views read as much as the chat whole");
+        }
+        let aside = store.read_pins_within(friend, budget)?;
+        let mut walk = |before, take: &mut dyn FnMut(usize, &Item) -> bool| {
+            store.walk_back(friend, &aside, before, budget, take)
         };
         let (items, more, whole, with_pins) = match *pick {
             Pick::Newest(limit) => {
                 let (items, more) = walk(None, &mut |n, _| n < limit)?;
                 (items, more, true, true)
-            }
-            // A chat not held changes only once read: nothing changed since a view read
-            // after it was let go of. Only whether items are before the view's oldest is
-            // read, back to it.
-            Pick::Changes { since, from, count }
-                if since >= entry.chat.away_since && since <= model::version() =>
-            {
-                let (_, more) = match from {
-                    Some(from) => walk(Some(from), &mut |_, _| false)?,
-                    None => walk(None, &mut |n, _| n < count)?,
-                };
-                (Vec::new(), more, false, false)
             }
             // What changed since is not known: the items from the view's oldest on, whole,
             // as when the chat was read again since.
@@ -1418,7 +1482,7 @@ impl Chats {
                 (items, more, false, false)
             }
         };
-        let (pinned, present) = self.pins_of(friend, &aside, &items, with_pins)?;
+        let (pinned, present) = self.pins_of(friend, &aside, &items, with_pins, budget)?;
         if items.iter().chain(&pinned).any(|i| i.at_ms == 0) {
             return Ok(None);
         }
@@ -1427,34 +1491,23 @@ impl Chats {
         let shows = |item: &Item| {
             item.pin_target().is_none_or(|t| present.contains(t)) && item.unsend_target().is_none()
         };
-        let summary = &entry.chat.summary;
-        let mut usage = summary.usage;
-        usage.messages = store.journal_bytes(friend);
-        Ok(Some(Page {
-            items: items.iter().filter(|i| shows(i)).map(&view).collect(),
-            more,
-            removed: Vec::new(),
-            whole,
-            pinned: with_pins.then(|| pinned.iter().map(&view).collect()),
-            timer_ms: summary.timer_ms.max(if summary.is_empty() {
-                state.settings.timer_ms
-            } else {
-                0
-            }),
-            usage,
-            // A chat not held was taken from its summary (its files as last written), or let
-            // go of after it was read whole, which made its files as last written again: read
-            // whole now, it would not say it was altered either. Files changed since do not
-            // read by pages, and the chat is read whole.
-            altered: false,
-        }))
+        // The oldest item shown is the place the screen asks from next: whether items are
+        // before it is known now.
+        if let Some(at) = items.iter().position(shows) {
+            held.before
+                .set(Some((Some(order(&items[at])), 0, more || at > 0)));
+        }
+        let shown = items.iter().filter(|i| shows(i)).map(&view).collect();
+        let pinned = with_pins.then(|| pinned.iter().map(&view).collect());
+        Ok(Some(page(shown, more, whole, pinned)))
     }
 
     /// The messages pinned now in the chat with `friend` (as [`Chat::pinned`]), from `aside`
     /// (its pins, unpins and deletions for both) and `page` (items read from the end of its
     /// journal), with the ids of the chat's items found that a pin may be about. What is not
-    /// in `page` is read back from the end of the journal until found: a pin of an old
-    /// message reads back to it. Only the pins of `page`'s items are looked for unless `all`
+    /// in `page` is read back from the end of the journal until found, opening at most
+    /// `budget` records: a pin of an old message reads back to it, and one of a message gone
+    /// to the journal's start. Only the pins of `page`'s items are looked for unless `all`
     /// (or more messages are pinned than are kept, so which are depends on the rest).
     fn pins_of(
         &self,
@@ -1462,6 +1515,7 @@ impl Chats {
         aside: &[Item],
         page: &[Item],
         all: bool,
+        budget: &mut usize,
     ) -> Result<(Vec<Item>, HashSet<ItemId>)> {
         // The last pin or unpin of each message, by its author's time (ties by id).
         let mut last: HashMap<ItemId, ((u64, ItemId), bool)> = HashMap::new();
@@ -1501,7 +1555,7 @@ impl Chats {
             }
         }
         if !missing.is_empty() {
-            self.store.scan_back(friend, |item| {
+            self.store.scan_back_within(friend, budget, |item| {
                 if missing.remove(&item.id) {
                     found.insert(item.id, item);
                 }
@@ -1947,18 +2001,25 @@ impl Core {
             }
             // Read back from the end of the journal to the first message with the file. Under
             // several names, the chat's first message with it gives it, as below: read back
-            // to the start.
+            // to the start. What it opens counts against what the chat's views may open
+            // ([`AWAY_RECORDS`]); past it, the chat is read whole below and held.
             let mut kept = None;
-            let read = self.inner.direct.store.scan_back(&friend, |item| {
-                if let Some(f) = item
-                    .files()
-                    .iter()
-                    .find(|f| f.id == file && f.local == Local::Here)
-                {
-                    kept = Some(f.clone());
-                }
-                names > 1 || kept.is_none()
-            });
+            let mut budget = entry.chat.budget.get();
+            let read = self
+                .inner
+                .direct
+                .store
+                .scan_back_within(&friend, &mut budget, |item| {
+                    if let Some(f) = item
+                        .files()
+                        .iter()
+                        .find(|f| f.id == file && f.local == Local::Here)
+                    {
+                        kept = Some(f.clone());
+                    }
+                    names > 1 || kept.is_none()
+                });
+            entry.chat.budget.set(budget);
             match read {
                 Ok(_) => return kept.context("that file is not on this computer"),
                 // Read whole below, which keeps what can be kept.
@@ -3202,9 +3263,21 @@ mod tests {
     }
 
     /// The view `pick` asks for of the chat with `friend`, by pages (which must read so).
+    /// As the first view since the chat was let go of: what earlier ones read is not counted
+    /// ([`AWAY_RECORDS`]).
     fn paged(chats: &Chats, friend: &DevicePublicKey, pick: Pick) -> Page {
         let state = chats.lock();
+        state.chats[friend].chat.budget.set(AWAY_RECORDS);
         chats.paged_view(&state, friend, &pick).unwrap()
+    }
+
+    /// The view `pick` asks for of the chat with `friend`, as a screen gets it: by pages
+    /// while that reads so, or from the chat read whole.
+    fn view(chats: &Chats, friend: &DevicePublicKey, pick: Pick) -> Page {
+        let state = chats.lock();
+        chats
+            .paged_view(&state, friend, &pick)
+            .unwrap_or_else(|| chats.held_page(&state, friend, &state.chats[friend], &pick))
     }
 
     /// The view `pick` asks for of the chat with `friend`, read whole.
@@ -3322,6 +3395,264 @@ mod tests {
         for (page, pick) in pages.iter().zip(picks()) {
             assert_eq!(page.shown(), whole(&chats, &friend, pick).shown());
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A chat of `n` messages written at once in a new folder at `dir` (sealed with `key`),
+    /// then let go of.
+    fn long_chat(
+        dir: &Path,
+        key: Option<fogata_crypto::at_rest::DataKey>,
+        n: u64,
+    ) -> (Chats, DevicePublicKey) {
+        let _ = std::fs::remove_dir_all(dir);
+        let chats = Chats::open(dir, key, Arc::new(Writer::start().unwrap()));
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        let now = now_ms();
+        write(
+            &chats,
+            &friend,
+            (0..n).map(|i| nth(i, now - n + i, Vec::new())),
+        );
+        let_go(&chats, &friend);
+        (chats, friend)
+    }
+
+    /// A chat on screen, not held, refreshed again and again with nothing changed in it (as
+    /// every event of any chat asks): after its first view, nothing more is read.
+    #[test]
+    fn a_chat_on_screen_refreshed_with_nothing_changed_reads_nothing() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = std::env::temp_dir().join(format!("fogata-direct-same-{}", std::process::id()));
+        let (chats, friend) = long_chat(&dir, None, 5_000);
+        let loads = || chats.store.loads.load(Relaxed);
+        let records = || chats.store.records_back.load(Relaxed);
+        let before = records();
+        let first = view(&chats, &friend, Pick::Newest(200));
+        let version = model::version();
+        // The 200 newest, and one that tells older ones are there.
+        assert_eq!(records() - before, 201);
+        let oldest = &first.items[0].item;
+        let from = Some((oldest.seq, oldest.id));
+        let read = records();
+        for _ in 0..100 {
+            let same = view(
+                &chats,
+                &friend,
+                Pick::Changes {
+                    since: version,
+                    from,
+                    count: 200,
+                },
+            );
+            assert!(same.items.is_empty() && !same.whole && same.more);
+            assert!(same.pinned.is_none() && same.removed.is_empty());
+        }
+        assert_eq!(records(), read, "a refresh read the journal");
+        assert_eq!(loads(), 0);
+        assert!(chats.lock().chats[&friend].chat.is_away());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Scrolling far back in a chat not held reads it by pages until its views read
+    /// [`AWAY_RECORDS`] records; the view that would read more reads the chat whole, once,
+    /// and holds it, and from then on nothing is read from the disk for it.
+    #[test]
+    fn scrolling_far_back_reads_the_chat_whole_once_then_nothing() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let dir = std::env::temp_dir().join(format!("fogata-direct-far-{}", std::process::id()));
+        let (chats, friend) = long_chat(&dir, None, 5_000);
+        let loads = || chats.store.loads.load(Relaxed);
+        let records = || chats.store.records_back.load(Relaxed);
+        let before = records();
+        let mut shown = view(&chats, &friend, Pick::Newest(200));
+        let mut held = 0;
+        let mut pages = 1;
+        while shown.more {
+            let oldest = &shown.items[0].item;
+            shown = view(
+                &chats,
+                &friend,
+                Pick::Older {
+                    before: (oldest.seq, oldest.id),
+                    count: 200,
+                    down_to: None,
+                },
+            );
+            pages += 1;
+            if held == 0 && !chats.lock().chats[&friend].chat.is_away() {
+                held = pages;
+                // 201 records for the newest page, 401 for the one before it; the third
+                // would read 601 but only the 198 left are opened before it reads whole.
+                assert_eq!(records() - before, AWAY_RECORDS);
+                assert_eq!(loads(), 1);
+            }
+        }
+        assert_eq!(pages, 25);
+        assert_eq!(held, 3);
+        let version = model::version();
+        view(
+            &chats,
+            &friend,
+            Pick::Changes {
+                since: version,
+                from: None,
+                count: 200,
+            },
+        );
+        view(&chats, &friend, Pick::Newest(200));
+        assert_eq!(
+            records() - before,
+            AWAY_RECORDS,
+            "read again after the whole read"
+        );
+        assert_eq!(loads(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A chat whose journal does not read back as last written, or is from before items
+    /// kept their time in the chat, is not shown by pages: it is read whole, which keeps
+    /// what reads, puts a copy aside, writes it again, says it was altered, or refuses
+    /// writes to a chat that cannot be read.
+    #[test]
+    fn a_journal_that_does_not_read_by_pages_is_read_whole() {
+        let base =
+            std::env::temp_dir().join(format!("fogata-direct-fallback-{}", std::process::id()));
+        let aside = |chats: &Chats, friend: &DevicePublicKey| {
+            std::fs::read_dir(chats.store.chat_dir(friend))
+                .unwrap()
+                .flatten()
+                .any(|e| {
+                    e.file_name()
+                        .to_string_lossy()
+                        .starts_with("journal.damaged")
+                })
+        };
+        let pick = Pick::Newest(10);
+        let not_paged = |chats: &Chats, friend: &DevicePublicKey| {
+            let state = chats.lock();
+            assert!(state.chats[friend].chat.is_away());
+            chats.paged_view(&state, friend, &pick).is_none()
+        };
+        // Cut inside its last record.
+        let (chats, friend) = long_chat(&base.join("cut"), None, 50);
+        let journal = chats.store.chat_dir(&friend).join("journal");
+        let bytes = std::fs::read(&journal).unwrap();
+        std::fs::write(&journal, &bytes[..bytes.len() - 3]).unwrap();
+        assert!(not_paged(&chats, &friend));
+        let page = view(&chats, &friend, pick);
+        assert!(page.altered && aside(&chats, &friend));
+        assert_eq!(chats.store.scan_back(&friend, |_| true).unwrap(), 49);
+        // Another chat's in its place, sealed.
+        let key = fogata_crypto::at_rest::DataKey::generate().unwrap();
+        let (chats, friend) = long_chat(&base.join("other"), Some(key), 50);
+        let other = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        write(&chats, &other, [nth(1, now_ms(), Vec::new())]);
+        chats.settle();
+        let journal = chats.store.chat_dir(&friend).join("journal");
+        let theirs = chats.store.chat_dir(&other).join("journal");
+        std::fs::copy(&theirs, &journal).unwrap();
+        assert!(not_paged(&chats, &friend));
+        let page = view(&chats, &friend, pick);
+        assert!(page.altered && aside(&chats, &friend));
+        assert!(page.items.is_empty());
+        // One that cannot be read at all: nothing is written to it.
+        let (chats, friend) = long_chat(&base.join("unread"), None, 50);
+        let journal = chats.store.chat_dir(&friend).join("journal");
+        std::fs::remove_file(&journal).unwrap();
+        std::fs::create_dir(&journal).unwrap();
+        assert!(not_paged(&chats, &friend));
+        assert!(view(&chats, &friend, pick).items.is_empty());
+        assert!(chats.store.refuses_writes(&friend));
+        // Items from before their time in the chat was kept: worked out reading it whole.
+        let dir = base.join("old");
+        let _ = std::fs::remove_dir_all(&dir);
+        let chats = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        {
+            let mut state = chats.lock();
+            let entry = state.chats.entry(friend).or_default();
+            let records: Vec<Record> = (1..=20)
+                .map(|n| {
+                    let item = Item {
+                        seq: n,
+                        ..nth(n, 1_000 + n, Vec::new())
+                    };
+                    entry.chat.insert(item.clone());
+                    Record::Item { item }
+                })
+                .collect();
+            chats.journal(&friend, entry, &records);
+        }
+        let_go(&chats, &friend);
+        assert!(not_paged(&chats, &friend));
+        let page = view(&chats, &friend, pick);
+        assert_eq!(page.items.len(), 10);
+        assert!(page.items.iter().all(|v| v.item.at_ms > 0) && !page.altered);
+        std::fs::remove_dir_all(&base).unwrap();
+    }
+
+    /// An attachment's download shows in a chat not held: a view of it from before gets
+    /// the chat again, with how much of the file came.
+    #[test]
+    fn a_download_shows_in_a_chat_not_held() {
+        let dir = std::env::temp_dir().join(format!("fogata-direct-coming-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let chats = Chats::open(&dir, None, Arc::new(Writer::start().unwrap()));
+        let friend = fogata_crypto::DeviceIdentity::generate()
+            .unwrap()
+            .public_key();
+        let now = now_ms();
+        let file = Attachment {
+            id: [7; 32],
+            name: "clip.mp4".into(),
+            size: 100,
+            kind: FileKind::Video,
+            video: None,
+            local: Local::Missing,
+            voice: None,
+        };
+        write(
+            &chats,
+            &friend,
+            (0..20).map(|n| {
+                nth(
+                    n,
+                    now,
+                    if n == 18 {
+                        vec![file.clone()]
+                    } else {
+                        Vec::new()
+                    },
+                )
+            }),
+        );
+        let_go(&chats, &friend);
+        let first = view(&chats, &friend, Pick::Newest(10));
+        let version = model::version();
+        let oldest = &first.items[0].item;
+        let changes = Pick::Changes {
+            since: version,
+            from: Some((oldest.seq, oldest.id)),
+            count: 10,
+        };
+        assert!(view(&chats, &friend, changes).items.is_empty());
+        chats.lock().set_download(friend, file.id, Some(40));
+        let page = view(&chats, &friend, changes);
+        assert!(page.whole);
+        let coming = page
+            .items
+            .iter()
+            .flat_map(|v| &v.files)
+            .find(|f| f.file.id == file.id);
+        assert_eq!(coming.and_then(|f| f.received), Some(40));
+        assert!(chats.lock().chats[&friend].chat.is_away());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
