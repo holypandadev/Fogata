@@ -51,7 +51,13 @@ core and 143 MB to 0.3 % and 107 MB, 10 to 30 minutes after starting, and opened
 connections to DHT nodes in half an hour instead of 6642. It also looks again as soon as its
 own first announcement goes through, since those who started at about the same time are
 announced by then while the lookups made at the start found nobody: in the network lab the
-first connection comes 12 to 20 s after starting instead of about 75. With every connection kept for
+first connection comes 12 to 20 s after starting instead of about 75. And not once only: at
+the slot that follows the announcement and at the two after it (half a minute, for the
+groups it found nobody of and for its friends), since the other's record may not be
+findable yet at the first look, and the next one was half a minute or more away: two
+devices started in the same seconds took 32 or 52 s now and then (about one run in ten of
+the lab's `dht-liars`); with the three looks, thirty runs in a row took 18 to 27 s
+(`.github/workflows/netlab.yml`). With every connection kept for
 60 s after its last use and most DHT nodes reached over TCP, a device held 200 to 600 open
 sockets, one file descriptor each; desktop apps on macOS may only open 256. The node
 therefore treats DHT nodes as strangers:

@@ -146,7 +146,10 @@ name, in the release's notes for the maintainers, never passed over in silence.
      6 copies; `measure.sh 4 camera 60` on the debug build): every copy's result says
      `passed`, no copy was kept out, and `coredumpctl list --since <the start>` shows no
      crash of `fogata`.
-3. **The network.** `tools/netlab/netlab.sh`, every scenario (about 70 minutes). And on
+3. **The network.** `tools/netlab/netlab.sh`, every scenario (about 70 minutes), here or on
+   one of GitHub's computers (`gh workflow run netlab.yml`, which also runs `dht-liars`
+   thirty times: two devices started in the same seconds must find each other within its
+   limit every time). And on
    the real internet, the release build of the command line must log "this device's
    public address confirmed" within seconds:
    `RUST_LOG=warn,fogata_net::node::network=debug target/release/fogata --data-dir $(mktemp -d) network`.

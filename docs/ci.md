@@ -69,7 +69,8 @@ applications, by hand, and has GitHub attest them; it signs nothing
 (docs/releasing-beta.md, "A release", step 2). `.github/workflows/update-install.yml`, by
 hand after a release is published, installs an earlier release on Windows and as a Flatpak
 and sees it update itself to the newest one from the releases page (the same document,
-step 7).
+step 7). `.github/workflows/netlab.yml`, by hand, runs the network lab on one of GitHub's
+computers (the same document, "Checks before a release", 3).
 
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD; --split app|checks: half of it
