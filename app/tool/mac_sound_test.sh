@@ -12,10 +12,21 @@
 # plays its own (which must come through). Both play on the Mac's output for about 25
 # seconds: turn the sound down. The first run makes macOS ask for Screen Recording for the
 # test build; allow it (System Settings > Privacy & Security) and run it again.
+# QuickTime Player is told what to do with Apple events, so macOS also asks, once, whether
+# the program this was started from (Terminal, say) may control it. Both questions are for
+# the person at the Mac: started with no terminal (by another program, over a remote
+# session) the script stops before anything that asks, unless FOGATA_SOUND_TEST_ASK=1 says
+# that person is there to answer.
 #
 # Prints the result ("passed", or "failed: ..." with the levels); exits 0 only when it
 # passed. Its files (sound.log, app.log) stay in OUT (a new folder in /tmp by default).
 set -u
+if [ ! -t 0 ] && [ "${FOGATA_SOUND_TEST_ASK:-}" != 1 ]; then
+  echo "cannot run here: macOS asks the person at the Mac whether this may record the screen" >&2
+  echo "and control QuickTime Player. Run it from a terminal on the Mac, or with" >&2
+  echo "FOGATA_SOUND_TEST_ASK=1 when that person is there to answer." >&2
+  exit 3
+fi
 cd "$(dirname "$0")/.." || exit 1
 export LANG=en_US.UTF-8
 out="${OUT:-$(mktemp -d /tmp/fogata-sound.XXXXXX)}"
