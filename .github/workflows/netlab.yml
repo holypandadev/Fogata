@@ -1,0 +1,85 @@
+# The network lab (tools/netlab/netlab.sh: a simulated internet with home routers of every
+# kind, in network namespaces) on one of GitHub's own computers, started by hand:
+#
+#   gh workflow run netlab.yml                         every connection scenario (over an hour)
+#   gh workflow run netlab.yml -f scenarios="cone-cone dht-liars"
+#
+# It builds the command line with its lab feature, as the script does anywhere, and runs
+# the scenarios one after another. Nothing here signs or publishes anything, and the job's
+# token can only read the repository.
+name: Network lab
+
+on:
+  workflow_dispatch:
+    inputs:
+      scenarios:
+        description: Scenarios, separated by spaces (empty, every connection scenario)
+        required: false
+        default: ""
+  push:
+    branches: [lab/netlab]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  # The lab's copies never read the releases page on GitHub.
+  FOGATA_UPDATE_WEB: "off"
+
+jobs:
+  netlab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the system packages
+        timeout-minutes: 20
+        run: |
+          # As in ci.yml: Azure's mirror of Ubuntu is asked first and left out when it gives
+          # nothing within 15 s.
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          curl -fsS --max-time 15 -o /dev/null \
+              "http://azure.archive.ubuntu.com/ubuntu/dists/$codename/InRelease" || {
+            [[ ! -f /etc/apt/apt-mirrors.txt ]] ||
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          }
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
+            libpipewire-0.3-dev libdbus-1-dev nftables iproute2 util-linux
+          # The lab's networks are unprivileged user namespaces, which Ubuntu's AppArmor
+          # refuses by default.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # The rules of the routers (masquerade, with random ports for the symmetric kind).
+          sudo modprobe -a nf_tables nft_chain_nat nft_masq nf_nat nf_conntrack || true
+
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: The network lab
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+        run: |
+          set -o pipefail
+          # shellcheck disable=SC2086  # the scenarios, one word each
+          tools/netlab/netlab.sh $SCENARIOS 2>&1 | tee "$RUNNER_TEMP/netlab.log"
+
+      - name: What passed and what did not
+        if: always()
+        run: |
+          grep -E '^(PASS|FAIL|ok|not ok|=== |--- )' "$RUNNER_TEMP/netlab.log" | tail -n 200 \
+            >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: netlab
+          path: ${{ runner.temp }}/netlab.log
+          if-no-files-found: ignore
+          retention-days: 14
