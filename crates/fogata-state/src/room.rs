@@ -387,6 +387,14 @@ impl<S: Clone> RoomTracker<S> {
         })
     }
 
+    /// The record of `holder`'s share of file `id`, if the room keeps that share.
+    pub fn share_record_of(&self, id: &[u8; 32], holder: &DevicePublicKey) -> Option<&S> {
+        let room = self.room.as_ref()?;
+        room.share_records
+            .get(&(*id, *holder))
+            .map(|(_, _, record)| record)
+    }
+
     /// Puts `record` in place of the record of `holder`'s share of file `id`: the same
     /// message, kept another way (on disk rather than in memory, say). Nothing else the room
     /// knows changes, so neither does what it takes, keeps, lists or answers: a share's cost
@@ -1737,6 +1745,7 @@ mod tests {
                 .map(|(id, holder, _, r)| (id, holder, *r))
                 .collect();
             for (id, holder, r) in kept {
+                assert_eq!(moved.share_record_of(&id, &holder), Some(&r));
                 assert!(moved.replace_share_record(&id, &holder, r + ELSEWHERE));
             }
         };

@@ -577,12 +577,15 @@ struct ConnectionInfo {
 #[derive(Clone, Debug)]
 enum Kept {
     Inline(Arc<WireMessage>),
-    /// The message's number in the file, what it weighs as sent (`room_record_weight`)
-    /// and what it takes in an answer (`room::wire_size`), as when it was in memory.
+    /// Which file of this run it is in and its number there, what it weighs as sent
+    /// (`room_record_weight`) and what it takes in an answer (`room::wire_size`), as when
+    /// it was in memory, and its id, to know it again when it comes once more.
     Spilled {
+        file: u32,
         number: u64,
         weight: usize,
         size: usize,
+        message_id: [u8; 16],
     },
 }
 

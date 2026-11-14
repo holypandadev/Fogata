@@ -752,7 +752,7 @@ mod tests {
         assert_eq!(kind_of("logs/crew.log"), Some(Kind::Plain));
         // Rooms' shares kept on disk by the run that wrote them, with a key of its own.
         assert_eq!(
-            kind_of(&format!("{}/shares", crate::rooms::SPILL_DIR)),
+            kind_of(&format!("{}/shares-0", crate::rooms::SPILL_DIR)),
             None
         );
         assert_eq!(kind_of("app.json"), Some(Kind::Plain));

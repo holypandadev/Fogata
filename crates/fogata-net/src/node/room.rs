@@ -105,8 +105,11 @@ pub(super) const ROOM_SHARE_BYTES: usize = 32 * 1024 * 1024;
 impl Node {
     /// Keeps the messages of shares held in memory, from every room of every group, within
     /// [`Self::room_share_budget`] (see [`fit_shares`]), at the same slot as the chat: a
-    /// file for them is needed, and one that was found damaged takes no more.
+    /// file for them is needed (without one, they all stay in memory). One found damaged is
+    /// followed by a new one, so the bound holds again; the groups that had messages in it
+    /// are not answered until they keep none of them (see `room_snapshot`).
     pub(super) fn fit_room_shares(&mut self) {
+        renew_if_lost(&mut self.room_spill);
         let Some(spill) = self.room_spill.as_mut() else {
             return;
         };
@@ -185,6 +188,24 @@ fn fit_chat<'a, S: Clone + 'a>(
     dropped
 }
 
+/// A file of shares' messages found damaged gives way to a new one, with a new key, for
+/// what comes next; with none to be had, they stay in memory from then on.
+fn renew_if_lost(spill: &mut Option<Spill>) {
+    let Some(lost) = spill.as_ref().filter(|s| s.lost()) else {
+        return;
+    };
+    *spill = match lost.fresh() {
+        Ok(fresh) => {
+            tracing::info!("a new file for rooms' shares, the last one being damaged");
+            Some(fresh)
+        }
+        Err(e) => {
+            tracing::warn!("rooms' shares stay in memory: no new file for them: {e}");
+            None
+        }
+    };
+}
+
 /// Moves the messages of shares that `trackers` hold in memory to `spill` until they hold at
 /// most `budget` bytes of them (weighed as sent), as [`fit_chat`] lets chat lines go: each
 /// time the oldest share (by its sender's time, then id) of whoever has the most held. One
@@ -203,13 +224,14 @@ fn fit_shares<'a>(
         .iter()
         .flat_map(|t| t.share_records())
         .filter_map(|(.., kept)| match kept {
-            Kept::Spilled { number, .. } => Some(*number),
-            Kept::Inline(_) => None,
+            Kept::Spilled { file, number, .. } if *file == spill.generation() => Some(*number),
+            _ => None,
         })
         .collect();
     spill.keep_only(&on_disk);
-    // A file found damaged: nothing more goes to it (see `Node::room_snapshot`).
-    if spill.lost() {
+    // A file found damaged takes nothing more (see `renew_if_lost`), nor one whose last
+    // write failed a moment ago.
+    if spill.lost() || !spill.writable() {
         return 0;
     }
     // A share that may move: its time, its file, its weight, its message and the tracker
@@ -249,17 +271,16 @@ fn fit_shares<'a>(
         else {
             continue;
         };
-        let number = match spill.put(&wire) {
-            Ok(number) => number,
-            Err(e) => {
-                tracing::warn!("cannot keep rooms' shares on disk now: {e}");
-                break;
-            }
+        // Kept in memory if it cannot be written (see `Spill::put`).
+        let Ok(number) = spill.put(&wire) else {
+            break;
         };
         let kept = Kept::Spilled {
+            file: spill.generation(),
             number,
             weight,
             size: wire_size(&wire),
+            message_id: message_id(&wire),
         };
         if trackers[at].replace_share_record(&id, &holder, kept) {
             moved += 1;
@@ -271,6 +292,11 @@ fn fit_shares<'a>(
         }
     }
     moved
+}
+
+/// A sealed message's id.
+fn message_id(wire: &WireMessage) -> [u8; 16] {
+    wire.message_id.as_slice().try_into().unwrap_or_default()
 }
 
 /// About how many bytes a sealed message takes in an answer.
@@ -564,9 +590,17 @@ impl Node {
                 // its share in the room has, which the room lists without it.
                 if let Some(video) = file.video.as_mut()
                     && video.thumb.is_empty()
-                    && let Some(thumb) = self.room_picture(group, &file.id)
                 {
-                    video.thumb = thumb.to_vec();
+                    match self.room_picture(group, &file.id) {
+                        Some(thumb) => video.thumb = thumb.to_vec(),
+                        // Kept on disk and not to be read back: not shared without it.
+                        None if self.picture_on_disk(group, &file.id) => {
+                            let _ = reply
+                                .send(Err("the picture of that video cannot be read now".into()));
+                            return;
+                        }
+                        None => {}
+                    }
                 }
                 let sent = self.try_send_payload(
                     group,
@@ -685,7 +719,28 @@ impl Node {
             message_id: sealed.header.message_id,
             input,
         };
+        // A share kept on disk come again as the same message (in a room's answer, asked
+        // for again): its record stays there, rather than in memory to be written again at
+        // the next slot. The room takes it as before.
+        let on_disk = match &event.input {
+            RoomInput::Share(info) => tracker
+                .share_record_of(&info.id, &event.sender)
+                .filter(|kept| {
+                    matches!(kept, Kept::Spilled { message_id, .. }
+                        if *message_id == event.message_id)
+                })
+                .cloned()
+                .map(|kept| (info.id, kept)),
+            _ => None,
+        };
+        let sender = event.sender;
         let changes = tracker.apply(event, Kept::Inline(wire), now_ms());
+        if let Some((id, kept)) = on_disk
+            && let Some(Kept::Inline(again)) = tracker.share_record_of(&id, &sender)
+            && message_id(again) == sealed.header.message_id
+        {
+            tracker.replace_share_record(&id, &sender, kept);
+        }
         let earlier = tracker.take_earlier_session();
         // Not taken now, and marked as seen, so nothing else brings it again: the room's
         // events tell. Asked of that member a moment ago (on entering the room, say), the
@@ -1085,10 +1140,10 @@ impl Node {
     /// each room comes first, then the files and the chat: a room with long chats and many
     /// videos holds far more than one answer takes, and an answer too big never arrives.
     /// Shares' messages kept on disk are read back, so the answer is the same as with all
-    /// in memory. None once the file of those messages failed to give one back, for any
-    /// group that has messages there: an answer without them would be another room than
-    /// the one this device lists, so the member asks the others (it asks again later, and
-    /// is refused until this device starts again).
+    /// in memory. None once the file of those messages failed to give one back, while the
+    /// group keeps messages there: an answer without them would be another room than the
+    /// one this device lists, so the member asks the others (it asks again later, and is
+    /// answered once those shares are gone: stopped, or their holders left).
     pub(super) fn room_snapshot(
         &self,
         group: GroupId,
@@ -1277,6 +1332,17 @@ impl Node {
             .find_map(|voice| self.read_picture(group, voice, id))
     }
 
+    /// Whether a share of file `id` in one of `group`'s rooms has its message on disk.
+    fn picture_on_disk(&self, group: GroupId, id: &[u8; 32]) -> bool {
+        self.groups.get(&group).is_some_and(|slot| {
+            slot.rooms.values().any(|tracker| {
+                tracker
+                    .share_records()
+                    .any(|(file, .., kept)| file == *id && matches!(kept, Kept::Spilled { .. }))
+            })
+        })
+    }
+
     /// Reads the first picture of video `id` from the record of its share in `group`'s
     /// voice room `voice`: opened again with the key of its epoch, which the group keeps
     /// while its log does.
@@ -1311,8 +1377,12 @@ fn rooms_part<'a>(
         rest.extend(r);
     }
     let all: Vec<&Kept> = joins.into_iter().chain(rest).collect();
-    let spilled = |kept: &&Kept| matches!(kept, Kept::Spilled { .. });
-    if spill.is_some_and(Spill::lost) && all.iter().any(spilled) {
+    // Messages in a file found damaged, or one given up since: none is left out.
+    let unreadable = |kept: &&Kept| match kept {
+        Kept::Spilled { file, .. } => spill.is_none_or(|s| s.lost() || s.generation() != *file),
+        Kept::Inline(_) => false,
+    };
+    if all.iter().any(unreadable) {
         return None;
     }
     // A message on disk takes what it took in memory, so the parts end at the same events.
@@ -1335,7 +1405,10 @@ fn rooms_part<'a>(
 fn read_kept(kept: &Kept, spill: Option<&Spill>) -> Option<WireMessage> {
     match kept {
         Kept::Inline(wire) => Some((**wire).clone()),
-        Kept::Spilled { number, .. } => spill?.read(*number).ok(),
+        Kept::Spilled { file, number, .. } => spill
+            .filter(|s| s.generation() == *file)?
+            .read(*number)
+            .ok(),
     }
 }
 
@@ -1966,7 +2039,7 @@ mod tests {
         let log = GroupLog::create(&ana, "g", 1).unwrap();
         let group = log.group_id();
         let dir = spill_dir("pictures");
-        let on_disk_file = dir.join("shares");
+        let on_disk_file = dir.join("shares-0");
         let spill_file = on_disk_file.clone();
         let (node, events) = start(NodeConfig {
             identity: ana,
@@ -2109,7 +2182,21 @@ mod tests {
             std::fs::write(&spill_file, vec![0; len as usize]).unwrap();
             assert!(n.room_snapshot(group, 0).is_none());
             assert!(n.room_picture(group, &[5; 32]).is_none());
+            // Nor is a file shared on without the picture it cannot read.
+            let mut downloaded = video(5);
+            downloaded.video.as_mut().unwrap().thumb = Vec::new();
+            let (reply, mut refused) = tokio::sync::oneshot::channel();
+            n.on_room_command(Command::ShareFile {
+                group,
+                file: downloaded,
+                reply,
+            });
+            assert!(matches!(refused.try_recv(), Ok(Err(_))));
+            // A new file for what comes next; the room, with shares in the lost one, is
+            // still not given.
             n.fit_room_shares();
+            assert_eq!(n.room_spill.as_ref().map(Spill::generation), Some(1));
+            assert!(n.room_snapshot(group, 0).is_none());
             // Another room shown: the first one's pictures are no longer kept read.
             let other: VoiceRoomId = [5; 8];
             n.show_pictures(group, other, &mut []);
@@ -2120,6 +2207,124 @@ mod tests {
         drop(events);
         node.shutdown().await.unwrap();
         assert!(!on_disk_file.exists(), "the file outlived the node");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A room answered again to a device whose shares' messages are on disk (asked for again
+    /// every 15 s, say, by a member that answers with every share): the shares that come
+    /// again as the same messages stay on disk, so nothing more is written and nothing more
+    /// is held in memory, however often it comes.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_room_answered_again_writes_nothing_more() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let bea = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, bea.public_key(), "Bea", 2).unwrap();
+        let group = log.group_id();
+        let dir = spill_dir("again");
+        let (node, events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+            spill_dir: Some(dir.clone()),
+        })
+        .unwrap();
+        let checked = inspect(&node, move |n| {
+            let peer = PeerId::random();
+            add_member(n, group, peer);
+            n.members.get_mut(&peer).unwrap().device = bea.public_key();
+            let voice = fogata_state::FIRST_ROOM;
+            n.on_room_command(Command::JoinRoom {
+                group,
+                voice,
+                nick: "Ana".into(),
+            });
+            let (voice, room) = n.joined_room(&group).unwrap();
+            let keys = n.groups[&group].ctx.current().cloned().unwrap();
+            let started_ms = n.groups[&group].rooms[&voice].room().unwrap().started_ms;
+            let at = now_ms();
+            let seal = |payload: GroupPayload, ms: u64| {
+                WireMessage::from(&SealedMessage::seal(&keys, &bea, ms, &payload.encode()).unwrap())
+            };
+            // Bea comes in and shares forty videos with the biggest pictures.
+            let mut sent = vec![seal(
+                GroupPayload::RoomJoin {
+                    voice,
+                    room,
+                    started_ms,
+                    nick: "Bea".into(),
+                },
+                at,
+            )];
+            for i in 0..40u8 {
+                let share = GroupPayload::RoomShare {
+                    voice,
+                    room,
+                    id: [i; 32],
+                    name: format!("clip {i}.mp4"),
+                    size: 1_000_000,
+                    video: Some(WireVideo {
+                        thumb: vec![i; fogata_state::MAX_THUMB_BYTES],
+                        width: 640,
+                        height: 360,
+                        duration_ms: 10_000,
+                    }),
+                };
+                sent.push(seal(share, at + 1 + u64::from(i)));
+            }
+            let give = |n: &mut Node, messages: &[WireMessage]| {
+                for wire in messages {
+                    n.receive(peer, wire.clone(), super::super::spread::Forward::No);
+                }
+            };
+            give(n, &sent);
+            let held = |n: &Node| -> (usize, usize) {
+                let tracker = &n.groups[&group].rooms[&voice];
+                let inline = tracker
+                    .share_records()
+                    .filter(|(.., k)| matches!(k, Kept::Inline(_)))
+                    .map(|(.., k)| k.weight())
+                    .sum();
+                (tracker.share_records().count(), inline)
+            };
+            assert_eq!(held(n).0, 40);
+            n.room_share_budget = 0;
+            n.fit_room_shares();
+            let written = n.room_spill.as_ref().unwrap().written;
+            assert!(written.0 > 30 * 64 * 1024, "{written:?}");
+            let before = held(n);
+            let answer = |n: &Node| -> Vec<WireMessage> {
+                let mut answer = Vec::new();
+                let mut from = Some(0);
+                while let Some(at) = from {
+                    let (part, next) = n.room_snapshot(group, at).unwrap();
+                    answer.extend(part);
+                    from = next;
+                }
+                answer
+            };
+            let first = answer(n);
+            // Answered again, and again: as the device had it.
+            for _ in 0..3 {
+                give(n, &sent);
+                assert_eq!(held(n), before, "held in memory again");
+                n.fit_room_shares();
+                assert_eq!(n.room_spill.as_ref().unwrap().written, written);
+            }
+            format!("{:?}", answer(n)) == format!("{first:?}")
+        })
+        .await;
+        assert!(checked, "the room answered otherwise");
+        drop(events);
+        node.shutdown().await.unwrap();
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2681,6 +2886,117 @@ mod tests {
             file as usize <= (on_disk_now + 1) * 20 * 1024,
             "{file} bytes"
         );
+        drop(spill);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A room of `shares` videos of `size` bytes each from one participant, as a device
+    /// keeps it, numbered on from `n`.
+    fn room_of_videos(n: &mut u8, shares: u8, size: usize) -> RoomTracker<Kept> {
+        let me = DeviceIdentity::generate().unwrap().public_key();
+        let ana = DeviceIdentity::generate().unwrap().public_key();
+        let mut tracker = RoomTracker::new(me);
+        let room = [*n; 16];
+        let mut event = |input, i: u8| {
+            *n = n.wrapping_add(1);
+            let mut message_id = [*n; 16];
+            message_id[15] = i;
+            RoomEvent {
+                room,
+                sender: ana,
+                timestamp_ms: 1_000 + u64::from(i),
+                message_id,
+                input,
+            }
+        };
+        let join = fogata_state::RoomInput::Join {
+            started_ms: 1_000,
+            nick: "Ana".into(),
+        };
+        tracker.apply(
+            event(join, 0),
+            Kept::Inline(Arc::new(record(0, 200))),
+            1_000,
+        );
+        for i in 1..=shares {
+            let share = fogata_state::RoomInput::Share(FileInfo {
+                id: [i; 32],
+                name: format!("video {i}.mp4"),
+                size: 1_000_000,
+                video: None,
+            });
+            let e = event(share, i);
+            let mut wire = record(i, size);
+            wire.message_id = e.message_id.to_vec();
+            tracker.apply(e, Kept::Inline(Arc::new(wire)), 1_000);
+        }
+        tracker
+    }
+
+    /// The messages of shares `tracker` holds in memory, weighed as sent.
+    fn held_in_memory(tracker: &RoomTracker<Kept>) -> usize {
+        tracker
+            .share_records()
+            .filter(|(.., k)| matches!(k, Kept::Inline(_)))
+            .map(|(.., k)| k.weight())
+            .sum()
+    }
+
+    /// A disk that takes no more: the messages stay in memory, the room answers the same,
+    /// and the next writes wait a while instead of failing at every slot.
+    #[test]
+    fn a_failed_write_keeps_the_messages_in_memory() {
+        let mut n = 0;
+        let mut tracker = room_of_videos(&mut n, 30, 20_000);
+        let parts = all_parts(&tracker, None);
+        let dir = spill_dir("full");
+        let mut spill = Spill::open(dir.clone()).unwrap();
+        spill.fail_writes = true;
+        let held = held_in_memory(&tracker);
+        assert_eq!(fit_shares(std::iter::once(&mut tracker), &mut spill, 0), 0);
+        assert_eq!(spill.written.1, 1);
+        assert_eq!(held_in_memory(&tracker), held);
+        assert_eq!(spill.bytes(), (0, 0));
+        assert!(same_parts(&all_parts(&tracker, Some(&spill)), &parts));
+        // The disk takes writes again: not tried before a while.
+        spill.fail_writes = false;
+        assert_eq!(fit_shares(std::iter::once(&mut tracker), &mut spill, 0), 0);
+        assert_eq!(spill.written.1, 1);
+        drop(spill);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A file found damaged: the room whose shares were in it is not given, another room
+    /// with nothing there still is, and what comes next goes to a new file within the bound
+    /// again; the first room is given again once it keeps none of the lost shares.
+    #[test]
+    fn after_a_lost_file_the_bound_holds_again() {
+        let mut n = 0;
+        let mut lost = room_of_videos(&mut n, 20, 20_000);
+        let mut other = room_of_videos(&mut n, 20, 20_000);
+        let dir = spill_dir("lost");
+        let mut spill = Some(Spill::open(dir.clone()).unwrap());
+        fit_shares(std::iter::once(&mut lost), spill.as_mut().unwrap(), 0);
+        spill.as_ref().unwrap().lose();
+        assert!(rooms_part(std::iter::once(&lost), spill.as_ref(), 0).is_none());
+        assert!(rooms_part(std::iter::once(&other), spill.as_ref(), 0).is_some());
+        renew_if_lost(&mut spill);
+        assert_eq!(spill.as_ref().map(Spill::generation), Some(1));
+        let budget = held_in_memory(&other) / 2;
+        let parts = all_parts(&other, None);
+        let moved = fit_shares(
+            [&mut lost, &mut other].into_iter(),
+            spill.as_mut().unwrap(),
+            budget,
+        );
+        assert!(moved > 0);
+        assert!(held_in_memory(&other) <= budget);
+        assert!(same_parts(&all_parts(&other, spill.as_ref()), &parts));
+        assert!(rooms_part(std::iter::once(&lost), spill.as_ref(), 0).is_none());
+        // Its holder leaves: nothing of the lost file is kept, the room is given again.
+        let holder = lost.share_records().next().unwrap().1;
+        lost.drop_device(&holder);
+        assert!(rooms_part(std::iter::once(&lost), spill.as_ref(), 0).is_some());
         drop(spill);
         std::fs::remove_dir_all(&dir).unwrap();
     }
