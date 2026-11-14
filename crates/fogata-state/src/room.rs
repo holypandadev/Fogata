@@ -1,6 +1,8 @@
 //! Rooms: the live part of a group. A room exists only in the memory of the members online;
 //! it holds who is in it, its chat and the files its participants share. Nothing of it is
-//! ever written to disk. A file stays listed while someone in the room has it.
+//! kept once the program ends (the node may hold the messages of shares in a file sealed
+//! with a key of that run only, see [`RoomTracker::replace_share_record`]). A file stays
+//! listed while someone in the room has it.
 //!
 //! Every event is a signed group message, so all members apply the same events and agree on
 //! the room. A member that comes online asks one that is already online for the room's
@@ -373,6 +375,38 @@ impl<S: Clone> RoomTracker<S> {
                     .map(|(_, record)| record)
             })
             .map(|(_, _, record)| record)
+    }
+
+    /// Each share the room keeps: its file, its holder, the time its sender gave it and its
+    /// record (see [`Self::replace_share_record`]).
+    pub fn share_records(&self) -> impl Iterator<Item = ([u8; 32], DevicePublicKey, u64, &S)> {
+        self.room.iter().flat_map(|room| {
+            room.share_records
+                .iter()
+                .map(|((id, holder), (at, _, record))| (*id, *holder, *at, record))
+        })
+    }
+
+    /// Puts `record` in place of the record of `holder`'s share of file `id`: the same
+    /// message, kept another way (on disk rather than in memory, say). Nothing else the room
+    /// knows changes, so neither does what it takes, keeps, lists or answers: a share's cost
+    /// was counted when it came, and the record goes out as it is given here. Whether the
+    /// room keeps that share.
+    pub fn replace_share_record(
+        &mut self,
+        id: &[u8; 32],
+        holder: &DevicePublicKey,
+        record: S,
+    ) -> bool {
+        let Some((_, _, kept)) = self
+            .room
+            .as_mut()
+            .and_then(|room| room.share_records.get_mut(&(*id, *holder)))
+        else {
+            return false;
+        };
+        *kept = record;
+        true
     }
 
     /// The same tracker, with `weigh` telling what each record it keeps weighs as sent: a
@@ -1633,6 +1667,110 @@ mod tests {
                 .keys()
                 .collect::<Vec<_>>()
         );
+        // Its shares' records kept another way (on disk, say: here the same number, marked):
+        // it answers with the same messages, and gives each share's own.
+        let elsewhere = 1_000;
+        let shares: Vec<([u8; 32], DevicePublicKey, usize)> = lean
+            .share_records()
+            .map(|(id, holder, _, r)| (id, holder, *r))
+            .collect();
+        assert_eq!(shares.len(), 5);
+        for (id, holder, r) in shares {
+            assert!(lean.replace_share_record(&id, &holder, r + elsewhere));
+        }
+        let back: Vec<usize> = lean.snapshot().iter().map(|r| r % elsewhere).collect();
+        assert_eq!(kept.snapshot(), back);
+        for (id, file) in files(&lean) {
+            let record = *lean.share_record(&id).unwrap();
+            assert!(record >= elsewhere);
+            let RoomInput::Share(sent) = &events[record - elsewhere].input else {
+                panic!("not a share's record");
+            };
+            assert_eq!(sent, &files(&kept)[&id].info);
+            assert!(file.info.video.unwrap().thumb.is_empty());
+        }
+    }
+
+    /// A share's record put in place of the same message kept another way (on disk, say)
+    /// changes nothing else: two trackers given the same events, one of which has every
+    /// share record replaced as soon as it keeps it, take, refuse and let go of the same
+    /// shares, list the same files and answer with the same messages.
+    #[test]
+    fn a_share_record_kept_another_way_changes_nothing_else() {
+        // A record kept elsewhere: the same number, marked.
+        const ELSEWHERE: u64 = 1 << 32;
+        let (ana, bea, me) = (key(), key(), key());
+        let room = [3; 16];
+        let file = |n: u8| FileInfo {
+            id: [n; 32],
+            name: format!("clip{n}.mp4"),
+            size: 1,
+            video: Some(VideoPreview {
+                thumb: vec![n; MAX_THUMB_BYTES],
+                width: 2,
+                height: 2,
+                duration_ms: 1,
+            }),
+        };
+        let mut events = vec![
+            event(room, ana, 0, join("Ana", 0)),
+            event(room, bea, 0, join("Bea", 0)),
+        ];
+        // More than each one's part of the room takes: some are refused.
+        for n in 0..200u8 {
+            let by = if n % 2 == 0 { ana } else { bea };
+            events.push(event(room, by, 1 + u64::from(n), RoomInput::Share(file(n))));
+        }
+        let mut plain: RoomTracker<u64> = RoomTracker::new(me);
+        let mut moved: RoomTracker<u64> = RoomTracker::new(me);
+        let mut changes = (Vec::new(), Vec::new());
+        let apply = |plain: &mut RoomTracker<u64>,
+                     moved: &mut RoomTracker<u64>,
+                     changes: &mut (Vec<RoomChange>, Vec<RoomChange>),
+                     e: &RoomEvent,
+                     record: u64| {
+            changes.0.extend(plain.apply(e.clone(), record, 10));
+            changes.1.extend(moved.apply(e.clone(), record, 10));
+            let kept: Vec<([u8; 32], DevicePublicKey, u64)> = moved
+                .share_records()
+                .filter(|(.., r)| **r < ELSEWHERE)
+                .map(|(id, holder, _, r)| (id, holder, *r))
+                .collect();
+            for (id, holder, r) in kept {
+                assert!(moved.replace_share_record(&id, &holder, r + ELSEWHERE));
+            }
+        };
+        for (i, e) in events.iter().enumerate() {
+            apply(&mut plain, &mut moved, &mut changes, e, i as u64);
+        }
+        let back = |t: &RoomTracker<u64>| -> Vec<u64> {
+            t.snapshot().iter().map(|r| r % ELSEWHERE).collect()
+        };
+        let same = |plain: &RoomTracker<u64>, moved: &RoomTracker<u64>| {
+            assert_eq!(plain.room().unwrap().files, moved.room().unwrap().files);
+            assert_eq!(plain.share_bytes(), moved.share_bytes());
+            assert_eq!(back(plain), back(moved));
+            assert!(moved.share_records().all(|(.., r)| *r >= ELSEWHERE));
+        };
+        same(&plain, &moved);
+        let listed = plain.room().unwrap().files.len();
+        assert!(listed > 40 && listed < 200, "{listed} listed");
+        // A share it does not keep: nothing to replace.
+        assert!(!moved.replace_share_record(&[199; 32], &bea, 7));
+        // The group gets more rooms: both keep the same of what they have, the earliest.
+        plain.set_room_for(8, 3);
+        moved.set_room_for(8, 3);
+        let more = [
+            event(room, ana, 300, RoomInput::Unshare([0; 32])),
+            event(room, bea, 301, RoomInput::Share(file(1))),
+            event(room, ana, 302, RoomInput::Leave),
+        ];
+        for (i, e) in more.iter().enumerate() {
+            apply(&mut plain, &mut moved, &mut changes, e, 1_000 + i as u64);
+        }
+        assert!(plain.room().unwrap().files.len() < listed);
+        same(&plain, &moved);
+        assert_eq!(changes.0, changes.1);
     }
 
     #[test]
