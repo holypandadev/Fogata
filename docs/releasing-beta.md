@@ -167,6 +167,9 @@ name, in the release's notes for the maintainers, never passed over in silence.
    opens with this build, with everything in it, and the test against the last release
    passes (`tools/previous-release.sh`, step 1 of "A release"), or the change that breaks
    it tells old copies to update (`release.py --min-build`, the group level notices).
+7. **The last release updated itself.** The `Update install` run made after the last
+   release was published passed on Windows and on the Flatpak ("A release", step 7): a
+   release is not prepared on top of one whose update nobody saw install.
 
 A call between two real networks cannot be made from one local network: the network lab
 and the public-address check of 3 stand in for it, and the notes of the release say that
@@ -435,6 +438,23 @@ it was not tried for real.
    `SHA256SUMS.sig` with the key lines of `tools/allowed_signers` from the source code, then
    compare the checksum of their file with what their computer works out before they open
    anything (the README tells them how).
+7. See the release before this one update itself to it, on Windows and on the Linux Flatpak,
+   on GitHub's own computers, with the published files alone:
+
+   ```
+   gh workflow run update-install.yml -f from=v0.1.0-beta.1
+   ```
+
+   (`from` is the tag of the release before, or of any older one whose copies are still in
+   use.) Each job installs that release as its README says, makes a profile in it, lets it
+   find the new release on the releases page and fetch it, starts it again and checks that
+   the new build took its place and stays up; the Flatpak job also installs the new
+   release's first install by itself (`tools/beta/test-update-windows.ps1`,
+   `tools/beta/test-update-flatpak.sh`; the pictures of each step are kept with the run). A
+   job that fails means testers on that system may be left on the old release: find out why
+   before anything else, and tell them how to install the new one by hand meanwhile. On
+   macOS open your own installed copy and see it become the new build, with its icon: the
+   update there needs the application signed, which only your Mac does.
 
 ## Dates that break things
 

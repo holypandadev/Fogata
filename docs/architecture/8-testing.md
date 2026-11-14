@@ -45,7 +45,11 @@ Part of [Fogata architecture](../architecture.md).
   command line of the last release against this version (weekly on GitHub, and before every
   release: docs/releasing-beta.md); and `crates/fogata-core/tests/old_copy.rs`, copies from
   before a given feature (run by hand where such a build is at hand). The plan for later
-  levels is under "Later levels" in 5.1.
+  levels is under "Later levels" in 5.1. And the update itself, with the published files: an
+  earlier release installed as a person installs it, on Windows and as a Flatpak on
+  GitHub's computers, finds the newest release on the releases page, fetches it and puts
+  itself in its place (`.github/workflows/update-install.yml`, by hand after each release:
+  docs/releasing-beta.md, "A release", step 7).
 - `app/integration_test` (run on Linux, macOS and Windows): the application driven on a
   desktop with a fresh data folder:
   every screen (`screens_test.dart`), and a whole session with another device

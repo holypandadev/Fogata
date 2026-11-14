@@ -1,0 +1,134 @@
+# The update's install step with the published files, on GitHub's own computers: an earlier
+# pre-release installed as a person installs it must find the newest one on the releases
+# page by itself, fetch it and put itself in its place (docs/architecture/5f-updates.md,
+# Installing). Started by hand after a release is published, and before the next one is
+# prepared:
+#
+#   gh workflow run update-install.yml -f from=v0.1.0-beta.9
+#
+#   windows   tools/beta/test-update-windows.ps1: the zip and its install.ps1, then the swap
+#             of %LOCALAPPDATA%\Programs\Fogata.
+#   flatpak   tools/beta/test-update-flatpak.sh: `flatpak install --user` of the file, then
+#             the update through the Flatpak portal, and the first install of the newest
+#             release by itself (it starts and stays up).
+#
+# macOS is not here: the update there needs the application signed by the team, which is
+# done on the owner's Mac, and is tried by hand on it (docs/releasing-beta.md).
+#
+# Nothing here builds or signs anything, and the job's token can only read the repository.
+name: Update install
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: The earlier pre-release to install first (its tag)
+        required: true
+        default: v0.1.0-beta.9
+      to:
+        description: The newest pre-release, which it must become (empty, the page's newest)
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  FROM: ${{ inputs.from }}
+  TO: ${{ inputs.to }}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The newest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ -n $TO ]] || TO=$(gh release list -R "$GITHUB_REPOSITORY" -L 1 --json tagName -q '.[0].tagName')
+          echo "TO=$TO" >> "$GITHUB_ENV"
+          echo "from $FROM to $TO"
+
+      - name: Install the earlier release and let it update itself
+        shell: powershell
+        run: |
+          powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\beta\test-update-windows.ps1 `
+            -From $env:FROM -To $env:TO -Out "$env:RUNNER_TEMP\update" -Repo $env:GITHUB_REPOSITORY
+          exit $LASTEXITCODE
+
+      - name: Keep the pictures and the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: update-windows
+          path: |
+            ${{ runner.temp }}/update/*.png
+            ${{ runner.temp }}/update/diagnostics
+            ${{ runner.temp }}/update/release.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  flatpak:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The newest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          [[ -n $TO ]] || TO=$(gh release list -R "$GITHUB_REPOSITORY" -L 1 --json tagName -q '.[0].tagName')
+          echo "TO=$TO" >> "$GITHUB_ENV"
+          echo "from $FROM to $TO"
+
+      - name: flatpak, a display and the runtime
+        run: |
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends flatpak xvfb dbus-x11 xdg-desktop-portal imagemagick xdotool
+          flatpak --version
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user --noninteractive -y flathub org.freedesktop.Platform//26.08
+
+      - name: The first install of the newest release starts
+        run: |
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg-runtime
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- \
+            tools/beta/test-update-flatpak.sh "$TO" "$TO" --out "$RUNNER_TEMP/first"
+          # The next step installs the earlier release on a computer without Fogata.
+          dbus-run-session -- flatpak uninstall --user --noninteractive -y --delete-data dev.holypanda.fogata
+          rm -rf "$HOME/.var/app/dev.holypanda.fogata"
+
+      - name: Install the earlier release and let it update itself
+        run: |
+          export XDG_RUNTIME_DIR=$RUNNER_TEMP/xdg-runtime
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          # The display first, then the session bus: what the bus starts (the Flatpak portal,
+          # which starts the new copy) must know the display, as in a person's session.
+          xvfb-run -a -s "-screen 0 1280x800x24" dbus-run-session -- \
+            tools/beta/test-update-flatpak.sh "$FROM" "$TO" --out "$RUNNER_TEMP/update"
+
+      - name: Keep the pictures and the logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: update-flatpak
+          path: |
+            ${{ runner.temp }}/first/*.png
+            ${{ runner.temp }}/first/*.log
+            ${{ runner.temp }}/first/diagnostics
+            ${{ runner.temp }}/update/*.png
+            ${{ runner.temp }}/update/*.log
+            ${{ runner.temp }}/update/diagnostics
+          if-no-files-found: ignore
+          retention-days: 14

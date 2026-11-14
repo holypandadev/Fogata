@@ -65,8 +65,11 @@ writes them. That is what keeps them honest: Cargo checks each crate's source ag
 (`release-build.yml`) use no cache at all.
 `.github/workflows/weekly.yml` runs once a week (and by hand) what no push waits for: see
 "Every week" below. `.github/workflows/release-build.yml` builds a pre-release's three
-applications, by hand or on a pushed `v*` tag, and has GitHub attest them; it signs nothing
-(docs/releasing-beta.md, "A release", step 2).
+applications, by hand, and has GitHub attest them; it signs nothing
+(docs/releasing-beta.md, "A release", step 2). `.github/workflows/update-install.yml`, by
+hand after a release is published, installs an earlier release on Windows and as a Flatpak
+and sees it update itself to the newest one from the releases page (the same document,
+step 7).
 
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD; --split app|checks: half of it
