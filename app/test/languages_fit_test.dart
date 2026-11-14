@@ -81,6 +81,19 @@ Future<List<String>> _overflows(
     const MethodChannel('window_manager'),
     (call) async => false,
   );
+  // Every text field asks the system which actions it has for a selection (Android's, and
+  // tests run as Android): unanswered, the question stays among the binding's pending
+  // messages for good, with the field and the whole page behind it, test after test.
+  messenger.setMockMethodCallHandler(
+    SystemChannels.processText,
+    (call) async => <Object?, Object?>{},
+  );
+  // What nothing here answers (the system's clipboard and text services, the window's own
+  // channels) is answered at once as "not there": sent on to the test's engine it is never
+  // answered, and stays among the binding's pending messages for good, with whoever waits
+  // for it and the whole page behind them, test after test.
+  messenger.allMessagesHandler = (channel, handler, message) =>
+      handler == null ? Future<ByteData?>.value() : handler(message);
   // The device panels list what the system has.
   messenger.setMockMethodCallHandler(
     const MethodChannel('FlutterWebRTC.Method'),
@@ -91,6 +104,8 @@ Future<List<String>> _overflows(
     (call) async => null,
   );
   addTearDown(() {
+    messenger.setMockMethodCallHandler(SystemChannels.processText, null);
+    messenger.allMessagesHandler = null;
     for (final name in [
       'window_manager',
       'FlutterWebRTC.Method',
