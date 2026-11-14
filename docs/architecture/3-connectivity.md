@@ -1498,8 +1498,9 @@ added) is let go too, and a new one is made when someone writes.
   newer or another chat's) the chat is read whole as before and its summary written
   again. An account move leaves summaries out and sealing a plain folder removes plain
   ones; both are made again. So a start reads no journal, and a chat's items are read
-  when something needs them: the chat on screen, a message that comes or goes, a receipt,
-  a file. The four chats used last stay in memory; the others are let go of (their
+  whole when something changes in it: a message that comes or goes, a receipt, a file. A
+  chat on screen that is not held is read back by pages instead (see below). The four
+  chats used last stay in memory; the others are let go of (their
   summary kept) at the next tick or view, unless records of them are still being written
   or could not be, so one read again is the chat as written. What runs over every chat
   reads none: the list, what chats take, what waits, what runs out, old charges, what
@@ -1519,12 +1520,36 @@ added) is let go too, and a new one is made when someone writes.
   its order, with nothing cut off its end or taken from its middle, back to the first
   record, which is bound to the chain's start. What later records say of an item
   (delivered, a file's state, played, not a voice message or picture, gone) is met before
-  the item and applied to it. A journal that does not read so is not read back: the chat
-  is read whole instead, which keeps what came before the damage and puts a copy aside.
-  Nothing is added to the files for this, and no index is kept. 10,000 messages read back
-  whole take 29 ms, the newest 200 under 1 ms (same Mac). It is there for a search
-  over old messages, which the screens do not have yet; the chat on screen is read whole,
-  as its pinned messages, files and every change need the chat.
+  the item and applied to it. An item whose record is there twice (a journal written here
+  never holds one so) is read back once, as its newest copy, where the chat read whole
+  keeps its first. The pins are read whole (`read_pins`: a small file, the last change of
+  each message), checked against their tails as the journal is. A journal or pins that
+  do not read so are not read back: the chat is read whole instead, which keeps what came
+  before the damage and puts a copy aside. Nothing is added to the files for this, and no
+  index is kept. 10,000 messages read back whole take 29 ms, the newest 200 under 1 ms
+  (same Mac).
+- **The chat on screen, by pages.** A chat that is not held is shown from its journal read
+  back from the end, with its pins in their places (`Chats::paged_view`): its newest page,
+  each older page as the screen scrolls back (before the oldest it holds, and down to a
+  message asked for, as from the chat held), or the items from a view's oldest on. Its
+  timer and what it takes come from its summary. Each pinned message is looked for back
+  from the end until found, so a pin of an old message reads back to it, not the chat
+  whole. Nothing is held after it: which chats stay in memory is as before. A chat not held
+  changes only once read, so a view read since it was let go of that asks what changed
+  gets nothing, with only a read back to its oldest item to say whether older ones are
+  there; a view from before gets the items from its oldest on, whole, as from a chat read
+  again. A file's download, which shows with its messages without reading the chat, counts
+  as a change. Marking a chat read whose summary has nothing unread writes nothing (only
+  the friend's messages after the mark count as unread, and what comes next goes after
+  everything there), and a file kept here, to show, play or save, is found back from the
+  end once the summary's list of files kept here says it is there. A chat in memory is
+  shown from memory, as before. The chat is still read whole when a journal or the pins
+  do not read back as last written, or are from before items kept their time in the chat
+  (only a read from the start works that out), and for every change of it: a message
+  that comes or is sent, a receipt, a deletion, a pin, the timer, a file that comes or
+  goes. Keeping each item once needs every id it holds and those of the friend's items
+  deleted here, and what is written follows the chat held. Each page is read with the
+  chats held, as a chat read whole is: a chat not held has no record being written.
 - **No longer friends.** When either removes the other, the chat stays on both devices, can
   only be read, says so, and its group stops; each can delete it on their own device.
   Becoming friends again resumes it. Removing Fogata's data, or losing the device without
