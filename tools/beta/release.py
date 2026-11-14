@@ -739,6 +739,33 @@ def check_macos_info(app, build):
              "app/pubspec.yaml and build it again")
 
 
+def check_macos_icon(app):
+    """Stops unless the macOS `app` carries its icon: the file its Info.plist names
+    (CFBundleIconFile, with or without `.icns`) in Contents/Resources, an icns file, or the
+    asset catalog the name of CFBundleIconName is looked up in (Assets.car). An Xcode that
+    does not read the project's AppIcon.icon builds the application without it, and nothing
+    else shows that: 0.1.0-beta.9 and 0.1.0-beta.10 went out with no icon."""
+    try:
+        info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    except (OSError, plistlib.InvalidFileException, ValueError) as error:
+        fail(f"cannot read Fogata.app's Info.plist: {error}")
+    resources = app / "Contents/Resources"
+    named = info.get("CFBundleIconFile")
+    if isinstance(named, str) and named:
+        for name in (named, named + ".icns"):
+            icon = resources / name
+            try:
+                if icon.is_file() and icon.read_bytes()[:4] == b"icns":
+                    return
+            except OSError:
+                pass
+    if info.get("CFBundleIconName") and (resources / "Assets.car").is_file():
+        return
+    fail("Fogata.app has no icon: its Info.plist names none that is in Contents/Resources "
+         "(CFBundleIconFile, or CFBundleIconName with Assets.car). Build it with the icon "
+         "of app/macos/Runner (Fogata.icns)")
+
+
 # The Mac architectures Fogata is built for (Mach-O CPU types), named as lipo names them, and
 # the platform under which a copy running on each looks for its package
 # (fogata_update::this_platform: a universal app runs natively on both, so it is the
@@ -1228,6 +1255,7 @@ def main():
             check_same_build(work / "attested/macos/Fogata.app", app, "macOS app", signed=True)
         refuse_debug_folder(app)
         check_macos_info(app, build)
+        check_macos_icon(app)
         mac_name, platforms = macos_platforms(macos_archs(app), args.macos_arch)
         pack = work / f"Fogata-{version}-macos-{mac_name}.pack"
         run(fogata, "release", "pack", *expect, app, "-o", pack)

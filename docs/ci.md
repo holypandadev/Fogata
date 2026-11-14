@@ -47,7 +47,7 @@ Each built application, the Linux bundle of `tools/ci.sh` too, goes through
 `python3 -I tools/beta/ci_builds.py check-build <linux|windows|macos> <folder>`: the checks
 `release.py` runs before it packs a build, with its own code (a release build, not debug or
 profile; every Linux and Windows program and library with its hardening, the Linux WebRTC
-plugin linking PipeWire and PulseAudio; the Mac app universal, with its updater, its
+plugin linking PipeWire and PulseAudio; the Mac app universal, with its icon, its updater, its
 `Info.plist` naming `THIS_BUILD`). A build `release.py` would refuse fails at the push, not
 at the release. Each build job also writes `tools/toolchain.sh` to the run's summary: the
 runner image, Flutter's engine revision, Rust, CMake, and clang and the dev packages (Linux),

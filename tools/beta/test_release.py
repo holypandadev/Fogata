@@ -567,6 +567,42 @@ class Builds(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 release.check_macos_info(app, 7)
 
+    def test_the_macos_bundle_must_carry_its_icon(self):
+        import plistlib
+        with tempfile.TemporaryDirectory() as tmp:
+            app = pathlib.Path(tmp) / "Fogata.app"
+            resources = app / "Contents/Resources"
+            resources.mkdir(parents=True)
+            plist = app / "Contents/Info.plist"
+            icns = b"icns" + bytes(32)
+            for info, files, good in [
+                # What an Xcode that does not read AppIcon.icon builds: the file named.
+                ({"CFBundleIconFile": "Fogata"}, {"Fogata.icns": icns}, True),
+                ({"CFBundleIconFile": "Fogata.icns"}, {"Fogata.icns": icns}, True),
+                # What a newer Xcode builds from AppIcon.icon.
+                ({"CFBundleIconFile": "AppIcon", "CFBundleIconName": "AppIcon"},
+                 {"AppIcon.icns": icns, "Assets.car": b"car"}, True),
+                ({"CFBundleIconName": "AppIcon"}, {"Assets.car": b"car"}, True),
+                # As 0.1.0-beta.9 and beta.10 went out: no name, no file.
+                ({}, {}, False),
+                ({"CFBundleIconFile": ""}, {"Fogata.icns": icns}, False),
+                ({"CFBundleIconFile": "Fogata"}, {}, False),
+                ({"CFBundleIconFile": "Fogata"}, {"Fogata.icns": b"not one"}, False),
+                ({"CFBundleIconName": "AppIcon"}, {}, False),
+            ]:
+                with self.subTest(info=info, files=sorted(files)):
+                    for old in resources.iterdir():
+                        old.unlink()
+                    for name, data in files.items():
+                        (resources / name).write_bytes(data)
+                    plist.write_bytes(plistlib.dumps(info))
+                    if good:
+                        release.check_macos_icon(app)
+                    else:
+                        with self.assertRaises(SystemExit) as stop:
+                            release.check_macos_icon(app)
+                        self.assertIn("has no icon", str(stop.exception))
+
     def test_the_architectures_of_a_mac_program_are_read_from_its_header(self):
         self.assertEqual(release.macho_archs(macho("arm64")), {"arm64"})
         self.assertEqual(release.macho_archs(macho("x86_64")), {"x86_64"})

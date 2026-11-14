@@ -22,8 +22,8 @@ pub use manifest::{Artifact, Manifest, Refusal, Signed};
 
 /// What this build of Fogata is, as releases count it: a number that only goes up from one
 /// release to the next, and the version people see.
-pub const THIS_BUILD: u64 = 10;
-pub const THIS_VERSION: &str = "0.1.0-beta.10";
+pub const THIS_BUILD: u64 = 11;
+pub const THIS_VERSION: &str = "0.1.0-beta.11";
 
 /// The application releases are for, and the channel this build follows.
 pub const PRODUCT: &str = "dev.holypanda.fogata";
@@ -105,7 +105,7 @@ pub fn role_of(trusted: &[ReleaseKey], key: &[u8; 32]) -> Option<KeyRole> {
 /// Bytes the release tooling looks for in a built library, to make sure a package holds
 /// the build its manifest names (`fogata release pack --expect-build`): a package that held
 /// an older build would be offered again and again once installed.
-pub const BUILD_MARKER: &str = concat!("fogata-build-marker:", "10", ";");
+pub const BUILD_MARKER: &str = concat!("fogata-build-marker:", "11", ";");
 
 /// What starts [`KEYS_MARKER`].
 pub const KEYS_MARKER_PREFIX: &[u8] = b"fogata-keys-marker:";

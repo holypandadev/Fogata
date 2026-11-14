@@ -1,7 +1,7 @@
 name: fogata
 description: "Fogata: voice, video and text rooms for groups of friends, device to device."
 publish_to: 'none'
-version: 0.1.0+10
+version: 0.1.0+11
 
 environment:
   sdk: ^3.13.5

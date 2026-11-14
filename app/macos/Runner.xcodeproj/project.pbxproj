@@ -26,6 +26,7 @@
 		335BBD1B22A9A15E00E9071D /* GeneratedPluginRegistrant.swift in Sources */ = {isa = PBXBuildFile; fileRef = 335BBD1A22A9A15E00E9071D /* GeneratedPluginRegistrant.swift */; };
 		33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC10F02044A3C60003C045 /* AppDelegate.swift */; };
 		7A1C0E5B2F3D4A6B8C9D0E20 /* AppIcon.icon in Resources */ = {isa = PBXBuildFile; fileRef = 7A1C0E5B2F3D4A6B8C9D0E1F /* AppIcon.icon */; };
+		7A1C0E5B2F3D4A6B8C9D0E61 /* Fogata.icns in Resources */ = {isa = PBXBuildFile; fileRef = 7A1C0E5B2F3D4A6B8C9D0E60 /* Fogata.icns */; };
 		33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */ = {isa = PBXBuildFile; fileRef = 33CC10F42044A3C60003C045 /* MainMenu.xib */; };
 		7A1C0E5B2F3D4A6B8C9D0E40 /* InfoPlist.strings in Resources */ = {isa = PBXBuildFile; fileRef = 7A1C0E5B2F3D4A6B8C9D0E41 /* InfoPlist.strings */; };
 		33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */ = {isa = PBXBuildFile; fileRef = 33CC11122044BFA00003C045 /* MainFlutterWindow.swift */; };
@@ -73,6 +74,7 @@
 		33CC10ED2044A3C60003C045 /* fogata.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = fogata.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		33CC10F02044A3C60003C045 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7A1C0E5B2F3D4A6B8C9D0E1F /* AppIcon.icon */ = {isa = PBXFileReference; lastKnownFileType = folder.iconcomposer.icon; name = AppIcon.icon; path = Runner/AppIcon.icon; sourceTree = "<group>"; };
+		7A1C0E5B2F3D4A6B8C9D0E60 /* Fogata.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; name = Fogata.icns; path = Runner/Fogata.icns; sourceTree = "<group>"; };
 		33CC10F52044A3C60003C045 /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.xib; name = Base; path = Base.lproj/MainMenu.xib; sourceTree = "<group>"; };
 		7A1C0E5B2F3D4A6B8C9D0E50 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/InfoPlist.strings; sourceTree = "<group>"; };
 		7A1C0E5B2F3D4A6B8C9D0E51 /* es */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = es; path = es.lproj/InfoPlist.strings; sourceTree = "<group>"; };
@@ -167,6 +169,7 @@
 			isa = PBXGroup;
 			children = (
 				7A1C0E5B2F3D4A6B8C9D0E1F /* AppIcon.icon */,
+				7A1C0E5B2F3D4A6B8C9D0E60 /* Fogata.icns */,
 				33CC10F42044A3C60003C045 /* MainMenu.xib */,
 				7A1C0E5B2F3D4A6B8C9D0E41 /* InfoPlist.strings */,
 				33CC10F72044A3C60003C045 /* Info.plist */,
@@ -345,6 +348,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				7A1C0E5B2F3D4A6B8C9D0E20 /* AppIcon.icon in Resources */,
+				7A1C0E5B2F3D4A6B8C9D0E61 /* Fogata.icns in Resources */,
 				33CC10F62044A3C60003C045 /* MainMenu.xib in Resources */,
 				7A1C0E5B2F3D4A6B8C9D0E40 /* InfoPlist.strings in Resources */,
 			);

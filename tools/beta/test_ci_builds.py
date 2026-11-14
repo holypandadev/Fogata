@@ -307,7 +307,9 @@ class CheckBuild(unittest.TestCase):
         program = maker.macho(*archs) + bytes(100)
         return self.files(self.tmp / "Fogata.app", {
             "Contents/Info.plist": plistlib.dumps({
-                "CFBundleIdentifier": "dev.holypanda.fogata", "CFBundleVersion": str(build)}),
+                "CFBundleIdentifier": "dev.holypanda.fogata", "CFBundleVersion": str(build),
+                "CFBundleIconFile": "Fogata"}),
+            "Contents/Resources/Fogata.icns": b"icns" + bytes(64),
             "Contents/MacOS/Fogata": program,
             "Contents/Library/Helpers/Fogata Updater.app/Contents/MacOS/Fogata Updater": program,
             "Contents/Frameworks/FlutterMacOS.framework/Versions/A/FlutterMacOS": program,
@@ -318,6 +320,11 @@ class CheckBuild(unittest.TestCase):
         ci_builds.check_build("linux", self.linux())
         ci_builds.check_build("windows", self.windows())
         ci_builds.check_build("macos", self.macos())
+
+    def test_a_mac_application_without_its_icon_is_refused(self):
+        app = self.macos()
+        (app / "Contents/Resources/Fogata.icns").unlink()
+        self.refused("macos", app, "has no icon")
 
     def test_debug_builds_are_refused_on_every_system(self):
         for system, folder, blob in [

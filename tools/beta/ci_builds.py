@@ -126,6 +126,7 @@ def check_build(system, folder, release=None):
             fail("Fogata.app has no updater: run tools/beta/macos-updater.sh first")
         build, _ = release.this_build()
         release.check_macos_info(folder, build)
+        release.check_macos_icon(folder)
         # Universal, as release.py takes it without --macos-arch.
         release.macos_platforms(release.macos_archs(folder), None)
     print(f"{folder}: a {system} release build that release.py would take")
