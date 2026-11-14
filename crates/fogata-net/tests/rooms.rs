@@ -38,6 +38,7 @@ fn node(
         peers,
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap()
 }
@@ -410,6 +411,7 @@ fn node_with_profile(
         peers,
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap()
 }

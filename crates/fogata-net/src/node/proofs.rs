@@ -481,6 +481,7 @@ mod tests {
                 peers: Vec::new(),
                 remembered: Vec::new(),
                 hidden: false,
+                spill_dir: None,
             })
             .unwrap();
             let (newest, every) = inspect(&node, |n| {

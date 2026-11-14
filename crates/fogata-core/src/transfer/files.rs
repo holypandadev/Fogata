@@ -77,7 +77,7 @@ impl Kind {
 
 /// What the file at `rel` (relative to the data folder, `/` between names) is, or `None`
 /// for one that does not move: what belongs to this computer (its key's name, its locks,
-/// copies made while sealing and how far sealing got, videos fetched to play, downloads cut short, how chats end as
+/// copies made while sealing and how far sealing got, videos fetched to play, rooms' shares kept on disk while it runs, downloads cut short, how chats end as
 /// written with this folder's key, what was judged of group logs, its own log, the new versions of Fogata it keeps for this
 /// system), the move's own files, and names that start with a dot (nothing the application
 /// writes does).
@@ -112,6 +112,7 @@ pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
             | REPLACED_DIR
             | "videos"
             | crate::shares::COPIES_DIR
+            | crate::rooms::SPILL_DIR
             | "window"
             | "diagnostics"
             | crate::updates::store::DIR,
@@ -169,6 +170,7 @@ fn skipped_dir(rel: &str) -> bool {
             | REPLACED_DIR
             | "videos"
             | crate::shares::COPIES_DIR
+            | crate::rooms::SPILL_DIR
             | "window"
             | "diagnostics"
             | crate::updates::store::DIR
@@ -748,6 +750,11 @@ mod tests {
             Some(Kind::Whole("mls/abcd".into()))
         );
         assert_eq!(kind_of("logs/crew.log"), Some(Kind::Plain));
+        // Rooms' shares kept on disk by the run that wrote them, with a key of its own.
+        assert_eq!(
+            kind_of(&format!("{}/shares", crate::rooms::SPILL_DIR)),
+            None
+        );
         assert_eq!(kind_of("app.json"), Some(Kind::Plain));
         assert_eq!(
             kind_of(&format!("direct/{CHAT}/journal")),

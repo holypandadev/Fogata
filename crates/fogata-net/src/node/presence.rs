@@ -270,6 +270,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         // While the application is busy (reading nothing), a member says it is away and

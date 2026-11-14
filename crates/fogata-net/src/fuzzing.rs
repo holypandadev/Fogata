@@ -280,6 +280,7 @@ pub fn node_request(data: &[u8]) {
                 peers: Vec::new(),
                 remembered: Vec::new(),
                 hidden: false,
+                spill_dir: None,
             })
             .expect("a node")
             .0
@@ -360,6 +361,7 @@ fn fuzz_node(
                 peers: Vec::new(),
                 remembered: Vec::new(),
                 hidden: false,
+                spill_dir: None,
             })
             .expect("a node")
             .0

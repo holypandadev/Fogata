@@ -67,6 +67,7 @@ fn node(
         peers,
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap()
 }

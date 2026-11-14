@@ -645,6 +645,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         node.commands.send(Command::Panic).await.unwrap();
@@ -922,6 +923,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let key = RecordKey::new(b"a lookup");

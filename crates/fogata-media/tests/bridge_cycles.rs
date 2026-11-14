@@ -40,6 +40,7 @@ async fn fifty_bridges_leave_nothing_running() {
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
     // A port taken already: the bridge cannot listen there.
@@ -109,6 +110,7 @@ async fn bridges_dropped_away_from_their_runtime_leave_nothing_running() {
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
     let mut after = Vec::new();

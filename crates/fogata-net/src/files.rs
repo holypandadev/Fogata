@@ -2421,6 +2421,7 @@ mod tests {
             peers,
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         };
         let (node_a, mut events_a) = crate::start(config(ana.clone(), port, Vec::new())).unwrap();
         let (node_b, _events_b) =
@@ -2536,6 +2537,7 @@ mod tests {
             peers,
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         };
         let (node_a, mut events_a) = crate::start(config(ana.clone(), port, Vec::new())).unwrap();
         let (node_b, _events_b) =
@@ -3270,6 +3272,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let group = GroupId::random().unwrap();

@@ -335,6 +335,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let mut stranger = SwarmBuilder::with_new_identity()

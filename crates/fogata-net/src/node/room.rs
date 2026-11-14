@@ -15,7 +15,7 @@ use fogata_proto::{GroupPayload, MemberRequest, WireMessage, WireVideo};
 use fogata_state::{FileInfo, RoomChange, RoomEvent, RoomId, RoomInput, VideoPreview, VoiceRoomId};
 use libp2p::PeerId;
 
-use super::{Node, Pending, RecentEvent, limits::Sender, now_ms};
+use super::{Kept, Node, Pending, RecentEvent, limits::Sender, now_ms, spill::Spill};
 use crate::{Command, NodeEvent, RoomView};
 
 /// How long after it was sent a member taken out of a voice room still acts on it, and how
@@ -93,7 +93,31 @@ const MAX_ASKED: usize = 64;
 /// oldest lines first (see [`fit_chat`]).
 pub(super) const ROOM_CHAT_BYTES: usize = 128 * 1024 * 1024;
 
+/// Bytes of the messages of shares this device holds in memory from the rooms of all its
+/// groups together, at most (each counted as sent, as `room_record_weight` weighs it). Each
+/// group's rooms keep up to 24 MiB of shares as counted (`MAX_SHARE_BYTES`), and a member
+/// in many groups that fills them all would make this device hold some 32 MiB more for
+/// each. Past this the messages go to a file (see spill.rs), the sender with the most held
+/// first, its oldest first (see [`fit_shares`]): each share stays kept and is read back
+/// when the room is asked for or shown, so the rooms list and answer the same.
+pub(super) const ROOM_SHARE_BYTES: usize = 32 * 1024 * 1024;
+
 impl Node {
+    /// Keeps the messages of shares held in memory, from every room of every group, within
+    /// [`Self::room_share_budget`] (see [`fit_shares`]), at the same slot as the chat: a
+    /// file for them is needed, and one that was found damaged takes no more.
+    pub(super) fn fit_room_shares(&mut self) {
+        let Some(spill) = self.room_spill.as_mut() else {
+            return;
+        };
+        let trackers = self.groups.values_mut().flat_map(|s| s.rooms.values_mut());
+        let moved = fit_shares(trackers, spill, self.room_share_budget);
+        if moved > 0 {
+            let (file, kept) = spill.bytes();
+            tracing::debug!(moved, file, kept, "rooms' shares moved to disk");
+        }
+    }
+
     /// Keeps the chat of every room of every group within [`ROOM_CHAT_BYTES`] (see
     /// [`fit_chat`]). Every slot, rather than at each event: going over by what arrives in
     /// one costs little, and looking at every line kept costs more than most events.
@@ -161,6 +185,94 @@ fn fit_chat<'a, S: Clone + 'a>(
     dropped
 }
 
+/// Moves the messages of shares that `trackers` hold in memory to `spill` until they hold at
+/// most `budget` bytes of them (weighed as sent), as [`fit_chat`] lets chat lines go: each
+/// time the oldest share (by its sender's time, then id) of whoever has the most held. One
+/// that is also among its room's latest events (the same message) would free nothing, and
+/// goes once it is no longer there. The records of messages on disk no room keeps any more
+/// are let go of first, so their pages hold the next. Nothing the rooms list, take or
+/// answer changes (see `RoomTracker::replace_share_record`). Returns how many moved.
+fn fit_shares<'a>(
+    trackers: impl Iterator<Item = &'a mut fogata_state::RoomTracker<Kept>>,
+    spill: &mut Spill,
+    budget: usize,
+) -> usize {
+    use std::collections::{BinaryHeap, HashMap};
+    let mut trackers: Vec<_> = trackers.collect();
+    let on_disk: HashSet<u64> = trackers
+        .iter()
+        .flat_map(|t| t.share_records())
+        .filter_map(|(.., kept)| match kept {
+            Kept::Spilled { number, .. } => Some(*number),
+            Kept::Inline(_) => None,
+        })
+        .collect();
+    spill.keep_only(&on_disk);
+    // A file found damaged: nothing more goes to it (see `Node::room_snapshot`).
+    if spill.lost() {
+        return 0;
+    }
+    // A share that may move: its time, its file, its weight, its message and the tracker
+    // it is in.
+    type Share = (u64, [u8; 32], usize, Arc<WireMessage>, usize);
+    let mut shares: HashMap<DevicePublicKey, (usize, Vec<Share>)> = HashMap::new();
+    let mut total = 0usize;
+    for (at, tracker) in trackers.iter().enumerate() {
+        for (id, holder, time, kept) in tracker.share_records() {
+            let Kept::Inline(wire) = kept else {
+                continue;
+            };
+            let weight = kept.weight();
+            total += weight;
+            let theirs = shares.entry(holder).or_default();
+            theirs.0 += weight;
+            if Arc::strong_count(wire) == 1 {
+                theirs.1.push((time, id, weight, wire.clone(), at));
+            }
+        }
+    }
+    if total <= budget {
+        return 0;
+    }
+    let mut holders: BinaryHeap<(usize, DevicePublicKey)> = BinaryHeap::new();
+    for (holder, (held, theirs)) in shares.iter_mut() {
+        // Newest first, so the oldest comes off the end.
+        theirs.sort_unstable_by_key(|s| std::cmp::Reverse((s.0, s.1)));
+        holders.push((*held, *holder));
+    }
+    let mut moved = 0;
+    while total > budget {
+        let Some((held, holder)) = holders.pop() else {
+            break;
+        };
+        let Some((_, id, weight, wire, at)) = shares.get_mut(&holder).and_then(|s| s.1.pop())
+        else {
+            continue;
+        };
+        let number = match spill.put(&wire) {
+            Ok(number) => number,
+            Err(e) => {
+                tracing::warn!("cannot keep rooms' shares on disk now: {e}");
+                break;
+            }
+        };
+        let kept = Kept::Spilled {
+            number,
+            weight,
+            size: wire_size(&wire),
+        };
+        if trackers[at].replace_share_record(&id, &holder, kept) {
+            moved += 1;
+            total = total.saturating_sub(weight);
+        }
+        let held = held.saturating_sub(weight);
+        if shares.get(&holder).is_some_and(|s| !s.1.is_empty()) {
+            holders.push((held, holder));
+        }
+    }
+    moved
+}
+
 /// About how many bytes a sealed message takes in an answer.
 fn wire_size(wire: &WireMessage) -> usize {
     wire.group_id.len()
@@ -176,20 +288,25 @@ fn wire_size(wire: &WireMessage) -> usize {
 /// least one, so a single large event still goes), and where the next part starts if any
 /// are left.
 pub(crate) fn room_part(all: &[&WireMessage], from: u32) -> (Vec<WireMessage>, Option<u32>) {
-    let start = usize::try_from(from).unwrap_or(usize::MAX).min(all.len());
-    let mut part = Vec::new();
-    let mut bytes = 0;
-    for wire in &all[start..] {
-        let size = wire_size(wire);
-        if !part.is_empty() && bytes + size > ROOM_PART_BYTES {
+    let sizes: Vec<usize> = all.iter().map(|wire| wire_size(wire)).collect();
+    let (part, more) = part_of(&sizes, from);
+    (all[part].iter().map(|wire| (*wire).clone()).collect(), more)
+}
+
+/// Of events of `sizes` (as [`wire_size`] counts them), those from `from` on that fit one
+/// answer (see [`room_part`]), and where the next part starts if any are left.
+fn part_of(sizes: &[usize], from: u32) -> (std::ops::Range<usize>, Option<u32>) {
+    let start = usize::try_from(from).unwrap_or(usize::MAX).min(sizes.len());
+    let (mut end, mut bytes) = (start, 0);
+    for size in &sizes[start..] {
+        if end > start && bytes + size > ROOM_PART_BYTES {
             break;
         }
         bytes += size;
-        part.push((*wire).clone());
+        end += 1;
     }
-    let next = start + part.len();
-    let more = (next < all.len()).then(|| u32::try_from(next).unwrap_or(u32::MAX));
-    (part, more)
+    let more = (end < sizes.len()).then(|| u32::try_from(end).unwrap_or(u32::MAX));
+    (start..end, more)
 }
 
 /// Of `messages`, a member's answer with room events, those an honest answer holds: those
@@ -568,7 +685,7 @@ impl Node {
             message_id: sealed.header.message_id,
             input,
         };
-        let changes = tracker.apply(event, wire, now_ms());
+        let changes = tracker.apply(event, Kept::Inline(wire), now_ms());
         let earlier = tracker.take_earlier_session();
         // Not taken now, and marked as seen, so nothing else brings it again: the room's
         // events tell. Asked of that member a moment ago (on entering the room, say), the
@@ -967,22 +1084,26 @@ impl Node {
     /// as many as fit one answer, and where the next part starts if more are left. Who is in
     /// each room comes first, then the files and the chat: a room with long chats and many
     /// videos holds far more than one answer takes, and an answer too big never arrives.
+    /// Shares' messages kept on disk are read back, so the answer is the same as with all
+    /// in memory. None once the file of those messages failed to give one back, for any
+    /// group that has messages there: an answer without them would be another room than
+    /// the one this device lists, so the member asks the others (it asks again later, and
+    /// is refused until this device starts again).
     pub(super) fn room_snapshot(
         &self,
         group: GroupId,
         from: u32,
-    ) -> (Vec<WireMessage>, Option<u32>) {
+    ) -> Option<(Vec<WireMessage>, Option<u32>)> {
         let Some(slot) = self.groups.get(&group) else {
-            return (Vec::new(), None);
+            return Some((Vec::new(), None));
         };
-        let (mut joins, mut rest) = (Vec::new(), Vec::new());
-        for tracker in slot.rooms.values() {
-            let (j, r) = tracker.snapshot_parts();
-            joins.extend(j);
-            rest.extend(r);
-        }
-        let all: Vec<&WireMessage> = joins.into_iter().chain(rest).map(|w| &**w).collect();
-        room_part(&all, from)
+        rooms_part(slot.rooms.values(), self.room_spill.as_ref(), from)
+    }
+
+    /// The message of a room event as sent, read back from disk if it went there; none when
+    /// it cannot be (see `Spill::read`).
+    fn read_kept(&self, kept: &Kept) -> Option<WireMessage> {
+        read_kept(kept, self.room_spill.as_ref())
     }
 
     /// A participant's presence named `recent` events (ids one after the other); asks for
@@ -1162,7 +1283,7 @@ impl Node {
     fn read_picture(&self, group: GroupId, voice: VoiceRoomId, id: &[u8; 32]) -> Option<Arc<[u8]>> {
         let slot = self.groups.get(&group)?;
         let record = slot.rooms.get(&voice)?.share_record(id)?;
-        let sealed = SealedMessage::try_from(&**record).ok()?;
+        let sealed = SealedMessage::try_from(&self.read_kept(record)?).ok()?;
         let keys = slot.ctx.keys(sealed.header.epoch)?;
         let payload = sealed.open(keys).ok()?;
         match GroupPayload::decode(&payload).ok()? {
@@ -1171,6 +1292,50 @@ impl Node {
             } => Some(video.thumb.into()),
             _ => None,
         }
+    }
+}
+
+/// The events of the rooms `trackers` keep from event `from` on, as many as fit one answer,
+/// and where the next part starts if more are left (see `Node::room_snapshot`), shares'
+/// messages on disk read back from `spill`; none when the file was found damaged and the
+/// rooms have messages there.
+fn rooms_part<'a>(
+    trackers: impl Iterator<Item = &'a fogata_state::RoomTracker<Kept>>,
+    spill: Option<&Spill>,
+    from: u32,
+) -> Option<(Vec<WireMessage>, Option<u32>)> {
+    let (mut joins, mut rest) = (Vec::new(), Vec::new());
+    for tracker in trackers {
+        let (j, r) = tracker.snapshot_parts();
+        joins.extend(j);
+        rest.extend(r);
+    }
+    let all: Vec<&Kept> = joins.into_iter().chain(rest).collect();
+    let spilled = |kept: &&Kept| matches!(kept, Kept::Spilled { .. });
+    if spill.is_some_and(Spill::lost) && all.iter().any(spilled) {
+        return None;
+    }
+    // A message on disk takes what it took in memory, so the parts end at the same events.
+    let sizes: Vec<usize> = all
+        .iter()
+        .map(|kept| match kept {
+            Kept::Inline(wire) => wire_size(wire),
+            Kept::Spilled { size, .. } => *size,
+        })
+        .collect();
+    let (part, more) = part_of(&sizes, from);
+    let part = all[part]
+        .iter()
+        .map(|kept| read_kept(kept, spill))
+        .collect::<Option<Vec<WireMessage>>>()?;
+    Some((part, more))
+}
+
+/// The message of a room event as sent, read back from `spill` if it went there.
+fn read_kept(kept: &Kept, spill: Option<&Spill>) -> Option<WireMessage> {
+    match kept {
+        Kept::Inline(wire) => Some((**wire).clone()),
+        Kept::Spilled { number, .. } => spill?.read(*number).ok(),
     }
 }
 
@@ -1204,7 +1369,7 @@ fn keep_recent(
 }
 
 /// What a voice room shows, if a room is open in it.
-fn room_view(tracker: &fogata_state::RoomTracker<Arc<WireMessage>>) -> Option<RoomView> {
+fn room_view(tracker: &fogata_state::RoomTracker<Kept>) -> Option<RoomView> {
     tracker.room().map(|room| RoomView {
         started_ms: room.started_ms,
         participants: room
@@ -1289,6 +1454,13 @@ mod tests {
         }
     }
 
+    /// A folder of its own for a test's file of shares' messages.
+    fn spill_dir(name: &str) -> std::path::PathBuf {
+        let mut random = [0u8; 8];
+        fogata_crypto::random_bytes(&mut random).unwrap();
+        std::env::temp_dir().join(format!("fogata-room-{name}-{}", hex::encode(random)))
+    }
+
     /// The answer as it goes on the wire, and whether the member that asked can read it.
     fn answer(messages: Vec<WireMessage>) -> (usize, bool) {
         futures::executor::block_on(async {
@@ -1365,6 +1537,42 @@ mod tests {
         assert!(small.iter().all(|e| e.wire.is_some()));
     }
 
+    /// A room's events in the parts a member that asks gets them in, read back from `spill`
+    /// where they went there, with where each part said the next starts.
+    fn all_parts(
+        tracker: &RoomTracker<Kept>,
+        spill: Option<&Spill>,
+    ) -> Vec<(Vec<WireMessage>, Option<u32>)> {
+        let mut parts = Vec::new();
+        let mut from = Some(0);
+        while let Some(at) = from {
+            let (part, more) = rooms_part(std::iter::once(tracker), spill, at).unwrap();
+            parts.push((part, more));
+            from = more;
+        }
+        parts
+    }
+
+    /// The same messages, byte for byte, in the same parts.
+    fn same_parts(
+        a: &[(Vec<WireMessage>, Option<u32>)],
+        b: &[(Vec<WireMessage>, Option<u32>)],
+    ) -> bool {
+        format!("{a:?}") == format!("{b:?}")
+    }
+
+    /// Moves every share `tracker` keeps in memory to a new file, as past the device's
+    /// bound; the file and its folder.
+    fn all_on_disk(tracker: &mut RoomTracker<Kept>, name: &str) -> (Spill, std::path::PathBuf) {
+        let dir = spill_dir(name);
+        let mut spill = Spill::open(dir.clone()).unwrap();
+        let moved = fit_shares(std::iter::once(&mut *tracker), &mut spill, 0);
+        assert_eq!(moved, tracker.share_records().count());
+        (spill, dir)
+    }
+
+    /// With its shares' messages on disk too: the same parts, read back from there. Prints
+    /// how long a part read from disk takes.
     #[test]
     fn a_room_of_many_videos_still_reaches_a_member_that_asks() {
         let me = DeviceIdentity::generate().unwrap().public_key();
@@ -1381,7 +1589,7 @@ mod tests {
                 nick: "Ana".into(),
             },
         };
-        tracker.apply(join, record(0, 200), 1_000);
+        tracker.apply(join, Kept::Inline(Arc::new(record(0, 200))), 1_000);
         // A hundred videos, each with a first picture near the largest a room keeps.
         for i in 1..=100u8 {
             let share = RoomEvent {
@@ -1396,29 +1604,39 @@ mod tests {
                     video: None,
                 }),
             };
-            tracker.apply(share, record(i, 90_000), 1_000);
+            tracker.apply(share, Kept::Inline(Arc::new(record(i, 90_000))), 1_000);
         }
-        let all = tracker.snapshot();
+        let all: Vec<WireMessage> = tracker
+            .snapshot()
+            .iter()
+            .map(|kept| read_kept(kept, None).unwrap())
+            .collect();
         assert_eq!(all.len(), 101);
         let (size, read) = answer(all);
         assert!(size as u64 > MAX_MESSAGE_BYTES && !read);
 
-        let (joins, rest) = tracker.snapshot_parts();
-        let ordered: Vec<&WireMessage> = joins.into_iter().chain(rest).collect();
-        let mut from = 0;
+        let parts = all_parts(&tracker, None);
         let mut received = Vec::new();
-        loop {
-            let (part, more) = room_part(&ordered, from);
+        for (part, _) in &parts {
             let (size, read) = answer(part.clone());
             assert!(size as u64 <= MAX_MESSAGE_BYTES && read);
-            received.extend(part);
-            match more {
-                Some(next) => from = next,
-                None => break,
-            }
+            received.extend(part.iter().cloned());
         }
         assert_eq!(received[0].message_id, vec![0; 16], "the join goes first");
         assert_eq!(received.len(), 101, "every event arrives over the parts");
+
+        let (spill, dir) = all_on_disk(&mut tracker, "videos");
+        let started = Instant::now();
+        let (part, _) = rooms_part(std::iter::once(&tracker), Some(&spill), 0).unwrap();
+        println!(
+            "a part of {} shares ({} KiB) read back from disk in {:?}",
+            part.len(),
+            part.iter().map(wire_size).sum::<usize>() >> 10,
+            started.elapsed()
+        );
+        assert!(same_parts(&all_parts(&tracker, Some(&spill)), &parts));
+        drop(spill);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1468,6 +1686,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let by = bea.public_key();
@@ -1560,6 +1779,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let backlog = events.backlog();
@@ -1688,6 +1908,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let asked_again = inspect(&node, move |n| {
@@ -1735,12 +1956,18 @@ mod tests {
     /// with an empty picture, the screens get it read from the record, those of the room
     /// shown last alone are kept read, and what the room answers a member that asks is the
     /// records as they were sent, pictures and all. A file shared on from here goes with
-    /// the room's picture. Prints how long reading a full room's pictures takes.
+    /// the room's picture. All of it the same with the shares' messages on disk, past what
+    /// the device holds in memory, but for those among the room's latest events; and with
+    /// that file damaged, the room is no longer given. Prints how long reading a full room's
+    /// pictures takes.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_rooms_pictures_are_kept_once_and_read_for_the_room_shown() {
         let ana = Arc::new(DeviceIdentity::generate().unwrap());
         let log = GroupLog::create(&ana, "g", 1).unwrap();
         let group = log.group_id();
+        let dir = spill_dir("pictures");
+        let on_disk_file = dir.join("shares");
+        let spill_file = on_disk_file.clone();
         let (node, events) = start(NodeConfig {
             identity: ana,
             groups: vec![GroupSetup::Member(log)],
@@ -1753,6 +1980,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: Some(dir.clone()),
         })
         .unwrap();
         let checked = inspect(&node, move |n| {
@@ -1790,7 +2018,23 @@ mod tests {
                 shared = listed;
             }
             assert!(shared > 30, "{shared} shared");
+            // Past what the device holds in memory: all go to disk but those among the
+            // room's latest events, which would free nothing.
+            n.room_share_budget = 0;
+            n.fit_room_shares();
             let tracker = &n.groups[&group].rooms[&voice];
+            let on_disk = tracker
+                .share_records()
+                .filter(|(.., kept)| matches!(kept, Kept::Spilled { .. }))
+                .count();
+            assert!(
+                on_disk > shared / 2 && on_disk < shared,
+                "{on_disk} on disk"
+            );
+            assert!(matches!(
+                tracker.share_record(&[3; 32]),
+                Some(Kept::Spilled { .. })
+            ));
             let room = tracker.room().unwrap();
             assert!(
                 room.files
@@ -1815,7 +2059,7 @@ mod tests {
             let mut answer = Vec::new();
             let mut from = Some(0);
             while let Some(at) = from {
-                let (part, next) = n.room_snapshot(group, at);
+                let (part, next) = n.room_snapshot(group, at).unwrap();
                 answer.extend(part);
                 from = next;
             }
@@ -1839,6 +2083,33 @@ mod tests {
                 n.room_picture(group, &[3; 32]).as_deref(),
                 Some(&picture(3)[..])
             );
+            // Shared on from here (downloaded, so without its picture): it goes with the
+            // picture read from disk.
+            let mut downloaded = video(3);
+            downloaded.video.as_mut().unwrap().thumb = Vec::new();
+            let (reply, _) = tokio::sync::oneshot::channel();
+            n.on_room_command(Command::ShareFile {
+                group,
+                file: downloaded,
+                reply,
+            });
+            let Some(Kept::Inline(wire)) = n.groups[&group].rooms[&voice].share_record(&[3; 32])
+            else {
+                panic!("not shared on");
+            };
+            let sealed = SealedMessage::try_from(&**wire).unwrap();
+            let sent = GroupPayload::decode(&sealed.open(&keys).unwrap()).unwrap();
+            assert!(matches!(
+                sent,
+                GroupPayload::RoomShare { video: Some(v), .. } if v.thumb == picture(3)
+            ));
+            // The file damaged under the device: the room is no longer given, rather than
+            // given without the shares it cannot read back.
+            let len = std::fs::metadata(&spill_file).unwrap().len();
+            std::fs::write(&spill_file, vec![0; len as usize]).unwrap();
+            assert!(n.room_snapshot(group, 0).is_none());
+            assert!(n.room_picture(group, &[5; 32]).is_none());
+            n.fit_room_shares();
             // Another room shown: the first one's pictures are no longer kept read.
             let other: VoiceRoomId = [5; 8];
             n.show_pictures(group, other, &mut []);
@@ -1848,6 +2119,8 @@ mod tests {
         assert!(checked);
         drop(events);
         node.shutdown().await.unwrap();
+        assert!(!on_disk_file.exists(), "the file outlived the node");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Someone left the room and came back, and the join that said so did not reach this
@@ -1879,6 +2152,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let bea_key = bea.public_key();
@@ -1950,6 +2224,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let backlog = events.backlog();
@@ -2249,6 +2524,167 @@ mod tests {
         assert_eq!(room(&small), room(&large));
     }
 
+    /// Two members of a group, one of which holds its shares' messages on disk past its own
+    /// bound (in many groups, say: [`fit_shares`]), still show the same room and answer a
+    /// member that asks with the same messages, byte for byte, in the same parts; a member
+    /// asking either gets the same room, and asking each other changes nothing. A message
+    /// still among the room's latest events stays in memory until it leaves them.
+    #[test]
+    fn devices_keeping_shares_on_disk_still_agree_on_the_room() {
+        use fogata_state::{EVENT_SLACK_BYTES, MAX_CHAT_CHARS};
+        let key = || DeviceIdentity::generate().unwrap().public_key();
+        let people = [key(), key(), key()];
+        let tracker = || RoomTracker::new(key()).weighing(Kept::weight);
+        let mut events: HashMap<Vec<u8>, RoomEvent> = HashMap::new();
+        let mut records = Vec::new();
+        let mut n = 0u32;
+        let mut send = |sender, input, weight: usize| {
+            n += 1;
+            let mut message_id = [0u8; 16];
+            message_id[..4].copy_from_slice(&n.to_be_bytes());
+            let mut wire = record(0, 0);
+            wire.message_id = message_id.to_vec();
+            wire.ciphertext = vec![n as u8; weight - crate::group::room_record_weight(&wire)];
+            events.insert(
+                wire.message_id.clone(),
+                RoomEvent {
+                    room: [1; 16],
+                    sender,
+                    timestamp_ms: 1_000 + u64::from(n),
+                    message_id,
+                    input,
+                },
+            );
+            records.push(wire);
+        };
+        for who in people {
+            let join = RoomInput::Join {
+                started_ms: 1_000,
+                nick: "m".into(),
+            };
+            send(who, join, 300);
+        }
+        let heavy = "\u{1}".repeat(MAX_CHAT_CHARS);
+        for i in 0..120u8 {
+            let who = people[usize::from(i) % people.len()];
+            if i % 3 == 0 {
+                let file = FileInfo {
+                    id: [i; 32],
+                    name: format!("clip{i}.mp4"),
+                    size: 1000,
+                    video: Some(VideoPreview {
+                        thumb: vec![9; 12_000],
+                        width: 2,
+                        height: 2,
+                        duration_ms: 1,
+                    }),
+                };
+                send(who, RoomInput::Share(file), 16_000 + usize::from(i));
+            }
+            let chat = RoomInput::Chat {
+                nick: "m".into(),
+                text: heavy.clone(),
+            };
+            send(who, chat, 6 * MAX_CHAT_CHARS + 1 + EVENT_SLACK_BYTES);
+        }
+        let apply_all = |t: &mut RoomTracker<Kept>, records: &[WireMessage]| {
+            for wire in records {
+                let kept = Kept::Inline(Arc::new(wire.clone()));
+                t.apply(events[&wire.message_id].clone(), kept, 1_000);
+            }
+        };
+        let (mut small, mut large) = (tracker(), tracker());
+        apply_all(&mut small, &records);
+        apply_all(&mut large, &records);
+        // The latest share, also among the room's latest events: the same message.
+        let latest = small
+            .share_records()
+            .max_by_key(|(_, _, at, _)| *at)
+            .map(|(id, holder, ..)| (id, holder))
+            .unwrap();
+        let recent = match small.share_records().find(|s| (s.0, s.1) == latest) {
+            Some((.., Kept::Inline(wire))) => wire.clone(),
+            _ => unreachable!(),
+        };
+        let held = |t: &RoomTracker<Kept>| -> usize {
+            t.share_records()
+                .filter(|(.., k)| matches!(k, Kept::Inline(_)))
+                .map(|(.., k)| k.weight())
+                .sum()
+        };
+        let all = held(&large);
+        let budget = all / 3;
+        let dir = spill_dir("agree");
+        let mut spill = Spill::open(dir.clone()).unwrap();
+        assert!(fit_shares(std::iter::once(&mut small), &mut spill, budget) > 0);
+        assert!(held(&small) <= budget);
+        let on_disk = |t: &RoomTracker<Kept>| -> Vec<([u8; 32], DevicePublicKey)> {
+            t.share_records()
+                .filter(|(.., k)| matches!(k, Kept::Spilled { .. }))
+                .map(|(id, holder, ..)| (id, holder))
+                .collect()
+        };
+        assert!(
+            !on_disk(&small).contains(&latest),
+            "moved while still latest"
+        );
+        // The oldest of whoever held the most went first: the latest held are all newer.
+        let times = |t: &RoomTracker<Kept>, spilled: bool| -> Vec<u64> {
+            t.share_records()
+                .filter(|(.., k)| matches!(k, Kept::Spilled { .. }) == spilled)
+                .map(|(_, _, at, _)| at)
+                .collect()
+        };
+        assert!(times(&small, true).iter().max() < times(&small, false).iter().max());
+        // The room as each shows it: who is in it and its files.
+        let room = |t: &RoomTracker<Kept>| {
+            let room = t.room().unwrap();
+            let who: Vec<(DevicePublicKey, String)> = room
+                .participants
+                .iter()
+                .map(|(d, p)| (*d, p.nick.clone()))
+                .collect();
+            (who, room.files.clone())
+        };
+        assert_eq!(room(&small), room(&large));
+        assert_eq!(room(&small).1.len(), 40);
+        // What each answers a member that asks: the same, byte for byte, in the same parts.
+        let small_parts = all_parts(&small, Some(&spill));
+        let large_parts = all_parts(&large, None);
+        assert!(small_parts.len() > 1);
+        assert!(same_parts(&small_parts, &large_parts));
+        // A member that comes online asks either: the same room.
+        let answer = |parts: &[(Vec<WireMessage>, Option<u32>)]| -> Vec<WireMessage> {
+            parts.iter().flat_map(|(p, _)| p.iter().cloned()).collect()
+        };
+        let (mut from_small, mut from_large) = (tracker(), tracker());
+        apply_all(&mut from_small, &answer(&small_parts));
+        apply_all(&mut from_large, &answer(&large_parts));
+        assert_eq!(room(&from_small), room(&large));
+        assert_eq!(room(&from_large), room(&large));
+        // Each asks the other: the same room on both; what came again from the other is
+        // held in memory until the next slot moves it again.
+        apply_all(&mut large, &answer(&small_parts));
+        apply_all(&mut small, &answer(&large_parts));
+        assert_eq!(room(&small), room(&large));
+        drop(recent);
+        fit_shares(std::iter::once(&mut small), &mut spill, budget);
+        assert!(held(&small) <= budget);
+        assert!(same_parts(
+            &all_parts(&small, Some(&spill)),
+            &all_parts(&large, None)
+        ));
+        // What went out of the room no longer takes room on disk: its pages hold the next.
+        let (file, _) = spill.bytes();
+        let on_disk_now = on_disk(&small).len();
+        assert!(
+            file as usize <= (on_disk_now + 1) * 20 * 1024,
+            "{file} bytes"
+        );
+        drop(spill);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A room as a device keeps it, with its latest events.
     type FloodedRoom = (RoomTracker<Arc<WireMessage>>, Vec<Arc<WireMessage>>);
 
@@ -2415,6 +2851,141 @@ mod tests {
     #[ignore]
     fn measure_device_room_memory_per_group_only() {
         measure_device_room_memory(false, false);
+    }
+
+    /// What ten groups of one room each make a device hold of their shares, in each of which
+    /// a member that floods it has eight devices sharing as many videos with the biggest
+    /// picture as the room takes from each (47): every share in memory (`on_disk` false),
+    /// or past [`ROOM_SHARE_BYTES`] on disk ([`fit_shares`], every slot of the node, here
+    /// after each group came). Kept as the node keeps them, with each room's latest events.
+    /// Also how long the slowest part of a room's answer takes to read back. Linux and
+    /// macOS, one at a time, in a release build:
+    /// `cargo test --release -p fogata-net --lib device_share_memory -- --ignored --nocapture`.
+    fn measure_device_share_memory(on_disk: bool) {
+        use fogata_state::{EVENT_SLACK_BYTES, MAX_IN_ROOM, MAX_SHARES_EACH, MAX_THUMB_BYTES};
+        let key = || DeviceIdentity::generate().unwrap().public_key();
+        let dir = spill_dir("measure");
+        let mut spill = on_disk.then(|| Spill::open(dir.clone()).unwrap());
+        let me = key();
+        let thumb = vec![9; MAX_THUMB_BYTES];
+        let mut n = 0u32;
+        let before = resident();
+        let mut rooms: Vec<(RoomTracker<Kept>, Vec<Arc<WireMessage>>)> = Vec::new();
+        for g in 0..10u8 {
+            let mut t = RoomTracker::new(me)
+                .weighing(Kept::weight)
+                .keeping_pictures(false);
+            t.set_room_for(MAX_IN_ROOM, 1);
+            let mut recent: VecDeque<RecentEvent> = VecDeque::new();
+            let mut send = |t: &mut RoomTracker<Kept>, sender, input, weight| {
+                n += 1;
+                let mut message_id = [0u8; 16];
+                message_id[..4].copy_from_slice(&n.to_be_bytes());
+                let mut wire = record(0, 0);
+                wire.message_id = message_id.to_vec();
+                wire.ciphertext = vec![5; weight - crate::group::room_record_weight(&wire)];
+                let wire = Arc::new(wire);
+                keep_recent(&mut recent, [g; 16], message_id, &wire);
+                let event = RoomEvent {
+                    room: [g; 16],
+                    sender,
+                    timestamp_ms: 1_000 + u64::from(n),
+                    message_id,
+                    input,
+                };
+                t.apply(event, Kept::Inline(wire), 1_000);
+            };
+            for d in 0..u32::from(MAX_IN_ROOM) {
+                let device = key();
+                let join = RoomInput::Join {
+                    started_ms: 1_000,
+                    nick: "m".into(),
+                };
+                send(&mut t, device, join, 300);
+                for i in 0..MAX_SHARES_EACH as u32 {
+                    let mut id = [0u8; 32];
+                    id[..4].copy_from_slice(&(d * 1_000 + i).to_be_bytes());
+                    let file = FileInfo {
+                        id,
+                        name: format!("f{i:03}"),
+                        size: 1,
+                        video: Some(VideoPreview {
+                            thumb: thumb.clone(),
+                            width: 2,
+                            height: 2,
+                            duration_ms: 1,
+                        }),
+                    };
+                    let weight = MAX_THUMB_BYTES.div_ceil(3) * 4 + 4 + EVENT_SLACK_BYTES;
+                    send(&mut t, device, RoomInput::Share(file), weight);
+                }
+            }
+            let recent = recent.into_iter().filter_map(|e| e.wire).collect();
+            rooms.push((t, recent));
+            if let Some(spill) = spill.as_mut() {
+                fit_shares(rooms.iter_mut().map(|(t, _)| t), spill, ROOM_SHARE_BYTES);
+            }
+        }
+        let after = resident();
+        let listed: usize = rooms.iter().map(|(t, _)| t.share_records().count()).sum();
+        let counted: usize = rooms.iter().map(|(t, _)| t.share_bytes()).sum();
+        let (mut held, mut moved) = (0, 0);
+        for (kept, weight) in rooms
+            .iter()
+            .flat_map(|(t, _)| t.share_records())
+            .map(|(.., k)| (k, k.weight()))
+        {
+            match kept {
+                Kept::Inline(_) => held += weight,
+                Kept::Spilled { .. } => moved += weight,
+            }
+        }
+        let file = spill.as_ref().map_or(0, |s| s.bytes().0);
+        // Each part of the first room's answer, read back, the slowest.
+        let mut slowest = (Duration::ZERO, 0, 0);
+        let mut from = Some(0);
+        while let Some(at) = from {
+            let started = Instant::now();
+            let (part, more) =
+                rooms_part(std::iter::once(&rooms[0].0), spill.as_ref(), at).unwrap();
+            let took = started.elapsed();
+            if took > slowest.0 {
+                slowest = (took, part.len(), part.iter().map(wire_size).sum::<usize>());
+            }
+            from = more;
+        }
+        println!(
+            "10 one-room groups{}: {listed} shares, {} MiB as counted; messages {} MiB in \
+             memory, {} MiB on disk (file {} MiB); {} MiB resident; slowest part of an \
+             answer ({} shares, {} KiB) read in {:?}",
+            if on_disk {
+                ", on disk past the bound"
+            } else {
+                ""
+            },
+            counted >> 20,
+            held >> 20,
+            moved >> 20,
+            file >> 20,
+            after.saturating_sub(before) >> 20,
+            slowest.1,
+            slowest.2 >> 10,
+            slowest.0,
+        );
+        drop(spill);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_device_share_memory_in_memory() {
+        measure_device_share_memory(false);
+    }
+
+    #[test]
+    #[ignore]
+    fn measure_device_share_memory_on_disk() {
+        measure_device_share_memory(true);
     }
 
     /// A busy device in many groups, every room of each full of honest chat (500 lines of

@@ -65,6 +65,7 @@ fn node(identity: Arc<DeviceIdentity>, setup: GroupSetup, port: u16) -> (NodeHan
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap()
 }

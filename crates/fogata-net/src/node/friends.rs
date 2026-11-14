@@ -2333,6 +2333,7 @@ mod tests {
             peers: vec![peer],
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap()
         .0
@@ -2447,6 +2448,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let code = bea_node.create_friend_code().await.unwrap();
@@ -2477,6 +2479,7 @@ mod tests {
             peers: vec![liar],
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         ana_node.use_friend_code(code).await.unwrap();
@@ -2633,6 +2636,7 @@ mod tests {
                 peers: Vec::new(),
                 remembered: Vec::new(),
                 hidden: false,
+                spill_dir: None,
             })
             .unwrap()
             .0
@@ -2708,6 +2712,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         node.create_friend_code().await.unwrap();
@@ -2800,6 +2805,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let ana_key = ana.public_key();
@@ -2865,6 +2871,7 @@ mod tests {
                 peers: Vec::new(),
                 remembered: Vec::new(),
                 hidden: false,
+                spill_dir: None,
             })
             .unwrap()
             .0

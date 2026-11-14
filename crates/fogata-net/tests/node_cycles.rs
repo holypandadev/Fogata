@@ -30,6 +30,7 @@ async fn fifty_nodes_leave_nothing_running() {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         fogata_net::files::serve(node.clone(), Default::default(), |_, _| {}).unwrap();
@@ -71,6 +72,7 @@ async fn a_node_stops_when_its_handles_are_dropped() {
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
     fogata_net::files::serve(node.clone(), Default::default(), |_, _| {}).unwrap();
@@ -110,6 +112,7 @@ async fn a_node_s_tasks_are_gone_when_its_shutdown_returns() {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         fogata_net::files::serve(node.clone(), Default::default(), |_, _| {}).unwrap();

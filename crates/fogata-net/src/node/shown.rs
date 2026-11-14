@@ -137,6 +137,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let mut peer = SwarmBuilder::with_new_identity()
@@ -242,6 +243,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let mut peer = SwarmBuilder::with_new_identity()
@@ -374,6 +376,7 @@ mod tests {
             peers,
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         };
         let port = std::net::UdpSocket::bind("127.0.0.1:0")
             .unwrap()

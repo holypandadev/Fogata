@@ -1018,6 +1018,7 @@ fn start_node(options: &TransferOptions, port: Option<u16>) -> Result<NodeHandle
         peers: net.peers.clone(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })?;
     tokio::spawn(async move {
         while let Some(event) = events.recv().await {

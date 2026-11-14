@@ -9,6 +9,10 @@ use fogata_state::{Barrier, FIRST_ROOM, KeptOut, VoiceRoomId};
 
 use crate::{Core, FileView, MediaBridge, RoomState, now_ms, shares};
 
+/// The folder of the data folder the node keeps the messages of rooms' shares in, past what
+/// it holds of them in memory: sealed with a key of that run only, and emptied at start.
+pub(crate) const SPILL_DIR: &str = "rooms";
+
 /// A time to wait, in words: "58 min", "3 h", "2 days".
 fn time_left(ms: u64) -> String {
     let minutes = ms.div_ceil(60_000).max(1);

@@ -1020,6 +1020,7 @@ impl Core {
             peers: options.peers,
             remembered,
             hidden: options.hidden,
+            spill_dir: Some(store.dir().join(rooms::SPILL_DIR)),
         })?;
         node.remember_levels(store.levels());
         // Right as the node starts, so members learn it when they first connect, with the

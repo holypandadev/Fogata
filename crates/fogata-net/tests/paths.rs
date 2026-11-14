@@ -53,6 +53,7 @@ async fn a_member_reached_several_ways_is_told_once() {
         peers,
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     };
     let (port_a, port_b) = (free_port(), free_port());
     let (_node_a, mut events_a) = fogata_net::start(config(ana, port_a, ways(port_b))).unwrap();

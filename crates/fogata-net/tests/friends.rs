@@ -56,6 +56,7 @@ fn node_as(
         peers,
         remembered: Vec::new(),
         hidden,
+        spill_dir: None,
     })
     .unwrap()
 }
@@ -605,6 +606,7 @@ async fn a_removal_is_kept_for_the_former_friend_when_another_device_refuses_it(
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
     // Dialled at an address given: probed at once, and told of the removal.
@@ -699,6 +701,7 @@ async fn a_friend_is_found_again_where_it_was_reached() {
             peers: Vec::new(),
             remembered,
             hidden: false,
+            spill_dir: None,
         })
         .unwrap()
     };
@@ -754,6 +757,7 @@ async fn an_address_of_a_former_friend_is_not_dialled() {
             peers: Vec::new(),
             remembered,
             hidden: false,
+            spill_dir: None,
         })
         .unwrap()
     };

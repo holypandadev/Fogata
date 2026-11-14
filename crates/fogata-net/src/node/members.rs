@@ -827,7 +827,11 @@ impl Node {
         let Some(device) = self.may_serve(peer) else {
             return MemberResponse::Refused;
         };
-        let (messages, more) = self.room_snapshot(group, from);
+        // Shares' messages kept on disk that cannot be read back: the room this device
+        // would give is not the one it lists (see `room_snapshot`); others are asked.
+        let Some((messages, more)) = self.room_snapshot(group, from) else {
+            return MemberResponse::Refused;
+        };
         self.charge_served(device, messages.iter().map(wire_bytes).sum());
         MemberResponse::RoomLog { messages, more }
     }
@@ -1889,6 +1893,7 @@ mod tests {
             peers,
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         };
         let port = std::net::UdpSocket::bind("127.0.0.1:0")
             .unwrap()
@@ -2004,6 +2009,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let bea_peer = inspect(&bea, |n| n.local_peer()).await;

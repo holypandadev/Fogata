@@ -189,6 +189,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         };
         let port = std::net::UdpSocket::bind("127.0.0.1:0")
             .unwrap()

@@ -86,6 +86,10 @@ pub struct NodeConfig {
     /// Appear offline: friends and members are asked to show this device as offline. It
     /// still connects, and it shows in the rooms it is in.
     pub hidden: bool,
+    /// A folder of the node's own, for the messages of rooms' shares it keeps on disk rather
+    /// than in memory past a bound (sealed with a key of this run only): emptied at start.
+    /// With none, the node keeps them all in memory.
+    pub spill_dir: Option<std::path::PathBuf>,
 }
 
 impl fmt::Debug for NodeConfig {

@@ -71,6 +71,7 @@ async fn a_profile_and_presence_sent_before_the_proof_still_count() {
         peers: vec![loopback(port_b)],
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
 
@@ -204,6 +205,7 @@ async fn a_profile_that_does_not_decode_is_not_kept_before_the_proof() {
         peers: vec![loopback(port_b)],
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
 

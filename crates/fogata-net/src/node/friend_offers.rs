@@ -562,6 +562,7 @@ mod offer_tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let (before, after) = inspect(&node, move |n| {

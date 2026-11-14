@@ -43,6 +43,7 @@ async fn a_silent_tcp_connection_is_closed() {
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap();
     // Listening.

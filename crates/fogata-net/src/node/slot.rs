@@ -55,6 +55,7 @@ impl Node {
         self.publish_known_addresses();
         self.trim_logs();
         self.fit_room_chat();
+        self.fit_room_shares();
         if let Some(left) = self.network_pending.take() {
             self.after_network_change(left);
         }

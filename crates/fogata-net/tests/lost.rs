@@ -85,6 +85,7 @@ async fn a_member_lost_in_a_long_outage_is_dialled_again() {
         peers,
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     };
     let port_b = free_port();
     let cut = Arc::new(AtomicBool::new(false));

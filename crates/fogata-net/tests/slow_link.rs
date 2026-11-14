@@ -35,6 +35,7 @@ fn node(listen_port: u16, peers: Vec<fogata_net::Multiaddr>) -> NodeHandle {
         peers,
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     })
     .unwrap()
     .0

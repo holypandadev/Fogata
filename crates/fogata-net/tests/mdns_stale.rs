@@ -59,6 +59,7 @@ fn node(
         peers: Vec::new(),
         remembered: Vec::new(),
         hidden: false,
+        spill_dir: None,
     };
     match service {
         Some(service) => fogata_net::start_on_mdns_service(config, service),

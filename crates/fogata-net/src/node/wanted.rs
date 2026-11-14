@@ -300,6 +300,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         let (home, challenge, other) = inspect(&node, |n| {

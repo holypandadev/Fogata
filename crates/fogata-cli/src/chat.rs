@@ -92,6 +92,7 @@ impl NetArgs {
             peers: options.peers,
             remembered: Vec::new(),
             hidden: options.hidden,
+            spill_dir: None,
         }
     }
 }

@@ -38,6 +38,7 @@ mod run;
 mod sessions;
 mod shown;
 mod slot;
+mod spill;
 mod spread;
 mod swarm_events;
 mod transfer;
@@ -310,6 +311,14 @@ pub(crate) fn start_with(
         last_sealed_ms: 0,
         groups: BTreeMap::new(),
         shown_pictures: Default::default(),
+        room_spill: config.spill_dir.and_then(|dir| {
+            spill::Spill::open(dir)
+                .map_err(|e| {
+                    tracing::warn!("rooms' shares stay in memory: no file for them: {e}");
+                })
+                .ok()
+        }),
+        room_share_budget: room::ROOM_SHARE_BYTES,
         friends: config.friends.map(FriendContext::new),
         lan_seen: HashSet::new(),
         #[cfg(test)]
@@ -563,6 +572,30 @@ struct ConnectionInfo {
     address: Multiaddr,
 }
 
+/// A room event as a voice room keeps it: the message as sent, or, for a share past what
+/// this device holds of them in memory, where that message waits on disk (see room.rs).
+#[derive(Clone, Debug)]
+enum Kept {
+    Inline(Arc<WireMessage>),
+    /// The message's number in the file, what it weighs as sent (`room_record_weight`)
+    /// and what it takes in an answer (`room::wire_size`), as when it was in memory.
+    Spilled {
+        number: u64,
+        weight: usize,
+        size: usize,
+    },
+}
+
+impl Kept {
+    /// What the message weighs as sent, wherever it is.
+    fn weight(&self) -> usize {
+        match self {
+            Kept::Inline(wire) => crate::group::room_record_weight(wire),
+            Kept::Spilled { weight, .. } => *weight,
+        }
+    }
+}
+
 /// A room event kept to name in presences and to give to members that lack it.
 struct RecentEvent {
     room: fogata_state::RoomId,
@@ -642,7 +675,7 @@ impl RecordSent {
 struct GroupSlot {
     ctx: GroupContext,
     /// The voice rooms heard of so far, each with its own people, chat and files.
-    rooms: BTreeMap<VoiceRoomId, RoomTracker<Arc<WireMessage>>>,
+    rooms: BTreeMap<VoiceRoomId, RoomTracker<Kept>>,
     /// This device, and when the node started running the group: its own joins from
     /// before then are an earlier session's.
     me: DevicePublicKey,
@@ -859,12 +892,12 @@ impl GroupSlot {
     }
 
     /// A voice room's tracker, made the first time the room is heard of.
-    fn tracker(&mut self, voice: VoiceRoomId) -> &mut RoomTracker<Arc<WireMessage>> {
+    fn tracker(&mut self, voice: VoiceRoomId) -> &mut RoomTracker<Kept> {
         let (me, since) = (self.me, self.since_ms);
         self.rooms.entry(voice).or_insert_with(|| {
             RoomTracker::new(me)
                 .since(since)
-                .weighing(|record: &Arc<WireMessage>| crate::group::room_record_weight(record))
+                .weighing(Kept::weight)
                 // A video's first picture is read from its share's record when the room is
                 // shown (see `Node::room_pictures`), not kept twice.
                 .keeping_pictures(false)
@@ -872,7 +905,7 @@ impl GroupSlot {
     }
 
     /// The voice room this device is in, if any.
-    fn joined(&self) -> Option<(VoiceRoomId, &RoomTracker<Arc<WireMessage>>)> {
+    fn joined(&self) -> Option<(VoiceRoomId, &RoomTracker<Kept>)> {
         self.rooms
             .iter()
             .find(|(_, tracker)| tracker.joined())
@@ -911,6 +944,12 @@ struct Node {
     /// The first pictures of the videos of the room the screens showed last, read from their
     /// shares' records (see room.rs): only that room's are kept read.
     shown_pictures: room::ShownPictures,
+    /// Where the messages of rooms' shares go past [`Node::room_share_budget`] of them in
+    /// memory (see room.rs); with none, all stay in memory.
+    room_spill: Option<spill::Spill>,
+    /// Bytes of shares' messages kept in memory across all rooms, at most
+    /// ([`room::ROOM_SHARE_BYTES`], less in tests).
+    room_share_budget: usize,
     friends: Option<FriendContext>,
     /// Fogata devices found on the local network.
     lan_seen: HashSet<PeerId>,
@@ -1523,6 +1562,7 @@ mod tests {
             peers: Vec::new(),
             remembered: Vec::new(),
             hidden: false,
+            spill_dir: None,
         })
         .unwrap();
         (node, group)
