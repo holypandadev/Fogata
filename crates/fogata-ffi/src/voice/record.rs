@@ -141,7 +141,7 @@ impl Active {
     /// thread to end, so all it took is in: at most [`STOP_WAIT`].
     fn stop_capture(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
-        wait_for_end(&self.ended, self.thread.take());
+        wait_for_end(&self.ended, self.thread.take(), STOP_WAIT);
     }
 
     /// Tells the recording's thread to stop, without waiting: the window's thread asks
@@ -154,9 +154,9 @@ impl Active {
 }
 
 /// Waits for a recording's thread, told to stop, to end, so all it took is in: at most
-/// [`STOP_WAIT`]. One that takes longer is left to end by itself.
-fn wait_for_end(ended: &AtomicBool, thread: Option<thread::JoinHandle<()>>) {
-    let until = Instant::now() + STOP_WAIT;
+/// `wait` ([`STOP_WAIT`] outside tests). One that takes longer is left to end by itself.
+fn wait_for_end(ended: &AtomicBool, thread: Option<thread::JoinHandle<()>>, wait: Duration) {
+    let until = Instant::now() + wait;
     while !ended.load(Ordering::Relaxed) && Instant::now() < until {
         thread::sleep(Duration::from_millis(5));
     }
@@ -338,6 +338,11 @@ pub(crate) fn cancel() {
 /// shorter than half a second; and which recording it was. It stays (see [`forget`]) until
 /// it is sent.
 pub(crate) fn finish(serial: u32) -> Result<(Option<Recording>, u64), String> {
+    finish_waiting(serial, STOP_WAIT)
+}
+
+/// [`finish`], waiting at most `wait` for the microphone to close.
+fn finish_waiting(serial: u32, wait: Duration) -> Result<(Option<Recording>, u64), String> {
     let _finishing = FINISHING.lock().unwrap_or_else(PoisonError::into_inner);
     let shown = state();
     // The microphone closes without the recording held: that can take up to STOP_WAIT.
@@ -352,7 +357,7 @@ pub(crate) fn finish(serial: u32) -> Result<(Option<Recording>, u64), String> {
         active.stop.store(true, Ordering::Relaxed);
         (active.id, active.ended.clone(), active.thread.take())
     };
-    wait_for_end(&ended, thread);
+    wait_for_end(&ended, thread, wait);
     let mut active = ACTIVE.lock().unwrap_or_else(PoisonError::into_inner);
     // Thrown away meanwhile, maybe with another one started: nothing to send.
     let Some(active) = active.as_mut().filter(|a| a.id == id) else {
@@ -732,6 +737,11 @@ pub(crate) mod tests {
     /// Tests that use the one recording there is, one at a time.
     pub(crate) static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
 
+    /// How long sending waits for the microphone in the tests of what it waits for: past
+    /// any pause of a busy computer, where [`STOP_WAIT`] is not. How long it waits at most
+    /// has a test of its own, `stopping_never_waits_long_for_the_microphone`.
+    const PATIENT: Duration = Duration::from_secs(30);
+
     /// A microphone that takes `opens_in` to open, then records nothing until stopped;
     /// `closed` is set once it closed.
     fn slow_microphone(
@@ -816,11 +826,13 @@ pub(crate) mod tests {
     #[test]
     fn the_window_does_not_wait_for_the_microphone_to_close() {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
-        // Well past the 50 ms the window's thread may take, and well within STOP_WAIT: a
-        // busy computer oversleeps by tens of milliseconds.
-        let closing = Duration::from_millis(150);
         for throw_away in [false, true] {
-            let (stopped, closed) = fake_recording_closing_in(closing);
+            // The microphone stays open until the test lets it close, so no sleep decides
+            // what closed first: a stop that waited for it would take all of STOP_WAIT.
+            let (let_close, may_close) = mpsc::channel::<()>();
+            let (stopped, closed) = fake_recording_closing_when(move || {
+                let _ = may_close.recv_timeout(2 * PATIENT);
+            });
             let asked = Instant::now();
             if throw_away {
                 cancel();
@@ -829,14 +841,16 @@ pub(crate) mod tests {
                 assert!(state().is_some_and(|s| !s.capturing));
             }
             let took = asked.elapsed();
-            assert!(took < Duration::from_millis(50), "{took:?}");
+            assert!(took < STOP_WAIT, "{took:?}");
             assert!(stopped.load(Ordering::Relaxed));
+            assert!(!closed.load(Ordering::Relaxed));
+            let _ = let_close.send(());
             if !throw_away {
-                let _ = finish(1).unwrap();
+                let _ = finish_waiting(1, PATIENT).unwrap();
                 assert!(closed.load(Ordering::Relaxed), "sent before all was in");
                 cancel();
             }
-            let until = Instant::now() + Duration::from_secs(2);
+            let until = Instant::now() + PATIENT;
             while !closed.load(Ordering::Relaxed) && Instant::now() < until {
                 thread::sleep(Duration::from_millis(5));
             }
@@ -852,16 +866,16 @@ pub(crate) mod tests {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let (let_close, may_close) = mpsc::channel::<()>();
         let (stopped, closed) = fake_recording_closing_when(move || {
-            let _ = may_close.recv_timeout(Duration::from_secs(5));
+            let _ = may_close.recv_timeout(2 * PATIENT);
         });
         let sending = {
             let closed = closed.clone();
             thread::spawn(move || {
-                let sent = finish(1);
+                let sent = finish_waiting(1, PATIENT);
                 (sent, closed.load(Ordering::Relaxed))
             })
         };
-        let until = Instant::now() + Duration::from_secs(2);
+        let until = Instant::now() + PATIENT;
         while !stopped.load(Ordering::Relaxed) && Instant::now() < until {
             thread::sleep(Duration::from_millis(1));
         }
@@ -885,10 +899,10 @@ pub(crate) mod tests {
         let _one = ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner);
         let (let_close, may_close) = mpsc::channel::<()>();
         let (stopped, _) = fake_recording_closing_when(move || {
-            let _ = may_close.recv_timeout(Duration::from_secs(5));
+            let _ = may_close.recv_timeout(2 * PATIENT);
         });
-        let sending = thread::spawn(|| finish(1));
-        let until = Instant::now() + Duration::from_secs(2);
+        let sending = thread::spawn(|| finish_waiting(1, PATIENT));
+        let until = Instant::now() + PATIENT;
         while !stopped.load(Ordering::Relaxed) && Instant::now() < until {
             thread::sleep(Duration::from_millis(1));
         }
@@ -930,7 +944,8 @@ pub(crate) mod tests {
             let started = Instant::now();
             active.stop_capture();
             let took = started.elapsed();
-            assert!(took < STOP_WAIT + Duration::from_millis(100), "{took:?}");
+            // Far under the 3 s the device hangs for, with room for a busy computer.
+            assert!(took < STOP_WAIT + Duration::from_secs(1), "{took:?}");
             assert_eq!(ended.load(Ordering::Relaxed), !hangs);
         }
     }
