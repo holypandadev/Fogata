@@ -1914,6 +1914,88 @@ async fn what_cannot_be_saved_is_neither_confirmed_nor_sent() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+/// Makes a chat's journal in `dir` unreadable (`true`) or readable again. Returns whether
+/// reading it now fails, which it does not for a user that ignores permissions (root).
+#[cfg(unix)]
+fn unreadable(dir: &Path, friend: DevicePublicKey, on: bool) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let journal = dir
+        .join("direct")
+        .join(hex::encode(friend.as_bytes()))
+        .join("journal");
+    let mode = if on { 0o000 } else { 0o600 };
+    std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(mode)).unwrap();
+    std::fs::File::open(&journal).is_err()
+}
+
+/// A chat whose items were let go of (here: not read yet at this start) and that cannot be
+/// read again shows only what comes and writes nothing; what comes meanwhile is not
+/// confirmed, so the friend's device keeps it and sends it again once the chat reads.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn what_comes_to_a_chat_that_cannot_be_read_again_is_not_confirmed() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-direct-unread-{}", std::process::id()));
+    let (dir_a, dir_b) = friends(&base);
+    let (port_a, port_b) = (free_port(), free_port());
+    let (ana, _events_a) = Core::start(dir_a.clone(), alone(port_a, None)).unwrap();
+    let (bea, _events_b) = Core::start(dir_b.clone(), alone(port_b, Some(port_a))).unwrap();
+    let (ana_key, bea_key) = (ana.me(), bea.me());
+    sees_online(&ana, bea_key, "Bea online").await;
+    ana.send_direct(bea_key, "one", Vec::new()).await.unwrap();
+    chat_until(&ana, bea_key, "the first one delivered", |c| {
+        c.items.iter().any(|i| i.item.delivered)
+    })
+    .await;
+    stop(bea).await;
+
+    // Bea's device starts with the chat's summary alone; then its journal cannot be read.
+    let (bea, _events_b) = start_again(&dir_b, alone(port_b, Some(port_a))).await;
+    if !unreadable(&dir_b, ana_key, true) {
+        eprintln!("permissions do not apply to this user; skipped");
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    }
+    sees_online(&ana, bea_key, "Bea back").await;
+    ana.send_direct(bea_key, "two", Vec::new()).await.unwrap();
+    // It shows what came, alone: the chat was not read, and nothing stands in for it.
+    let chat = chat_until(&bea, ana_key, "the second one shown", |c| {
+        texts(c).contains(&"two".to_string())
+    })
+    .await;
+    assert_eq!(texts(&chat), ["two"]);
+    // Given time to come, no receipt does.
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let chat = ana.direct_chat(bea_key, 100).await.unwrap();
+    assert!(!chat.items.last().unwrap().item.delivered);
+    // Nor does Bea write to it: nothing is sent that her device could not keep.
+    assert!(
+        bea.send_direct(ana_key, "hello?", Vec::new())
+            .await
+            .is_err()
+    );
+
+    // Once it reads again, at a later start, what was not confirmed comes again and stays.
+    stop(bea).await;
+    unreadable(&dir_b, ana_key, false);
+    let (bea, _events_b) = start_again(&dir_b, alone(port_b, Some(port_a))).await;
+    chat_until(&ana, bea_key, "the second one delivered", |c| {
+        c.items.last().is_some_and(|i| i.item.delivered)
+    })
+    .await;
+    assert_eq!(
+        texts(&bea.direct_chat(ana_key, 100).await.unwrap()),
+        ["one", "two"]
+    );
+    stop(bea).await;
+    let (bea, _events_b) = start_again(&dir_b, alone(port_b, Some(port_a))).await;
+    assert_eq!(
+        texts(&bea.direct_chat(ana_key, 100).await.unwrap()),
+        ["one", "two"]
+    );
+    let _ = std::fs::remove_dir_all(&base);
+}
+
 /// How long writing to a friend takes, and how long reading a chat waits meanwhile: 200
 /// messages written one after another while another task reads the chat. Run by hand on a
 /// real disk: `FOGATA_MEASURE_DIR=<folder> cargo test -p fogata-core --test direct
