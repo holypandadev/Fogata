@@ -1765,6 +1765,12 @@ EOF2
         [[ -n $found && -n $connected ]] && after=$(( $(ms "$connected") - $(ms "$found") ))
         echo "--- A found C over mDNS at ${found:-never}; connected to C at ${connected:-never}," \
             "$after ms later"
+        # A's mDNS listens at both its addresses, each on a socket of its own on port 5353,
+        # and the kernel hands each of C's answers to one of them: in some runs always to
+        # the public one, which drops them as answers to no query of its own.
+        [[ -z $found ]] && grep -q 'address=203.0.113.21 remote_address=192.168.60.2' \
+            "$WORK/A.out" && echo "--- mDNS never told A of C: C's answers went to A's" \
+            "public address (the lab, not the dial: run it again)"
         grep -m1 -E "\+ C \[[^]]*\] connected" "$WORK/A.out" || true
         # What mDNS and the dials to C did, when it took long or never happened.
         if [[ $after == never ]] || (( after > 3000 )); then
