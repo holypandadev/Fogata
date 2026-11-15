@@ -354,7 +354,9 @@ mod tests {
 
     /// Makes the room of dials that ended due now.
     fn linger_over(room: &DialRoom) {
-        let past = Instant::now().checked_sub(Duration::from_millis(1)).unwrap();
+        let past = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap();
         for (at, ..) in &mut room.lock().lingering {
             *at = past;
         }
@@ -373,15 +375,25 @@ mod tests {
             turns.push(room.take(ip(last), DIAL_HOLDS));
         }
         held.extend(turns.iter_mut().skip(3).filter_map(ready));
-        assert_eq!(held.len(), IN_ALL / DIAL_HOLDS, "more dials than the room holds");
+        assert_eq!(
+            held.len(),
+            IN_ALL / DIAL_HOLDS,
+            "more dials than the room holds"
+        );
         assert_eq!(room.held(), (IN_ALL, 4));
 
         // One ends: its room lingers, then the earliest waiting whose address has room
         // takes its place.
         drop(held.pop());
-        assert!(turns.iter_mut().all(|t| ready(t).is_none()), "its room came back early");
+        assert!(
+            turns.iter_mut().all(|t| ready(t).is_none()),
+            "its room came back early"
+        );
         linger_over(&room);
-        assert!(ready(&mut turns[2]).is_none(), "an address held three dials");
+        assert!(
+            ready(&mut turns[2]).is_none(),
+            "an address held three dials"
+        );
         let next = ready(&mut turns[3 + 6]);
         assert!(next.is_some(), "the room did not come back");
     }
@@ -414,7 +426,10 @@ mod tests {
         drop(held.pop());
         linger_over(&room);
         assert!(ready(&mut punch).is_none());
-        assert!(ready(&mut dial).is_none(), "a later dial went before the punch");
+        assert!(
+            ready(&mut dial).is_none(),
+            "a later dial went before the punch"
+        );
         drop(held.pop());
         drop(held.pop());
         linger_over(&room);
@@ -441,7 +456,10 @@ mod tests {
         drop(held.swap_remove(0));
         linger_over(&room);
         let dialling = ready(&mut real);
-        assert!(dialling.is_some(), "the new address waited behind the others");
+        assert!(
+            dialling.is_some(),
+            "the new address waited behind the others"
+        );
         let mut next: Vec<Held> = made_up.iter_mut().filter_map(ready).collect();
         assert_eq!(next.len(), 1, "the other place went elsewhere");
         next.clear();
