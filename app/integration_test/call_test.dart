@@ -65,6 +65,13 @@
 // FOGATA_TEST_MIC_CASE=rejoin (two copies, both with the microphone on, on one computer or
 // on two) has each copy in turn leave the room and enter it again, and both measure how
 // soon the call is back; FOGATA_TEST_REJOIN_TIMES sets how many times; see _rejoin.
+// FOGATA_TEST_OUTPUT_SWAP=<seconds>, with FOGATA_TEST_MEASURE, has that copy choose another
+// output that many seconds into the measure, through the call's menu's own path, and its
+// first one again as long after; FOGATA_TEST_OUTPUT_SWAP_TO names a part of the other's
+// name (else the first listed after the system's default and the one in use). Each line
+// of the measure says which output played, and the log sums what this copy sent with
+// each, whether its microphone stayed on, what it was told and, on macOS, the voice
+// engine's own lines; see _OutputSwap.
 
 import 'dart:async';
 import 'dart:convert';
@@ -84,6 +91,7 @@ import 'keychain_dialog.dart';
 
 import 'package:flutter_webrtc/flutter_webrtc.dart'
     show
+        MediaDeviceInfo,
         RTCPeerConnection,
         RTCPeerConnectionState,
         RTCRtpMediaType,
@@ -3837,8 +3845,10 @@ Future<void> _measureCall(
   final start = at;
   final processor = <double>[], memory = <double>[];
   var stalls = 0, freezes = 0.0, lost = 0.0, received = 0.0;
+  final swap = await _OutputSwap.from(state, start);
   while (DateTime.now().difference(start) < Duration(seconds: seconds)) {
     await Future<void>.delayed(const Duration(seconds: 2));
+    await swap?.step(DateTime.now().difference(start));
     final now = <String, Map<String, Object?>>{};
     for (final peer in call.peers.values.toList()) {
       now[peer.id] = await _measureStats(peer);
@@ -3910,15 +3920,17 @@ Future<void> _measureCall(
         received += voiceIn;
       }
       peers[id.substring(0, 8)] = record;
+      swap?.take(record);
     }
     before
       ..clear()
       ..addAll(now);
     out.writeAsStringSync(
-      '${jsonEncode({'t': _json(at.difference(start).inMilliseconds / 1000), 'role': _role, 'copies': _copies, 'took': _json(took), 'cpu': _json(share), 'rss': _json(rss), 'peers': peers})}\n',
+      '${jsonEncode({'t': _json(at.difference(start).inMilliseconds / 1000), 'role': _role, 'copies': _copies, 'took': _json(took), 'cpu': _json(share), 'rss': _json(rss), if (swap != null) 'output': swap.now, 'peers': peers})}\n',
       mode: FileMode.append,
     );
   }
+  await swap?.end();
   // Where the processor time went: each kind of thread's share of one core, the most
   // first.
   final spent = DateTime.now().difference(start).inMilliseconds / 1000;
@@ -3939,6 +3951,133 @@ Future<void> _measureCall(
   _log('sharing at the end: ${call.sharing}; problem: ${call.problem}');
   if (_share != null) await call.stopSharing();
   if (_camera) await state.setCamera(false);
+}
+
+/// FOGATA_TEST_OUTPUT_SWAP for [_measureCall]: chooses another output in the middle of the
+/// measure and the first one again, as the call's menu does ([AppState.setAudioOutput]),
+/// and says what this copy sent with each: a voice engine that loses the microphone when
+/// the output changes sends no voice after it (`voiceOut` 0) while the call shows the
+/// microphone on, until the call notices (about 8 s) and turns it off.
+class _OutputSwap {
+  _OutputSwap._(this.state, this.start, this.after, this.first, this.other);
+
+  final AppState state;
+  final DateTime start;
+  final Duration after;
+
+  /// The output chosen when the measure started (null: the system's default) and the
+  /// other one.
+  final String? first;
+  final MediaDeviceInfo other;
+
+  /// Which output plays: 'first', 'other', then 'first again'.
+  String now = 'first';
+
+  /// What this copy sent with each, by output (voice packets, readings), and what it was
+  /// told.
+  final _sent = <String, double>{};
+  final _readings = <String, int>{};
+  final _told = <String>{};
+
+  static Future<_OutputSwap?> from(AppState state, DateTime start) async {
+    final seconds = int.tryParse(_env['FOGATA_TEST_OUTPUT_SWAP'] ?? '');
+    if (seconds == null) return null;
+    final outputs = (await navigator.mediaDevices.enumerateDevices())
+        .where((d) => d.kind == 'audiooutput')
+        .toList();
+    final first = state.prefs.audioOutput;
+    // The first listed is the system's default (Call._first).
+    final inUse = first ?? outputs.firstOrNull?.deviceId;
+    final name = _env['FOGATA_TEST_OUTPUT_SWAP_TO'];
+    final other = outputs
+        .skip(1)
+        .where(
+          (d) =>
+              d.deviceId != inUse &&
+              (name == null || name.isEmpty || d.label.contains(name)),
+        )
+        .firstOrNull;
+    if (other == null) {
+      throw StateError(
+        'no other output to choose: ${outputs.map((d) => d.label)}',
+      );
+    }
+    _log(
+      'output swap: from ${first ?? 'the default'} to ${other.label} after $seconds s',
+    );
+    return _OutputSwap._(
+      state,
+      start,
+      Duration(seconds: seconds),
+      first,
+      other,
+    );
+  }
+
+  /// Chooses the other output, and then the first again, when their time comes.
+  Future<void> step(Duration since) async {
+    if (now == 'first' && since >= after) {
+      await _choose('other', other.deviceId);
+    } else if (now == 'other' && since >= after * 2) {
+      await _choose('first again', first);
+    }
+    _told.addAll(state.toasts.list.map((t) => t.text));
+  }
+
+  Future<void> _choose(String which, String? id) async {
+    _log('output swap: ${_state()}; choosing ${id ?? 'the default'} ($which)');
+    await state.setAudioOutput(id);
+    now = which;
+  }
+
+  /// Takes one connection's reading of the measure.
+  void take(Map<String, Object?> record) {
+    final out = record['voiceOut'];
+    _sent[now] = (_sent[now] ?? 0) + (out is num ? out.toDouble() : 0);
+    _readings[now] = (_readings[now] ?? 0) + 1;
+  }
+
+  String _state() {
+    final call = state.callState.call;
+    return 'microphone ${call?.mic ?? false ? 'on' : 'off'}, problem ${call?.problem}';
+  }
+
+  Future<void> end() async {
+    if (now == 'other') await _choose('first again', first);
+    _told.addAll(state.toasts.list.map((t) => t.text));
+    for (final which in ['first', 'other', 'first again']) {
+      _log(
+        'output swap: with the $which output, voice packets sent '
+        '${_sent[which] ?? 0} in ${_readings[which] ?? 0} readings',
+      );
+    }
+    _log('output swap at the end: ${_state()}; told $_told');
+    if (!Platform.isMacOS) return;
+    // The voice engine's own lines ("Fogata: ..."), from the system's log.
+    final since = start.subtract(const Duration(seconds: 5));
+    String two(int n) => n.toString().padLeft(2, '0');
+    final from =
+        '${since.year}-${two(since.month)}-${two(since.day)} '
+        '${two(since.hour)}:${two(since.minute)}:${two(since.second)}';
+    try {
+      final shown = await Process.run('/usr/bin/log', [
+        'show',
+        '--style',
+        'compact',
+        '--start',
+        from,
+        '--predicate',
+        'processID == $pid AND eventMessage CONTAINS "Fogata:"',
+      ]);
+      for (final line in '${shown.stdout}'.split('\n')) {
+        if (line.contains('Fogata:')) {
+          _log('output swap, engine: ${line.trim()}');
+        }
+      }
+    } catch (e) {
+      _log('output swap: the system log could not be read: $e');
+    }
+  }
 }
 
 /// The processor time of this process's threads so far, in clock ticks of 1/100 s, by
