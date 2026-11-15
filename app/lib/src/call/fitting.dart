@@ -105,15 +105,20 @@ const maxScreenPixels = 7680 * 4320;
 const screenSteps = [1080, 720, 540];
 
 /// The most lines a shared screen goes out at with [watchers] watching it, as the 16:9 box
-/// of [ScreenQuality.lines]; null for no more than the quality chosen. Without the shared
-/// encode ([ScreenLoad.sharedEncode]) everyone watching has an encoder of their own for the
-/// same picture, and each one's memory and work grow with its pixels: shared to seven, a
-/// 1600×900 screen took the sharer about 1 GB and a core. With it, the upload still grows
-/// with each watcher, and this stays until measured. One or two watchers get the quality
-/// chosen; three or four at most 1080 lines,
-/// where a screen shared at its own size (1440 lines, or 4K) would take two to four times
-/// that; five or more at most 720, the smaller quality offered, so that what [ScreenLoad]
-/// gives back when the processor allows is frames rather than size.
+/// of [ScreenQuality.lines]; null for no more than the quality chosen. Each watcher gets a
+/// stream of their own, so the sharer's upload grows with each one, and the size is what
+/// it follows when the screen hardly moves, as documents, code and slides mostly do:
+/// measured, about 1 Mbit/s to each at 1080 lines, 0.4 at 720 and 0.2 to 0.36 at 540. A
+/// moving screen is bounded by its bitrate rather than its size (see [screenShareKbps]),
+/// but above 1080 lines, where one or two watchers may have it, that is 11 to 20 Mbit/s
+/// to each (see [screenKbps]). One or two
+/// watchers get the quality chosen; three or four at most 1080 lines, where a screen
+/// shared at its own size (1440 lines, or 4K) would take two to four times that; five or
+/// more at most 720, the smaller quality offered, so that what [ScreenLoad] gives back
+/// when the processor allows is frames rather than size. Without the shared encode
+/// ([ScreenLoad.sharedEncode]) everyone watching also has an encoder of their own for the
+/// same picture, whose memory and work grow with its pixels: shared to seven, a 1600×900
+/// screen took the sharer about 1 GB and a core.
 int? screenCeiling(int watchers) => switch (watchers) {
   <= 2 => null,
   <= 4 => 1080,
@@ -615,6 +620,44 @@ int screenKbps(double width, double height, num fps) =>
       screenMaxKbps,
     );
 
+/// What a shared screen may send to everyone watching it together, in kbit/s, from three
+/// watchers on. Each watcher has a connection of their own, and the screen goes to each as
+/// a stream of its own, so the sharer's upload is the watchers times one stream. A moving
+/// screen (a film, text scrolling) takes all of [screenKbps]'s limit, which is
+/// [screenLeastKbps] at 1080 lines and 30 frames a second and below: measured, about
+/// 6 Mbit/s to each at 540, 720 and 1080 lines alike, 17 for three and 24 to 28 for five,
+/// more than a common home connection sends. Two watchers at the usual quality already
+/// take 12 Mbit/s between them; from three on, the same total is divided among them, which
+/// fits a common upload with room left for the voice and the camera.
+const screenBudgetKbps = 12000;
+
+/// The least each watcher's stream of a shared screen gets from [screenBudgetKbps],
+/// however many watch, in kbit/s: as much as the camera's most ([cameraMaxKbps]). A call
+/// takes eight people, so seven watchers at most get about 1700 each, over it.
+const screenLeastShareKbps = 1500;
+
+/// The most each watcher's stream of a shared screen may use with [watchers] watching it,
+/// in kbit/s, from [kbps], what the screen's size and rate allow (see [screenKbps]): that
+/// for one or two, as the size's ceiling treats them alike (see [screenCeiling]), and from
+/// three on [screenBudgetKbps] divided among them, at least [screenLeastShareKbps]. With
+/// two, a share of 6000 would leave a 1080p screen at 60 frames a second, or a 1440-line
+/// one, under half of what one watcher gets and dropping frames as soon as it moves, and
+/// each watcher's connection would then step it down on its own (see [ScreenFit]). As
+/// [screenKbps] never gives less than [screenLeastKbps], more than any share, from three
+/// on everyone watching gets the same, whatever size their connection lets the screen go
+/// out at: the connections that send it at one size share one encoder of it, at the lowest
+/// rate of them, and one held far under the others would leave for an encoder of its own
+/// (tools/webrtc/patches/wrapper/0017). A screen that hardly moves sends well under any of
+/// these (about 1 Mbit/s to each at 1080 lines, measured), so only a moving one is held
+/// back.
+@visibleForTesting
+int screenShareKbps(int kbps, int watchers) => watchers <= 2
+    ? kbps
+    : math.min(
+        kbps,
+        math.max(screenLeastShareKbps, screenBudgetKbps ~/ watchers),
+      );
+
 /// The most the camera may use, in kbit/s. Unlimited, WebRTC let it take about 2500 for each
 /// member, so four members could try to send three times that at once.
 const cameraMaxKbps = 1500;
@@ -874,9 +917,9 @@ extension _Fitting on Call {
   }
 
   /// The most the shared screen may use going out scaled down by [scale] (see
-  /// [screenKbps]), at the rate it goes out at now. Before its size is known it is taken
-  /// to fill its quality's 16:9 box, within the ceiling for those watching (1080 lines
-  /// when as captured).
+  /// [screenKbps]), at the rate it goes out at now, to each of those it is sent to now
+  /// (see [screenShareKbps] and [Call._watchersSentTo]). Before its size is known it is taken to fill its quality's 16:9
+  /// box, within the ceiling for those watching (1080 lines when as captured).
   int _screenKbpsAt(double scale) {
     final video = localScreen.value;
     final lines =
@@ -885,10 +928,13 @@ extension _Fitting on Call {
     final (width, height) = video.width > 0 && video.height > 0
         ? (video.width / scale, video.height / scale)
         : (lines * 16 / 9, lines);
-    return screenKbps(
-      width,
-      height,
-      math.min(screenQuality.fps, _screenLoad.limits.fps),
+    return screenShareKbps(
+      screenKbps(
+        width,
+        height,
+        math.min(screenQuality.fps, _screenLoad.limits.fps),
+      ),
+      sharing ? _watchersSentTo : 0,
     );
   }
 
@@ -1100,22 +1146,69 @@ extension _Fitting on Call {
     // Also where the ceiling goes back up once fewer have watched for a while.
     final more = _screenLoad.watchersAre(watchers);
     final changed = _screenLoad.take(encoders: encoders, now: DateTime.now());
-    if (!more && !changed) return;
-    _screenLoadChanged(before, ceiling);
+    if (more || changed) {
+      _screenLoadChanged(before, ceiling);
+    } else {
+      // A watcher gone from the call, or whose connection went, who never said they
+      // stopped watching: the others' share of the budget follows at this reading.
+      _sharesChanged();
+    }
   }
 
   /// Someone started or stopped watching this device's shared screen: the screen's
   /// ceiling and level follow their number at once (see [ScreenLoad.watchersAre]), before
-  /// a new watcher's encoder starts, rather than at the next reading. Those who watch are
-  /// tuned after what is under way on their connections, all but [inTurn], whose turn this
-  /// is: its caller tunes it.
+  /// a new watcher's encoder starts, rather than at the next reading, and so does the
+  /// bitrate each one may use (see [_sharesChanged]), lower for those already watching
+  /// when one comes, higher when one goes. Those who watch are tuned each on its own turn,
+  /// after what is under way on their connections, all but [inTurn], whose turn this is:
+  /// its caller tunes it.
   void _watchersChanged(CallPeer inTurn) {
     if (!sharing) return;
     final before = _screenLoad.level;
     final ceiling = _screenLoad.ceiling;
     if (_screenLoad.watchersAre(watchers)) {
       _screenLoadChanged(before, ceiling, except: inTurn);
+    } else {
+      _sharesChanged(except: inTurn);
     }
+  }
+
+  /// The number the shared screen is sent to may have changed ([_watchersSentTo]), and
+  /// neither its level nor its ceiling did: when that changes the bitrate each one may use
+  /// (see [screenShareKbps]), every connection watching is tuned again, but [except]. At
+  /// once the first time, and then at most once every [Call.sharesEvery]: someone turning
+  /// their watching on and off again and again would otherwise have every other watcher's
+  /// connection told each time. A change within it is taken when it ends, with the number
+  /// there is then, and every watcher is told then even when that number gives the share
+  /// told before, since one who came meanwhile was told another (its caller tunes it).
+  void _sharesChanged({CallPeer? except}) {
+    if (!sharing) return;
+    if (_sharesQuiet != null) {
+      _sharesOwed = true;
+      return;
+    }
+    _shareOut(except: except);
+  }
+
+  /// Takes the bitrate each watcher may use now and tunes them, but [except], when it
+  /// changed or when [owed]; then keeps quiet for [Call.sharesEvery].
+  void _shareOut({CallPeer? except, bool owed = false}) {
+    final kbps = _screenKbps;
+    final changed = _scaleAgain();
+    if (!changed && !owed) return;
+    if (changed) {
+      _trace(
+        'screen for everyone: $_screenKbps kbit/s each (was $kbps), '
+        'sent to $_watchersSentTo of $watchers watching',
+      );
+    }
+    _tuneWatching(except: except);
+    _sharesQuiet = Timer(Call.sharesEvery, () {
+      _sharesQuiet = null;
+      if (!_sharesOwed || _closed) return;
+      _sharesOwed = false;
+      if (sharing) _shareOut(owed: true);
+    });
   }
 
   /// The screen's level or ceiling changed from [before] and [ceiling]: its scale follows,
@@ -1127,8 +1220,14 @@ extension _Fitting on Call {
       'screen for everyone: level ${_screenLoad.level} (was $before), '
       '${limits.lines ?? 'full'} lines at most ${limits.fps} fps, within '
       '${_screenLoad.ceiling ?? 'any'} lines (was ${ceiling ?? 'any'}), '
-      '$watchers watching',
+      '$_screenKbps kbit/s each, sent to $_watchersSentTo of $watchers watching',
     );
+    _tuneWatching(except: except);
+  }
+
+  /// Tunes every connection watching this device's shared screen, but [except], after
+  /// what is under way on it.
+  void _tuneWatching({CallPeer? except}) {
     for (final peer in peers.values) {
       final connection = peer.connection;
       if (connection != null && peer.watches == me && peer != except) {

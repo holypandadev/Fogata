@@ -559,6 +559,7 @@ class Call extends ChangeNotifier {
       _levels?.cancel();
       _measuring?.cancel();
       _stateAgain?.cancel();
+      _sharesQuiet?.cancel();
       // Before the tracks, as every connection sending them.
       await _letGo('the own level', _alone.close);
       await _letGo('what is sent', () => screenOut.value = const {});
@@ -886,6 +887,14 @@ class Call extends ChangeNotifier {
 
   /// The others watching this device's shared screen.
   int get watchers => peers.values.where((p) => p.watches == me).length;
+
+  /// Those watching this device's shared screen whose connection is up, which the screen
+  /// is sent on: the upload's budget is divided among them ([screenShareKbps]). One kept
+  /// out (no connection while it stays) or making its connection again (5 to 30 s after
+  /// it failed) still watches, but takes nothing of it meanwhile.
+  int get _watchersSentTo => peers.values
+      .where((p) => p.watches == me && p.connection != null && p.connected)
+      .length;
 
   /// How many watch [id]'s shared screen, this device included.
   int watchersOf(String id) =>
@@ -1269,6 +1278,9 @@ class Call extends ChangeNotifier {
       await _recapture();
     }
     _screenScale = _scaleNow();
+    // The bitrate the connections are told below, so that the next reading does not take
+    // it for a change.
+    _screenKbps = _screenKbpsAt(_screenScale);
     _trace('screen out: ${quality.label}, scaled down by $_screenScale');
     for (final peer in peers.values) {
       peer._fit.reset();
@@ -1724,7 +1736,10 @@ class Call extends ChangeNotifier {
         wasUp = true;
         peer._attempt = 0;
       }
+      final went = peer.connected != up;
       peer.connected = up;
+      // A watcher's connection came up or went: the others' share of the upload follows.
+      if (went && peer.watches == me) _sharesChanged();
       if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
         _retry(peer);
       }
@@ -1788,10 +1803,19 @@ class Call extends ChangeNotifier {
   /// size it is captured at; 1 until its first picture tells.
   double _screenScale = 1;
 
-  /// The most the shared screen may use at that scale, in kbit/s, when its size last
-  /// changed (see [screenKbps]): a new size the scale keeps (a window made larger, within
-  /// its quality) still changes it.
+  /// The most the shared screen may use at that scale, in kbit/s, to each of those it is
+  /// sent to, as the connections were last told when its size, its rate or that number
+  /// changed (see [screenKbps] and [screenShareKbps]): a new size the scale keeps (a
+  /// window made larger, within its quality) still changes it.
   int _screenKbps = 0;
+
+  /// While the bitrate each watcher may use keeps quiet after it was told (see
+  /// [_sharesChanged]), and whether a change came meanwhile.
+  Timer? _sharesQuiet;
+  bool _sharesOwed = false;
+
+  /// How often at most the bitrate each watcher may use follows a change of their number.
+  static const sharesEvery = Duration(seconds: 1);
 
   /// How far the shared screen is lowered for everyone, for this device's processor.
   final _screenLoad = ScreenLoad();

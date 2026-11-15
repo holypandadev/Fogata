@@ -3,6 +3,10 @@
 #   RUN     the run's folder (meet/, data/, logs)
 #   BUNDLE  the call test build (flutter build linux --debug -t integration_test/call_test.dart)
 #   LAB_DISPLAY  the Xvfb display (default 171), SCREEN its size (default 1600x900)
+#   LAB_MOVING   video or desktop: something moving over the whole display for as long as
+#                the copies run (lab_moving), for a shared screen that changes as a real
+#                one does; off (the default) leaves the copies' own windows, which hardly
+#                move
 
 LAB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 X=${LAB_DISPLAY:-171}
@@ -218,6 +222,92 @@ lab_start() { # copies
   lab_recorder
 }
 
+# LAB_MOVING: something that moves on the display, kept above the copies' windows (there is
+# no window manager to raise anything) by xdotool every 2 s and started again if it ends:
+#   video    ffmpeg's testsrc2 pattern panning across the whole display at 30 frames a
+#            second (about 2.5 pixels a frame each way) under a coarse grain that changes in
+#            every frame, as a grainy film does: harder to encode than most films. Drawn by
+#            ffplay with SDL's software renderer, in RGB (from YUV it took twice the
+#            processor); LAB_MOVING_GRAPH: another filtergraph for it, of the display's size.
+#            On one of GitHub's computers (4 threads) it took 0.6 of a core at 1920x1080
+#            and 1.1 at 2560x1440 alone, 0.7 to 1.1 at 1920x1080 beside the copies
+#   desktop  a window of text (docs/architecture's notes on voice and video) on a still
+#            desktop, scrolling 15 lines a second (about 250 pixels), as a page read and
+#            scrolled: Tk's text window (scroll.py, python3-tk), which moves what is drawn
+#            already and draws only the new line; the rest of the screen stays still. Under
+#            1 % of a core, the display server's share included
+# Every 10 s moving.log has the processor time of what draws it and of the display server
+# (Xvfb, which also serves the copies and the capture) over those 10 s, in % of one core.
+lab_moving() {
+  local kind=${LAB_MOVING:-off} size=${SCREEN:-1600x900} graph needs
+  [ "$kind" = off ] && return 0
+  local w=${size%x*} h=${size#*x}
+  case "$kind" in
+    video)
+      needs=ffplay
+      graph=${LAB_MOVING_GRAPH:-testsrc2=size=$size:rate=30,scroll=horizontal=0.0013:vertical=0.0021,noise=alls=20:allf=t,format=bgra}
+      echo "$graph" > "$RUN/moving-graph.txt"
+      lab_moving_start() {
+        env -u WAYLAND_DISPLAY DISPLAY=":$X" SDL_VIDEODRIVER=x11 SDL_RENDER_DRIVER=software \
+          ffplay -hide_banner -loglevel error -nostats -an -sn -noborder -left 0 -top 0 \
+          -x "$w" -y "$h" -window_title fogata-lab-moving -f lavfi "$graph" >> "$RUN/moving.log" 2>&1 &
+      }
+      ;;
+    desktop)
+      needs=python3
+      python3 -I -c 'import tkinter' 2> /dev/null || needs=python3-tk
+      lab_moving_start() {
+        env -u WAYLAND_DISPLAY DISPLAY=":$X" python3 -I "$LAB_DIR/scroll.py" \
+          "$LAB_DIR/../../docs/architecture/4-voice-and-video.md" \
+          "$((w * 3 / 5))x$((h * 3 / 4))+$((w / 5))+$((h / 8))" >> "$RUN/moving.log" 2>&1 &
+      }
+      ;;
+    *)
+      echo "no LAB_MOVING $kind (video or desktop)" | tee -a "$RUN/lab.log" >&2
+      return 1
+      ;;
+  esac
+  command -v "$needs" > /dev/null && command -v xdotool > /dev/null || {
+    echo "LAB_MOVING=$kind needs $needs and xdotool" | tee -a "$RUN/lab.log" >&2
+    return 1
+  }
+  (
+    trap 'kill "$(cat "$RUN/moving-player.pid" 2> /dev/null)" 2> /dev/null; exit 0' TERM HUP INT
+    tick=$(getconf CLK_TCK)
+    # The processor ticks of a process and its children.
+    ticks() {
+      local pid t=0 s
+      for pid in "$1" $(cat "/proc/$1/task/$1/children" 2> /dev/null); do
+        s=$(awk '{print $14 + $15}' "/proc/$pid/stat" 2> /dev/null) && t=$((t + ${s:-0}))
+      done
+      echo $t
+    }
+    last="" display="" at=0 n=0
+    while true; do
+      p=$(cat "$RUN/moving-player.pid" 2> /dev/null)
+      if [ -z "$p" ] || ! kill -0 "$p" 2> /dev/null; then
+        lab_moving_start
+        p=$!
+        echo $p > "$RUN/moving-player.pid"
+        echo "$(date +%s) $kind started" >> "$RUN/moving.log"
+        last=""
+      fi
+      DISPLAY=":$X" xdotool search --name '^fogata-lab-moving$' windowraise > /dev/null 2>&1
+      if [ $((n % 5)) = 0 ]; then
+        now=$(ticks "$p") xvfb=$(ticks "$(cat "$RUN/xvfb.pid")") t=$(date +%s)
+        if [ -n "$last" ] && [ "$t" -gt "$at" ]; then
+          echo "$t $kind $(((now - last) * 100 / tick / (t - at))) % of a core," \
+            "display $(((xvfb - display) * 100 / tick / (t - at))) %" >> "$RUN/moving.log"
+        fi
+        last=$now display=$xvfb at=$t
+      fi
+      n=$((n + 1))
+      sleep 2
+    done
+  ) &
+  echo $! > "$RUN/moving.pid"
+}
+
 # The session's own sound daemons (session.sh: pipewire, wireplumber, pipewire-pulse),
 # stopped and started again as `systemctl --user restart` does on a desktop.
 # lab_sound_stop stops the ones named, in that order, each gone before the next;
@@ -399,7 +489,7 @@ lab_stop() {
   local f
   for f in "$RUN"/[a-h].pid; do [ -e "$f" ] && lab_kill "$(cat "$f")" "$BUNDLE"; done
   for f in "$RUN"/tone-?.pid "$RUN/tone-apps.pid" "$RUN/recorder.pid" "$RUN/phases.pid" \
-    "$RUN/echo-proof.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
+    "$RUN/echo-proof.pid" "$RUN/moving.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
   for f in "$RUN"/played/*.pids; do
     # shellcheck disable=SC2046
     [ -e "$f" ] && kill $(cat "$f") 2> /dev/null

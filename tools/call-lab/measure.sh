@@ -17,11 +17,21 @@
 # sum.py makes tables of the run folders. MEASURE_ENV=FOGATA_SHARED_SCREEN_ENCODE=off
 # measures without the shared screen encode, for before and after on one build.
 #
+# A screen measured as it is barely moves: the display shows the copies' own windows. With
+# LAB_MOVING=video (the whole display moves in every frame) or LAB_MOVING=desktop (a page of
+# text scrolling in a window, the rest of the screen still), something moves on the display
+# for the whole run (lab.sh's lab_moving; needs xdotool, and ffplay, from the ffmpeg
+# package, for video or python3-tk for desktop), and moving.log has what it costs. SCREEN
+# sets the display's size (default 1600x900; 1920x1080 for a 1080p screen), and
+# MEASURE_ENV=FOGATA_TEST_SCREEN_QUALITY=720 (or 540, 1080, source, with @60 for 60 frames
+# a second) the quality copy a shares at.
+#
 # Usage: tools/call-lab/measure.sh <copies> <idle|voice|camera|screen> [seconds, default 60]
 # Build first: (cd app && flutter build linux --debug -t integration_test/call_test.dart)
 # Environment: BUNDLE (another build), CALL_LAB_RUNS (where run folders go, default
 # ~/call-lab), MEASURE_ENV (more VAR=value for every copy), LAB_DISPLAY (default 171), LOAD_MAX (the computer's load to wait under before
-# starting, default 6: other work on it shows in every figure). Prints the run folder at the end.
+# starting, default 6: other work on it shows in every figure), LAB_MOVING and SCREEN
+# (above). Prints the run folder at the end.
 #
 # For a call's memory over hours: every minute smaps.log gets what each copy's memory is
 # made of (smaps.py), and with MEASURE_HEAP=<role> that copy runs under heaptrack's library
@@ -74,6 +84,7 @@ if [ "${1:-}" = --inside ]; then
     [ -n "${MEASURE_ENV:-}" ] && read -r -a more <<< "$MEASURE_ENV" && extra+=("${more[@]}")
     lab_copy "$r" "$N" "$mic" "${extra[@]}"
   done
+  lab_moving || { lab_stop; exit 1; }
   # The highest memory each copy has held so far and the computer's load, every 5 s.
   (
     while true; do
@@ -132,6 +143,6 @@ for _ in $(seq 300); do
   [ "$(cut -d. -f1 /proc/loadavg)" -lt "${LOAD_MAX:-6}" ] && break
   sleep 2
 done
-echo "copies $N, $MODE, $SECS s, $(git -C "$REPO" describe --always --dirty), nice $(nice), ${MEASURE_ENV:-} started $(date -Is), load $(cut -d' ' -f1-3 /proc/loadavg)" > "$RUN/settings.txt"
+echo "copies $N, $MODE, $SECS s, $(git -C "$REPO" describe --always --dirty), nice $(nice), ${MEASURE_ENV:-}, moving ${LAB_MOVING:-off}, display ${SCREEN:-1600x900}, started $(date -Is), load $(cut -d' ' -f1-3 /proc/loadavg)" > "$RUN/settings.txt"
 "$HERE/session.sh" "$RUN/session" "$0" --inside "$N" "$MODE" "$SECS"
 echo "$RUN"

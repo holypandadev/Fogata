@@ -206,6 +206,8 @@ extension _Measuring on Call {
     quality.forget(peer.id);
     await peer._close();
     await peer._closeSoundIn();
+    // Nor does the screen: the others' share of the upload follows.
+    if (peer.watches == me) _sharesChanged();
     // Nor does this device's screen sound go to them.
     await _soundTo(peer);
     _report(l10n.callKeptOut(nameOf(peer.id)));

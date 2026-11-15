@@ -308,6 +308,41 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   (`maxBitrate`). Each side's description allows up to 20 Mbit/s in the screen channel
   (`x-google-max-bitrate`); WebRTC also takes that as the most its bandwidth estimate may
   reach for the whole connection, so with 6 a 1080p screen at 60 could never get more.
+  **The screen's upload is shared among its watchers.** Each watcher gets the stream on a
+  connection of their own, so the sharer sends the watchers times one stream. Measured on
+  GitHub's runners (90 s each): a moving screen (a film, or text scrolling in a window)
+  sent about 6 Mbit/s to each watcher at 540, 720 and 1080 lines alike (5.4 to 6.1), as
+  the limit above and not the size decides there, and about 11 at 1440; three watchers at
+  1080 lines took 17 Mbit/s in all (19 at most), five at 720 lines 24 to 28, more than a
+  common home upload of 5 to 20. A screen that hardly moves sent about 1 Mbit/s to each at
+  1080 lines, 0.4 at 720 and 0.2 to 0.36 at 540. One or two watchers get what the screen's
+  size and rate allow, as before: two at the usual quality already take 12 Mbit/s between
+  them, and the size's ceiling treats them alike too. From three on, the same 12 Mbit/s is
+  divided among them, each getting the smaller of the above and its share, never under
+  1.5 (as much as the camera's most): three get 4 each, four 3, five 2.4, six 2, seven
+  (the most a call of eight has) about 1.7. That fits a common upload with room for the
+  voice and the camera. A share of 6 for two would have left a 1080p screen at 60 frames a
+  second (12.4) or a 1440-line one (11) at under half of what one gets, dropping frames as
+  soon as it moves, and each watcher's connection would then have stepped it down on its
+  own, splitting them among encoders. From three on every watcher gets the same limit,
+  whatever size their connection lets the screen go out at (the limit above is never under
+  6 Mbit/s), so those sent one size keep sharing its encoder (below), which takes the
+  lowest bitrate of them. Only watchers whose connection is up count: one kept out, or
+  making its connection again after it failed (5 to 30 s), still watches (and still counts
+  for the size's ceiling, which would otherwise change everyone's size twice for one who
+  comes back), but takes nothing of the budget meanwhile. The shares follow the number at
+  once, as the camera's steps follow the number in the call: when someone starts or stops
+  watching, or a watcher's connection comes up or goes, the others' connections are told
+  their new limit, each queued on its own turn, and the one who came is told as theirs is
+  set; a watcher who leaves the call without saying so, or one whose connection closes
+  without telling, is counted out at the next reading (2 s). After a change the shares wait
+  a second before following another, and then follow the number there is, telling every
+  watcher, so that someone turning their watching on and off again and again does not have
+  every other connection told each time. The application cannot know a person's upload,
+  and this does not guess it: a slower one is left to each connection's bandwidth estimate
+  and the screen's steps. In one lab trial, with the sharer's upload shaped to 12 Mbit/s on
+  the loopback and five watchers at the limits before this budget, the total fell to 1 to
+  2.5 Mbit/s and four of the five watchers stayed at 0 to 1 frame a second for 100 s.
   The processor lowers the screen for everyone, a level at a time: the rate halves first
   (60, 30, 15 frames a second, a level that sends the same as the one above being passed
   over), then 720 lines at 15, then 540 at 15, 10 and 5; it goes down when WebRTC says an
@@ -326,13 +361,15 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   The number watching also sets a ceiling on the size, on top of the quality chosen (never
   more than chosen, nor than the screen is): one or two watchers get the quality chosen,
   three or four at most 1080 lines, five or more at most 720 (each in a 16:9 box, as the
-  qualities are). Before the shared encode, the mesh encoded the screen once per watcher,
-  and each encoder's memory and work grew with its pixels: shared to seven, a 1600x900
-  screen took the sharer about 1 GB of memory and a core (`VideoEncoderQueue` threads and
-  one allocator arena of 27-40 MB each), and a screen shared at its own size (1440 lines,
-  4K) would take two to four times as much per encoder. The ceiling stays as it was until
-  the lab has measured the shared encode: the upload still grows with each watcher, as
-  each connection sends the whole stream. Under the ceiling a level that sends the same as
+  qualities are). It is there for the upload: a screen that hardly moves, as documents,
+  code and slides mostly do, sends to each watcher what its size calls for (the numbers
+  above), and a moving one above 1080 lines, which one or two watchers may have, takes 11
+  to 20 Mbit/s to each. It was first there for the processor: before the shared encode,
+  the mesh encoded the screen once per watcher, and each encoder's memory and work grew
+  with its pixels (shared to seven, a 1600x900 screen took the sharer about 1 GB of memory
+  and a core, `VideoEncoderQueue` threads and one allocator arena of 27-40 MB each), and a
+  screen shared at its own size (1440 lines, 4K) would take two to four times as much per
+  encoder. Under the ceiling a level that sends the same as
   the one below it is passed over, so when the processor allows more, a big room gets
   frames back rather than size. The ceiling comes down as soon as more watch, before the
   new watcher's encoder starts, and goes back up only once fewer have watched for 20 s (to

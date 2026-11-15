@@ -56,9 +56,10 @@
 // _hostileStuck.
 // FOGATA_TEST_MEASURE=<seconds> measures instead the call as it is, with every copy's voice
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
-// screen watched by all the others; see _measureCall. FOGATA_TEST_MIC_CASE checks instead
-// one thing of the microphone (muted, switch, unplug, late, alone, broken, quit, devices,
-// noise)
+// screen watched by all the others, at the quality FOGATA_TEST_SCREEN_QUALITY names if set
+// (<lines>, 540 too, or source, maybe with @<fps>); see _measureCall. FOGATA_TEST_MIC_CASE
+// checks instead one thing of the microphone (muted, switch, unplug, late, alone, broken,
+// quit, devices, noise)
 // or of the call (rejoin, echo, restart);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
@@ -3783,6 +3784,19 @@ Future<void> _measureCall(
     if (!call.camera) throw StateError('no camera: ${call.problem}');
   }
   if (_share != null) {
+    // FOGATA_TEST_SCREEN_QUALITY=<lines|source>[@<fps>]: the quality the screen goes out
+    // at, as chosen in the call, instead of 1080 lines at 30; 540 lines too, a size only
+    // the steps reach otherwise. The ceiling for those watching still holds.
+    final quality = _env['FOGATA_TEST_SCREEN_QUALITY']?.split('@');
+    if (quality != null) {
+      await call.setScreenQuality(
+        ScreenQuality(
+          lines: quality[0] == 'source' ? null : int.parse(quality[0]),
+          fps: quality.length > 1 ? int.parse(quality[1]) : 30,
+        ),
+      );
+      _log('screen quality ${call.screenQuality.label}');
+    }
     final sources = await call.screens();
     // FOGATA_TEST_SCREEN=named:<text> shares the first window whose title holds the text
     // (another program's, which may then be closed while it is shared).
@@ -3897,6 +3911,10 @@ Future<void> _measureCall(
         );
         record['${channel}OutKbps'] = _json(
           delta('out.$channel.bytesSent') * 8 / took / 1000,
+        );
+        // What its encoder is given now, within the limit set for it (`maxBitrate`).
+        record['${channel}OutTarget'] = _json(
+          d(v['out.$channel.targetBitrate']) / 1000,
         );
         record['${channel}OutHeight'] = v['out.$channel.frameHeight'];
         record['${channel}Limit'] = v['out.$channel.qualityLimitationReason'];

@@ -1,3 +1,4 @@
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:fogata/src/call.dart';
@@ -31,6 +32,9 @@ class _Transceiver implements RTCRtpTransceiver {
 class _Sender implements RTCRtpSender {
   RTCRtpEncoding? set;
 
+  /// How many times it was told how to send.
+  int sets = 0;
+
   @override
   RTCRtpParameters get parameters =>
       RTCRtpParameters(encodings: [RTCRtpEncoding()]);
@@ -38,6 +42,7 @@ class _Sender implements RTCRtpSender {
   @override
   Future<bool> setParameters(RTCRtpParameters parameters) async {
     set = parameters.encodings!.single;
+    sets++;
     return true;
   }
 
@@ -57,6 +62,60 @@ class _Sender implements RTCRtpSender {
     lines: cappedLines(chosen, screenCeiling(watchers)),
   );
   return ((width / scale).round(), (height / scale).round());
+}
+
+/// A call sharing a [width] by [height] screen at [quality] (as captured, unless said), as
+/// where its watchers share one encoder of it: their number then changes no level, only
+/// the ceiling. Six others are in the call, their connections up; none watches yet.
+class _Sharing {
+  _Sharing(
+    this.time,
+    double width,
+    double height, {
+    ScreenQuality quality = const ScreenQuality(lines: null),
+  }) {
+    call.screenLoad.sharedEncode = true;
+    call.screenQuality = quality;
+    call.localScreen.value = RTCVideoValue.empty.copyWith(
+      width: width,
+      height: height,
+    );
+    call.rescaleNow();
+    time.flushMicrotasks();
+    for (var i = 0; i < 6; i++) {
+      final id = 'p$i';
+      final connection = connections[id] = _Connection();
+      call.peers[id] = CallPeer(id)
+        ..connection = connection
+        ..connected = true;
+    }
+  }
+
+  final FakeAsync time;
+  final call = Call(group: 'g', me: 'me')..sharing = true;
+  final connections = <String, _Connection>{};
+
+  _Sender sender(String id) => connections[id]!.channels[2];
+
+  int? limitTo(String id) => sender(id).set?.maxBitrate;
+
+  /// [id] says it starts (or stops) watching, and what that tunes is done.
+  void watch(String id, {bool on = true}) {
+    call.handleSignal(id, {'t': 'state', 'watch': on ? 'me' : ''});
+    time.flushMicrotasks();
+  }
+
+  /// A reading of the statistics, as every 2 s.
+  void read() {
+    call.measureNow();
+    time.flushMicrotasks();
+  }
+
+  void expectAll(List<String> ids, int bitrate) {
+    for (final id in ids) {
+      expect(limitTo(id), bitrate, reason: id);
+    }
+  }
 }
 
 void main() {
@@ -170,6 +229,229 @@ void main() {
       await watch('p4');
       expect(screenTo('p4')!.scaleResolutionDownBy, 4);
     },
+  );
+
+  test('from three watchers, the less each one\'s stream may use', () {
+    // One or two watchers: what the size and rate allow, as before.
+    for (final watchers in [0, 1, 2]) {
+      expect(screenShareKbps(6000, watchers), 6000);
+      // 1440 lines at 30 frames a second, and 1080 at 60.
+      expect(screenShareKbps(11059, watchers), 11059);
+      expect(screenShareKbps(12442, watchers), 12442);
+      expect(screenShareKbps(screenMaxKbps, watchers), screenMaxKbps);
+    }
+    // From three: 12 Mbit/s divided among them.
+    expect(screenShareKbps(6000, 3), 4000);
+    expect(screenShareKbps(12442, 3), 4000);
+    expect(screenShareKbps(6000, 4), 3000);
+    expect(screenShareKbps(6000, 5), 2400);
+    expect(screenShareKbps(6000, 6), 2000);
+    expect(screenShareKbps(6000, 7), 1714);
+    expect(screenShareKbps(6000, 8), 1500);
+    // Never more than the size and rate allow.
+    expect(screenShareKbps(1000, 3), 1000);
+    for (var n = 3; n <= 7; n++) {
+      // Three or more never send more than the budget together...
+      expect(n * screenShareKbps(screenMaxKbps, n), lessThanOrEqualTo(12000));
+      // ...and each gets the same at any size and rate, so those sent one size keep
+      // sharing its encoder.
+      expect(
+        screenShareKbps(screenKbps(960, 540, 5), n),
+        screenShareKbps(screenKbps(3840, 2160, 60), n),
+      );
+    }
+  });
+
+  test('each stream keeps a usable least however many watch', () {
+    expect(screenShareKbps(6000, 9), screenLeastShareKbps);
+    expect(screenShareKbps(screenMaxKbps, 20), screenLeastShareKbps);
+    expect(screenShareKbps(screenMaxKbps, 1000), screenLeastShareKbps);
+    // A call of eight has seven watchers at most: they stay over it.
+    expect(screenShareKbps(6000, 7), greaterThan(screenLeastShareKbps));
+  });
+
+  test(
+    'watchers coming and going change the limit of those already watching',
+    () => fakeAsync((time) {
+      // A 1440-line screen shared at its own size.
+      final s = _Sharing(time, 2560, 1440);
+      // One or two: what its size and rate allow, as before.
+      s.watch('p0');
+      expect(s.limitTo('p0'), screenKbps(2560, 1440, 30) * 1000);
+      s.watch('p1');
+      expect(s.limitTo('p0'), 11059000);
+      expect(s.limitTo('p1'), 11059000);
+
+      // Three and four: 1080 lines from three, and 4, then 3 Mbit/s each, the others'
+      // at once (the fourth changes neither the ceiling nor the level, only the limit).
+      s.watch('p2');
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+      time.elapse(Call.sharesEvery);
+      s.watch('p3');
+      s.expectAll(['p0', 'p1', 'p2', 'p3'], 3000000);
+      // Who does not watch is told nothing.
+      expect(s.limitTo('p5'), isNull);
+
+      // Five: 720 lines, 2.4 Mbit/s each.
+      time.elapse(Call.sharesEvery);
+      s.watch('p4');
+      s.expectAll(['p0', 'p1', 'p2', 'p3', 'p4'], 2400000);
+
+      // They go: the others get their share back at once, though the ceiling waits.
+      time.elapse(Call.sharesEvery);
+      s.watch('p4', on: false);
+      s.expectAll(['p0', 'p1', 'p2', 'p3'], 3000000);
+      time.elapse(Call.sharesEvery);
+      s.watch('p3', on: false);
+      expect(s.call.screenLoad.ceiling, 720);
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+      time.elapse(Call.sharesEvery);
+      s.watch('p2', on: false);
+      // Two, at the 720 lines the ceiling keeps for now: what they allow.
+      s.expectAll(['p0', 'p1'], screenLeastKbps * 1000);
+    }),
+  );
+
+  test('two watchers of a screen at 60 frames a second keep its limit', () {
+    fakeAsync((time) {
+      final s = _Sharing(
+        time,
+        1920,
+        1080,
+        quality: const ScreenQuality(lines: null, fps: 60),
+      );
+      s.watch('p0');
+      s.watch('p1');
+      s.expectAll(['p0', 'p1'], 12442000);
+      expect(s.sender('p0').set!.maxFramerate, 60);
+      s.watch('p2');
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+    });
+  });
+
+  test(
+    'someone watching on and off again and again is followed once a second at most',
+    () => fakeAsync((time) {
+      final s = _Sharing(time, 1920, 1080);
+      for (final id in ['p0', 'p1', 'p2']) {
+        s.watch(id);
+      }
+      time.elapse(Call.sharesEvery);
+      final sent = s.sender('p0').sets;
+      for (var i = 0; i < 10; i++) {
+        s.watch('p3');
+        s.watch('p3', on: false);
+      }
+      // Told at once the first time, and the rest waits.
+      expect(s.sender('p0').sets, sent + 1);
+      time.elapse(Call.sharesEvery);
+      // Then once, with the number there is: three.
+      expect(s.sender('p0').sets, sent + 2);
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+      time.elapse(Call.sharesEvery * 5);
+      expect(s.sender('p0').sets, sent + 2);
+    }),
+  );
+
+  test(
+    'a watcher who came while the limit kept quiet is told the one there is after',
+    () => fakeAsync((time) {
+      final s = _Sharing(time, 1920, 1080);
+      for (final id in ['p0', 'p1', 'p2', 'p3']) {
+        s.watch(id);
+      }
+      time.elapse(Call.sharesEvery);
+      s.expectAll(['p0', 'p1', 'p2', 'p3'], 3000000);
+      // One goes: 4 Mbit/s each at once.
+      s.watch('p3', on: false);
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+      // Within the second after: one comes, told 3 as four watch, and one goes.
+      s.watch('p4');
+      expect(s.limitTo('p4'), 3000000);
+      s.watch('p2', on: false);
+      // Three watch again, as when the others were told 4: the one who came is told it
+      // too.
+      time.elapse(Call.sharesEvery);
+      s.expectAll(['p0', 'p1', 'p4'], 4000000);
+    }),
+  );
+
+  test(
+    'only watchers whose connection is up divide the budget, and one gone from the '
+    'call is counted out at the next reading',
+    () => fakeAsync((time) {
+      final s = _Sharing(time, 1920, 1080);
+      for (final id in ['p0', 'p1', 'p2', 'p3']) {
+        s.watch(id);
+      }
+      time.elapse(Call.sharesEvery);
+      s.expectAll(['p0', 'p1', 'p2', 'p3'], 3000000);
+
+      // p3's connection fails: while it is made again, the others share among three.
+      s.call.peers['p3']!.connected = false;
+      s.read();
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+      // It still watches, and the size's ceiling still counts it.
+      expect(s.call.watchers, 4);
+      expect(s.call.screenLoad.ceiling, 1080);
+      // Up again: four.
+      time.elapse(Call.sharesEvery);
+      s.call.peers['p3']!.connected = true;
+      s.read();
+      s.expectAll(['p0', 'p1', 'p2', 'p3'], 3000000);
+
+      // Kept out: its connection closed, and none made while it stays.
+      time.elapse(Call.sharesEvery);
+      s.call.peers['p3']!
+        ..connection = null
+        ..connected = false;
+      s.read();
+      s.expectAll(['p0', 'p1', 'p2'], 4000000);
+
+      // p2 leaves the call without saying it stopped watching: two are left, at what
+      // the screen allows.
+      time.elapse(Call.sharesEvery);
+      s.call.peers.remove('p2');
+      s.read();
+      s.expectAll(['p0', 'p1'], screenKbps(1920, 1080, 30) * 1000);
+    }),
+  );
+
+  test(
+    'another quality chosen while they watch tells each connection once',
+    () => fakeAsync((time) {
+      final s = _Sharing(time, 2560, 1440);
+      s.watch('p0');
+      s.watch('p1');
+      time.elapse(Call.sharesEvery);
+      s.expectAll(['p0', 'p1'], 11059000);
+      s.call.setScreenQuality(const ScreenQuality(lines: 720, fps: 60));
+      time.flushMicrotasks();
+      final sent = s.sender('p0').sets;
+      s.expectAll(['p0', 'p1'], screenLeastKbps * 1000);
+      expect(s.sender('p0').set!.maxFramerate, 60);
+      // The next reading finds nothing changed.
+      s.read();
+      time.elapse(Call.sharesEvery);
+      expect(s.sender('p0').sets, sent);
+    }),
+  );
+
+  test(
+    'a watcher whose connection steps the screen down gets the limit of the others',
+    () => fakeAsync((time) {
+      final s = _Sharing(time, 1920, 1080);
+      for (final id in ['p0', 'p1', 'p2']) {
+        s.watch(id);
+      }
+      // p1's connection falls short: it gets the screen a step smaller, 720 lines.
+      s.call.peers['p1']!.screenFit.step = 1;
+      time.elapse(Call.sharesEvery);
+      s.watch('p3');
+      expect(s.sender('p0').set!.scaleResolutionDownBy, 1);
+      expect(s.sender('p1').set!.scaleResolutionDownBy, 1.5);
+      s.expectAll(['p0', 'p1', 'p2', 'p3'], 3000000);
+    }),
   );
 
   test(

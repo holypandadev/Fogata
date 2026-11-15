@@ -43,6 +43,9 @@ class CallPeer {
   /// How this device's shared screen goes out to them.
   final _fit = ScreenFit();
 
+  @visibleForTesting
+  ScreenFit get screenFit => _fit;
+
   /// The pictures of this device's shared screen encoded for them on connection `on`
   /// by the last reading before they watched it, and whether they watch it; and the
   /// times it was sent again since ([Call._followScreenOut]).
