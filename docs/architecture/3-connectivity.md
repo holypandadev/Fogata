@@ -399,7 +399,11 @@ cloud provider and say anything, and a stranger that came in by itself counts fo
 even beside one this device dialled; the same for the address announced when the device's
 network changes the port for each destination). The DHT nodes a device dials as it starts
 are on many networks, and tell it its address within seconds (every confirmation logged in
-the lab and on the internet had all its reporters dialled). The log says when an address is
+the lab and on the internet had all its reporters dialled). The first announcement waits for
+it. In the lab's `dht-liars` that takes 4.5 s: the six nodes that answer first are all on one
+network, and the lab DHT nodes, the only peers on the other two, answer 1.5 s late, so the
+QUIC handshake with them ends 3 s after the dial and identify 1.5 s later. No connection to a
+DHT node closes early there, on either side. The log says when an address is
 taken (`this device's public address confirmed`, with how many peers, networks and dialled
 ones), and when strangers that came in agree on one not taken. Only an address a member or friend
 reported too counts as this device's own when a candidate behind it is taken for one of
