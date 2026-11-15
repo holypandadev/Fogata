@@ -46,7 +46,7 @@ SCENARIOS=(selftest cone-cone cone-cone-member cone-symmetric cone-symmetric-mem
     symmetric-symmetric-member member-lost-direct home-two-routers home-two-routers-firewall
     home-two-routers-closed group-join friends-link friends-code friends-later friends-later-code
     friends-remove friends-ex-mutual room-files network-check network-check-negative fake-observed inbound-flood
-    silent-flood tcp-known tcp-slow mdns-flood mdns-stale dht-liars media-silent lan-sealed direct-apart transfer-cone-cone transfer-lan transfer-cone-symmetric
+    silent-flood tcp-known tcp-slow mdns-flood mdns-stale dht-liars media-silent lan-first-contact lan-first-contact-quiet lan-sealed direct-apart transfer-cone-cone transfer-lan transfer-cone-symmetric
     transfer-two-routers transfer-two-routers-back update-chain update-refusals)
 
 if [[ -z "${NETLAB_INSIDE:-}" ]]; then
@@ -1688,6 +1688,84 @@ EOF2
             [[ -n $gap && $gap -le 400 && ${got:-0} -ge 2500 ]] || pass=0
         done
         if [[ $pass == 1 ]]; then
+            echo "result: PASS   logs: $WORK"
+            exit 0
+        fi
+        echo "result: FAIL   logs: $WORK"
+        exit 1 ;;
+    lan-first-contact|lan-first-contact-quiet)
+        # A is on a public network (203.0.113.0/24) and on a private one of its own
+        # (192.168.60.0/24, a second link), where C, a member A has never reached, is. A finds
+        # C over mDNS and dials it there: first contact. In lan-first-contact twelve DHT nodes
+        # that A asks first answer every lookup with eight made-up members each, at four of
+        # 24 addresses of A's public network where no host is: A's dials to them keep the
+        # room for dials to its own networks that have not answered full, with more waiting
+        # (vendor/libp2p-quic, change 5). A's dial to C must still go out and connect within
+        # a few seconds of A finding C, as it does with no one lying
+        # (lan-first-contact-quiet). C never dials A first (its new connections to A are
+        # dropped, but mDNS), and TCP between them is dropped: the time is that of A's QUIC
+        # dial.
+        public_host A 203.0.113.21
+        ip netns add C
+        ip link add name lan0 type veth peer name eth0
+        ip link set lan0 netns A
+        ip link set eth0 netns C
+        in_ns A ip addr add 192.168.60.1/24 dev lan0
+        in_ns A ip link set lan0 up
+        in_ns C ip addr add 192.168.60.2/24 dev eth0
+        in_ns C ip link set eth0 up
+        in_ns C ip link set lo up
+        in_ns A nft -f - <<'EOF2'
+table inet lab {
+    chain output { type filter hook output priority 0; policy accept; ip daddr 192.168.60.2 meta l4proto tcp drop; }
+}
+EOF2
+        in_ns C nft -f - <<'EOF2'
+table inet lab {
+    chain output {
+        type filter hook output priority 0; policy accept;
+        ip daddr 192.168.60.1 udp dport 5353 accept;
+        ip daddr 192.168.60.1 meta l4proto tcp drop;
+        ip daddr 192.168.60.1 ct state new drop;
+    }
+}
+EOF2
+        members A C
+        liars=""
+        if [[ $SCENARIO == lan-first-contact ]]; then
+            for i in $(seq 1 12); do
+                public_host "L$i" "203.0.113.$((100 + i))"
+                lie_at=()
+                for j in 0 1 2 3; do
+                    lie_at+=(--lie-at "/ip4/203.0.113.$((130 + (i * 4 + j) % 24))/udp/41000/quic-v1")
+                done
+                start_dht "L$i" 4001 --peer "$DHT1" --lies 8 "${lie_at[@]}"
+                liars="$liars --bootstrap $DHT_ADDR"
+            done
+        fi
+        # shellcheck disable=SC2086  # the DHT nodes, two words each
+        (sleep 100) | ip netns exec A env RUST_LOG=warn,fogata_net=debug,libp2p_swarm=debug \
+            timeout 100 "$BIN" --data-dir "$WORK/data-A" chat lab --nick A --port 41000 \
+            $liars $BOOT > "$WORK/A.out" 2>&1 &
+        PIDS+=($!)
+        sleep 15
+        (sleep 85) | ip netns exec C timeout 85 "$BIN" --data-dir "$WORK/data-C" chat lab \
+            --nick C --port 41000 --no-dht > "$WORK/C.out" 2>&1 &
+        PIDS+=($!)
+        sleep 87
+        echo "=== $SCENARIO"
+        ms() { date -u -d "$1" +%s%3N; }
+        found=$(grep -m1 'dialling a peer mDNS found' "$WORK/A.out" | awk '{print $1}' || true)
+        connected=$(grep 'Connection established' "$WORK/A.out" | grep -m1 '192\.168\.60\.2' |
+            awk '{print $1}' || true)
+        echo "--- A: $(grep -c 'found a member announcement' "$WORK/A.out" || true) made-up" \
+            "members taken"
+        after=never
+        [[ -n $found && -n $connected ]] && after=$(( $(ms "$connected") - $(ms "$found") ))
+        echo "--- A found C over mDNS at ${found:-never}; connected to C at ${connected:-never}," \
+            "$after ms later"
+        grep -m1 -E "\+ C \[[^]]*\] connected" "$WORK/A.out" || true
+        if [[ $after != never ]] && (( after <= 3000 )); then
             echo "result: PASS   logs: $WORK"
             exit 0
         fi
