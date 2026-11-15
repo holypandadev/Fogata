@@ -1316,17 +1316,22 @@ comes into a call since when it goes; a start said to be before the call's group
 or more than 48 hours ago, counts as that.
 
 A device that no longer knows a call it left (its application was closed during the call
-and started again, say) calls with a new call. When it rings the device that waits alone
-in the old call for it (it was in that call and left), that ring is answered at once, as
-if the person had pressed Accept: the waiting call ends as one hung up, and the device goes
-into the new call with its microphone as it was, with nothing ringing, nothing missed and
-no notice of the old call ending. Only that ring is answered so: a ring from anyone else
-rings as any other; with someone else still in the call, the ring hears it is busy, as
-before; a friend rung into the call who never came in, one this device rings back in
-already, and a ring that comes once the person hung up the waiting call ring as any other;
-an invitation into another call that goes on is not taken this way. What belonged to the
-old call ends with it: its chat, its time, and this device's camera and shared screen,
-which stay off in the new call until turned on again.
+and started again, say) calls with a new call. A new call from the friend a device waits for
+alone in a call of the two of them, who left it less than a minute ago (the one shown as
+may come back), is answered at once, as if the person had pressed Accept: the waiting call
+ends as one hung up, noted in the chat as a call that lasted what it lasted, and the device
+goes into the new call with its microphone as it was, with nothing ringing, nothing missed
+and no notice of the old call ending. The waiting call is hung up before the new call's
+room is entered: if that room cannot be entered, the device is in neither call and the
+friend hears its call was declined. A friend's ring stopped before it was told it was
+answered is a missed call, and no room is entered; hung up by the person then, the friend
+hears it was declined. Every other ring is taken as before: a ring from anyone else rings
+as any other; with someone else still in the call, the ring hears it is busy; in a call of
+more than two, while someone is being rung into the call, once a minute has passed since
+the friend left, while or after the person hangs up the waiting call (or it ends as nobody
+came back), and for an invitation into another call that goes on, the ring rings as any
+other. What belonged to the old call ends with it: its chat, its time, and this device's
+camera and shared screen, which stay off in the new call until turned on again.
 
 When a call is over for a device (it was the last one, or no friend of its is left in a call
 it left, or the application quits), it notes the call in its chats: a line such as "Ana
@@ -1354,8 +1359,8 @@ see each other's names and pictures as in any room, friends or not.
 Each side of a call tells the other with a `GroupCalls` step that it takes all this. An
 older device refuses both steps: invited, it is shown at once as too old to join; in a call
 of two with a newer one, nobody can be added, and its call ends as before when either
-hangs up (the newer one waits its minute, and the older one's call back is a new call,
-answered at once as above).
+hangs up (the newer one waits its minute, and the older one's call back in that minute is
+a new call, answered at once as above).
 
 An identity open on two computers at once (a copied data folder) has two sessions a friend
 can reach. A ring goes to every session; the first to answer or decline takes the call, and

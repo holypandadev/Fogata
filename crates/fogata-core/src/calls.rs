@@ -199,6 +199,11 @@ pub(crate) struct CallEntry {
     telling: bool,
     /// Whether this device started entering the call's room (see [`enter`]).
     entered: bool,
+    /// Whether this device hangs up the call: it is no longer waited in, nor hung up twice.
+    ending: bool,
+    /// A friend's ring answered by itself (see [`take_back`]), until the friend is told:
+    /// stopped meanwhile, by the friend or the person, it ends as a ring not answered.
+    answering: bool,
 }
 
 impl CallEntry {
@@ -224,6 +229,8 @@ impl CallEntry {
             heard: false,
             telling: false,
             entered: false,
+            ending: false,
+            answering: false,
         }
     }
 
@@ -620,9 +627,21 @@ impl Core {
     /// Stops ringing, or hangs up. The others in the call go on without this device, which
     /// can come back by calling one of them while they are still in it.
     pub async fn end_call(&self, group: GroupId) -> Result<()> {
+        // Looked at and noted at once: a call being hung up is not hung up twice, nor
+        // waited in (see [`waited_for`]). A friend's ring answered by itself and not yet
+        // told so is declined, as a ring not answered.
         let (with, phase) = {
-            let state = self.inner.lock();
-            let call = state.calls.get(&group).context("no such call")?;
+            let mut state = self.inner.lock();
+            let call = state.calls.get_mut(&group).context("no such call")?;
+            if call.answering {
+                call.answering = false;
+                call.phase = CallPhase::Incoming;
+            } else if call.phase == CallPhase::Connected {
+                if call.ending {
+                    return Ok(());
+                }
+                call.ending = true;
+            }
             (call.with, call.phase)
         };
         match phase {
@@ -632,44 +651,7 @@ impl Core {
                 finish(&self.inner, group, CallEnd::Cancelled).await;
             }
             CallPhase::Connected => {
-                // An older friend's call ends with this; a newer one waits for this device.
-                let _ = send(&self.inner, with, group, CallSignal::End).await;
-                let others = people_in_room(&self.inner, group).await;
-                let now = now_ms();
-                {
-                    let mut state = self.inner.lock();
-                    // Only friends say that the call goes on: with none of them left in it, it
-                    // is over here.
-                    let friends: Vec<DevicePublicKey> = others
-                        .iter()
-                        .filter(|d| state.friends_online.contains_key(*d))
-                        .copied()
-                        .collect();
-                    if !friends.is_empty() {
-                        let left = state.calls.get(&group).map(|c| {
-                            let mut seen = c.seen.clone();
-                            seen.extend(others.iter().copied());
-                            LeftCall {
-                                log: c.log.clone(),
-                                at_ms: now,
-                                capable: c.capable.clone(),
-                                started_ms: c.started_ms.unwrap_or(c.since_ms),
-                                together_until: now,
-                                seen,
-                                inside: friends
-                                    .iter()
-                                    .map(|d| (*d, (now, others.len() > 1)))
-                                    .collect(),
-                                gone: HashMap::new(),
-                            }
-                        });
-                        if let Some(left) = left {
-                            state.left_calls.insert(group, left);
-                            watch_left(Arc::downgrade(&self.inner), group, now);
-                        }
-                    }
-                }
-                finish(&self.inner, group, CallEnd::Ended).await;
+                hang_up(&self.inner, group, with).await;
             }
         }
         Ok(())
@@ -1084,9 +1066,25 @@ pub(crate) async fn on_call(inner: &Arc<Inner>, from: DevicePublicKey, message: 
             };
             finish(inner, group, reason).await
         }
-        // The friend left; the others go on, and the last one waits for them a while.
+        // The friend left; the others go on, and the last one waits for them a while. A
+        // ring answered by itself and stopped before the friend was told was missed.
         (CallSignal::Cancel | CallSignal::End, CallPhase::Connected) => {
-            someone_left(inner, group, from).await
+            let missed = match inner.lock().calls.get_mut(&group) {
+                Some(call) if call.answering && from == with => {
+                    call.answering = false;
+                    call.phase = CallPhase::Incoming;
+                    true
+                }
+                _ => false,
+            };
+            if missed {
+                finish_if(inner, group, CallEnd::Missed, |c| {
+                    c.phase == CallPhase::Incoming
+                })
+                .await;
+            } else {
+                someone_left(inner, group, from).await
+            }
         }
         // Only the node of the friend who rang says another session took its ring.
         (CallSignal::Elsewhere, CallPhase::Incoming | CallPhase::Connected) if from == with => {
@@ -1180,12 +1178,15 @@ async fn on_ring(
             Ok(Taken::Crossed(mine))
         } else if state.calls.values().any(CallEntry::busy) {
             Err(CallSignal::Busy)
-        } else if let Some(waited) = waited_for(&state.calls, from).filter(|_| new_call) {
-            // Answered here at once: no ring shows, nor one that rang and stopped.
-            state.calls.insert(
-                group,
-                CallEntry::new(from, false, CallPhase::Connected, log.clone()),
-            );
+        } else if let Some(waited) = waited_for(&state.calls, from, now_ms()).filter(|_| new_call) {
+            // Answered here at once: no ring shows, nor one that rang and stopped. The call
+            // waited in is hung up by this alone.
+            if let Some(call) = state.calls.get_mut(&waited) {
+                call.ending = true;
+            }
+            let mut call = CallEntry::new(from, false, CallPhase::Connected, log.clone());
+            call.answering = true;
+            state.calls.insert(group, call);
             Ok(Taken::Back(waited))
         } else {
             state.calls.insert(
@@ -1221,7 +1222,11 @@ async fn on_ring(
         // own call when that is the lower one.
         Ok(Taken::Crossed(mine)) if mine < group => return,
         Ok(Taken::Crossed(mine)) => return take_crossed(inner, from, group, mine, log).await,
-        Ok(Taken::Back(waited)) => return take_back(inner, from, group, waited, log).await,
+        Ok(Taken::Back(waited)) => {
+            if !take_back(inner, from, group, waited, log).await {
+                return;
+            }
+        }
         Ok(Taken::Rings) => {}
     }
     expire(
@@ -1233,6 +1238,50 @@ async fn on_ring(
     );
     inner.emit(CoreEvent::CallIncoming { group, from });
     inner.emit(CoreEvent::CallsChanged);
+}
+
+/// Hangs up call `group`, which this device is in with `with`, noted as being hung up
+/// ([`CallEntry::ending`]). Returns whether this ended it: something else may have meanwhile.
+async fn hang_up(inner: &Arc<Inner>, group: GroupId, with: DevicePublicKey) -> bool {
+    meanwhile("hanging up", group).await;
+    // An older friend's call ends with this; a newer one waits for this device.
+    let _ = send(inner, with, group, CallSignal::End).await;
+    let others = people_in_room(inner, group).await;
+    let now = now_ms();
+    {
+        let mut state = inner.lock();
+        // Only friends say that the call goes on: with none of them left in it, it is over
+        // here.
+        let friends: Vec<DevicePublicKey> = others
+            .iter()
+            .filter(|d| state.friends_online.contains_key(*d))
+            .copied()
+            .collect();
+        if !friends.is_empty() {
+            let left = state.calls.get(&group).map(|c| {
+                let mut seen = c.seen.clone();
+                seen.extend(others.iter().copied());
+                LeftCall {
+                    log: c.log.clone(),
+                    at_ms: now,
+                    capable: c.capable.clone(),
+                    started_ms: c.started_ms.unwrap_or(c.since_ms),
+                    together_until: now,
+                    seen,
+                    inside: friends
+                        .iter()
+                        .map(|d| (*d, (now, others.len() > 1)))
+                        .collect(),
+                    gone: HashMap::new(),
+                }
+            });
+            if let Some(left) = left {
+                state.left_calls.insert(group, left);
+                watch_left(Arc::downgrade(inner), group, now);
+            }
+        }
+    }
+    finish_if(inner, group, CallEnd::Ended, |_| true).await
 }
 
 /// What becomes of a ring that this device takes.
@@ -1259,36 +1308,65 @@ fn crossing(calls: &HashMap<GroupId, CallEntry>, from: DevicePublicKey) -> Optio
     }
 }
 
-/// The call this device waits in, the only one left, for `from`, who was in it and left,
-/// unless this device rings `from` back into it already. A new ring from `from` then comes
-/// from a device that no longer knows that call: its application was closed and started
-/// again, say.
-fn waited_for(calls: &HashMap<GroupId, CallEntry>, from: DevicePublicKey) -> Option<GroupId> {
+/// The call of two this device waits in, the only one left, for `from`, the other one in
+/// it, who left less than [`ALONE_MS`] ago (the one the screen shows may come back), with
+/// nobody being rung into it and nobody hanging it up. A new ring from `from` then comes from
+/// a device that no longer knows that call: its application was closed and started again,
+/// say. A friend in the call can say it left (`End`) and ring anew to be answered this way,
+/// whatever its device knows: that gives it nothing it could not have, being the only other
+/// one in the call, whose call back into the call waited in is answered at once too.
+fn waited_for(
+    calls: &HashMap<GroupId, CallEntry>,
+    from: DevicePublicKey,
+    now: u64,
+) -> Option<GroupId> {
     calls
         .iter()
         .find(|(_, c)| {
+            let state = c.log.shared_state();
             c.phase == CallPhase::Connected
+                && !c.ending
                 && c.alone_since.is_some()
-                && c.left.contains_key(&from)
-                && !c.adding.contains_key(&from)
+                && c.adding.is_empty()
+                && state.members.len() == 2
+                && state.is_member(&from)
+                && c.left
+                    .get(&from)
+                    .is_some_and(|at| now.saturating_sub(*at) < ALONE_MS)
         })
         .map(|(group, _)| *group)
 }
 
 /// Answers the friend's `group`, noted here as answered, as Accept would: this device hangs
-/// up the call `waited` it waits in for that friend, and goes into the new one.
+/// up the call `waited` it waits in for that friend, noted as being hung up, and goes into
+/// the new one. Returns whether the friend's call rings instead: the call waited in was
+/// ended by something else meanwhile.
 async fn take_back(
     inner: &Arc<Inner>,
     from: DevicePublicKey,
     group: GroupId,
     waited: GroupId,
     log: GroupLog,
-) {
-    let core = Core {
-        inner: Arc::clone(inner),
+) -> bool {
+    let with = inner.lock().calls.get(&waited).map(|c| c.with);
+    let hung_up = match with {
+        Some(with) => hang_up(inner, waited, with).await,
+        None => false,
     };
-    let _ = core.end_call(waited).await;
+    {
+        let mut state = inner.lock();
+        // Stopped meanwhile, by the friend or the person: it ended as a ring not answered.
+        let Some(call) = state.calls.get_mut(&group).filter(|c| c.answering) else {
+            return false;
+        };
+        if !hung_up {
+            call.answering = false;
+            call.phase = CallPhase::Incoming;
+            return true;
+        }
+    }
     answer_now(inner, from, group, log).await;
+    false
 }
 
 /// Lets this device's own call `mine` go for the friend's `group`, which rang at the same
@@ -1317,6 +1395,23 @@ async fn take_crossed(
 async fn answer_now(inner: &Arc<Inner>, from: DevicePublicKey, group: GroupId, log: GroupLog) {
     entering(inner, from, group);
     let joined = enter(inner, group, log, join_call_room(inner, group)).await;
+    // Still wanted once in its room: not stopped or hung up meanwhile. Otherwise the friend
+    // hears it cannot be now, as a ring declined.
+    let wanted = joined.is_ok() && {
+        let mut state = inner.lock();
+        match state.calls.get_mut(&group) {
+            Some(call) if call.phase == CallPhase::Connected && !call.ending => {
+                call.answering = false;
+                true
+            }
+            _ => false,
+        }
+    };
+    if joined.is_ok() && !wanted {
+        let _ = send(inner, from, group, CallSignal::Decline).await;
+        let_go(inner, group).await;
+        return;
+    }
     // The friend hears it is answered only once this device is in the call's room, and
     // that it cannot be now otherwise.
     let answered = match joined {
@@ -1850,9 +1945,10 @@ async fn alone_over(inner: &Arc<Inner>, group: GroupId, since: u64) {
         .is_some_and(|c| c.alone_since == Some(since));
     if still && others_in_room(inner, group).await == 0 {
         meanwhile("alone", group).await;
-        // Someone may have come back while the room was looked at.
+        // Someone may have come back while the room was looked at, or this device started
+        // hanging up, which ends the call as that.
         finish_if(inner, group, CallEnd::Alone, |c| {
-            c.alone_since == Some(since)
+            c.alone_since == Some(since) && !c.ending
         })
         .await;
     }
@@ -2022,16 +2118,18 @@ async fn finish(inner: &Inner, group: GroupId, reason: CallEnd) {
 
 /// Ends call `group` as [`finish`] does, if `still` holds of it as it is taken: what
 /// decided to end it and waited meanwhile (for a timer, for the room) leaves it be when it
-/// changed since (answered, someone came back into it).
+/// changed since (answered, someone came back into it). Returns whether it ended it.
 async fn finish_if(
     inner: &Inner,
     group: GroupId,
     reason: CallEnd,
     still: impl FnOnce(&CallEntry) -> bool,
-) {
-    if let Some(ending) = take_call(inner, group, still) {
-        ended(inner, group, ending, reason).await;
-    }
+) -> bool {
+    let Some(ending) = take_call(inner, group, still) else {
+        return false;
+    };
+    ended(inner, group, ending, reason).await;
+    true
 }
 
 /// A call taken off this device's calls to be ended ([`take_call`], [`ended`]).
@@ -2357,35 +2455,49 @@ mod tests {
     fn only_the_one_waited_for_rings_into_a_new_call_answered_at_once() {
         let ana = identity();
         let (bea, carla) = (identity().public_key(), identity().public_key());
+        let now = 1_000_000;
         let mut log = GroupLog::create(&ana, "Call", 1).unwrap();
         log.add(&ana, bea, "Bea", 1).unwrap();
         let group = log.group_id();
         let mut calls =
             HashMap::from([(group, CallEntry::new(bea, true, CallPhase::Connected, log))]);
         // Bea is still in the call: her ring hears this device is busy, as before.
-        assert_eq!(waited_for(&calls, bea), None);
-        // Bea left, and someone else is still in it: the same.
-        calls.get_mut(&group).unwrap().left.insert(bea, 10);
-        assert_eq!(waited_for(&calls, bea), None);
-        // Ana waits alone for Bea: Bea's ring is answered, Carla's rings.
-        calls.get_mut(&group).unwrap().alone_since = Some(10);
-        assert_eq!(waited_for(&calls, bea), Some(group));
-        assert_eq!(waited_for(&calls, carla), None);
-        // Ana rings Bea back into the call already: Bea's ring rings, as before.
-        calls.get_mut(&group).unwrap().adding.insert(bea, 20);
-        assert_eq!(waited_for(&calls, bea), None);
-        // Carla, rung into the call, never came in: her ring rings.
+        assert_eq!(waited_for(&calls, bea, now), None);
+        // Ana waits alone for Bea, who just left: Bea's ring is answered, Carla's rings.
         let call = calls.get_mut(&group).unwrap();
-        call.adding.clear();
-        call.adding.insert(carla, 5);
-        assert_eq!(waited_for(&calls, carla), None);
+        call.left.insert(bea, now - 1000);
+        call.alone_since = Some(now - 1000);
+        assert_eq!(waited_for(&calls, bea, now), Some(group));
+        assert_eq!(waited_for(&calls, carla, now), None);
+        // Bea left a minute ago or more: no longer shown as may come back.
+        assert_eq!(waited_for(&calls, bea, now - 1000 + ALONE_MS), None);
+        // Ana rings someone into the call: Bea's ring rings, as before.
+        calls.get_mut(&group).unwrap().adding.insert(carla, now);
+        assert_eq!(waited_for(&calls, bea, now), None);
+        calls.get_mut(&group).unwrap().adding.clear();
+        // Ana is hanging up the call: Bea's ring rings.
+        calls.get_mut(&group).unwrap().ending = true;
+        assert_eq!(waited_for(&calls, bea, now), None);
+        calls.get_mut(&group).unwrap().ending = false;
         // Ana still rings Bea: not a call that waits.
-        let call = calls.get_mut(&group).unwrap();
-        call.phase = CallPhase::Ringing;
-        assert_eq!(waited_for(&calls, bea), None);
+        calls.get_mut(&group).unwrap().phase = CallPhase::Ringing;
+        assert_eq!(waited_for(&calls, bea, now), None);
         // Ana hung up: nothing waits.
         calls.clear();
-        assert_eq!(waited_for(&calls, bea), None);
+        assert_eq!(waited_for(&calls, bea, now), None);
+
+        // A call of three Ana waits in alone, Bea and Carla gone a moment ago (or Carla
+        // long ago, or rung in and never come): neither's ring is answered by itself.
+        let mut log = GroupLog::create(&ana, "Call", 1).unwrap();
+        log.add(&ana, bea, "Bea", 1).unwrap();
+        log.add(&ana, carla, "Carla", 1).unwrap();
+        let mut call = CallEntry::new(bea, true, CallPhase::Connected, log);
+        call.left.insert(bea, now - 1000);
+        call.left.insert(carla, now - 1000);
+        call.alone_since = Some(now - 1000);
+        let calls = HashMap::from([(group, call)]);
+        assert_eq!(waited_for(&calls, bea, now), None);
+        assert_eq!(waited_for(&calls, carla, now), None);
     }
 
     #[test]
@@ -2773,6 +2885,357 @@ mod tests {
             !in_room(&ana, group).await,
             "still in the room of a call hung up"
         );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Ana and Bea online, each with their events.
+    async fn ana_and_bea(base: &Path) -> (Core, crate::CoreEvents, Core, crate::CoreEvents) {
+        let _ = std::fs::remove_dir_all(base);
+        let [dir_a, dir_b] = friends(base);
+        let [options_a, options_b] = dialling();
+        let (ana, mut events_a) = Core::start(dir_a, options_a).unwrap();
+        let (bea, mut events_b) = Core::start(dir_b, options_b).unwrap();
+        let online = |e: &CoreEvent| matches!(e, CoreEvent::FriendOnline { .. });
+        wait_for(&mut events_a, "Bea online", online).await;
+        wait_for(&mut events_b, "Ana online", online).await;
+        (ana, events_a, bea, events_b)
+    }
+
+    /// Ana waits alone in a call of two for Bea, who just left it; Bea's device no longer
+    /// knows it. Returns the call.
+    fn waits_for(ana: &Core, bea: DevicePublicKey) -> GroupId {
+        let now = now_ms();
+        let mut log = GroupLog::create(&ana.inner.identity, "Call", now - 60_000).unwrap();
+        log.add(&ana.inner.identity, bea, "Bea", now - 60_000)
+            .unwrap();
+        let group = log.group_id();
+        let mut call = CallEntry::new(bea, true, CallPhase::Connected, log);
+        call.left.insert(bea, now);
+        call.alone_since = Some(now);
+        ana.inner.lock().calls.insert(group, call);
+        group
+    }
+
+    /// Runs `then` at `point` of the handling of call `group`.
+    fn at<F>(point: &'static str, group: GroupId, then: impl FnOnce() -> F + Send + 'static)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let pause: Pause = Box::new(move || Box::pin(then()));
+        PAUSES
+            .lock()
+            .unwrap()
+            .get_or_insert_default()
+            .insert((point, group), pause);
+    }
+
+    /// Waits until `core` has a call with `phase` from `from` (a connected one being
+    /// answered by itself), and returns it.
+    async fn call_from(core: &Core, from: DevicePublicKey, phase: CallPhase) -> GroupId {
+        timeout(Duration::from_secs(30), async {
+            loop {
+                let found = core
+                    .inner
+                    .lock()
+                    .calls
+                    .iter()
+                    .find(|(_, c)| {
+                        c.with == from
+                            && c.phase == phase
+                            && (phase != CallPhase::Connected || c.answering)
+                    })
+                    .map(|(g, _)| *g);
+                if let Some(group) = found {
+                    return group;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("no such call came")
+    }
+
+    /// Fails if `events` holds any of `what`.
+    fn none_of(events: &mut crate::CoreEvents, who: &str, what: impl Fn(&CoreEvent) -> bool) {
+        while let Ok(e) = events.try_recv() {
+            assert!(!what(&e), "{who}: {e:?}");
+        }
+    }
+
+    /// The call Ana waits in is ending already when Bea's ring comes: the person hangs it
+    /// up, or the minute alone ran out. Bea's ring then rings as any other. When the minute
+    /// runs out as Bea's ring is being answered, the call ends as hung up, with no word of
+    /// it ending alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_into_a_call_already_ending_rings_as_any_other() {
+        let base = std::env::temp_dir().join(format!("fogata-call-ending-{}", std::process::id()));
+        let (ana, mut events_a, bea, mut events_b) = ana_and_bea(&base).await;
+        let from = bea.me();
+
+        // The person hangs up; Bea's ring comes before the call is gone.
+        let waited = waits_for(&ana, from);
+        let (core, ringer) = (ana.clone(), bea.clone());
+        at("hanging up", waited, move || async move {
+            ringer.start_call(core.me()).await.unwrap();
+            call_from(&core, from, CallPhase::Incoming).await;
+        });
+        ana.end_call(waited).await.unwrap();
+        let rang = call_from(&ana, from, CallPhase::Incoming).await;
+        wait_for(
+            &mut events_a,
+            "the ring shown",
+            |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == rang),
+        )
+        .await;
+        assert_eq!(ana.inner.lock().calls.len(), 1);
+        ana.decline_call(rang).await.unwrap();
+        wait_for(&mut events_b, "Bea declined", |e| {
+            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Declined, .. } if *group == rang)
+        })
+        .await;
+
+        // The minute alone ran out, and Bea's ring comes after.
+        let waited = waits_for(&ana, from);
+        let since = ana.inner.lock().calls[&waited].alone_since.unwrap();
+        alone_over(&ana.inner, waited, since).await;
+        assert!(ana.inner.lock().calls.is_empty());
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        wait_for(
+            &mut events_a,
+            "the ring shown",
+            |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == rang),
+        )
+        .await;
+        ana.decline_call(rang).await.unwrap();
+        wait_for(&mut events_b, "Bea declined", |e| {
+            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Declined, .. } if *group == rang)
+        })
+        .await;
+        while events_a.try_recv().is_ok() {}
+
+        // The minute runs out as Bea's ring is taken: answered, and no word of it alone.
+        let waited = waits_for(&ana, from);
+        let since = ana.inner.lock().calls[&waited].alone_since.unwrap();
+        let (core, ringer) = (ana.clone(), bea.clone());
+        at("alone", waited, move || async move {
+            ringer.start_call(core.me()).await.unwrap();
+            // Taken: the call waited in is being hung up for it.
+            let taken = timeout(Duration::from_secs(30), async {
+                while core
+                    .inner
+                    .lock()
+                    .calls
+                    .get(&waited)
+                    .is_some_and(|c| !c.ending)
+                {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await;
+            assert!(taken.is_ok(), "Bea's ring was not taken");
+        });
+        alone_over(&ana.inner, waited, since).await;
+        let mut rang = None;
+        wait_for(&mut events_b, "Bea answered", |e| match e {
+            CoreEvent::CallAccepted { group } => {
+                rang = Some(*group);
+                true
+            }
+            _ => false,
+        })
+        .await;
+        let rang = rang.unwrap();
+        wait_for(
+            &mut events_a,
+            "Ana answered",
+            |e| matches!(e, CoreEvent::CallAccepted { group } if *group == rang),
+        )
+        .await;
+        none_of(&mut events_a, "Ana", |e| {
+            matches!(
+                e,
+                CoreEvent::CallIncoming { .. }
+                    | CoreEvent::CallEnded {
+                        reason: CallEnd::Alone,
+                        ..
+                    }
+            )
+        });
+        let calls: Vec<GroupId> = ana.inner.lock().calls.keys().copied().collect();
+        assert_eq!(calls, vec![rang]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Bea's ring is answered by itself, and stopped before Bea is told: by Bea, it is a
+    /// missed call and no room is entered; by the person hanging it up, Bea hears it was
+    /// declined, never that it was answered.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_answered_by_itself_and_stopped_meanwhile_is_not_answered() {
+        let base = std::env::temp_dir().join(format!("fogata-call-stopped-{}", std::process::id()));
+        let (ana, mut events_a, bea, mut events_b) = ana_and_bea(&base).await;
+        let from = bea.me();
+
+        // Bea stops ringing while the call waited in is hung up.
+        let waited = waits_for(&ana, from);
+        let (core, ringer) = (ana.clone(), bea.clone());
+        at("hanging up", waited, move || async move {
+            let rang = call_from(&core, from, CallPhase::Connected).await;
+            let _ = ringer.end_call(rang).await;
+            on_call(&core.inner, from, step(rang, CallSignal::Cancel)).await;
+        });
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        wait_for(&mut events_a, "the ring missed", |e| {
+            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Missed, .. } if *group == rang)
+        })
+        .await;
+        wait_for(&mut events_a, "the call waited in hung up", |e| {
+            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Ended, .. } if *group == waited)
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(ana.inner.lock().calls.is_empty());
+        assert!(!in_room(&ana, rang).await, "in the room of a ring stopped");
+        none_of(&mut events_a, "Ana", |e| {
+            matches!(
+                e,
+                CoreEvent::CallAccepted { .. } | CoreEvent::CallIncoming { .. }
+            ) || matches!(
+                e,
+                CoreEvent::CallEnded {
+                    reason: CallEnd::Alone,
+                    ..
+                }
+            )
+        });
+        none_of(&mut events_b, "Bea", |e| {
+            matches!(e, CoreEvent::CallAccepted { .. })
+        });
+
+        // The person hangs up the new call before Bea is told it was answered.
+        let waited = waits_for(&ana, from);
+        let core = ana.clone();
+        at("hanging up", waited, move || async move {
+            let rang = call_from(&core, from, CallPhase::Connected).await;
+            let hanging = core.clone();
+            let done = tokio::spawn(async move { hanging.end_call(rang).await });
+            timeout(Duration::from_secs(30), done)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+        });
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        wait_for(&mut events_b, "Bea declined", |e| match e {
+            CoreEvent::CallAccepted { .. } => panic!("Bea heard her ring was answered"),
+            CoreEvent::CallEnded { group, reason, .. } if *group == rang => {
+                assert_eq!(*reason, CallEnd::Declined);
+                true
+            }
+            _ => false,
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert!(ana.inner.lock().calls.is_empty());
+        assert!(!in_room(&ana, rang).await, "in the room of a ring declined");
+        none_of(&mut events_a, "Ana", |e| {
+            matches!(
+                e,
+                CoreEvent::CallAccepted { .. } | CoreEvent::CallIncoming { .. }
+            )
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// While Ana waits for Bea: an invitation from Bea into another call rings as any
+    /// other; with someone else still in the call, Bea's ring hears Ana is busy. Bea's new
+    /// ring is answered by itself, and a ring of hers once she is in that call hears Ana is
+    /// busy, with no missed call: Ana is talking to her.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn other_rings_while_waiting_are_taken_as_before() {
+        let base = std::env::temp_dir().join(format!("fogata-call-others-{}", std::process::id()));
+        let (ana, mut events_a, bea, mut events_b) = ana_and_bea(&base).await;
+        let from = bea.me();
+        let ring = |invite: bool| {
+            let now = now_ms();
+            let mut log = GroupLog::create(&bea.inner.identity, "Call", now).unwrap();
+            log.add(&bea.inner.identity, ana.me(), "Ana", now).unwrap();
+            let group = log.group_id();
+            let entries = encode(&log);
+            let signal = if invite {
+                CallSignal::Invite { log: entries }
+            } else {
+                CallSignal::Ring { log: entries }
+            };
+            (group, step(group, signal))
+        };
+
+        // An invitation, not a new call: it rings.
+        let waited = waits_for(&ana, from);
+        let (invited, message) = ring(true);
+        on_call(&ana.inner, from, message).await;
+        wait_for(
+            &mut events_a,
+            "the invitation shown",
+            |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == invited),
+        )
+        .await;
+        assert_eq!(ana.inner.lock().calls[&invited].phase, CallPhase::Incoming);
+        ana.decline_call(invited).await.unwrap();
+
+        // Carla is still in the call: Bea's ring hears Ana is busy, a missed call here.
+        let carla = identity().public_key();
+        {
+            let mut state = ana.inner.lock();
+            let call = state.calls.get_mut(&waited).unwrap();
+            call.with = carla;
+            call.alone_since = None;
+        }
+        let (busy, message) = ring(false);
+        on_call(&ana.inner, from, message).await;
+        wait_for(&mut events_a, "the missed call", |e| {
+            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::MissedInCall, .. } if *group == busy)
+        })
+        .await;
+        let calls: Vec<GroupId> = ana.inner.lock().calls.keys().copied().collect();
+        assert_eq!(calls, vec![waited]);
+        ana.inner.lock().calls.clear();
+
+        // Waited for: answered by itself.
+        let waited = waits_for(&ana, from);
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        wait_for(
+            &mut events_b,
+            "Bea answered",
+            |e| matches!(e, CoreEvent::CallAccepted { group } if *group == rang),
+        )
+        .await;
+        wait_for(
+            &mut events_a,
+            "Ana answered",
+            |e| matches!(e, CoreEvent::CallAccepted { group } if *group == rang),
+        )
+        .await;
+        assert!(!ana.inner.lock().calls.contains_key(&waited));
+        // Bea's device rings again: busy, and nothing missed.
+        while events_a.try_recv().is_ok() {}
+        let (again, message) = ring(false);
+        on_call(&ana.inner, from, message).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        none_of(&mut events_a, "Ana", |e| {
+            matches!(
+                e,
+                CoreEvent::CallIncoming { .. } | CoreEvent::CallEnded { .. }
+            )
+        });
+        let calls: Vec<(GroupId, CallPhase)> = ana
+            .inner
+            .lock()
+            .calls
+            .iter()
+            .map(|(g, c)| (*g, c.phase))
+            .collect();
+        assert_eq!(calls, vec![(rang, CallPhase::Connected)]);
+        assert_ne!(again, rang);
         let _ = std::fs::remove_dir_all(&base);
     }
 
