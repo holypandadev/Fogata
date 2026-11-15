@@ -18,21 +18,27 @@ Changed, each place marked `Fogata:` in the code:
   handed on as a path, and so is any other target (`text/x-moz-url`, `_NETSCAPE_URL`,
   `x-special/gnome-copied-files`, plain text). Its paths are read as POSIX ones on every
   system, as a Linux desktop writes them, so its tests give the same answer on Windows.
-- The FileTransfer portal (`application/vnd.portal.filetransfer`), which 0.8.1 added, is
-  taken in `linux/desktop_drop_plugin.cc` itself, not in the Dart part through the dbus
-  package (MPL-2.0), which this copy does not depend on: inside the Flatpak only (where
-  `/.flatpak-info` is), the portal's target comes before the list of files, so a source
-  that offers it hands its files to the sandbox through it. The plugin asks the portal for
-  the files (`RetrieveFiles`, through GIO, at most five seconds) while the drop is still
-  going, as 0.9.0 does, since a source may end its transfer once the drop is finished (in
-  0.8.1 to 0.8.4 the Dart part asks after it), and hands them on as a `text/uri-list` of
-  the document portal's paths, which `linuxDropPaths` reads as any other. A portal that
-  gives nothing drops nothing. Outside the Flatpak the targets are those of 0.8.0.
-- `lib/src/channel.dart` no longer has 0.8.1's `performOperation_portal` (above), and its
-  `performOperation_linux` is Fogata's (above); it hands on the text of a Linux drop as
-  `rawText`, as published (the application does not read it).
+- `linux/desktop_drop_plugin.cc` hands its message's list and values over with
+  `g_autoptr` and `fl_value_append_take`, so they are freed once sent: as published the list
+  was never freed (0.8.4 frees the list, not the values in it).
+- 0.8.1's FileTransfer portal (`application/vnd.portal.filetransfer`, through the dbus
+  package, MPL-2.0) is left out: `lib/src/channel.dart` has no `performOperation_portal`,
+  `pubspec.yaml` no dbus, and the plugin takes the portal's target from no drag. GTK 3 adds
+  the portal's targets to the list of files' own where a portal runs, on any desktop; a drag
+  that offers only those is shown as something that can be dropped, and its drop, which
+  is not a `text/uri-list`, gives nothing, as in this copy of 0.8.0. A file dropped through
+  the portal arrives as a path of the document portal (`/run/user/<id>/doc/<id>/<name>`), whatever
+  the place it was dragged from: the application's check of private places
+  (`app/lib/src/private_places.dart`) would let through a file dragged from `~/.ssh` or a
+  browser's profile, as GTK hands every file of a drag to the portal by itself. Taking the
+  portal needs that check to judge each file by its real place first (the Documents
+  portal's `GetHostPaths`), inside the Flatpak only, and then tried on a real desktop.
+- `lib/src/channel.dart`'s `performOperation_linux` is Fogata's (above); it hands on the
+  text of a Linux drop as `rawText`, as published (the application does not read it), and
+  `lib/src/events.dart` and `lib/src/drop_target.dart` say so of `rawText`, which here is
+  never a portal's transfer key.
 - `pubspec.yaml` no longer says `resolution: workspace`, which only fits the plugin's own
-  repository, and does not depend on dbus.
+  repository.
 
 Nothing else is changed: macOS, Windows, Android and the web are as published.
 
@@ -54,8 +60,8 @@ Reviewed against desktop_drop 0.9.2 (2026-11-15): the fork stays on 0.8.4.
   channel written again. Its Linux code takes files only from a `text/uri-list`, as
   `file:` entries of this computer (or the portal's), which is what Fogata's change above
   does; a query in an entry is read there as part of the name.
-- Its fixes: the portal transfer kept alive until its files are found (Linux; done here in
-  the plugin, above), mouse events let through to native views outside a drag (macOS;
+- Its fixes: the portal transfer kept alive until its files are found (Linux; the portal
+  is left out here, above), mouse events let through to native views outside a drag (macOS;
   Fogata embeds no native view), drops on the web. 0.9.1 (a crash at start on Windows,
   from tasks of 0.9.0's own native bridge) and 0.9.2 (Android's Gradle) fix 0.9.0's code
   only.

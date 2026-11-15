@@ -36,7 +36,7 @@ dependencies:
   flutter_webrtc:
     path: third_party/flutter_webrtc
   # Our copy of desktop_drop 0.8.4 (Apache-2.0) that takes only files on Linux, without
-  # the dbus package (MPL-2.0) the published one depends on (see its FOGATA.md).
+  # 0.8.1's FileTransfer portal and the dbus package (MPL-2.0) it needs (see its FOGATA.md).
   desktop_drop:
     path: third_party/desktop_drop
   # Videos with each system's own player.
