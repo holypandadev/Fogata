@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <iostream>
 #include <memory>
 #include <vector>
@@ -123,6 +124,25 @@ int64_t NowNs() {
   timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return int64_t(t.tv_sec) * 1000000000 + t.tv_nsec;
+}
+
+// With FOGATA_WEBRTC_LOG set (at any level), every buffer PipeWire gives and every
+// frame given again goes to standard error, with the time of day in milliseconds since
+// the epoch: a test tells from it whether the shared screen stayed still
+// (tools/smoke-wayland/still.sh).
+void LogCapture(const char* what) {
+  static const bool on = getenv("FOGATA_WEBRTC_LOG") != nullptr;
+  if (!on) return;
+  timespec t;
+  clock_gettime(CLOCK_REALTIME, &t);
+  const long long ms = (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+  // One write, at once: a line is never held in a buffer nor cut by another thread's.
+  char line[128];
+  const int n = snprintf(line, sizeof line, "[PortalScreenCapturer] %lld %s\n", ms, what);
+  if (n <= 0) return;
+  if (write(STDERR_FILENO, line, std::min<size_t>(size_t(n), sizeof line - 1)) < 0) {
+    // Nothing to do: the log is for tests only.
+  }
 }
 
 // Request and session handles must be unique on the bus connection.
@@ -365,8 +385,13 @@ void OnProcess(void* data) {
   // starts again from now, without a burst.
   const int64_t interval = 1000000000LL / std::max(1, s->fps.load());
   const bool due = now >= s->next_frame_ns - interval / 4;
-  if (!corrupted && known && d->data != nullptr && d->chunk->size > 0 && width > 0 &&
-      height > 0 && due && s->on_frame) {
+  const bool picture = !corrupted && known && d->data != nullptr && d->chunk->size > 0 &&
+                       width > 0 && height > 0;
+  LogCapture(corrupted  ? "buffer corrupted"
+             : !picture ? "buffer without a picture"
+             : !due     ? "buffer not due"
+                        : "buffer");
+  if (picture && due && s->on_frame) {
     s->next_frame_ns =
         std::max(s->next_frame_ns + interval, now + interval * 3 / 4);
     const int stride = d->chunk->stride > 0 ? d->chunk->stride : width * 4;
@@ -683,6 +708,7 @@ bool PortalScreenCapturer::Refresh() {
     s->on_frame(width, height, y, width, u, half_w, v, half_w);
   }
   pw_thread_loop_unlock(s->loop);
+  LogCapture(given ? "last frame again" : "no last frame to give again");
   return given;
 }
 

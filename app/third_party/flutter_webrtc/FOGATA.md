@@ -92,7 +92,10 @@ its "zero-hertz" mode, which these sources are not in (see "One thread for each 
 encoder").
 
 - `linux/portal_screen_capturer.{h,cc}`: keeps the last frame it converted (its I420
-  buffer was kept already) and `Refresh` gives it again, under PipeWire's loop lock.
+  buffer was kept already) and `Refresh` gives it again, under PipeWire's loop lock. With
+  `FOGATA_WEBRTC_LOG` set (any level), each buffer PipeWire gives and each frame given
+  again is a line on standard error with its time, from which
+  `tools/smoke-wayland/still.sh` proves the shared screen stayed still.
 - `common/cpp/include/flutter_webrtc_base.h`, `common/cpp/src/flutter_screen_capture.cc`,
   `common/cpp/src/flutter_media_stream.cc`: `track_refreshers_` keeps it by track,
   dropped with the track, as `track_rates_`.

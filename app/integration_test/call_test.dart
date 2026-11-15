@@ -33,7 +33,10 @@
 // FOGATA_TEST_WATCH=<seconds> measures instead how a shared screen and the voice come
 // through (for a network made slow around the copies): the copy with FOGATA_TEST_SCREEN
 // shares, the others watch that long, and each logs every 2 s what goes out and what
-// arrives, then a summary; see _watchScreen. FOGATA_TEST_TYPING=1 checks instead who shows
+// arrives, then a summary; see _watchScreen. FOGATA_TEST_STILL=<opens> measures instead how
+// soon a screen shared while it stays still shows when opened, again and again, as
+// whatever runs the copies says (tools/smoke-wayland/still.sh); see _stillOpens.
+// FOGATA_TEST_TYPING=1 checks instead who shows
 // as typing under the room's chat while the others write, and then ends: see _typing.
 // FOGATA_TEST_NOISE=<seconds> has copy a (or the copy FOGATA_TEST_NOISE_ROLE names) turn
 // noise suppression off and on in the middle of the call instead; see _noiseSteps.
@@ -690,6 +693,13 @@ Future<void> _call(WidgetTester tester) async {
         _env['FOGATA_TEST_MIC_SOAK'] != null ||
         _env['FOGATA_TEST_CALL_SOAK'] != null;
     await _hear(tester, state, ['done'], seconds: soaking ? 1800 : 300);
+    return;
+  }
+  final still = int.tryParse(_env['FOGATA_TEST_STILL'] ?? '');
+  if (still != null) {
+    await _stillOpens(tester, state, still);
+    await _say(state, 'done');
+    await _hear(tester, state, ['done']);
     return;
   }
   final watch = int.tryParse(_env['FOGATA_TEST_WATCH'] ?? '');
@@ -2750,6 +2760,121 @@ Future<void> _logVoiceCodecs(CallPeer peer) async {
   final sorted = [...values]..sort();
   double at(double q) => sorted[((sorted.length - 1) * q).round()];
   return (median: at(0.5), low: at(0.1), high: at(0.9));
+}
+
+/// Writes the file [name] in the FOGATA_CALL folder, for whatever runs the copies.
+void _stillMark(String name, [String text = '']) =>
+    File('$_dir/$name').writeAsStringSync(text);
+
+/// Waits until whatever runs the copies writes the file [name] in the FOGATA_CALL folder.
+Future<void> _stillMarked(
+  WidgetTester tester,
+  String name, {
+  int seconds = 300,
+}) => _until(
+  tester,
+  'told: $name',
+  () => File('$_dir/$name').existsSync(),
+  seconds: seconds,
+);
+
+/// `FOGATA_TEST_STILL=<opens>`, two copies (tools/smoke-wayland/still.sh): the copy with
+/// FOGATA_TEST_SCREEN shares its screen, and the other opens it [opens] times, closing it
+/// between, each time when whatever runs the copies says the shared screen has stayed
+/// still (a capture that gives a picture only when the screen changes gives none then).
+/// Before each open it writes `still-<n>-ready` in the FOGATA_CALL folder and waits for
+/// `still-<n>-go`. It logs how long the first picture took: decoded (a picture received)
+/// and, on the first open, shown (the spinner gone). With none in
+/// FOGATA_TEST_STILL_GIVE_UP seconds (20) it writes `still-<n>-stuck`, for the screen to
+/// be changed, and waits 30 s more. Each open's line also goes to `still-results.txt`:
+/// the open, the milliseconds to the first picture decoded and shown (-1: none, or not
+/// the first open), those after the change (-1: not needed, or none), and when it was
+/// opened (milliseconds since the epoch).
+Future<void> _stillOpens(WidgetTester tester, AppState state, int opens) async {
+  final call = state.callState.call!;
+  if (_share != null) {
+    // On Wayland there is no list: the system's dialog picks.
+    final sources = await call.screens();
+    await call.shareScreen(
+      sources.where((s) => s.type == SourceType.Screen).firstOrNull,
+    );
+    if (!call.sharing) throw StateError('not sharing: ${call.problem}');
+    _log('still: sharing');
+    await _say(state, 'still screen');
+    await _hear(tester, state, ['still done'], seconds: opens * 120 + 300);
+    await call.stopSharing();
+    return;
+  }
+  final sharer = (await _hear(tester, state, ['still screen'])).keys.single;
+  final peer = _peer(state, sharer);
+  await _until(
+    tester,
+    "${sharer.name}'s screen offered",
+    () => peer.sharing,
+    seconds: 60,
+  );
+  final giveUp = int.tryParse(_env['FOGATA_TEST_STILL_GIVE_UP'] ?? '') ?? 20;
+  final results = File('$_dir/still-results.txt');
+  for (var open = 1; open <= opens; open++) {
+    _stillMark('still-$open-ready');
+    await _stillMarked(tester, 'still-$open-go');
+    final decodedBefore = await _received(
+      state,
+      'video',
+      'framesDecoded',
+      only: peer,
+    );
+    final first = peer.screen.videoWidth <= 0;
+    final asked = DateTime.now();
+    call.watch(sharer.id);
+    var decoded = -1, shown = -1;
+    // Fills in, in milliseconds from [from], what comes within [seconds].
+    Future<void> follow(int seconds, DateTime from) async {
+      final end = DateTime.now().add(Duration(seconds: seconds));
+      while (DateTime.now().isBefore(end) &&
+          (decoded < 0 || (first && shown < 0))) {
+        await _wait(tester, const Duration(milliseconds: 100));
+        final ms = DateTime.now().difference(from).inMilliseconds;
+        if (first && shown < 0 && peer.screen.videoWidth > 0) shown = ms;
+        if (decoded < 0 &&
+            await _received(state, 'video', 'framesDecoded', only: peer) >
+                decodedBefore) {
+          decoded = ms;
+        }
+      }
+    }
+
+    await follow(giveUp, asked);
+    var line =
+        'still open $open: first picture decoded after ${decoded}ms'
+        '${first ? ', shown after ${shown}ms' : ''}';
+    var afterDecoded = -1, afterShown = -1;
+    if (decoded < 0 || (first && shown < 0)) {
+      final stuck = DateTime.now();
+      _stillMark('still-$open-stuck');
+      // Only what had not come is followed on, from the change.
+      final before = (decoded, shown);
+      await follow(30, stuck);
+      afterDecoded = before.$1 < 0 ? decoded : -1;
+      afterShown = first && before.$2 < 0 ? shown : -1;
+      decoded = before.$1;
+      shown = before.$2;
+      line =
+          'still open $open: no picture in $giveUp s (decoded ${decoded}ms'
+          '${first ? ', shown ${shown}ms' : ''}); after the screen changed: '
+          'decoded after ${afterDecoded}ms'
+          '${first ? ', shown after ${afterShown}ms' : ''}';
+    }
+    _log(line);
+    results.writeAsStringSync(
+      '$open $decoded ${first ? shown : -1} $afterDecoded $afterShown '
+      '${asked.millisecondsSinceEpoch}\n',
+      mode: FileMode.append,
+    );
+    call.watch(null);
+    await _wait(tester, const Duration(seconds: 2));
+  }
+  await _say(state, 'still done');
 }
 
 /// After 15 s of voice, the copy with FOGATA_TEST_SCREEN shares its screen and the

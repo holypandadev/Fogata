@@ -362,8 +362,10 @@ camera, session bus or portal:
   sockets hidden, a home folder of its own, its own `dbus-daemon` session bus (with the
   system's service files, so the portal starts on demand as in Plasma), PipeWire, WirePlumber,
   pipewire-pulse, KDE's application index (`kbuildsycoca6`, which KWin reads to let the
-  portal use its screen casting) and `kwin_wayland --virtual --xwayland`. The copies start
-  with the environment Plasma gives an application. The portal's dialog is answered by
+  portal use its screen casting), `kwin_wayland --virtual --xwayland` and a notification
+  server that shows nothing (`notifications.py`: the portal tells of every share through
+  one, and with none the bus tried to start one for 25 s each time; two shares in thirty
+  timed out then, none since). The copies start with the environment Plasma gives an application. The portal's dialog is answered by
   `tools/smoke-wayland/picker.py`, which watches the accessibility bus for it and presses
   the screen's button (Share) or closes the dialog's window through KWin (Cancel), as the
   test asks in `$SMOKE_PICKER/answer`; before the copies run, `portal_check.py` shares the
@@ -389,3 +391,33 @@ On macOS the copies are an application of their own, `Fogata Smoke.app`
 Mac only, each copy with its own data folder. The first run of each build needs a person:
 macOS asks to let it record the screen and maybe to accept incoming connections, and the two
 windows show on the screen while it runs. Mute the Mac's sound first.
+
+### A still shared screen under Wayland
+
+Under Wayland the portal's capture (PipeWire) gives a picture only when something on the
+shared screen changes, and a screen is sent to someone only once they open it: the first
+picture they get has to be made from what the capture already had (the plugin keeps its
+last frame and gives it again when someone starts watching: the fork's "The last frame of
+a shared screen again"). `tools/smoke-wayland/still.sh [calls] [opens] [still|moved|both]`
+checks it in the same KDE Plasma Wayland session as the smoke test's `wayland` desktop,
+with two virtual outputs (`SMOKE_OUTPUTS=2`): copy a shares the first one through the
+portal's dialog, both copies' windows are moved to the second as they appear, and nothing
+on the shared one moves (KWin draws no panel, wallpaper or clock there, and the pointer
+stays where it is). Copy b opens the screen only once PipeWire has given copy a no buffer
+for 5 s, which the plugin's own log proves (`FOGATA_WEBRTC_LOG`: each buffer and each
+frame given again, with its time), and logs how long the first picture took, decoded and
+shown (the spinner gone). Before an open the screen has stayed still since the share
+started (`still`), or a window was moved onto it and back first (`moved`); with
+`both` (the default) they take turns. A picture that does not come in 20 s is waited for
+30 s more after a change on the screen, so the trial says whether it ever comes without
+one. By default, 30 calls each made anew with one open (the first open of a share);
+`still.sh 1 30` opens and closes the screen 30 times in one call instead. It passes when
+every picture came within 3 s with no buffer from PipeWire in between; 30 calls take
+about 15 minutes. Built with the plugin's `Refresh` giving nothing, every open waited the 20 s,
+and its picture came only with the change: the trial tells.
+
+Like the smoke test's KDE desktops it needs a GPU's render node (KWin shares a screen
+only with one), so it cannot run on GitHub's computers: it runs on a Linux computer with
+a GPU, and is skipped where the session cannot be built. `STILL_WINDOWS=shared` leaves the
+windows on the shared output, as on a desktop with one screen, to see what reaches the
+capture then.
