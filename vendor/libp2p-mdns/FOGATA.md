@@ -13,7 +13,8 @@ crate by `[patch.crates-io]` in the workspace's Cargo.toml. Only these changes:
    expiry was the TTL the response gave (up to 136 years).
    - `src/behaviour/iface.rs`: a response is taken only when it answers one of this
      interface's own recent queries (by its id; 30 seconds since 5. below) and comes from the
-     interface's network or a link-local address (RFC 6762, section 11). What a response
+     interface's network or a link-local address (RFC 6762, section 11); on Linux whichever
+     of the device's sockets read it (9. below). What a response
      tells is kept at most twice the query interval (Fogata asks every 30 seconds), and at
      most 256 addresses wait to be handed on. Test:
      `only_responses_to_a_recent_own_query_from_the_network_are_taken`.
@@ -46,8 +47,12 @@ crate by `[patch.crates-io]` in the workspace's Cargo.toml. Only these changes:
 
    What the query id does and does not do: it is 16 bits sent in the clear to the multicast
    group, so anyone on the local network reads it and can answer anything to it. It keeps
-   out responses from the internet (which also fail the network check) and unasked floods
-   from the local network; what bounds a neighbour that answers the queries are the limits
+   out unasked floods from the local network, and with the network check responses from
+   the internet: those sent from their real address. The network check is of the sender's
+   address, which a sender can make up; on Linux that is all it is (every socket shares the
+   port, see 9.); on macOS a multicast response must also come over the link of that
+   network, as a socket hears the group only on the links it joined it on; what Windows
+   does is not known; what bounds a neighbour that answers the queries are the limits
    above and the node's. `Behaviour::told_by` gives the node the address of the response
    that told of an address, which the node counts new peers by: the addresses a response
    names are whatever its sender likes.
@@ -113,6 +118,62 @@ crate by `[patch.crates-io]` in the workspace's Cargo.toml. Only these changes:
    so that no other device there (the user's own Fogata, another test, any libp2p program)
    takes part (crates/fogata-net/tests/mdns_stale.rs). Tests:
    `only_packets_of_the_same_service_count`, `only_a_service_name_packets_can_carry_is_taken`.
+
+9. `src/behaviour/iface.rs` and `src/behaviour.rs`, on Linux and Android only
+   (`HAND_OVER`): a packet one interface's socket reads from the network of another
+   interface of the device is handed to that interface's task, which takes it as if its own
+   socket had read it: an answer to its queries, or a query it answers with its own
+   addresses, on its own link. The socket of every interface is bound to port 5353 of all
+   the device's addresses, and Linux gives each packet to one of them: its early
+   demultiplexing of UDP gives a multicast packet to one of the sockets sharing the port,
+   not always that of the link it came over, `IP_MULTICAST_ALL` off or not (measured with
+   two interfaces in network namespaces: C's multicast answers reached the other
+   interface's socket in 2 of 6 tries, none with `net.ipv4.udp_early_demux` off), and a
+   packet sent straight to an address goes to one chosen by a hash of the addresses and
+   ports. A device with two networks (Wi-Fi and cable on different networks, a VPN, a
+   private network of its own) then often never took the answers of a peer on one of them,
+   for the whole session: they reached the socket of the other interface, which had not
+   sent the query they answered and refused them.
+
+   A packet goes to the interface whose network is the narrowest that holds its sender,
+   the one whose socket read it included (a local network inside a VPN's), the lowest
+   address of a tie; an interface whose task ended is passed over. A link-local sender,
+   which may be on any link, one on no network of the device, and one of the device's own
+   addresses stay with the socket that read them, which answers a query from there as
+   upstream did: its own queries looped back, and those of copies on this computer, which
+   all send from the device's addresses. At most 16 packets wait
+   for an interface, past which they are dropped as if lost, and a task takes its own
+   socket's packets and those handed to it in turns. A query handed over is answered only
+   by an interface whose socket sends on its own link (`IP_MULTICAST_IF` taken; otherwise
+   the routes would pick the link of the answer), and at most once every 250 ms: anyone
+   who reaches one of the sockets can send them from a made-up address of the device's
+   other networks (upstream answers every query, and still does those its socket read).
+   A browse for services (`_services._dns-sd._udp.local`) handed over is not answered at
+   all, nor counts: any device's software sends them; one an interface's own socket read is
+   answered, as upstream.
+   What is taken is unchanged: an answer to a query this device sent on the network its
+   sender is on, within 30 seconds, from that network or a link-local address. Nothing more
+   is sent.
+
+   On Linux this weakens nothing: every socket shares the port of all addresses, and the
+   kernel already gave a socket packets of any link, so the sender's address was all the
+   network check ever saw. Elsewhere a packet stays with the socket that read it, as
+   before: macOS gives a socket the group's packets of the links it joined it on, so a
+   socket's network keeps out a sender on another link that makes up an address of that
+   network; handed over, such a packet would leave only the query id in the way (16 bits,
+   eight queries kept 30 seconds). What Windows does is not known. Deciding by the
+   interface a packet came over (`IP_PKTINFO`, `IP_RECVIF`) would be the whole answer on
+   every system; it is not done.
+
+   Tests: `a_packet_read_by_another_interface_s_socket_is_taken_as_on_its_own`,
+   `without_the_hand_over_a_packet_stays_with_the_socket_that_read_it`,
+   `queries_handed_over_are_answered_at_most_once_a_gap`,
+   `a_task_takes_its_socket_s_packets_and_those_handed_to_it_in_turns`,
+   `the_narrowest_network_of_the_sender_takes_a_packet`,
+   `packets_past_what_may_wait_for_an_interface_are_dropped`,
+   `a_packet_goes_to_the_narrowest_network_of_its_sender`,
+   `an_interface_whose_task_ended_is_handed_nothing`; netlab `lan-first-contact` and
+   `lan-first-contact-quiet`, which before this missed the peer in 8 of 13 runs.
 
 The crate is not a workspace member: `tools/check.sh` runs its tests with
 `cargo test -p libp2p-mdns --lib`.

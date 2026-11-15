@@ -41,7 +41,7 @@ use std::{
 
 use self::{
     found::Discovered,
-    iface::{Found, InterfaceState},
+    iface::{Found, InterfaceState, Interfaces},
 };
 use crate::{
     Config,
@@ -132,6 +132,9 @@ where
 
     /// Handles to tasks running the mDNS queries.
     if_tasks: HashMap<IpAddr, P::TaskHandle>,
+    /// The interfaces of those tasks, which hand each other what their sockets read from
+    /// the others' networks (Fogata, see `iface::Interfaces`).
+    interfaces: Interfaces,
 
     query_response_receiver: mpsc::Receiver<Found>,
     query_response_sender: mpsc::Sender<Found>,
@@ -183,6 +186,7 @@ where
             config,
             if_watch: P::new_watcher()?,
             if_tasks: Default::default(),
+            interfaces: Default::default(),
             query_response_receiver: rx,
             query_response_sender: tx,
             discovered_nodes: Default::default(),
@@ -336,6 +340,7 @@ where
                                 self.local_peer_id,
                                 self.listen_addresses.clone(),
                                 self.query_response_sender.clone(),
+                                self.interfaces.clone(),
                             ) {
                                 Ok(iface_state) => {
                                     e.insert(P::spawn(iface_state));
@@ -347,6 +352,7 @@ where
                         }
                     }
                     Ok(IfEvent::Down(inet)) => {
+                        self.interfaces.remove(&inet.addr());
                         if let Some(handle) = self.if_tasks.remove(&inet.addr()) {
                             tracing::info!(instance=%inet.addr(), "dropping instance");
 

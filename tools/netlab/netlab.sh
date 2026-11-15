@@ -61,14 +61,7 @@ if [[ -z "${NETLAB_INSIDE:-}" ]]; then
     [[ ${#list[@]} -eq 0 ]] && list=("${SCENARIOS[@]}")
     failed=0
     for scenario in "${list[@]}"; do
-        # A scenario that says the lab itself kept it from measuring (it ends with 75) is run
-        # again, eight times at most.
-        for _ in 1 2 3 4 5 6 7 8; do
-            code=0
-            NETLAB_INSIDE=1 unshare --user --map-root-user --net --mount "$0" "$scenario" || code=$?
-            [[ $code == 75 ]] || break
-        done
-        [[ $code == 0 ]] || failed=1
+        NETLAB_INSIDE=1 unshare --user --map-root-user --net --mount "$0" "$scenario" || failed=1
     done
     exit $failed
 fi
@@ -1709,7 +1702,9 @@ EOF2
         # a few seconds of A finding C, as it does with no one lying
         # (lan-first-contact-quiet). C never dials A first (its new connections to A are
         # dropped, but mDNS), and TCP between them is dropped: the time is that of A's QUIC
-        # dial.
+        # dial. A's mDNS has a socket on port 5353 for each of its addresses, and the kernel
+        # often gives C's packets to the public one, which hands them to the private one
+        # (vendor/libp2p-mdns, change 9): A must find C in every run, never run again.
         public_host A 203.0.113.21
         ip netns add C
         ip link add name lan0 type veth peer name eth0
@@ -1770,17 +1765,6 @@ EOF2
         [[ -n $found && -n $connected ]] && after=$(( $(ms "$connected") - $(ms "$found") ))
         echo "--- A found C over mDNS at ${found:-never}; connected to C at ${connected:-never}," \
             "$after ms later"
-        # A's mDNS listens at both its addresses, each on a socket of its own on port 5353,
-        # and the kernel hands each of C's answers to one of them: in some runs always to
-        # the public one, which drops them as answers to no query of its own.
-        # Nothing was measured then, and the scenario is run again (see the top of this file).
-        if [[ -z $found ]] && grep -q 'address=203.0.113.21 remote_address=192.168.60.2' \
-            "$WORK/A.out"; then
-            echo "--- mDNS never told A of C: C's answers went to A's public address (the" \
-                "lab, not the dial)"
-            echo "result: AGAIN  logs: $WORK"
-            exit 75
-        fi
         grep -m1 -E "\+ C \[[^]]*\] connected" "$WORK/A.out" || true
         # What mDNS and the dials to C did, when it took long or never happened.
         if [[ $after == never ]] || (( after > 3000 )); then

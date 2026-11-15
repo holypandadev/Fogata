@@ -379,11 +379,20 @@ Discovery is layered; every layer runs in parallel and none is required.
    minutes once anyone answered, so a lost answer or a friend that restarts waited that long).
    Queries and answers go from the socket on port 5353 of each interface, as RFC 6762 has
    responders do, so every copy on a computer is one sender to the others (macOS's firewall
-   checks each new sender a socket hears from). Anyone there can answer with made-up peers,
-   so only answers to this device's own queries of the last 30 seconds (one query interval:
+   checks each new sender a socket hears from). On Linux and Android the kernel's early
+   demultiplexing of UDP gives a multicast packet to one of the sockets sharing the port,
+   not always that of the interface it came over: there a packet from another interface's
+   network is handed to that interface, which takes it as its own, so that a device on two
+   networks (Wi-Fi and cable on different ones, a VPN) finds the peers of both (netlab
+   `lan-first-contact`, which before missed the peer in 8 of 13 runs). Elsewhere a packet
+   stays with the socket that read it, as before. Anyone there can answer with made-up
+   peers, so only answers to this device's own queries of the last 30 seconds (one query interval:
    an answer the firewall held a while still counts), from its own network, are taken (the query id is 16 bits sent in
-   the clear, so that keeps out the internet and unasked floods, not a neighbour that
-   answers the queries: the bounds that follow do); what they tell is kept for at most a
+   the clear, so that keeps out unasked floods, and with the network check answers from
+   the internet sent from their real address, not a neighbour that answers the queries:
+   the bounds that follow do; the network check is of the sender's address, which on Linux
+   is all of it; on macOS a multicast answer must also come over that network's link, and
+   what Windows does is not known); what they tell is kept for at most a
    minute unless heard again; at most 128 peers are kept, 16 told of by one address (a new
    one takes the place of the one of that address that expires first; a peer stays with
    the address that first named it until a connection is made at an address another one
