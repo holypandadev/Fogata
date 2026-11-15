@@ -1205,3 +1205,184 @@ async fn a_friend_rung_into_a_call_can_say_no_or_be_stopped() {
     assert_eq!(ana.calls().await.unwrap()[0].phase, CallPhase::Connected);
     let _ = std::fs::remove_dir_all(&base);
 }
+
+/// Waits until `core` has no call at all.
+async fn idle(core: &Core, what: &str) {
+    let over = timeout(Duration::from_secs(60), async {
+        while !core.calls().await.unwrap().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(over.is_ok(), "{what}");
+}
+
+/// Bea's application closes while she is in a call with Ana, who waits for her; started
+/// again, Bea calls Ana. Her device no longer knows the call, so hers is a new one: Ana's
+/// side answers it at once, as if Ana had pressed Accept, and the call Ana waited in ends
+/// as one she hung up. Nothing rang on Ana's side, nor shows as missed. The same when the
+/// first call was Bea's.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_friend_whose_application_closed_in_a_call_calls_and_is_answered_at_once() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-call-reopen-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (dir_a, dir_b) = friends(&base);
+    let options = dialling(2);
+    let (ana, mut events_a) = Core::start(dir_a, options[0].clone()).unwrap();
+    let (mut bea, mut events_b) = Core::start(dir_b.clone(), options[1].clone()).unwrap();
+    online(&ana, 1).await;
+    online(&bea, 1).await;
+
+    for bea_starts in [false, true] {
+        let call = if bea_starts {
+            let call = bea.start_call(ana.me()).await.unwrap();
+            wait_for(
+                &mut events_a,
+                "Bea's ring",
+                |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == call),
+            )
+            .await;
+            ana.accept_call(call).await.unwrap();
+            call
+        } else {
+            let call = ana.start_call(bea.me()).await.unwrap();
+            wait_for(
+                &mut events_b,
+                "Ana's ring",
+                |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == call),
+            )
+            .await;
+            bea.accept_call(call).await.unwrap();
+            call
+        };
+        in_room(&ana, call, 2, "they did not meet").await;
+
+        // Bea's application closes: Ana waits for her.
+        bea.shutdown().await.unwrap();
+        drop(bea);
+        drop(events_b);
+        waits_alone(&ana, call).await;
+        (bea, events_b) = start_again(&dir_b, options[1].clone()).await;
+        online(&bea, 1).await;
+        online(&ana, 1).await;
+        assert!(bea.call_returns().is_empty(), "Bea remembers the call");
+        while events_a.try_recv().is_ok() {}
+
+        // Bea calls Ana again: a new call, answered at once.
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        assert_ne!(rang, call);
+        wait_for(&mut events_b, "Bea's call answered", |e| match e {
+            CoreEvent::CallAccepted { group } => *group == rang,
+            CoreEvent::CallEnded { group, reason, .. } if *group == rang => {
+                panic!("Bea's call ended: {reason:?}, Bea started the call: {bea_starts}")
+            }
+            _ => false,
+        })
+        .await;
+        in_room(&ana, rang, 2, "Ana and Bea are not in the new call").await;
+        let view = ana.calls().await.unwrap();
+        assert_eq!(view.len(), 1, "Ana has one call: {view:?}");
+        assert_eq!((view[0].group, view[0].phase), (rang, CallPhase::Connected));
+        let view = bea.calls().await.unwrap();
+        assert_eq!(view.len(), 1, "Bea has one call");
+        assert_eq!((view[0].group, view[0].phase), (rang, CallPhase::Connected));
+        // On Ana's side the new call was answered, and the old one ended as hung up: no
+        // ring, nothing missed, nobody left alone, even after the wait would have run out.
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        let (mut accepted, mut ended) = (false, false);
+        while let Ok(e) = events_a.try_recv() {
+            match e {
+                CoreEvent::CallAccepted { group } if group == rang => accepted = true,
+                CoreEvent::CallEnded {
+                    group,
+                    reason: CallEnd::Ended,
+                    ..
+                } if group == call => ended = true,
+                CoreEvent::CallIncoming { .. } | CoreEvent::CallEnded { .. } => {
+                    panic!("Ana, Bea started the call: {bea_starts}: {e:?}")
+                }
+                _ => {}
+            }
+        }
+        assert!(accepted && ended, "Bea started the call: {bea_starts}");
+
+        // Both hang up, and the round is over on both sides.
+        ana.end_call(rang).await.unwrap();
+        waits_alone(&bea, rang).await;
+        bea.end_call(rang).await.unwrap();
+        nobody_to_go_back_to(&ana).await;
+        nobody_to_go_back_to(&bea).await;
+        idle(&ana, "Ana kept a call").await;
+        idle(&bea, "Bea kept a call").await;
+        while events_a.try_recv().is_ok() {}
+        while events_b.try_recv().is_ok() {}
+    }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// While Ana waits for Bea, who hung up, a call from Carla rings as any other; once Ana
+/// hung up too, Bea's call to her rings as a new call.
+#[tokio::test(flavor = "multi_thread")]
+async fn while_waiting_a_call_from_someone_else_rings_as_any_other() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let base = std::env::temp_dir().join(format!("fogata-call-wait-ring-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let dirs = all_friends(&base, &["Ana", "Bea", "Carla"]);
+    let options = dialling(3);
+    let (ana, mut events_a) = Core::start(dirs[0].clone(), options[0].clone()).unwrap();
+    let (bea, mut events_b) = Core::start(dirs[1].clone(), options[1].clone()).unwrap();
+    let (carla, mut events_c) = Core::start(dirs[2].clone(), options[2].clone()).unwrap();
+    for core in [&ana, &bea, &carla] {
+        online(core, 2).await;
+    }
+    let call = ana.start_call(bea.me()).await.unwrap();
+    wait_for(
+        &mut events_b,
+        "Ana's ring",
+        |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == call),
+    )
+    .await;
+    bea.accept_call(call).await.unwrap();
+    in_room(&ana, call, 2, "they did not meet").await;
+    bea.end_call(call).await.unwrap();
+    waits_alone(&ana, call).await;
+
+    // Carla, never in the call, rings: it rings on Ana's side, and Ana says no.
+    let carlas = carla.start_call(ana.me()).await.unwrap();
+    wait_for(
+        &mut events_a,
+        "Carla's ring",
+        |e| matches!(e, CoreEvent::CallIncoming { group, from } if *group == carlas && *from == carla.me()),
+    )
+    .await;
+    ana.decline_call(carlas).await.unwrap();
+    wait_for(&mut events_c, "Ana says no", |e| {
+        matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Declined, .. } if *group == carlas)
+    })
+    .await;
+    let view = ana.calls().await.unwrap();
+    assert_eq!(view.len(), 1);
+    assert_eq!(view[0].group, call);
+
+    // Ana hangs up the call she waits in; Bea then calls her: a new call, which rings.
+    ana.end_call(call).await.unwrap();
+    nobody_to_go_back_to(&bea).await;
+    idle(&ana, "Ana kept the call").await;
+    let rang = bea.start_call(ana.me()).await.unwrap();
+    assert_ne!(rang, call);
+    wait_for(
+        &mut events_a,
+        "Bea's new call",
+        |e| matches!(e, CoreEvent::CallIncoming { group, .. } if *group == rang),
+    )
+    .await;
+    ana.accept_call(rang).await.unwrap();
+    wait_for(
+        &mut events_b,
+        "Ana answers",
+        |e| matches!(e, CoreEvent::CallAccepted { group } if *group == rang),
+    )
+    .await;
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -1315,6 +1315,19 @@ a word of its that arrives out of order just after it left. `Going` also tells s
 comes into a call since when it goes; a start said to be before the call's group was made,
 or more than 48 hours ago, counts as that.
 
+A device that no longer knows a call it left (its application was closed during the call
+and started again, say) calls with a new call. When it rings the device that waits alone
+in the old call for it (it was in that call and left), that ring is answered at once, as
+if the person had pressed Accept: the waiting call ends as one hung up, and the device goes
+into the new call with its microphone as it was, with nothing ringing, nothing missed and
+no notice of the old call ending. Only that ring is answered so: a ring from anyone else
+rings as any other; with someone else still in the call, the ring hears it is busy, as
+before; a friend rung into the call who never came in, one this device rings back in
+already, and a ring that comes once the person hung up the waiting call ring as any other;
+an invitation into another call that goes on is not taken this way. What belonged to the
+old call ends with it: its chat, its time, and this device's camera and shared screen,
+which stay off in the new call until turned on again.
+
 When a call is over for a device (it was the last one, or no friend of its is left in a call
 it left, or the application quits), it notes the call in its chats: a line such as "Ana
 started a call that lasted 25 minutes" ("a few seconds", "1 minute", "1 hour 20 minutes"),
@@ -1341,8 +1354,8 @@ see each other's names and pictures as in any room, friends or not.
 Each side of a call tells the other with a `GroupCalls` step that it takes all this. An
 older device refuses both steps: invited, it is shown at once as too old to join; in a call
 of two with a newer one, nobody can be added, and its call ends as before when either
-hangs up (the newer one waits its minute, and the older one's call back rings as a new
-call).
+hangs up (the newer one waits its minute, and the older one's call back is a new call,
+answered at once as above).
 
 An identity open on two computers at once (a copied data folder) has two sessions a friend
 can reach. A ring goes to every session; the first to answer or decline takes the call, and

@@ -1177,15 +1177,22 @@ async fn on_ring(
         let crossed = if state.appear_offline {
             Err(CallSignal::Decline)
         } else if let Some(mine) = crossing(&state.calls, from) {
-            Ok(Some(mine))
+            Ok(Taken::Crossed(mine))
         } else if state.calls.values().any(CallEntry::busy) {
             Err(CallSignal::Busy)
+        } else if let Some(waited) = waited_for(&state.calls, from).filter(|_| new_call) {
+            // Answered here at once: no ring shows, nor one that rang and stopped.
+            state.calls.insert(
+                group,
+                CallEntry::new(from, false, CallPhase::Connected, log.clone()),
+            );
+            Ok(Taken::Back(waited))
         } else {
             state.calls.insert(
                 group,
                 CallEntry::new(from, false, CallPhase::Incoming, log.clone()),
             );
-            Ok(None)
+            Ok(Taken::Rings)
         };
         (crossed, with_them)
     };
@@ -1212,9 +1219,10 @@ async fn on_ring(
         // Both rang each other at once: the call with the lower id goes on, on both sides,
         // instead of each hearing that the other is busy. The friend answers this device's
         // own call when that is the lower one.
-        Ok(Some(mine)) if mine < group => return,
-        Ok(Some(mine)) => return take_crossed(inner, from, group, mine, log).await,
-        Ok(None) => {}
+        Ok(Taken::Crossed(mine)) if mine < group => return,
+        Ok(Taken::Crossed(mine)) => return take_crossed(inner, from, group, mine, log).await,
+        Ok(Taken::Back(waited)) => return take_back(inner, from, group, waited, log).await,
+        Ok(Taken::Rings) => {}
     }
     expire(
         Arc::downgrade(inner),
@@ -1225,6 +1233,16 @@ async fn on_ring(
     );
     inner.emit(CoreEvent::CallIncoming { group, from });
     inner.emit(CoreEvent::CallsChanged);
+}
+
+/// What becomes of a ring that this device takes.
+enum Taken {
+    /// It rings here.
+    Rings,
+    /// It crossed this device's own call to the same friend (see [`crossing`]).
+    Crossed(GroupId),
+    /// It comes from the friend this device waits for in that call (see [`waited_for`]).
+    Back(GroupId),
 }
 
 /// This device's own call, when its only call rings `from`: a ring from that friend then
@@ -1239,6 +1257,38 @@ fn crossing(calls: &HashMap<GroupId, CallEntry>, from: DevicePublicKey) -> Optio
         }
         _ => None,
     }
+}
+
+/// The call this device waits in, the only one left, for `from`, who was in it and left,
+/// unless this device rings `from` back into it already. A new ring from `from` then comes
+/// from a device that no longer knows that call: its application was closed and started
+/// again, say.
+fn waited_for(calls: &HashMap<GroupId, CallEntry>, from: DevicePublicKey) -> Option<GroupId> {
+    calls
+        .iter()
+        .find(|(_, c)| {
+            c.phase == CallPhase::Connected
+                && c.alone_since.is_some()
+                && c.left.contains_key(&from)
+                && !c.adding.contains_key(&from)
+        })
+        .map(|(group, _)| *group)
+}
+
+/// Answers the friend's `group`, noted here as answered, as Accept would: this device hangs
+/// up the call `waited` it waits in for that friend, and goes into the new one.
+async fn take_back(
+    inner: &Arc<Inner>,
+    from: DevicePublicKey,
+    group: GroupId,
+    waited: GroupId,
+    log: GroupLog,
+) {
+    let core = Core {
+        inner: Arc::clone(inner),
+    };
+    let _ = core.end_call(waited).await;
+    answer_now(inner, from, group, log).await;
 }
 
 /// Lets this device's own call `mine` go for the friend's `group`, which rang at the same
@@ -1259,6 +1309,12 @@ async fn take_crossed(
         group,
         CallEntry::new(from, false, CallPhase::Connected, log.clone()),
     );
+    answer_now(inner, from, group, log).await;
+}
+
+/// Enters the room of the friend's call `group`, noted here as answered, and tells the
+/// friend it is answered.
+async fn answer_now(inner: &Arc<Inner>, from: DevicePublicKey, group: GroupId, log: GroupLog) {
     entering(inner, from, group);
     let joined = enter(inner, group, log, join_call_room(inner, group)).await;
     // The friend hears it is answered only once this device is in the call's room, and
@@ -1271,7 +1327,7 @@ async fn take_crossed(
         }
     };
     if let Err(e) = answered {
-        tracing::debug!("a call that crossed this device's own did not go on: {e:#}");
+        tracing::debug!("a call answered at once did not go on: {e:#}");
         // It never went on: it ends as one not answered, which no chat notes.
         if let Some(call) = inner.lock().calls.get_mut(&group) {
             call.phase = CallPhase::Incoming;
@@ -2295,6 +2351,41 @@ mod tests {
         assert!(!left.returnable(&bea, 10 + GONE_AFTER_MS));
         // Someone not in the call's group is never counted.
         assert!(!left.returnable(&identity().public_key(), 20));
+    }
+
+    #[test]
+    fn only_the_one_waited_for_rings_into_a_new_call_answered_at_once() {
+        let ana = identity();
+        let (bea, carla) = (identity().public_key(), identity().public_key());
+        let mut log = GroupLog::create(&ana, "Call", 1).unwrap();
+        log.add(&ana, bea, "Bea", 1).unwrap();
+        let group = log.group_id();
+        let mut calls =
+            HashMap::from([(group, CallEntry::new(bea, true, CallPhase::Connected, log))]);
+        // Bea is still in the call: her ring hears this device is busy, as before.
+        assert_eq!(waited_for(&calls, bea), None);
+        // Bea left, and someone else is still in it: the same.
+        calls.get_mut(&group).unwrap().left.insert(bea, 10);
+        assert_eq!(waited_for(&calls, bea), None);
+        // Ana waits alone for Bea: Bea's ring is answered, Carla's rings.
+        calls.get_mut(&group).unwrap().alone_since = Some(10);
+        assert_eq!(waited_for(&calls, bea), Some(group));
+        assert_eq!(waited_for(&calls, carla), None);
+        // Ana rings Bea back into the call already: Bea's ring rings, as before.
+        calls.get_mut(&group).unwrap().adding.insert(bea, 20);
+        assert_eq!(waited_for(&calls, bea), None);
+        // Carla, rung into the call, never came in: her ring rings.
+        let call = calls.get_mut(&group).unwrap();
+        call.adding.clear();
+        call.adding.insert(carla, 5);
+        assert_eq!(waited_for(&calls, carla), None);
+        // Ana still rings Bea: not a call that waits.
+        let call = calls.get_mut(&group).unwrap();
+        call.phase = CallPhase::Ringing;
+        assert_eq!(waited_for(&calls, bea), None);
+        // Ana hung up: nothing waits.
+        calls.clear();
+        assert_eq!(waited_for(&calls, bea), None);
     }
 
     #[test]
