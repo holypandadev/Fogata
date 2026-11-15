@@ -1324,18 +1324,21 @@ ends as one hung up, noted in the chat as a call that lasted what it lasted, and
 goes into the new call with its microphone as it was, with nothing ringing, nothing missed
 and no notice of the old call ending. The waiting call is hung up before the new call's
 room is entered: if that room cannot be entered, the device is in neither call and the
-friend hears its call was declined. Should the friend stop its ring before it hears it was
-answered (its stop comes after the answer went, and it was never seen in the call's room),
-the new call ends at once as a missed call: its room is left, with no wait alone and no
-call noted (so does a friend's call answered at once as rings crossed). Hanging up while the ring is being taken, the waiting call or the new one, means
-the new call is not wanted: before the friend is told, it is declined (the friend hears so)
-and its room left; after, the new call is hung up as any other. Every other ring is taken
-as before: a ring from anyone else rings as any other; with someone else still in the call, the ring hears it is busy; in a call of
-more than two, while someone is being rung into the call, once a minute has passed since
-the friend left, while or after the person hangs up the waiting call (or it ends as nobody
-came back), and for an invitation into another call that goes on, the ring rings as any
-other. What belonged to the old call ends with it: its chat, its time, and this device's
-camera and shared screen, which stay off in the new call until turned on again.
+friend hears its call was declined. Should the friend stop its ring (a stop is sent only
+while it still rings, so it never heard the answer; it comes after the answer went), the
+new call ends at once as a missed call: its room is left, with no wait alone and no call
+noted; so does a friend's call answered at once as rings crossed. A friend that hangs up a
+call it heard was answered has left it as anyone leaves a call. Hanging up the waiting call
+once the new one is taken in its place hangs up the new one, for as long as it lasts, as
+hanging up the new one does: before the friend is told, it is declined (the friend hears
+so) and its room left; after, it is hung up as any other. Every other ring is taken as
+before: a ring from anyone else rings as any other; with someone else still in the call,
+the ring hears it is busy; in a call of more than two, while someone is being rung into the
+call, once a minute has passed since the friend left, while or after the person hangs up
+the waiting call (or it ends as nobody came back), and for an invitation into another call
+that goes on, the ring rings as any other. What belonged to the old call ends with it: its
+chat, its time, and this device's camera and shared screen, which stay off in the new call
+until turned on again.
 
 When a call is over for a device (it was the last one, or no friend of its is left in a call
 it left, or the application quits), it notes the call in its chats: a line such as "Ana

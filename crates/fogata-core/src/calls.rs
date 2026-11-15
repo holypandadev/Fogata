@@ -205,8 +205,10 @@ pub(crate) struct CallEntry {
     /// told: hung up meanwhile, it is declined as a ring not answered.
     answering: bool,
     /// The call this one is answered in place of (see [`take_back`]): hanging that one up
-    /// means this one.
+    /// means this one, for as long as this one lasts.
     replaces: Option<GroupId>,
+    /// A friend's ring answered here at once (see [`answered_at_once`]).
+    at_once: bool,
 }
 
 impl CallEntry {
@@ -235,6 +237,7 @@ impl CallEntry {
             ending: false,
             answering: false,
             replaces: None,
+            at_once: false,
         }
     }
 
@@ -256,7 +259,8 @@ impl CallEntry {
     }
 
     /// This device rings, is rung, or talks with someone: a ring from anyone else is busy.
-    /// The last one left in a call, waiting, is not, nor a call being hung up.
+    /// The last one left in a call, waiting, is not, nor a call being hung up, which stays
+    /// listed beside the next call a moment, until its hang-up is done.
     fn busy(&self) -> bool {
         !self.ending && (self.phase != CallPhase::Connected || self.alone_since.is_none())
     }
@@ -516,8 +520,16 @@ impl Core {
             let _ = self.end_call(other).await;
         }
         entering(&self.inner, friend, group);
-        // The friend is rung only once this device is in the call's room.
-        let rung = enter(&self.inner, group, log, self.join_room(group)).await;
+        // The friend is rung only once this device is in the call's room. A ring no longer
+        // here (hung up, or crossed by the friend's, answered instead) is not entered, looked
+        // at with the call rooms held: entering would leave the room of the friend's call.
+        let join = async {
+            if !self.inner.lock().calls.contains_key(&group) {
+                return Ok(());
+            }
+            self.join_room(group).await
+        };
+        let rung = enter(&self.inner, group, log, join).await;
         let rung = match rung {
             Ok(()) => send(&self.inner, friend, group, signal).await,
             Err(e) => Err(e),
@@ -1008,12 +1020,15 @@ pub(crate) async fn on_call(inner: &Arc<Inner>, from: DevicePublicKey, message: 
         signal => signal,
     };
     on_left_signal(inner, from, group, &signal).await;
-    let (phase, with, adding) = {
+    let (phase, with, adding, at_once) = {
         let state = inner.lock();
         match state.calls.get(&group) {
-            Some(call) if call.knows(&from) => {
-                (call.phase, call.with, call.adding.contains_key(&from))
-            }
+            Some(call) if call.knows(&from) => (
+                call.phase,
+                call.with,
+                call.adding.contains_key(&from),
+                call.at_once,
+            ),
             _ => return,
         }
     };
@@ -1084,25 +1099,20 @@ pub(crate) async fn on_call(inner: &Arc<Inner>, from: DevicePublicKey, message: 
             };
             finish(inner, group, reason).await
         }
-        // The friend left; the others go on, and the last one waits for them a while. A
-        // friend's ring answered here at once that the friend stopped before it heard so
-        // (never seen in the call's room) was missed: no call took place.
-        (CallSignal::Cancel | CallSignal::End, CallPhase::Connected) => {
-            let missed = match inner.lock().calls.get_mut(&group) {
-                Some(call) if from == with && !call.outgoing && !call.seen.contains(&from) => {
-                    call.phase = CallPhase::Incoming;
-                    true
-                }
-                _ => false,
-            };
-            if missed {
-                finish_if(inner, group, CallEnd::Missed, |c| {
-                    c.phase == CallPhase::Incoming
-                })
-                .await;
-            } else {
-                someone_left(inner, group, from).await
+        // A friend's ring answered here at once, stopped by the friend (a stop is sent only
+        // while it rings: it never heard the answer) was missed: no call took place.
+        (CallSignal::Cancel, CallPhase::Connected) if from == with && at_once => {
+            if let Some(call) = inner.lock().calls.get_mut(&group) {
+                call.phase = CallPhase::Incoming;
             }
+            finish_if(inner, group, CallEnd::Missed, |c| {
+                c.phase == CallPhase::Incoming
+            })
+            .await;
+        }
+        // The friend left; the others go on, and the last one waits for them a while.
+        (CallSignal::Cancel | CallSignal::End, CallPhase::Connected) => {
+            someone_left(inner, group, from).await
         }
         // Only the node of the friend who rang says another session took its ring.
         (CallSignal::Elsewhere, CallPhase::Incoming | CallPhase::Connected) if from == with => {
@@ -1410,13 +1420,14 @@ async fn take_crossed(
 }
 
 /// The friend's call `log`, answered here at once: listed as connected from now, so it
-/// rings nowhere, a moment before the friend is told (see [`answer_now`]). It counts as a
-/// ring until then: answered when the friend is told, and with the friend in it only once
-/// seen in its room.
+/// rings nowhere, a moment before the friend is told (see [`answer_now`]). It counts as
+/// answered, and its time runs, from when the friend is told.
 fn answered_at_once(from: DevicePublicKey, log: GroupLog) -> CallEntry {
     let mut call = CallEntry::new(from, false, CallPhase::Incoming, log);
     call.phase = CallPhase::Connected;
+    call.seen.insert(from);
     call.answering = true;
+    call.at_once = true;
     call
 }
 
@@ -1427,7 +1438,8 @@ async fn answer_now(inner: &Arc<Inner>, from: DevicePublicKey, group: GroupId, l
     let joined = enter(inner, group, log, join_call_room(inner, group)).await;
     // Still wanted once in its room: not stopped or hung up meanwhile. Otherwise the friend
     // hears it cannot be now, as a ring declined. Its room is left here, or, while the call
-    // is still listed (being hung up), as that ends it.
+    // is still listed (being hung up), as that ends it. A hang-up between this and the
+    // answer going out hangs up a call answered, as with any call answered here.
     let wanted = joined.is_ok() && {
         let mut state = inner.lock();
         match state.calls.get_mut(&group) {
@@ -3229,6 +3241,89 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// Bea's ring answered at once: her hang-up (`End`) is a call that took place, noted on
+    /// both sides, whether or not Ana saw her in the room yet; only her stop (`Cancel`, sent
+    /// while she still rings) is a missed call, even once seen in the room.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn only_a_stopped_ring_answered_at_once_is_missed() {
+        let base = std::env::temp_dir().join(format!("fogata-call-end-{}", std::process::id()));
+        let (ana, mut events_a, bea, mut events_b) = ana_and_bea(&base).await;
+        let from = bea.me();
+        let notes = |core: &Core, with: DevicePublicKey| {
+            let core = core.clone();
+            async move { core.direct_chat(with, 50).await.unwrap().items.len() }
+        };
+
+        // Bea hangs up as soon as she hears the answer.
+        waits_for(&ana, from);
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        wait_for(
+            &mut events_b,
+            "Bea answered",
+            |e| matches!(e, CoreEvent::CallAccepted { group } if *group == rang),
+        )
+        .await;
+        bea.end_call(rang).await.unwrap();
+        let alone = timeout(Duration::from_secs(30), async {
+            while !ana
+                .inner
+                .lock()
+                .calls
+                .get(&rang)
+                .is_some_and(|c| c.alone_since.is_some())
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(alone.is_ok(), "Ana does not wait for Bea");
+        ana.end_call(rang).await.unwrap();
+        none_of(&mut events_a, "Ana", |e| {
+            matches!(
+                e,
+                CoreEvent::CallEnded {
+                    reason: CallEnd::Missed,
+                    ..
+                }
+            )
+        });
+        // The call waited in and this one.
+        assert_eq!(notes(&ana, from).await, 2);
+        let noted = timeout(Duration::from_secs(30), async {
+            while notes(&bea, ana.me()).await < 1 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(noted.is_ok(), "Bea did not note the call");
+
+        // A stop from Bea once she is in the room: missed, with no wait alone.
+        waits_for(&ana, from);
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        let met = timeout(Duration::from_secs(30), async {
+            while ana.inner.lock().calls.get(&rang).map(|c| c.answering) != Some(false)
+                || !people_in_room(&ana.inner, rang).await.contains(&from)
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        assert!(met.is_ok(), "Bea did not come into the call");
+        while events_a.try_recv().is_ok() {}
+        on_call(&ana.inner, from, step(rang, CallSignal::Cancel)).await;
+        wait_for(&mut events_a, "the ring missed", |e| match e {
+            CoreEvent::CallEnded { group, reason, .. } if *group == rang => {
+                assert_eq!(*reason, CallEnd::Missed);
+                true
+            }
+            _ => false,
+        })
+        .await;
+        assert!(ana.inner.lock().calls.is_empty());
+        assert!(!in_room(&ana, rang).await, "in the room of a ring stopped");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     /// While Ana waits for Bea: an invitation from Bea into another call rings as any
     /// other; with someone else still in the call, Bea's ring hears Ana is busy. Bea's new
     /// ring is answered by itself, and a ring of hers once she is in that call hears Ana is
@@ -3319,6 +3414,49 @@ mod tests {
             .collect();
         assert_eq!(calls, vec![(rang, CallPhase::Connected)]);
         assert_ne!(again, rang);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Ana's ring is let go of, for Bea's crossing it, before its room is entered: it is
+    /// not entered, and Ana stays in the room of Bea's call.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_ring_let_go_of_before_its_room_is_entered_leaves_the_call_answered() {
+        let base =
+            std::env::temp_dir().join(format!("fogata-call-cross-room-{}", std::process::id()));
+        let (ana, bea) = ana_alone(&base);
+        let now = now_ms();
+        ana.inner
+            .lock()
+            .friends_online
+            .insert(bea.public_key(), fogata_net::Path::Direct);
+        // Bea's call, its room entered here already.
+        let mut theirs = GroupLog::create(&bea, "Call", now).unwrap();
+        theirs.add(&bea, ana.me(), "Ana", now).unwrap();
+        let group = theirs.group_id();
+        ana.inner.node.add_call(theirs.clone()).await.unwrap();
+        join_call_room(&ana.inner, group).await.unwrap();
+        assert!(in_room(&ana, group).await);
+        let started = Arc::new(std::sync::Mutex::new(None));
+        let noted = started.clone();
+        let from = bea.public_key();
+        ENTERING.lock().unwrap().get_or_insert_default().insert(
+            from,
+            Box::new(move |inner: &Inner, mine: GroupId| {
+                let mut state = inner.lock();
+                state.calls.remove(&mine);
+                state.calls.insert(group, answered_at_once(from, theirs));
+                *noted.lock().unwrap() = Some(mine);
+            }),
+        );
+        let _ = ana.start_call(from).await;
+        let mine = started.lock().unwrap().expect("the call was started");
+        assert!(
+            !in_room(&ana, mine).await,
+            "in the room of a ring let go of"
+        );
+        assert!(in_room(&ana, group).await, "out of the room of Bea's call");
+        let calls: Vec<GroupId> = ana.inner.lock().calls.keys().copied().collect();
+        assert_eq!(calls, vec![group]);
         let _ = std::fs::remove_dir_all(&base);
     }
 
