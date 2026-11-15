@@ -60,6 +60,9 @@ jobs:
           # The lab's networks are unprivileged user namespaces, which Ubuntu's AppArmor
           # refuses by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          # GitHub's computers let a socket's send buffer grow to 4 MiB; the lab runs with the
+          # kernel's own limit, as most systems keep it (media-silent needs it so).
+          sudo sysctl -w net.core.wmem_max=212992
           # The rules of the routers (masquerade, with random ports for the symmetric kind).
           sudo modprobe -a nf_tables nft_chain_nat nft_masq nf_nat nf_conntrack || true
 

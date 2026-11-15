@@ -1626,8 +1626,18 @@ EOF2
         # them, and on Linux its packets there wait for a neighbour that never answers,
         # counted against its one UDP socket. With the system's limit on send buffers left
         # at its default, the longest gap between the datagrams either one receives must stay
-        # close to the pace: a full socket would stop the sound for seconds.
+        # close to the pace: a full socket would stop the sound for seconds. (A system that
+        # lets send buffers grow past the kernel's default limit hides what it measures: it
+        # runs only where net.core.wmem_max is 212992, which takes root to set.)
         limits=$(sysctl net.core.wmem_max net.core.wmem_default | tr '\n' ' ')
+        if [[ $(sysctl -n net.core.wmem_max) != 212992 ]]; then
+            echo "=== $SCENARIO"
+            echo "--- $limits"
+            echo "--- needs net.core.wmem_max at the kernel's default:" \
+                "sudo sysctl -w net.core.wmem_max=212992"
+            echo "result: FAIL   logs: $WORK"
+            exit 1
+        fi
         public_host A 203.0.113.21
         public_host B 203.0.113.22
         members A B
