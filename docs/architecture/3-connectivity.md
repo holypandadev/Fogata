@@ -1289,7 +1289,8 @@ call with the lower id goes on and the other device answers it at once (an older
 still answers busy); one whose friend's ring is already there when it calls answers that
 ring instead. A device takes one call at a time: calling a friend while another one
 rings here declines that ring first (the app asks), and answering ends a call it rang or was
-in. The call's group is never saved, listed or offered to friends as a
+in. A call this device is hanging up counts as gone: a ring that comes meanwhile is not
+busy. The call's group is never saved, listed or offered to friends as a
 group, and the node lets it go when the call ends. A ring that stopped before an answer is a
 missed call for the one called, and so is a ring answered busy (the person sees that the
 friend called while they were in a call) and one declined while appearing offline, which
@@ -1323,10 +1324,13 @@ ends as one hung up, noted in the chat as a call that lasted what it lasted, and
 goes into the new call with its microphone as it was, with nothing ringing, nothing missed
 and no notice of the old call ending. The waiting call is hung up before the new call's
 room is entered: if that room cannot be entered, the device is in neither call and the
-friend hears its call was declined. A friend's ring stopped before it was told it was
-answered is a missed call, and no room is entered; hung up by the person then, the friend
-hears it was declined. Every other ring is taken as before: a ring from anyone else rings
-as any other; with someone else still in the call, the ring hears it is busy; in a call of
+friend hears its call was declined. Should the friend stop its ring before it hears it was
+answered (its stop comes after the answer went, and it was never seen in the call's room),
+the new call ends at once as a missed call: its room is left, with no wait alone and no
+call noted (so does a friend's call answered at once as rings crossed). Hanging up while the ring is being taken, the waiting call or the new one, means
+the new call is not wanted: before the friend is told, it is declined (the friend hears so)
+and its room left; after, the new call is hung up as any other. Every other ring is taken
+as before: a ring from anyone else rings as any other; with someone else still in the call, the ring hears it is busy; in a call of
 more than two, while someone is being rung into the call, once a minute has passed since
 the friend left, while or after the person hangs up the waiting call (or it ends as nobody
 came back), and for an invitation into another call that goes on, the ring rings as any

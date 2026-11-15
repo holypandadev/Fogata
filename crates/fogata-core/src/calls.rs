@@ -201,9 +201,12 @@ pub(crate) struct CallEntry {
     entered: bool,
     /// Whether this device hangs up the call: it is no longer waited in, nor hung up twice.
     ending: bool,
-    /// A friend's ring answered by itself (see [`take_back`]), until the friend is told:
-    /// stopped meanwhile, by the friend or the person, it ends as a ring not answered.
+    /// A friend's ring answered by itself (see [`answered_at_once`]), until the friend is
+    /// told: hung up meanwhile, it is declined as a ring not answered.
     answering: bool,
+    /// The call this one is answered in place of (see [`take_back`]): hanging that one up
+    /// means this one.
+    replaces: Option<GroupId>,
 }
 
 impl CallEntry {
@@ -231,6 +234,7 @@ impl CallEntry {
             entered: false,
             ending: false,
             answering: false,
+            replaces: None,
         }
     }
 
@@ -252,9 +256,9 @@ impl CallEntry {
     }
 
     /// This device rings, is rung, or talks with someone: a ring from anyone else is busy.
-    /// The last one left in a call, waiting, is not.
+    /// The last one left in a call, waiting, is not, nor a call being hung up.
     fn busy(&self) -> bool {
-        self.phase != CallPhase::Connected || self.alone_since.is_none()
+        !self.ending && (self.phase != CallPhase::Connected || self.alone_since.is_none())
     }
 }
 
@@ -407,6 +411,7 @@ impl Core {
                 .iter()
                 .find(|(_, c)| {
                     c.phase == CallPhase::Connected
+                        && !c.ending
                         && c.alone_since.is_some()
                         && c.log.shared_state().is_member(&friend)
                 })
@@ -630,8 +635,21 @@ impl Core {
         // Looked at and noted at once: a call being hung up is not hung up twice, nor
         // waited in (see [`waited_for`]). A friend's ring answered by itself and not yet
         // told so is declined, as a ring not answered.
-        let (with, phase) = {
+        let (group, with, phase) = {
             let mut state = self.inner.lock();
+            // Hanging up a call another is answered in place of means that other one, which
+            // the person is in or about to be in; a call being hung up already counts as gone.
+            let instead = state
+                .calls
+                .iter()
+                .find(|(_, c)| c.replaces == Some(group))
+                .map(|(g, _)| *g);
+            let group = match (state.calls.get(&group), instead) {
+                (Some(call), _) if !call.ending => group,
+                (_, Some(instead)) => instead,
+                (Some(_), None) => return Ok(()),
+                (None, None) => bail!("no such call"),
+            };
             let call = state.calls.get_mut(&group).context("no such call")?;
             if call.answering {
                 call.answering = false;
@@ -642,7 +660,7 @@ impl Core {
                 }
                 call.ending = true;
             }
-            (call.with, call.phase)
+            (group, call.with, call.phase)
         };
         match phase {
             CallPhase::Incoming => return self.decline_call(group).await,
@@ -1067,11 +1085,11 @@ pub(crate) async fn on_call(inner: &Arc<Inner>, from: DevicePublicKey, message: 
             finish(inner, group, reason).await
         }
         // The friend left; the others go on, and the last one waits for them a while. A
-        // ring answered by itself and stopped before the friend was told was missed.
+        // friend's ring answered here at once that the friend stopped before it heard so
+        // (never seen in the call's room) was missed: no call took place.
         (CallSignal::Cancel | CallSignal::End, CallPhase::Connected) => {
             let missed = match inner.lock().calls.get_mut(&group) {
-                Some(call) if call.answering && from == with => {
-                    call.answering = false;
+                Some(call) if from == with && !call.outgoing && !call.seen.contains(&from) => {
                     call.phase = CallPhase::Incoming;
                     true
                 }
@@ -1184,8 +1202,8 @@ async fn on_ring(
             if let Some(call) = state.calls.get_mut(&waited) {
                 call.ending = true;
             }
-            let mut call = CallEntry::new(from, false, CallPhase::Connected, log.clone());
-            call.answering = true;
+            let mut call = answered_at_once(from, log.clone());
+            call.replaces = Some(waited);
             state.calls.insert(group, call);
             Ok(Taken::Back(waited))
         } else {
@@ -1297,7 +1315,7 @@ enum Taken {
 /// This device's own call, when its only call rings `from`: a ring from that friend then
 /// crossed it on the way.
 fn crossing(calls: &HashMap<GroupId, CallEntry>, from: DevicePublicKey) -> Option<GroupId> {
-    let mut calls = calls.iter();
+    let mut calls = calls.iter().filter(|(_, c)| !c.ending);
     match (calls.next(), calls.next()) {
         (Some((group, call)), None)
             if call.with == from && call.outgoing && call.phase == CallPhase::Ringing =>
@@ -1361,6 +1379,7 @@ async fn take_back(
         };
         if !hung_up {
             call.answering = false;
+            call.replaces = None;
             call.phase = CallPhase::Incoming;
             return true;
         }
@@ -1383,11 +1402,22 @@ async fn take_crossed(
         return;
     }
     let_go(inner, mine).await;
-    inner.lock().calls.insert(
-        group,
-        CallEntry::new(from, false, CallPhase::Connected, log.clone()),
-    );
+    inner
+        .lock()
+        .calls
+        .insert(group, answered_at_once(from, log.clone()));
     answer_now(inner, from, group, log).await;
+}
+
+/// The friend's call `log`, answered here at once: listed as connected from now, so it
+/// rings nowhere, a moment before the friend is told (see [`answer_now`]). It counts as a
+/// ring until then: answered when the friend is told, and with the friend in it only once
+/// seen in its room.
+fn answered_at_once(from: DevicePublicKey, log: GroupLog) -> CallEntry {
+    let mut call = CallEntry::new(from, false, CallPhase::Incoming, log);
+    call.phase = CallPhase::Connected;
+    call.answering = true;
+    call
 }
 
 /// Enters the room of the friend's call `group`, noted here as answered, and tells the
@@ -1396,12 +1426,16 @@ async fn answer_now(inner: &Arc<Inner>, from: DevicePublicKey, group: GroupId, l
     entering(inner, from, group);
     let joined = enter(inner, group, log, join_call_room(inner, group)).await;
     // Still wanted once in its room: not stopped or hung up meanwhile. Otherwise the friend
-    // hears it cannot be now, as a ring declined.
+    // hears it cannot be now, as a ring declined. Its room is left here, or, while the call
+    // is still listed (being hung up), as that ends it.
     let wanted = joined.is_ok() && {
         let mut state = inner.lock();
         match state.calls.get_mut(&group) {
             Some(call) if call.phase == CallPhase::Connected && !call.ending => {
+                let now = now_ms();
                 call.answering = false;
+                call.since_ms = now;
+                call.started_ms = Some(now);
                 true
             }
             _ => false,
@@ -2452,6 +2486,26 @@ mod tests {
     }
 
     #[test]
+    fn a_call_being_hung_up_counts_as_gone() {
+        let ana = identity();
+        let (bea, carla) = (identity().public_key(), identity().public_key());
+        let call = |with, phase, outgoing| {
+            let mut log = GroupLog::create(&ana, "Call", 1).unwrap();
+            log.add(&ana, with, "Someone", 1).unwrap();
+            (log.group_id(), CallEntry::new(with, outgoing, phase, log))
+        };
+        // Ana hangs up a call with Carla, someone else still in it, and calls Bea.
+        let (old, mut hanging) = call(carla, CallPhase::Connected, false);
+        assert!(hanging.busy());
+        hanging.ending = true;
+        assert!(!hanging.busy());
+        let (mine, ringing) = call(bea, CallPhase::Ringing, true);
+        let calls = HashMap::from([(old, hanging), (mine, ringing)]);
+        // A ring from Bea crosses Ana's call to her, rather than hearing Ana is busy.
+        assert_eq!(crossing(&calls, bea), Some(mine));
+    }
+
+    #[test]
     fn only_the_one_waited_for_rings_into_a_new_call_answered_at_once() {
         let ana = identity();
         let (bea, carla) = (identity().public_key(), identity().public_key());
@@ -3066,69 +3120,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
-    /// Bea's ring is answered by itself, and stopped before Bea is told: by Bea, it is a
-    /// missed call and no room is entered; by the person hanging it up, Bea hears it was
-    /// declined, never that it was answered.
+    /// Bea's ring is answered by itself, and stopped by Bea before she hears it was (her
+    /// Cancel is taken here after the answer went): a missed call, with no wait alone and no
+    /// call noted. Hung up by the person before Bea is told, by either call's id, Bea hears
+    /// it was declined; after, by either id, the new call is hung up.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_ring_answered_by_itself_and_stopped_meanwhile_is_not_answered() {
         let base = std::env::temp_dir().join(format!("fogata-call-stopped-{}", std::process::id()));
         let (ana, mut events_a, bea, mut events_b) = ana_and_bea(&base).await;
         let from = bea.me();
+        let notes = |core: &Core| {
+            let (core, bea) = (core.clone(), from);
+            async move { core.direct_chat(bea, 50).await.unwrap().items.len() }
+        };
 
-        // Bea stops ringing while the call waited in is hung up.
+        // Bea stops ringing while Ana's side takes her ring.
         let waited = waits_for(&ana, from);
-        let (core, ringer) = (ana.clone(), bea.clone());
+        let ringer = bea.clone();
         at("hanging up", waited, move || async move {
-            let rang = call_from(&core, from, CallPhase::Connected).await;
-            let _ = ringer.end_call(rang).await;
-            on_call(&core.inner, from, step(rang, CallSignal::Cancel)).await;
+            let rang = *ringer.inner.lock().calls.keys().next().unwrap();
+            ringer.end_call(rang).await.unwrap();
         });
         let rang = bea.start_call(ana.me()).await.unwrap();
-        wait_for(&mut events_a, "the ring missed", |e| {
-            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Missed, .. } if *group == rang)
-        })
-        .await;
-        wait_for(&mut events_a, "the call waited in hung up", |e| {
-            matches!(e, CoreEvent::CallEnded { group, reason: CallEnd::Ended, .. } if *group == waited)
-        })
-        .await;
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        assert!(ana.inner.lock().calls.is_empty());
-        assert!(!in_room(&ana, rang).await, "in the room of a ring stopped");
-        none_of(&mut events_a, "Ana", |e| {
-            matches!(
-                e,
-                CoreEvent::CallAccepted { .. } | CoreEvent::CallIncoming { .. }
-            ) || matches!(
-                e,
-                CoreEvent::CallEnded {
-                    reason: CallEnd::Alone,
-                    ..
-                }
-            )
-        });
-        none_of(&mut events_b, "Bea", |e| {
-            matches!(e, CoreEvent::CallAccepted { .. })
-        });
-
-        // The person hangs up the new call before Bea is told it was answered.
-        let waited = waits_for(&ana, from);
-        let core = ana.clone();
-        at("hanging up", waited, move || async move {
-            let rang = call_from(&core, from, CallPhase::Connected).await;
-            let hanging = core.clone();
-            let done = tokio::spawn(async move { hanging.end_call(rang).await });
-            timeout(Duration::from_secs(30), done)
-                .await
-                .unwrap()
-                .unwrap()
-                .unwrap();
-        });
-        let rang = bea.start_call(ana.me()).await.unwrap();
-        wait_for(&mut events_b, "Bea declined", |e| match e {
-            CoreEvent::CallAccepted { .. } => panic!("Bea heard her ring was answered"),
+        wait_for(&mut events_a, "the ring missed", |e| match e {
             CoreEvent::CallEnded { group, reason, .. } if *group == rang => {
-                assert_eq!(*reason, CallEnd::Declined);
+                assert_eq!(*reason, CallEnd::Missed);
                 true
             }
             _ => false,
@@ -3136,13 +3152,80 @@ mod tests {
         .await;
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert!(ana.inner.lock().calls.is_empty());
-        assert!(!in_room(&ana, rang).await, "in the room of a ring declined");
+        assert!(!in_room(&ana, rang).await, "in the room of a ring stopped");
+        // Only the call waited in is noted.
+        assert_eq!(notes(&ana).await, 1);
         none_of(&mut events_a, "Ana", |e| {
             matches!(
                 e,
-                CoreEvent::CallAccepted { .. } | CoreEvent::CallIncoming { .. }
+                CoreEvent::CallIncoming { .. }
+                    | CoreEvent::CallEnded {
+                        reason: CallEnd::Alone,
+                        ..
+                    }
             )
         });
+
+        // The person hangs up, by the new call's id or the one waited in, before Bea is told.
+        for by_new in [true, false] {
+            let waited = waits_for(&ana, from);
+            let core = ana.clone();
+            at("hanging up", waited, move || async move {
+                let rang = call_from(&core, from, CallPhase::Connected).await;
+                let hanging = core.clone();
+                let hung = if by_new { rang } else { waited };
+                let done = tokio::spawn(async move { hanging.end_call(hung).await });
+                timeout(Duration::from_secs(30), done)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+            });
+            let rang = bea.start_call(ana.me()).await.unwrap();
+            wait_for(&mut events_b, "Bea declined", |e| match e {
+                CoreEvent::CallAccepted { .. } => panic!("Bea heard her ring was answered"),
+                CoreEvent::CallEnded { group, reason, .. } if *group == rang => {
+                    assert_eq!(*reason, CallEnd::Declined);
+                    true
+                }
+                _ => false,
+            })
+            .await;
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            assert!(ana.inner.lock().calls.is_empty(), "by the new id: {by_new}");
+            assert!(!in_room(&ana, rang).await, "in the room of a ring declined");
+            none_of(&mut events_a, "Ana", |e| {
+                matches!(
+                    e,
+                    CoreEvent::CallAccepted { .. } | CoreEvent::CallIncoming { .. }
+                )
+            });
+        }
+
+        // Once Bea is told, hanging up the call waited in hangs up the new one.
+        let waited = waits_for(&ana, from);
+        let rang = bea.start_call(ana.me()).await.unwrap();
+        wait_for(
+            &mut events_a,
+            "Ana answered",
+            |e| matches!(e, CoreEvent::CallAccepted { group } if *group == rang),
+        )
+        .await;
+        ana.end_call(waited).await.unwrap();
+        assert!(ana.inner.lock().calls.is_empty());
+        let left = timeout(Duration::from_secs(60), async {
+            while !bea
+                .calls()
+                .await
+                .unwrap()
+                .iter()
+                .any(|c| c.group == rang && c.alone_since_ms.is_some())
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(left.is_ok(), "Bea did not see Ana leave");
         let _ = std::fs::remove_dir_all(&base);
     }
 
