@@ -110,10 +110,30 @@ therefore treats DHT nodes as strangers:
   for a larger buffer there (`vendor/libp2p-quic`, change 4). In `dht-liars` the made-up
   members' address is on the devices' network and answers even ARP only after 12 s: with
   the default buffer the requests to the real DHT nodes went unsent for 8 s and timed out.
-  A limit: the kernel gives at most what `net.core.wmem_max` allows, twice the default
-  buffer where that is left at its default, and each such address holds up to one default
-  buffer of packets, so made-up members spread over three or more addresses of the
-  device's own network that no host answers for could still fill it for a few seconds.
+  The kernel gives at most what `net.core.wmem_max` allows, twice the default buffer where
+  that is left at its default, and each such address holds up to one default buffer of
+  packets, so a larger buffer alone could not do: made-up members at three addresses of
+  the device's own network where no host is filled even that one. So the dials to
+  addresses of the device's own networks that have not answered lately take turns
+  (`vendor/libp2p-quic`, change 5): each holds room for the packets it may leave waiting
+  (14 KiB for a dial, 32 KiB for a hole punch) while it runs and for 3.5 s after, the
+  longest such a packet waits, and they hold 32 KiB for one address and 112 KiB in all at
+  most, about half of the default buffer, whatever a lookup's answers name. The others
+  wait, within the time the dial has, the one whose address holds least first, so a real
+  device at another address goes before made-up ones at a few addresses as soon as room
+  comes back. A limit: made-up members at many such addresses, named faster than the turns
+  come back (eight per 10.5 s at worst), all hold nothing and go in the order they came,
+  so a real device there not met before can wait the whole 7 s its dial has, and fail, on
+  every try while that lasts. An
+  address that set up a connection in the last ten minutes takes no turn, nor does any
+  address off the device's own networks, so members already met there, and every address
+  on the internet, are dialled at once. In `media-silent` two devices send each other a
+  datagram every 20 ms, as a call's sound goes, while twelve DHT nodes name made-up members
+  at three such addresses to one of them, with `net.core.wmem_max` at its default: before
+  the turns its socket filled (429600 bytes waiting of 425984) and the longest gap between
+  datagrams was 6.1 s one way and 9.2 s the other; with them, at most 75456 bytes waited,
+  each side received 3000 of the 3001 datagrams sent, and the longest gap was 22 ms both
+  ways.
 - **Candidates that never answer** (announcements of sessions that ended, members that
   closed the app) are tried six times, rested for ten minutes, and forgotten after three
   such rests; a later lookup that still finds them announced brings them back. While
