@@ -3772,8 +3772,19 @@ Future<void> _measureCall(
   }
   if (_share != null) {
     final sources = await call.screens();
+    // FOGATA_TEST_SCREEN=named:<text> shares the first window whose title holds the text
+    // (another program's, which may then be closed while it is shared).
+    final named = _share!.startsWith('named:')
+        ? _share!.substring(6).toLowerCase()
+        : null;
     await call.shareScreen(
-      sources.firstWhere((s) => s.type == SourceType.Screen),
+      sources.firstWhere(
+        (s) => named != null
+            ? s.type == SourceType.Window &&
+                  s.name.toLowerCase().contains(named)
+            : s.type == SourceType.Screen,
+        orElse: () => throw StateError('nothing to share for $_share'),
+      ),
     );
     if (!call.sharing) throw StateError('not sharing: ${call.problem}');
   }
@@ -3921,6 +3932,7 @@ Future<void> _measureCall(
     '${m.median.toStringAsFixed(0)} MB; voice lost $lost of ${lost + received}; '
     'freezes $freezes; stalls $stalls',
   );
+  _log('sharing at the end: ${call.sharing}; problem: ${call.problem}');
   if (_share != null) await call.stopSharing();
   if (_camera) await state.setCamera(false);
 }
