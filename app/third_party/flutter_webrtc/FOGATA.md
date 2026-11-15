@@ -641,13 +641,37 @@ something makes the engine again.
   - As the module's observer (unless an embedding plugin registered one): when the engine
     stops while playout goes on, it looks once the module's change is done, and again
     500 ms later; an engine still stopped while the module counts itself as playing is
-    released and made again (three times in a row at most). When an engine that stopped
-    was to record (the module's `isRecordingEnabled`, the state it was changing to), it
-    is made with the speaker alone, and the input is not tried again until one of the
-    changes above. When every engine that stopped was only to play, the input was not
-    the cause (a speaker that went to sleep or changed its profile): it is made again as
-    it was, the microphone left as it is. Without the observer (another one was set), no
-    stop is heard, and the input is taken for the cause.
+    released and made again (three times in a row at most; an engine made again that
+    then ran 5 s worked, and a later stop starts the count again). It is made as it was
+    first, the input in it if it was: an engine stops with its input in it as well when
+    another output is chosen (the module makes a new engine then) or the system switches
+    devices, and the microphone had no part in that. Taking every such stop for a
+    microphone that cannot be opened lost the microphone at each change of output, until
+    the system's devices changed. Only when the engine made again with the input does not
+    run, or stops again at once, is it made with the speaker alone; the input is then
+    tried again by itself after 2, 10 and 30 s (the first before the call's own check of a
+    microphone that reads nothing, 8 s), and at each change above, of the default output
+    and of the output chosen; three such tries at most until one of those changes, each
+    costing at most two quick remakes when the input still fails. When every engine that
+    stopped was only to play, the input was not the cause (a speaker that went to sleep
+    or changed its profile): it is made again as it was. Without the observer (another
+    one was set), no stop is heard, and the input is taken for the cause once the engine
+    made as it was did not run.
+  - The output chosen holds when the microphone is turned on. The module gives its
+    output the chosen device only to an engine it makes in that change (WebRTC-SDK's
+    `audio_engine_device.mm`, the step "Configure device", run only when the engine is
+    new or must be made again). Adding the input to an engine that played alone does not
+    make a new one: it turns voice processing on, the system's voice processing then
+    plays through an aggregate of the system's default input and output, and the others'
+    voices went to the default output instead of the one chosen. So the chosen output
+    (`selectAudioOutput`, `FlutterRTCMediaStream.m`, both copies, identical, tells it
+    with `outputChosen:`) is given to the engine's output unit
+    (`kAudioOutputUnitProperty_CurrentDevice`) in the module's `willStartEngine` when the
+    engine was not made in that change and starts with the input for the first time,
+    just as the module does for a new engine. A chosen output that is gone is left to the
+    system's default, as the module does. The module's own `outputDevice` and
+    `inputDevice` cannot tell the device chosen (this audio module does not answer
+    `GetPlayoutDevice`: always nil), hence the copy kept here.
   - Its work runs on a queue of its own: the module's getters (`isPlaying`,
     `isEngineRunning`) and setters wait for its thread (WebRTC-SDK's `RTCAudioDeviceModule`
     calls the module with `BlockingCall` on the factory's network thread, which is also
@@ -655,8 +679,12 @@ something makes the engine again.
     to two seconds while an engine starts. So the check 500 ms after a stop never sees a
     start half done. `stop` waits for the queue before the factory goes.
   - The log says "Fogata: microphone not usable, playing only: ...", "microphone usable",
-    "microphone could not be opened" and "the audio engine stopped while playing; made
-    again without the microphone" (or "as it was").
+    "microphone could not be opened", "the audio engine stopped while playing; made
+    again without the microphone" (or "as it was"), "trying the microphone again (n of
+    3)" and "the output chosen given again with the microphone".
+  - `app/integration_test/call_test.dart`'s FOGATA_TEST_OUTPUT_SWAP chooses another
+    output in the middle of a measured call and the first one again, and logs what the
+    copy sent with each and these lines.
 - `FlutterWebRTCPlugin.m` (both copies, identical; macOS only): made with the factory,
   stopped in `dealloc`.
 - A headless check outside the app (the module of `app/macos/WebRTC-SDK.podspec`, its

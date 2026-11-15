@@ -809,6 +809,9 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   for (RTCIODevice* device in outputDevices) {
     if ([deviceId isEqualToString:device.deviceId]) {
       [audioDeviceModule setOutputDevice:device];
+      // Kept when the microphone is added to the engine, and a microphone left out is
+      // tried again with it.
+      [FogataPlayout outputChosen:device.deviceId];
       result(nil);
       return;
     }

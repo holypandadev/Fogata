@@ -544,6 +544,15 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   nothing of its microphone and does not turn it off for reading nothing, and a server
   gone over 5 s is told, and its return too. It used to keep a dead connection until the
   application restarted, listing only "System default".
+  On macOS one audio engine plays and records; our copy of flutter_webrtc remakes it when
+  it stops while it should play (its FOGATA.md, "The others' voices play without a
+  microphone"): as it was first, as an engine also stops when another output is chosen or
+  the system switches devices, and without the microphone only if that does not run,
+  trying the microphone again by itself after 2, 10 and 30 s and at each change of the
+  devices or of those chosen. The speaker chosen stays chosen when the microphone is
+  turned on. While the microphone is left out the call still shows it on, and the
+  call's own check (8 s with nothing read or sent) says it could not be used and turns
+  it off.
 - Noise suppression (Settings, under the microphone; off by default, kept in `app.json`)
   is RNNoise (`crates/fogata-denoise`, nnnoiseless: a small neural network that tells
   speech from noise in 22 bands and lowers the bands that hold noise, so a fan, a hum,
