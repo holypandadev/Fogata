@@ -41,9 +41,10 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # What crates.io adds to a published crate, and Fogata's own notes: not part of the fork.
 IGNORED = {".cargo_vcs_info.json", ".cargo-ok", "Cargo.toml.orig", "Cargo.lock", "FOGATA.md"}
 AGENT = {"User-Agent": "fogata-vendor-diff (https://github.com/holypandadev/Fogata)"}
-# The code of a Dart plugin: its Dart part and the native parts of the systems Fogata builds
-# for (a file of them left out needs a note in FOGATA.md as much as a changed one does).
-PUB_CODE = ("lib/", "linux/", "windows/", "macos/", "darwin/", "common/")
+# The code of a Dart plugin: its Dart part, the native parts of the systems Fogata builds for
+# and what their builds read (flutter_webrtc's `third_party/`: the libwebrtc it downloads,
+# its CMake); a file of them left out needs a note in FOGATA.md as much as a changed one does.
+PUB_CODE = ("lib/", "linux/", "windows/", "macos/", "darwin/", "common/", "third_party/")
 
 
 def fetch(url):
@@ -157,6 +158,14 @@ def compare(name, folder, out):
                       out, ("src/",))
 
 
+def names(told, name, whole_path):
+    """Whether the notes `told` name `name` as a whole: not inside a longer name or path
+    (`x.cc` is not named by `ax.cc`, nor `linux/x.cc` by `src/linux/x.cc`). A path must be
+    written whole; a file name may also end a path (`linux/x.cc` names `x.cc`)."""
+    before = r"(?<![\w./-])" if whole_path else r"(?<![\w.-])"
+    return re.search(before + re.escape(name) + r"(?![\w/-])", told) is not None
+
+
 def report(where, what, folder, upstream, out, code):
     """Prints what differs in the fork `folder` (`where` in the repository) from `upstream`,
     as published (`what`: its name and version), adds the diff to `out`; returns the number
@@ -182,10 +191,12 @@ def report(where, what, folder, upstream, out, code):
     unexplained = 0
     for kind, paths in (("changed", changed), ("added", added), ("removed", removed)):
         for path in paths:
-            # A file is explained when FOGATA.md names it (as `src/x.rs` or `x.rs`). A licence
-            # added, or a file left out that is no code of the package (changelogs, tests,
-            # benches, examples), needs no note.
-            named = (path in told or pathlib.PurePosixPath(path).name in told
+            # A file is explained when FOGATA.md names it (as `src/x.rs` or `x.rs`; one left
+            # out only by its whole path, as many files share a name). A licence added, or a
+            # file left out that is no code of the package (changelogs, tests, benches,
+            # examples), needs no note.
+            name = path if kind == "removed" else pathlib.PurePosixPath(path).name
+            named = (names(told, path, True) or names(told, name, kind == "removed")
                      or path.startswith("LICENSE")
                      or (kind == "removed" and not path.startswith(code)))
             unexplained += 0 if named else 1

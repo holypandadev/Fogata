@@ -285,12 +285,27 @@ class VendorDiff(unittest.TestCase):
             (fork / "lib").mkdir(parents=True)
             (fork / "lib/a.dart").write_text("code")
             (fork / "FOGATA.md").write_text("This is a 1.0.0.\n")
-            with contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(vendor_diff.report("a", "a 1.0.0", fork, upstream,
-                                                    io.StringIO(), vendor_diff.PUB_CODE), 1)
-                (fork / "FOGATA.md").write_text("Its `linux/plugin.cc` is left out.\n")
-                self.assertEqual(vendor_diff.report("a", "a 1.0.0", fork, upstream,
-                                                    io.StringIO(), vendor_diff.PUB_CODE), 0)
+            def unexplained(notes):
+                (fork / "FOGATA.md").write_text(notes)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    return vendor_diff.report("a", "a 1.0.0", fork, upstream, io.StringIO(),
+                                              vendor_diff.PUB_CODE)
+
+            self.assertEqual(unexplained("This is a 1.0.0.\n"), 1)
+            self.assertEqual(unexplained("Its `linux/plugin.cc` is left out.\n"), 0)
+            self.assertEqual(unexplained("Its `linux/x.{h,cc}` and `linux/plugin.cc`.\n"), 0)
+            # Only its whole path names a file left out: not its name alone, nor a longer
+            # name or path that has it inside.
+            for notes in ["`plugin.cc` is left out.", "`linux/myplugin.cc` is left out.",
+                          "`src/linux/plugin.cc` is left out.", "`linux/plugin.cc2`.",
+                          "`linux/plugin.cc/x` is left out."]:
+                with self.subTest(notes=notes):
+                    self.assertEqual(unexplained(notes + "\n"), 1)
+            # A changed file is named by its name too, but as a whole.
+            (fork / "linux").mkdir()
+            (fork / "linux/plugin.cc").write_text("changed")
+            self.assertEqual(unexplained("`plugin.cc` is changed.\n"), 0)
+            self.assertEqual(unexplained("`myplugin.cc` is changed.\n"), 1)
 
 
 class WebrtcStable(unittest.TestCase):

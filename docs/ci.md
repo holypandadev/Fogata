@@ -264,8 +264,9 @@ token that can only read; a failure there is for the maintainers to look at, it 
   crates.io at the version it records, and each forked Dart package of `app/third_party`
   (flutter_webrtc, tray_manager, desktop_drop) against pub.dev at the version its
   `pubspec.yaml` records: the files changed, and the files of the package's code left out
-  (for a Dart plugin, its native code for Linux, Windows and macOS too), which `FOGATA.md`
-  must name, and whether a newer version is out (a Dart fork behind also shows as a warning
+  (for a Dart plugin, its native code for Linux, Windows and macOS too, and flutter_webrtc's
+  `third_party/`), which `FOGATA.md` must name, as a whole (a file left out by its whole
+  path), and whether a newer version is out (a Dart fork behind also shows as a warning
   on the run). A fork whose
   `FOGATA.md` has a line "Reviewed against <name> <version>" was read against that newer
   version, what it brings taken or left out there: while that is the newest, the fork shows

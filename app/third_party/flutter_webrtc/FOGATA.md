@@ -783,10 +783,17 @@ The package's end-to-end encryption of frames and data packets (`FrameCryptor`,
 `KeyProvider`, `DataPacketCryptor`) needs WebRTC's frame cryptor, which Fogata's own
 libwebrtc and WebRTC-SDK leave out: calls never use it.
 
-- `common/cpp/src/flutter_frame_cryptor.cc`, `flutter_data_packet_cryptor.cc` and their
-  headers (`common/cpp/include/flutter_frame_cryptor.h`, `flutter_data_packet_cryptor.h`;
-  Linux, Windows) and `FlutterRTCFrameCryptor.{h,m}`, `FlutterDataPacketCryptor.{h,m}`
-  (macOS, both copies) are removed, with their method handlers and key provider maps
+- `common/cpp/src/flutter_frame_cryptor.cc`, `common/cpp/src/flutter_data_packet_cryptor.cc`
+  and their headers (`common/cpp/include/flutter_frame_cryptor.h`,
+  `common/cpp/include/flutter_data_packet_cryptor.h`; Linux, Windows) and, for macOS, both
+  copies of `FlutterRTCFrameCryptor` and `FlutterDataPacketCryptor`
+  (`common/darwin/Classes/FlutterRTCFrameCryptor.{h,m}`,
+  `common/darwin/Classes/FlutterDataPacketCryptor.{h,m}`,
+  `macos/flutter_webrtc/Sources/flutter_webrtc/FlutterRTCFrameCryptor.m`,
+  `macos/flutter_webrtc/Sources/flutter_webrtc/FlutterDataPacketCryptor.m`,
+  `macos/flutter_webrtc/Sources/flutter_webrtc/include/flutter_webrtc/FlutterRTCFrameCryptor.h`,
+  `macos/flutter_webrtc/Sources/flutter_webrtc/include/flutter_webrtc/FlutterDataPacketCryptor.h`)
+  are removed, with their method handlers and key provider maps
   (`flutter_webrtc.{h,cc}`, `flutter_webrtc_base.{h,cc}`, `FlutterWebRTCPlugin.{h,m}`) and
   the sources in `linux/`, `windows/` and `elinux/` `CMakeLists.txt`. Their methods now
   answer "not implemented"; the Dart classes (`frame_cryptor_impl.dart`,
@@ -1327,7 +1334,7 @@ someone had been made before it.
 The fork is on 1.6.3: every change of 1.6.2+hotfix.4 to 1.6.3 (its CHANGELOG, and the diff
 of the two published packages, file by file) was taken onto the changes above, except
 those below. Where a change of 1.6.3 was already here, in an earlier form of Fogata's, the
-code is now 1.6.3's: "Devices listed off the main thread" (#2229, macOS), the encodings
+code is now 1.6.3's: `getSources` off the main thread (#2229, macOS), the encodings
 written back by `setParameters` (#2211), the Windows task runner (#2244) and the
 renderer's dispose (#2235).
 
@@ -1339,7 +1346,10 @@ Taken as published, with no change of Fogata's crossing them:
 - "resolve the plugin instance per engine and free it on engine teardown" (#2221,
   `FlutterWebRTCPlugin.{h,m}`, both copies, identical), with its logger block holding the
   plugin weakly, next to Fogata's copy of the log to standard error (`FOGATA_WEBRTC_LOG`).
-  Fogata runs one Flutter engine.
+  Fogata runs one Flutter engine. The block held the plugin strongly before, so the plugin
+  was never freed; now it can be, and its `-dealloc` (the playout watcher stopped, the
+  voice engine's keeper and the peer connections closed) can run for the first time, at
+  the application's end. Quitting during a call on macOS is to be tried by hand.
 - "duplicate null check for video renderer" (#2219, `FlutterRTCVideoRenderer.m`, both
   copies, identical).
 - iOS (its podspec and its copy of the Objective-C code), Android (#2230, #2213, Gradle)
