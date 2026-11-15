@@ -150,8 +150,8 @@ void FlutterVideoRenderer::SetVideoTrack(scoped_refptr<RTCVideoTrack> track) {
 }
 
 void FlutterVideoRenderer::Dispose() {
-  // RemoveRenderer takes the track's broadcaster lock: once SetVideoTrack returns,
-  // OnFrame is not running and will not run again, so nothing sends on the channel.
+  // RemoveRenderer() takes the track's broadcaster lock, so once this returns
+  // OnFrame() is not running and will not run again.
   SetVideoTrack(nullptr);
   event_channel_.reset();
 }
@@ -230,19 +230,20 @@ void FlutterVideoRendererManager::VideoRendererDispose(
     std::unique_ptr<MethodResultProxy> result) {
   auto it = renderers_.find(texture_id);
   if (it != renderers_.end()) {
-    // Fogata (taken from upstream 1.6.3): out of the map at once, on the platform
-    // thread, and its event channel closed now, while the texture id is still its own:
-    // the id may go to a new renderer once the engine lets go of the texture (on
-    // Windows it is the texture's address), and closing the channel later cleared the
-    // new renderer's handler. On Windows the map was changed from the engine's
-    // callback, on the raster thread, and a second dispose of the same texture before
-    // that callback erased the same entry twice.
+    // Take the renderer out of the map right away, on the platform thread, so
+    // that a second dispose of the same texture fails cleanly and the map is
+    // never touched from another thread.
     scoped_refptr<FlutterVideoRenderer> renderer = it->second;
     renderers_.erase(it);
+    // Close the event channel now, while the texture id still belongs to this
+    // renderer. On Windows the id is the address of the engine's texture and
+    // can go to a new renderer as soon as the texture is released; closing the
+    // channel later would clear the new renderer's handler.
     renderer->Dispose();
 #if defined(_WINDOWS)
-    // The engine may call CopyPixelBuffer on the raster thread until it has let go
-    // of the texture, and runs this callback after that: the renderer lives until then.
+    // The engine may keep calling CopyPixelBuffer() on the raster thread until
+    // it has released the texture, and runs this callback after that, also on
+    // the raster thread. Keep the renderer alive until then.
     base_->textures_->UnregisterTexture(
         texture_id, [renderer]() mutable { renderer = nullptr; });
 #else

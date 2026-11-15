@@ -31,7 +31,7 @@ dependencies:
   # 0.5.3 (MIT) without its Linux plugin (see its FOGATA.md).
   tray_manager:
     path: third_party/tray_manager
-  # Our copy of flutter_webrtc 1.6.2+hotfix.4 (MIT), changed where noted in its
+  # Our copy of flutter_webrtc 1.6.3 (MIT), changed where noted in its
   # FOGATA.md.
   flutter_webrtc:
     path: third_party/flutter_webrtc

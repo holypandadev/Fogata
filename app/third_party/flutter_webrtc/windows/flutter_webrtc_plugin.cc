@@ -69,7 +69,7 @@ class FlutterWebRTCPluginImpl : public FlutterWebRTCPlugin {
   // FlutterWebRTC queues while it goes (a capture's end) still finds the runner, and
   // the queue of a sound still starting closes before the runner goes
   // (flutter_screen_capture.cc). Declared after, the runner went first. Upstream
-  // 1.6.3 does the same.
+  // 1.6.3 lets go of webrtc_ first in the destructor instead.
   std::unique_ptr<TaskRunner> task_runner_;
   std::unique_ptr<FlutterWebRTC> webrtc_;
   BinaryMessenger* messenger_;

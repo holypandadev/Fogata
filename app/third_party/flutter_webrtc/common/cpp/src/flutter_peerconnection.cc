@@ -844,8 +844,7 @@ scoped_refptr<RTCRtpParameters> FlutterPeerConnection::updateRtpParameters(
       encoding++;
     }
   }
-  // Fogata: the encodings handed out above are copies, so the changes only reach the
-  // sender once they are put back.
+  // encodings() returns copies, so the changes above must be written back.
   parameters->set_encodings(params);
 
   EncodableValue value =

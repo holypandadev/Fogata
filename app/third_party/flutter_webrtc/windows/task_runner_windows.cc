@@ -55,12 +55,9 @@
    // Even though it would usually be sufficient to process only a single task
    // whenever we receive the message, if the message queue happens to be full,
    // we might not receive a message for each individual task.
-   // Fogata: each task runs with the queue let go of, as on Linux
-   // (task_runner_linux.cc). Run under it, a task that queues another (an event sent
-   // from a capture's end) locked again the queue it already held; and a thread that
-   // queues while holding a lock of its own (fogata_sound_start.h's PlatformQueue)
-   // would deadlock with any task that takes that lock.
-   // Upstream 1.6.3 does the same.
+   //
+   // Hold the lock only to pop, never while a task runs. A task that enqueues
+   // another one would otherwise deadlock on the non-recursive mutex.
    for (;;) {
      TaskClosure task;
      {

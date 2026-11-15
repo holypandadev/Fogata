@@ -3,7 +3,7 @@ PODS:
     - FlutterMacOS
   - file_selector_macos (0.0.1):
     - FlutterMacOS
-  - flutter_webrtc (1.6.2):
+  - flutter_webrtc (1.6.3):
     - FlutterMacOS
     - WebRTC-SDK (= 156.8078.6)
   - FlutterMacOS (1.0.0)
@@ -56,7 +56,7 @@ EXTERNAL SOURCES:
 SPEC CHECKSUMS:
   desktop_drop: 10a3e6a7fa9dbe350541f2574092fecfa345a07b
   file_selector_macos: 9e9e068e90ebee155097d00e89ae91edb2374db7
-  flutter_webrtc: 6dad83a678a95559efe0edf2984748253026b169
+  flutter_webrtc: e537a4ed7684e2e48e89035a4169eab879b6b2fe
   FlutterMacOS: c232990155153907050900a2e175c7773903ba4e
   fogata_video: 89e3192743b16158d379d0090f4140328c4f34c6
   rust_lib_fogata: 7aa5873c9ebf2611ee60b6befc45dc719b64572f

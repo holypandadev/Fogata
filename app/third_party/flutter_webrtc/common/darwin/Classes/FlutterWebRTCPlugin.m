@@ -130,8 +130,13 @@ void postEvent(FlutterEventSink _Nullable sink, id _Nullable event) {
 // Each Flutter engine registers its own plugin instance. The first one keeps
 // this slot, and the instance that creates the peer connection factory takes
 // it over, so native callers never end up on an instance without a factory.
+// A detached instance hands it on to another live one.
 // Guarded by @synchronized on the class.
 static FlutterWebRTCPlugin *sharedSingleton;
+
+// Weak on both sides so the map never keeps a messenger or an instance alive.
+// Guarded by @synchronized on the class.
+static NSMapTable<NSObject<FlutterBinaryMessenger>*, FlutterWebRTCPlugin*>* instancesByMessenger;
 
 // Process-global so it can be set from native code (e.g. another plugin) before
 // this plugin is even registered. Defaults to enabled. See
@@ -220,6 +225,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
   }
 }
 
++ (FlutterWebRTCPlugin*)instanceForMessenger:(NSObject<FlutterBinaryMessenger>*)messenger {
+  @synchronized([FlutterWebRTCPlugin class]) {
+    return [instancesByMessenger objectForKey:messenger];
+  }
+}
+
 + (void)setAudioSessionManagementEnabled:(BOOL)enabled {
   gAudioSessionManagementEnabled = enabled;
 }
@@ -277,6 +288,8 @@ static void FlutterWebRTCApplyFieldTrials(void) {
 #endif
                                       withTextures:[registrar textures]];
   [registrar addMethodCallDelegate:instance channel:channel];
+  // The iOS engine only calls -detachFromEngineForRegistrar: on published instances.
+  [registrar publish:instance];
 }
 
 - (instancetype)initWithChannel:(FlutterMethodChannel*)channel
@@ -293,6 +306,14 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     if (sharedSingleton == nil) {
       sharedSingleton = self;
     }
+    if (instancesByMessenger == nil) {
+      instancesByMessenger =
+          [[NSMapTable alloc] initWithKeyOptions:NSPointerFunctionsWeakMemory |
+                                                 NSPointerFunctionsObjectPointerPersonality
+                                    valueOptions:NSPointerFunctionsWeakMemory
+                                        capacity:0];
+    }
+    [instancesByMessenger setObject:self forKey:messenger];
   }
 
   FlutterEventChannel* eventChannel =
@@ -351,6 +372,20 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     peerConnection.eventSink = nil;
   }
   _eventSink = nil;
+
+  @synchronized([FlutterWebRTCPlugin class]) {
+    [instancesByMessenger removeObjectForKey:_messenger];
+    if (sharedSingleton == self) {
+      // Hand the slot on, preferring an instance that owns a factory.
+      sharedSingleton = nil;
+      for (id messenger in instancesByMessenger) {
+        FlutterWebRTCPlugin* instance = [instancesByMessenger objectForKey:messenger];
+        if (instance != nil && sharedSingleton.peerConnectionFactory == nil) {
+          sharedSingleton = instance;
+        }
+      }
+    }
+  }
 }
 
 #pragma mark - FlutterStreamHandler methods
@@ -388,9 +423,12 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     loggerCallback = [RTC_OBJC_TYPE(RTCCallbackLogger) new];
     // Fogata: with FOGATA_WEBRTC_LOG set, libwebrtc's log also goes to standard error.
     const BOOL toStderr = getenv("FOGATA_WEBRTC_LOG") != NULL;
+    // The logger is an ivar and keeps this block, so a strong self would be a
+    // retain cycle that keeps the plugin alive after its engine is gone.
+    __weak FlutterWebRTCPlugin* weakSelf = self;
     [loggerCallback start:^(NSString *logMessage) {
       if (toStderr) fprintf(stderr, "%s\n", logMessage.UTF8String);
-      postEvent(self.eventSink, @{
+      postEvent(weakSelf.eventSink, @{
         @"event" : @"onLogData",
         @"data" : logMessage
       });

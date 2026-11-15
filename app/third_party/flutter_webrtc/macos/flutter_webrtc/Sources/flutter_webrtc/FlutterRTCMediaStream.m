@@ -690,10 +690,9 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 }
 
 - (void)getSources:(FlutterResult)result {
-  // Fogata (taken from upstream 1.6.3): the first camera discovery in a process loads
-  // the system's camera extensions and waits on the camera daemon, about a second on a
-  // Mac; the audio module's lists wait for WebRTC's worker thread. Off the main thread,
-  // which is Flutter's UI thread on macOS; the answer goes on the main thread.
+  // The first camera discovery in a process loads the system's camera
+  // extensions and waits on the camera daemon, about a second on a Mac. Off
+  // the main thread, which is Flutter's UI thread on macOS.
 #if TARGET_OS_OSX
   RTCAudioDeviceModule* audioDeviceModule = [self.peerConnectionFactory audioDeviceModule];
 #endif
