@@ -15,6 +15,8 @@
 # - answers the portal's screen-sharing dialogs as a person would, through the
 #   accessibility bus (tools/smoke-wayland/picker.py), with what $SMOKE_PICKER/answer says
 #   ("share", the default, or "cancel");
+# - gives the portal a notification server that shows nothing (notifications.py), as
+#   Plasma's shell would be;
 # - ends every process started inside when it ends (its first process is the namespace's
 #   init). The network is the computer's own.
 #
@@ -22,6 +24,9 @@
 #   <folder> keeps the session's home folder and the daemons' logs. The command runs with
 #   WAYLAND_DISPLAY, DISPLAY (Xwayland), XDG_SESSION_TYPE=wayland, XDG_CURRENT_DESKTOP=KDE
 #   and DBUS_SESSION_BUS_ADDRESS of this session, as an application started from Plasma.
+#   SMOKE_WIDTH and SMOKE_HEIGHT set each output's size (1600 by 900), SMOKE_OUTPUTS how
+#   many there are (1), side by side from the left; the portal's dialog lists the
+#   leftmost first, which the picker shares.
 # Exits 3, naming it, when the session cannot be built on this computer (a program missing,
 # no unprivileged namespaces, the portal offering no screen sharing), else the command's own
 # status.
@@ -193,7 +198,7 @@ kbuildsycoca6 --noincremental > "$DIR/sycoca.log" 2>&1 ||
 
 # KWin, on a virtual output, with Xwayland, as the desktop.
 KWIN_WAYLAND_NO_PERMISSION_CHECKS=${SMOKE_NO_PERMISSION_CHECKS:-0} kwin_wayland --virtual --xwayland --socket wayland-smoke --width "${SMOKE_WIDTH:-1600}" \
-  --height "${SMOKE_HEIGHT:-900}" --no-lockscreen --no-global-shortcuts \
+  --height "${SMOKE_HEIGHT:-900}" --output-count "${SMOKE_OUTPUTS:-1}" --no-lockscreen --no-global-shortcuts \
   > "$DIR/kwin.log" 2>&1 &
 pids+=($!)
 for _ in $(seq 200); do [ -S "$RUNTIME/wayland-smoke" ] && break; sleep 0.1; done
@@ -222,6 +227,10 @@ dbus-update-activation-environment DBUS_SESSION_BUS_ADDRESS WAYLAND_DISPLAY DISP
   PULSE_CLIENTCONFIG \
   DBUS_SYSTEM_BUS_ADDRESS 2> "$DIR/activation.log" ||
   fail "cannot pass the session to the bus (see $DIR/activation.log)"
+
+# The desktop's notification server, which the portal tells of every share.
+python3 -I "$HERE/notifications.py" > "$DIR/notifications.log" 2>&1 &
+pids+=($!)
 
 # The person in front of the portal's dialogs.
 export SMOKE_PICKER=${SMOKE_PICKER:-$DIR/picker}
