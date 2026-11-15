@@ -130,12 +130,15 @@ therefore treats DHT nodes as strangers:
   socket with `net.core.wmem_max` at its default, and under the default buffer itself. In
   each part the others wait, within the time the dial has, the one whose address holds
   least first; a dial that got no turn in its time sends nothing and is not counted as a
-  try of the peer, nor by the check whether UDP gets out. An address with a connection open,
-  or that answered in the last 10 s, takes no turn (the kernel keeps sending to a
-  neighbour that answered for 8 s after it stops answering), nor does any address off the
-  device's own networks, so members connected there, and every address on the internet,
-  are dialled at once; link-local addresses are always on the device's own networks. What
-  answered, lingers or was vouched for is forgotten when an interface's address goes.
+  failure of a candidate (its six tries and rest), nor as UDP lost; mDNS's own two retries
+  and the probes of the check whether UDP gets out still count it. An address of the
+  device's own networks with a connection open, or that answered in the last 10 s (a
+  connection set up, or a reply to a dial of this device's), takes no turn (the kernel
+  keeps sending to a neighbour that answered for 8 s after it stops answering), nor does
+  any address off the device's own networks, so members connected there, and every
+  address on the internet, are dialled at once; link-local addresses are always on the
+  device's own networks. When an interface's address goes, what was vouched for and what
+  answered with no connection open now are forgotten; room still lingering lingers out.
   What is left, as limits:
   - Someone on the local network can make mDNS tell of made-up peers from its own address
     (or from addresses it sends from that are not its own), and those are vouched for. The
@@ -156,8 +159,10 @@ therefore treats DHT nodes as strangers:
     private (both on one public network, or one IPv6 /64).
   - An IPv6 prefix that is on the link only by a router's advertisement, with no address of
     the device in it, is not taken as on the link: dials there take no turn.
-  - Replies to incoming handshakes take no turn and are not counted; a host that sent a
-    handshake is there.
+  - Replies to incoming handshakes take no turn and are not counted. The first packet of
+    an incoming handshake can come from a forged source on the device's own network, and
+    the reply to it then waits for a neighbour that is not there (an incoming handshake
+    that does not complete never counts as an answer).
   - Before the interface watcher's first events no network is known, so nothing takes
     turns; and a device that wakes on another network keeping the same address on the same
     interface sees no change, and keeps what answered before for up to 10 s.
