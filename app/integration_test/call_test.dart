@@ -126,6 +126,10 @@ Future<void> _shot(WidgetTester tester, String name) async {
 final _role = _env['FOGATA_ROLE'] ?? 'a';
 final _dir = _env['FOGATA_CALL'] ?? Directory.systemTemp.path;
 final _copies = int.tryParse(_env['FOGATA_PEERS'] ?? '') ?? 2;
+
+/// How many times longer every wait may last (FOGATA_TEST_PATIENCE, 1 when left out): a
+/// copy run under a memory profiler starts many times slower, and the others wait for it.
+final _patience = int.tryParse(_env['FOGATA_TEST_PATIENCE'] ?? '') ?? 1;
 final _mic = _env['FOGATA_TEST_MIC'];
 final _camera = _env['FOGATA_TEST_CAMERA'] == '1';
 final _share = _env['FOGATA_TEST_SCREEN'];
@@ -164,7 +168,7 @@ Future<void> _until(
   bool Function() done, {
   int seconds = 120,
 }) async {
-  final end = DateTime.now().add(Duration(seconds: seconds));
+  final end = DateTime.now().add(Duration(seconds: seconds * _patience));
   while (!done()) {
     if (DateTime.now().isAfter(end)) throw StateError('not in time: $what');
     await _wait(tester, const Duration(milliseconds: 200));

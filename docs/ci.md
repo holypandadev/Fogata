@@ -72,6 +72,31 @@ and sees it update itself to the newest one from the releases page (the same doc
 step 7). `.github/workflows/netlab.yml`, by hand, runs the network lab on one of GitHub's
 computers (the same document, "Checks before a release", 3).
 
+## A call's memory over hours
+
+`.github/workflows/call-memory.yml`, started by hand (`gh workflow run call-memory.yml -f
+seconds=12600 -f mode=voice`), runs a call of the call lab for hours on one of GitHub's
+computers, where a job may last six: copies of the call test, every copy's memory by kind of
+mapping each minute (`tools/call-lab/smaps.py`, in the run's `smaps.log`), and, when asked
+(`-f heap=b`), one copy under heaptrack (`MEASURE_HEAP` of `tools/call-lab/measure.sh`), from
+whose notes `tools/call-lab/heap-report.sh` says what was allocated after the call settled
+and never freed, by call stack. The whole run folder is the run's artifact, kept 30 days. It
+checks nothing and blocks nothing: it is how a slow growth is looked for, before and after a
+change. The same runs on any Linux computer with `heaptrack` and `zstd` installed.
+
+It measures a release build unless told otherwise (`-f build=profile`), because a profile
+build grows by itself while a call is on screen: the engine writes a timeline event with a
+new id for every frame it is asked to draw (`Animator::RequestFrame`), and, by what
+heaptrack recorded, a build that is not a release keeps a 16-byte record and a slot of a
+table for each, for as long as the process lives.
+At 60 frames a second that is about 17 MB an hour, in steps (the table doubles: 6 MB after
+some 36 minutes, 12 after 65, 24 after two hours). In a call of two with voice measured for
+three and a half hours side by side, the profile build's copies went from 552 to 578 MB and
+from 516 to 551 MB, and the release build's stayed where they were (496 to 496 MB, 487 to
+489 MB): a release build has no such record. The profiler's copy starts many times slower,
+so the others wait longer for it (`FOGATA_TEST_PATIENCE` of the call test); with more than
+two copies it can still miss the test's waits.
+
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD; --split app|checks: half of it
 tools/install-hooks.sh        # once per clone: installs the pre-push hook
