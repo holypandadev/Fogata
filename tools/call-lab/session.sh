@@ -6,6 +6,9 @@
 # - hides the user's runtime folder (their PipeWire and PulseAudio sockets) and the system's
 #   PulseAudio folders, and starts a PipeWire, WirePlumber and pipewire-pulse of its own there,
 #   which only ever hold the virtual devices the command makes;
+# - gives those daemons a D-Bus session bus of their own, with nothing else on it (WirePlumber
+#   0.4 ends at once on the bus address everything else is given, "disabled:", which means
+#   none); the command's processes reach no bus at all;
 # - names that server's socket in PULSE_SERVER and gives libpulse an empty client.conf, so
 #   neither a client.conf, nor the X display's root window, nor a TCP default can lead
 #   anywhere else; it stops unless `pactl info` names exactly that socket;
@@ -93,12 +96,18 @@ stop() {
 trap 'stop; exit 1' INT TERM HUP
 trap stop EXIT
 
-pipewire > "$DIR/pipewire.log" 2>&1 &
+# The daemons' own bus (lab.sh's lab_sound_start starts them on it too).
+export CALL_LAB_DAEMON_BUS=disabled:
+if command -v dbus-daemon > /dev/null &&
+  dbus-daemon --session --fork --address="unix:path=$RUNTIME/daemons-bus" > /dev/null 2>&1; then
+  CALL_LAB_DAEMON_BUS=unix:path=$RUNTIME/daemons-bus
+fi
+DBUS_SESSION_BUS_ADDRESS=$CALL_LAB_DAEMON_BUS pipewire > "$DIR/pipewire.log" 2>&1 &
 echo $! > "$DIR/pipewire.pid"
 for _ in $(seq 50); do [ -S "$RUNTIME/pipewire-0" ] && break; sleep 0.1; done
-wireplumber > "$DIR/wireplumber.log" 2>&1 &
+DBUS_SESSION_BUS_ADDRESS=$CALL_LAB_DAEMON_BUS wireplumber > "$DIR/wireplumber.log" 2>&1 &
 echo $! > "$DIR/wireplumber.pid"
-pipewire-pulse > "$DIR/pipewire-pulse.log" 2>&1 &
+DBUS_SESSION_BUS_ADDRESS=$CALL_LAB_DAEMON_BUS pipewire-pulse > "$DIR/pipewire-pulse.log" 2>&1 &
 echo $! > "$DIR/pipewire-pulse.pid"
 for _ in $(seq 100); do pactl info > /dev/null 2>&1 && break; sleep 0.1; done
 server=$(pactl info 2>/dev/null | sed -n 's/^Server String: //p')

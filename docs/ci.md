@@ -70,7 +70,44 @@ applications, by hand, and has GitHub attest them; it signs nothing
 hand after a release is published, installs an earlier release on Windows and as a Flatpak
 and sees it update itself to the newest one from the releases page (the same document,
 step 7). `.github/workflows/netlab.yml`, by hand, runs the network lab on one of GitHub's
-computers (the same document, "Checks before a release", 3).
+computers (the same document, "Checks before a release", 3), and
+`.github/workflows/call-checks.yml` the Linux calls of the same list (2): see below.
+
+## The calls before a release
+
+`.github/workflows/call-checks.yml`, started by hand on the commit to be released (`gh
+workflow run call-checks.yml --ref <branch or tag>`), runs on one of GitHub's computers
+what docs/releasing-beta.md asks of Linux in calls ("Checks before a release", 2), in one
+job of about 40 minutes: a clean release build checked as `tools/beta/release.py` checks it
+(`tools/beta/ci_builds.py check-build linux`), the video plugin's native tests, the call
+test built as a profile and as a debug build, and then, in the call lab
+(`tools/call-lab`, with `LOAD_MAX=9` and its own display `:172`), the microphone checks
+`media devices alone late muted unplug switch broken hang noise` on the debug build,
+`rejoin` on the profile build, a shared screen's sound beside a loopback and a combined
+output (`CALL_LAB_LOOPBACK=1`: a's log must say `passed on, not linked` and never link
+`pipewire-pulse`), calls of 4 copies with a camera and with a shared screen for 60 s on the
+debug build, and of 4 copies three times and 6 copies twice with a shared screen for 90 s
+on the profile build. A call passes when every copy wrote a result, none says `failed` and
+no copy's log says it was kept out. The run fails when any part failed or did not run, or
+when the application crashed meanwhile (`coredumpctl`, the kernel log, a core file). The
+run's summary has every part's result and the tables of `tools/call-lab/sum.py`; the run
+folders, without the copies' data folders, are the run's artifact, kept 30 days. One job,
+because every part needs the same three builds and the parts run one after another anyway:
+each takes the computer's processors and a sound session to itself. Before the builds, a
+recording in a sound session of the lab's must reach its virtual microphone, or the run
+stops there. Two things of the lab's sound sessions keep them working on the PipeWire 1.0
+and WirePlumber 0.4 of GitHub's Ubuntu 24.04 as on a newer desktop: the sound daemons have
+a session bus of their own (`tools/call-lab/session.sh`; WirePlumber 0.4 ended at once
+without one, so nothing was linked and no copy recorded or played anything, the x11 smoke
+test's session included), and the graph runs at WebRTC's 10 ms from the start
+(`tools/call-lab/lab.sh`, `lab_devices`; otherwise a lab microphone went silent for good
+when the voice engine stopped its recording and started it again, as it does when the
+microphone opens after someone connected, and `mic.sh late` failed every time).
+
+GitHub's computers have 4 processors: the call of 4 copies with a camera takes them whole
+(a load of about 18, each copy at some 93% of a processor, 20 to 22 pictures a second where
+a shared screen keeps 30) and still passes; the calls with a shared screen, of 6 copies
+too, stay near a load of 10.
 
 ## A call's memory over hours
 

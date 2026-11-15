@@ -17,8 +17,20 @@ ROLES=(a b c d e f g h)
 # microphone goes away records silence. With LAB_LATE_DEVICES=<role>:<seconds>, that copy's
 # devices are made that long after the others' (a desktop's sound card coming back after
 # its sound server, mic.sh restart).
+#
+# The session's graph runs at WebRTC's own 10 ms (480 samples at 48 kHz) from the start, as it
+# does anyway once any copy records, so that a recording stopped and started again at once
+# does not change it. On PipeWire 1.0 (Ubuntu 24.04, GitHub's computers), when a recording
+# of 10 ms from a remapped source stopped and another started at once, the source gave
+# silence to every recording of it until none was left, 9 times in 12 (parec alone, no
+# application); with the quantum fixed, never in 12. A copy that selected its microphone
+# while its voice engine was recording (mic.sh late: WebRTC stops the recording and starts
+# it again on the same input) sent silence for the rest of the call. Set again with the
+# devices, after mic.sh restart started the sound server again.
 lab_devices() { # copies
   local i r late
+  pw-metadata -n settings 0 clock.force-quantum 480 > /dev/null 2>&1 ||
+    echo "the graph's quantum could not be fixed (pw-metadata)" >> "$RUN/lab.log"
   pactl load-module module-null-sink sink_name=lab_default sink_properties=device.description=LabDefault > /dev/null
   pactl load-module module-remap-source source_name=lab_default_mic master=lab_default.monitor source_properties=device.description=LabDefaultMic > /dev/null
   for i in $(seq 0 $(($1 - 1))); do
@@ -220,7 +232,7 @@ lab_sound_stop() { # daemon...
 lab_sound_start() { # daemon...
   local d
   for d in "$@"; do
-    "$d" >> "$CALL_LAB_SESSION/$d.log" 2>&1 &
+    DBUS_SESSION_BUS_ADDRESS=${CALL_LAB_DAEMON_BUS:-disabled:} "$d" >> "$CALL_LAB_SESSION/$d.log" 2>&1 &
     echo $! > "$CALL_LAB_SESSION/$d.pid"
     case "$d" in
       pipewire)

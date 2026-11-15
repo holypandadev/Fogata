@@ -122,7 +122,7 @@ refuses a folder that holds any key already.
 ## Checks before a release
 
 Required before every release, on the commit that will be released, beside the checks of
-every push (docs/ci.md). No workflow runs them: each needs a real sound server, a second
+every push (docs/ci.md). No push runs them: each needs a real sound server, a second
 system or an hour, and each is here because it found a fault that every push check had
 passed. A release waits until all of them pass; one that cannot be run is said so, by
 name, in the release's notes for the maintainers, never passed over in silence.
@@ -146,6 +146,11 @@ name, in the release's notes for the maintainers, never passed over in silence.
      6 copies; `measure.sh 4 camera 60` on the debug build): every copy's result says
      `passed`, no copy was kept out, and `coredumpctl list --since <the start>` shows no
      crash of `fogata`.
+
+   All of these run on one of GitHub's computers (`gh workflow run call-checks.yml --ref
+   <branch or tag>`, about 40 minutes; docs/ci.md, "The calls before a release"), with
+   `rejoin` on the profile build and a shared screen's sound beside a loopback besides; its
+   run's summary says which part passed.
 3. **The network.** `tools/netlab/netlab.sh`, every scenario (about 70 minutes), here or on
    one of GitHub's computers (`gh workflow run netlab.yml`, which also runs `dht-liars`
    thirty times: two devices started in the same seconds must find each other within its
