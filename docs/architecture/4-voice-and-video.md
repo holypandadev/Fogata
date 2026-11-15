@@ -535,7 +535,23 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   as its place in the list of inputs and, on Linux, reads the list again each time it
   starts recording (when someone comes into a room where this device was alone, say); our
   copy of flutter_webrtc selects it again at its new place whenever an input comes or
-  goes, so it never becomes another microphone or the default one. On Linux a sound server
+  goes, so it never becomes another microphone or the default one. Choosing the
+  microphone WebRTC records from already (the call chooses it as it starts, and the
+  microphone opens it again when it is turned on, maybe once someone already hears this
+  device) leaves the recording alone: WebRTC would stop it and start it again at once,
+  and PipeWire 1.0 answers that, for a remapped or filtered microphone, with silence until
+  nothing records from it. It is the same microphone while it has the same id at the same
+  place as the one last asked for, with nothing counted since: on Linux a source added to
+  the sound server or removed from it, or the server lost and found again; on Windows a
+  change of state of any endpoint, outputs too; and the voice engine's start. Otherwise it
+  is chosen anew. Anything counted between the call's start and the microphone's opening
+  (a Bluetooth headset connecting, the monitor of a new output, the application's own
+  silent input for a shared screen's sound) has the recording started again once, as
+  before, so the silence is avoided only while nothing changed in between. With WebRTC's
+  ALSA module (Linux without a sound server) nothing is counted, so a device unplugged and
+  plugged in again at the same place is taken for the same and opens again only when the
+  microphone is turned off and on; the system's default input changing while the default
+  is chosen is not counted, as the sound server moves the recording itself. On Linux a sound server
   that goes away while the application runs (PipeWire or PulseAudio restarted, as after an
   update) is connected to again by Fogata's libwebrtc itself (0.5 s after, then after 1, 2
   and 4 s, then every 5 s, giving up on a server that does not answer in 5 s), which then

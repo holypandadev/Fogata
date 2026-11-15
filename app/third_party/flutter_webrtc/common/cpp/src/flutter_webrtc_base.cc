@@ -187,6 +187,7 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
   // (bandwidth estimates, probes, route changes) to standard error.
   const std::string name = Env("FOGATA_WEBRTC_LOG");
   if (!name.empty()) {
+    log_devices_ = true;
     const libwebrtc::RTCLoggingSeverity severity =
         name == "verbose"   ? libwebrtc::Verbose
         : name == "info"    ? libwebrtc::Info
@@ -215,6 +216,8 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
     // Fogata: the chosen input may have moved in the list. Not on the thread
     // that tells, which may be WebRTC's own: on Linux its worker thread tells when
     // the sound server goes away (no device listed at all then) and when it is back.
+    // Counted here, as it is told: an input asked for before it is asked for anew.
+    input_changes_++;
     task_runner_->EnqueueTask([this] { KeepRecordingDevice(); });
     EncodableMap info;
     info[EncodableValue("event")] = "onDeviceChange";
@@ -229,6 +232,7 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
   // from the main loop and with its queue let go, so the event's own delivery can be
   // queued from the task.
   InputWatcher::Start([this] {
+    input_changes_++;
     task_runner_->EnqueueTask([this] {
       KeepRecordingDevice();
       EncodableMap info;
@@ -242,20 +246,45 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
 void FlutterWebRTCBase::SelectRecordingDevice(uint16_t index,
                                               const std::string& id) {
   std::lock_guard<std::mutex> guard(recording_device_mutex_);
-  recording_device_id_ = index == 0 ? std::string() : id;
-  // Refused (while recording, on some systems), the place stays as it was and the
-  // next change in the list, or the next selection, tries again.
-  recording_device_selected_ = audio_device_->SetRecordingDevice(index) == 0;
-  if (recording_device_selected_) recording_device_index_ = index;
+  const std::string kept = index == 0 ? std::string() : id;
+  recording_device_id_ = kept;
+  // Read before asking: a change told meanwhile has the next selection asked anew.
+  const uint64_t changes = input_changes_.load();
+  // The input the plugin asked for last, at the same place and by the same id (its guid,
+  // Windows' endpoint id; on Linux, which gives none, its description in the sound
+  // server), with no change counted since: asking again would stop a recording running
+  // from it and start it again at once (the wrapper's SetRecordingDevice), which
+  // PipeWire 1.0 answers with silence from a remapped or filtered source. One unplugged
+  // and plugged in again, or a sound server started again, is counted, so it is asked
+  // for anew.
+  if (recording_device_given_ && index == recording_device_index_ &&
+      kept == recording_device_given_id_ &&
+      changes == recording_device_given_at_) {
+    if (log_devices_) {
+      std::fprintf(stderr,
+                   "Fogata: input %d is selected already, left as it is\n",
+                   static_cast<int>(index));
+    }
+    return;
+  }
+  // The wrapper does it later, on WebRTC's worker thread, and always answers 0. A
+  // refusal there goes unseen: the input is asked for again only by the next selection
+  // after a change counted, or when KeepRecordingDevice finds it at another place.
+  audio_device_->SetRecordingDevice(index);
+  recording_device_index_ = index;
+  recording_device_given_id_ = kept;
+  recording_device_given_ = true;
+  recording_device_given_at_ = changes;
+  if (log_devices_) {
+    std::fprintf(stderr, "Fogata: input %d selected\n", static_cast<int>(index));
+  }
 }
 
 void FlutterWebRTCBase::KeepRecordingDevice() {
   std::lock_guard<std::mutex> guard(recording_device_mutex_);
+  const uint64_t changes = input_changes_.load();
   // The system's default stays the list's first entry.
-  if (!audio_device_ ||
-      (recording_device_id_.empty() && recording_device_selected_)) {
-    return;
-  }
+  if (!audio_device_ || recording_device_id_.empty()) return;
   char name[RTCAudioDevice::kAdmMaxDeviceNameSize + 1] = {0};
   char guid[RTCAudioDevice::kAdmMaxGuidSize + 1] = {0};
   // The same id as flutter_media_stream.cc gives a device: its guid, else its
@@ -269,9 +298,8 @@ void FlutterWebRTCBase::KeepRecordingDevice() {
   const int count = audio_device_->RecordingDevices();
   if (count <= 0) return;
   std::string id;
-  if (recording_device_selected_ && recording_device_index_ > 0 &&
-      recording_device_index_ < count && id_at(recording_device_index_, id) &&
-      id == recording_device_id_) {
+  if (recording_device_index_ > 0 && recording_device_index_ < count &&
+      id_at(recording_device_index_, id) && id == recording_device_id_) {
     return;
   }
   uint16_t found = 0;
@@ -279,10 +307,19 @@ void FlutterWebRTCBase::KeepRecordingDevice() {
     if (!id_at(static_cast<uint16_t>(i), id)) return;
     if (id == recording_device_id_) found = static_cast<uint16_t>(i);
   }
-  if (recording_device_selected_ && found == recording_device_index_) return;
-  // As in SelectRecordingDevice: refused, it is tried again on the next change.
-  recording_device_selected_ = audio_device_->SetRecordingDevice(found) == 0;
-  if (recording_device_selected_) recording_device_index_ = found;
+  if (found == recording_device_index_) return;
+  // As in SelectRecordingDevice, a refusal goes unseen. What is asked for is kept as
+  // it is: the system's default while the chosen input is gone, so that choosing the
+  // default then is the same selection.
+  audio_device_->SetRecordingDevice(found);
+  recording_device_index_ = found;
+  recording_device_given_id_ = found == 0 ? std::string() : recording_device_id_;
+  recording_device_given_ = true;
+  recording_device_given_at_ = changes;
+  if (log_devices_) {
+    std::fprintf(stderr, "Fogata: input %d selected again\n",
+                 static_cast<int>(found));
+  }
 }
 
 void FlutterWebRTCBase::KeepVoiceEngine() {
@@ -290,6 +327,10 @@ void FlutterWebRTCBase::KeepVoiceEngine() {
   // No ICE servers and nothing added: it never gathers candidates, sends or receives.
   RTCConfiguration idle;
   voice_engine_keeper_ = factory_->Create(idle, RTCMediaConstraints::Create());
+  // The engine's start selected the system's default input (the default communication
+  // device on Windows), whatever the plugin had asked for before: the next selection is
+  // asked anew.
+  input_changes_++;
 }
 
 bool FlutterWebRTCBase::SuppressNoise(bool on, int64_t api) {

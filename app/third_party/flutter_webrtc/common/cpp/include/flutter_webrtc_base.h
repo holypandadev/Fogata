@@ -6,6 +6,8 @@
 #include "fogata_track_owner.h"
 
 #include <string.h>
+#include <atomic>
+#include <cstdint>
 #include <functional>
 #include <list>
 #include <map>
@@ -102,7 +104,10 @@ class FlutterWebRTCBase {
   // list's first entry, the system's default, nothing more is kept). WebRTC keeps only
   // the index, and on Linux it reads the list again each time it starts recording, so
   // once another input comes or goes the same index may be another microphone, or the
-  // default one.
+  // default one. The input the plugin asked for last is left as it is when it is asked
+  // for again with nothing counted since (see input_changes_): WebRTC would stop a
+  // recording running from it and start it again at once, which on PipeWire 1.0 leaves a
+  // remapped or filtered source giving only silence.
   void SelectRecordingDevice(uint16_t index, const std::string& id);
 
   // Fogata: finds the chosen input in the list again and selects it at its new place,
@@ -205,14 +210,31 @@ class FlutterWebRTCBase {
   // Fogata: gives the encoders of a screen captured through the portal its last frame
   // again, by its track; false when there is none.
   std::map<std::string, std::function<bool()>> track_refreshers_;
-  // Fogata: the input chosen, by id ("" for the system's default), and its place in
-  // the list when last selected.
+  // Fogata: the input chosen, by id ("" for the system's default), which
+  // KeepRecordingDevice follows.
   std::mutex recording_device_mutex_;
   std::string recording_device_id_;
+  // Fogata: what the plugin last asked the audio device for: its place in the list and
+  // its id ("" for the list's first entry, the system's default), which is not the
+  // chosen one while that is gone and the default is asked for instead. The wrapper's
+  // SetRecordingDevice does the work later, on WebRTC's worker thread, and always
+  // answers 0, so whether the audio device took it is not known here.
   uint16_t recording_device_index_ = 0;
-  // False while the audio device refused the last selection: the place above is then
-  // the one it still has.
-  bool recording_device_selected_ = true;
+  std::string recording_device_given_id_;
+  bool recording_device_given_ = false;
+  // Fogata: counted as each is told, before anything reads the list: a notice of Linux's
+  // input watcher (a source added to or removed from the sound server, or the watcher
+  // connected again), libwebrtc's own device change (on Linux only the sound server lost
+  // and found again; on Windows a change of any endpoint, outputs too), and the voice
+  // engine kept from its start on (its start selects the system's default, the default
+  // communication device on Windows). `recording_device_given_at_` is the count when the
+  // plugin last asked for an input; while it is still the count, asking for the same one
+  // again is left out.
+  std::atomic<uint64_t> input_changes_{0};
+  uint64_t recording_device_given_at_ = 0;
+  // Fogata: whether libwebrtc's log goes to standard error (FOGATA_WEBRTC_LOG), where the
+  // plugin's own choices of input are told too.
+  bool log_devices_ = false;
   // Fogata: the microphone's noise suppressor, once made. Never freed: libwebrtc keeps a
   // plain pointer to it for as long as the factory lives and cannot be given none.
   FogataDenoiser* denoiser_ = nullptr;

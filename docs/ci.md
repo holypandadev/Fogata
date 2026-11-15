@@ -82,7 +82,8 @@ job of about 40 minutes: a clean release build checked as `tools/beta/release.py
 (`tools/beta/ci_builds.py check-build linux`), the video plugin's native tests, the call
 test built as a profile and as a debug build, and then, in the call lab
 (`tools/call-lab`, with `LOAD_MAX=9` and its own display `:172`), the microphone checks
-`media devices alone late muted unplug switch broken hang noise` on the debug build,
+`media devices alone late muted unplug switch broken hang noise` on the debug build and
+`late` again with PipeWire's quantum left free (`LAB_FIXED_QUANTUM=0`, a part of its own),
 `rejoin` on the profile build, a shared screen's sound beside a loopback and a combined
 output (`CALL_LAB_LOOPBACK=1`: a's log must say `passed on, not linked` and never link
 `pipewire-pulse`), calls of 4 copies with a camera and with a shared screen for 60 s on the
@@ -101,8 +102,12 @@ a session bus of their own (`tools/call-lab/session.sh`; WirePlumber 0.4 ended a
 without one, so nothing was linked and no copy recorded or played anything, the x11 smoke
 test's session included), and the graph runs at WebRTC's 10 ms from the start
 (`tools/call-lab/lab.sh`, `lab_devices`; otherwise a lab microphone went silent for good
-when the voice engine stopped its recording and started it again, as it does when the
-microphone opens after someone connected, and `mic.sh late` failed every time).
+when the voice engine stopped its recording and started it again, as it did when the
+microphone opened after someone connected, and `mic.sh late` failed every time). The
+application no longer does that restart when the microphone opens with nothing changed
+in the sound server since the call chose it (a source or sink that comes or goes in between
+still has it restart once, as before); `LAB_FIXED_QUANTUM=0` leaves the quantum free, as
+on a person's computer, and the part "mic late (quantum free)" checks it so.
 
 GitHub's computers have 4 processors: the call of 4 copies with a camera takes them whole
 (a load of about 18, each copy at some 93% of a processor, 20 to 22 pictures a second where

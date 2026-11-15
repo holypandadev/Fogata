@@ -25,12 +25,20 @@ ROLES=(a b c d e f g h)
 # silence to every recording of it until none was left, 9 times in 12 (parec alone, no
 # application); with the quantum fixed, never in 12. A copy that selected its microphone
 # while its voice engine was recording (mic.sh late: WebRTC stops the recording and starts
-# it again on the same input) sent silence for the rest of the call. Set again with the
-# devices, after mic.sh restart started the sound server again.
+# it again on the same input) sent silence for the rest of the call; the application no
+# longer selects again the input it records from already, while nothing changed since.
+# Set again with the devices, after mic.sh restart started the sound server again.
+# LAB_FIXED_QUANTUM=0 leaves the quantum to PipeWire, as on a person's computer, where a
+# recording stopped and started again at once can still give silence (to see whether the
+# application does that).
 lab_devices() { # copies
   local i r late
-  pw-metadata -n settings 0 clock.force-quantum 480 > /dev/null 2>&1 ||
-    echo "the graph's quantum could not be fixed (pw-metadata)" >> "$RUN/lab.log"
+  if [ "${LAB_FIXED_QUANTUM:-1}" = 0 ]; then
+    echo "the graph's quantum left to PipeWire (LAB_FIXED_QUANTUM=0)" >> "$RUN/lab.log"
+  else
+    pw-metadata -n settings 0 clock.force-quantum 480 > /dev/null 2>&1 ||
+      echo "the graph's quantum could not be fixed (pw-metadata)" >> "$RUN/lab.log"
+  fi
   pactl load-module module-null-sink sink_name=lab_default sink_properties=device.description=LabDefault > /dev/null
   pactl load-module module-remap-source source_name=lab_default_mic master=lab_default.monitor source_properties=device.description=LabDefaultMic > /dev/null
   for i in $(seq 0 $(($1 - 1))); do

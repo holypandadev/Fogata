@@ -254,8 +254,12 @@ void FlutterMediaStream::GetUserAudio(const EncodableMap& constraints,
           sourceId ==
               SanitizeDeviceIdFromAudioBuffers(strRecordingName,
                                                strRecordingGuid)) {
-        // Fogata: kept by id, so it stays chosen when the list changes.
+        // Fogata: kept by id, so it stays chosen when the list changes. The first
+        // input of that id, as selectAudioInput takes: two of the same id (on Linux
+        // two microphones with the same description) were both selected, one after
+        // the other, ending on the other one.
         base_->SelectRecordingDevice(i, sourceId);
+        break;
       }
     }
 

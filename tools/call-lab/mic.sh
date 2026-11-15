@@ -15,7 +15,10 @@
 #   hang     a's sound server takes the connection and never answers: asked twice (5 s each,
 #            a slow one answers the second time), then as for broken
 #   late     a's microphone opens 8 s after its room does, so b connects first; b must
-#            hear it without a muting and unmuting
+#            hear it without a muting and unmuting. a's WebRTC log (FOGATA_WEBRTC_LOG, info
+#            unless WEBRTC_LOG says otherwise) tells whether its recording was stopped and
+#            started again as the microphone opened; LAB_FIXED_QUANTUM=0 leaves PipeWire's
+#            quantum free (lab.sh), where such a restart can leave a's microphone silent
 #   alone    a is alone in the call for 6 s before b enters (its own level read through a
 #            loop of its own meanwhile); b must hear it without a muting and unmuting
 #   quit     a quits the application as it enters the room with its microphone on, after
@@ -112,7 +115,12 @@ if [ "${1:-}" = --inside ]; then
       lab_copy a 2 hang FOGATA_TEST_MIC_CASE=hang
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=hang
       ;;
-    late) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=late FOGATA_TEST_MIC_LATE=8; lab_copy b 2 off FOGATA_TEST_MIC_CASE=late ;;
+    late)
+      # a's WebRTC log tells whether its recording was stopped and started again as its
+      # microphone opened.
+      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=late FOGATA_TEST_MIC_LATE=8 FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}"
+      lab_copy b 2 off FOGATA_TEST_MIC_CASE=late
+      ;;
     media) lab_copy a 2 1 FOGATA_TEST_MIC_CASE=media FOGATA_TEST_CAMERA=1; lab_copy b 2 off FOGATA_TEST_MIC_CASE=media ;;
     rejoin)
       for role in a b; do
@@ -247,6 +255,7 @@ for check in "${checks[@]}"; do
   export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/mic-${check/:/-}-$(date +%m%d-%H%M%S)
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
+  [ "${LAB_FIXED_QUANTUM:-1}" = 0 ] && echo "LAB_FIXED_QUANTUM=0" >> "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   alsa=""

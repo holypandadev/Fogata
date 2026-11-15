@@ -226,11 +226,53 @@ came back recorded from another microphone that way.
   `SelectRecordingDevice` keeps the chosen input's id with its place; `KeepRecordingDevice`
   finds it in the list again and selects it at its new place (while it is gone, the
   system's default, as a recording whose input goes away moves there by itself; it is taken
-  again when it comes back). A list that cannot be read changes nothing. A selection the
-  audio device refuses (it may while recording) keeps the place it had, and the next
-  change in the list or the next selection tries again.
+  again when it comes back). A list that cannot be read changes nothing.
 - `common/cpp/src/flutter_media_stream.cc`: `getUserMedia` and `selectAudioInput` select
-  through `SelectRecordingDevice`.
+  through `SelectRecordingDevice`, both the first input of the id asked for (`getUserMedia`
+  selected every input of that id, one after the other: on Linux, where the id is the
+  description, two microphones of the same model ended on the other one than the call
+  chose, its recording started again on the way).
+- The input recorded from already is not asked for again. The wrapper's
+  `SetRecordingDevice` (`rtc_audio_device_impl.cc`), while recording, stops the recording,
+  selects and starts it again within a millisecond, whatever the input. A call selects its
+  input as it starts and `getUserMedia` selects it again when the microphone opens; when
+  someone already hears this device then (the microphone opened late, or turned on in the
+  middle of a call), the voice engine records already, and on PipeWire 1.0 (Ubuntu 24.04)
+  a remapped or filtered source answered that restart with silence to every recording of
+  it until none was left: the device sent only silence (`tools/call-lab/mic.sh late`, with
+  `LAB_FIXED_QUANTUM=0`). `SelectRecordingDevice` now leaves it as it is when the input is
+  the one the plugin asked for last, at the same place, by the same id (the guid, Windows'
+  endpoint id; on Linux, which gives none, the description in the sound server; nothing
+  for the list's first entry, the system's default), with no change counted since. What
+  was asked for is kept, not only what was chosen: while the chosen input is gone,
+  `KeepRecordingDevice` asks for the default, and choosing the default then is the same.
+  The counter `input_changes_` grows as each of these is told, before the list is read:
+  a notice of Linux's input watcher (a source added to the sound server or removed from
+  it, or the watcher connected again); libwebrtc's own device change (on Linux only the
+  sound server lost and found again, on Windows a change of state of any endpoint,
+  outputs too); and the voice engine kept (`KeepVoiceEngine`), as its start selects the
+  system's default (the default communication device on Windows) whatever was asked for
+  before. An input unplugged and plugged in again at the same place, with the same id, is
+  counted, so it is asked for anew; a different input, a different place or the first
+  selection always are. Whether the audio device took a selection is not known: the
+  wrapper does it later on WebRTC's worker thread and always answers 0, so a refusal there
+  goes unseen until the next selection after a change counted, or until
+  `KeepRecordingDevice` finds the input at another place. With `FOGATA_WEBRTC_LOG`,
+  standard error says "Fogata: input N selected", "selected again" (`KeepRecordingDevice`)
+  or "is selected already, left as it is". Linux and Windows share this code; macOS has
+  its own audio module and plugin code, unchanged. Known limits:
+  - Anything counted between the call's selection and the microphone's opening (a
+    Bluetooth headset connecting, the monitor of a new output, the application's own silent
+    input for a shared screen's sound) has the same input asked for again, and its
+    recording started again once, as before: the silence on PipeWire 1.0 is avoided only
+    while nothing was counted in between.
+  - With WebRTC's ALSA module (Linux without a PulseAudio or PipeWire sound server) nothing
+    is counted but the voice engine's start: the same input at the same place is never
+    asked for again, so an ALSA device unplugged and plugged in again there is taken for
+    the same, and only the voice engine stopping and starting its recording (the
+    microphone turned off and on) opens it again.
+  - The system's default input changing while the default is chosen is not counted: the
+    sound server moves the recording there by itself (PipeWire, PulseAudio 15 or later).
 - `linux/input_watcher.{h,cc}` (new, with libpulse): listens to the sound server for inputs
   added or removed and has `KeepRecordingDevice` run on the platform thread, where the
   audio device is used; libwebrtc tells nothing about them on Linux. It then sends Dart the

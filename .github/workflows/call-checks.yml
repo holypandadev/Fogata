@@ -6,9 +6,10 @@
 # On a clean checkout it makes a release build of the application and checks it as
 # tools/beta/release.py does, runs the video plugin's native tests, builds the call test
 # twice (profile and debug), and then, in the call lab (tools/call-lab), the microphone
-# checks, rejoining on the profile build, a shared screen's sound beside a loopback and a
-# combined output, and calls of 4 and 6 copies with a camera and a shared screen. Each part
-# is a step of its own and says pass or fail; the last step writes them all to the run's
+# checks (late once more with PipeWire's quantum left free), rejoining on the profile
+# build, a shared screen's sound beside a loopback and a combined output, and calls of 4
+# and 6 copies with a camera and a shared screen. Each part is a step of its own and says
+# pass or fail; the last step writes them all to the run's
 # summary with the tables of tools/call-lab/sum.py, looks for a crash of the application
 # since the lab started (systemd-coredump, the kernel log, a core file), and fails the run if
 # anything failed or did not run. The run folders and their logs, without the copies' data
@@ -228,6 +229,22 @@ jobs:
           done
           exit $failed
 
+      # mic.sh late again with PipeWire's quantum left free, as on a person's computer
+      # (tools/call-lab/lab.sh, LAB_FIXED_QUANTUM): a recording started again as the
+      # microphone opens gives only silence from the lab's remapped microphone there, so
+      # this fails if the application does that again.
+      - name: The microphone opening late, the quantum free
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
+        timeout-minutes: 15
+        run: |
+          if LAB_FIXED_QUANTUM=0 tools/call-lab/mic.sh late | tee "$RUNNER_TEMP/mic.out"; then
+            echo "mic late (quantum free)|pass|" >> "$PARTS"
+          else
+            why=$(grep -m 1 '^  problem: ' "$RUNNER_TEMP/mic.out" | sed 's/^  problem: //; s/|/:/g' | cut -c1-200 || true)
+            echo "mic late (quantum free)|fail|$why" >> "$PARTS"
+            exit 1
+          fi
+
       - name: Rejoining, on the profile build
         if: ${{ !cancelled() && steps.profile.outcome == 'success' }}
         timeout-minutes: 30
@@ -348,7 +365,7 @@ jobs:
           for check in media devices alone late muted unplug switch broken hang noise; do
             expected+=("mic $check")
           done
-          expected+=("mic rejoin (profile)" "screen sound with a loopback"
+          expected+=("mic late (quantum free)" "mic rejoin (profile)" "screen sound with a loopback"
             "call 4 camera 60 s" "call 4 screen 60 s" "call 4 screen 90 s" "call 6 screen 90 s"
             "no crash of the application")
           for part in "${expected[@]}"; do
