@@ -1634,16 +1634,13 @@ EOF2
         # counted against its one UDP socket. With the system's limit on send buffers left
         # at its default, the longest gap between the datagrams either one receives must stay
         # close to the pace: a full socket would stop the sound for seconds. (A system that
-        # lets send buffers grow past the kernel's default limit hides what it measures: it
-        # runs only where net.core.wmem_max is 212992, which takes root to set.)
+        # lets send buffers grow past the kernel's default limit, net.core.wmem_max over
+        # 212992, cannot fill the socket this way: there the scenario still measures the gap
+        # and says that it proves less. .github/workflows/netlab.yml sets the default.)
         limits=$(sysctl net.core.wmem_max net.core.wmem_default | tr '\n' ' ')
+        raised=""
         if [[ $(sysctl -n net.core.wmem_max) != 212992 ]]; then
-            echo "=== $SCENARIO"
-            echo "--- $limits"
-            echo "--- needs net.core.wmem_max at the kernel's default:" \
-                "sudo sysctl -w net.core.wmem_max=212992"
-            echo "result: FAIL   logs: $WORK"
-            exit 1
+            raised="--- net.core.wmem_max is not the kernel's default (212992): the socket cannot fill here, so this run proves less (sudo sysctl -w net.core.wmem_max=212992, or the workflow on GitHub)"
         fi
         public_host A 203.0.113.21
         public_host B 203.0.113.22
@@ -1683,6 +1680,7 @@ EOF2
         read -r peak limit < "$WORK/queue" || true
         echo "=== $SCENARIO"
         echo "--- $limits"
+        [[ -z $raised ]] || echo "$raised"
         echo "--- A: $(grep -c 'found a member announcement' "$WORK/A.out" || true) made-up" \
             "members taken; most bytes waiting in its socket: ${peak:-?} of ${limit:-?}"
         pass=1
