@@ -343,7 +343,7 @@ others in a call would hear their own voices back. Instead:
   whole screen: a window's sound cannot be narrowed to its application here, and every
   other one's would go with it. Without PipeWire, or where it cannot connect (PulseAudio
   itself is the sound server), a shared screen has no sound: the package's PulseAudio
-  monitor capture (removed) carried this application's own call sound back to everyone,
+  monitor capture (`linux/pulse_loopback_capturer.{h,cc}`, removed) carried this application's own call sound back to everyone,
   and its stop could block the platform thread.
 - `common/cpp/src/flutter_webrtc.cc`, `linux/pipewire_apps_capturer.{h,cc}`: the method
   `fogataScreenSoundServer` answers "pipewire" when the build has PipeWire and its server
@@ -798,7 +798,8 @@ The package's end-to-end encryption of frames and data packets (`FrameCryptor`,
 libwebrtc and WebRTC-SDK leave out: calls never use it.
 
 - `common/cpp/src/flutter_frame_cryptor.cc`, `flutter_data_packet_cryptor.cc` and their
-  headers (Linux, Windows) and `FlutterRTCFrameCryptor.{h,m}`, `FlutterDataPacketCryptor.{h,m}`
+  headers (`common/cpp/include/flutter_frame_cryptor.h`, `flutter_data_packet_cryptor.h`;
+  Linux, Windows) and `FlutterRTCFrameCryptor.{h,m}`, `FlutterDataPacketCryptor.{h,m}`
   (macOS, both copies) are removed, with their method handlers and key provider maps
   (`flutter_webrtc.{h,cc}`, `flutter_webrtc_base.{h,cc}`, `FlutterWebRTCPlugin.{h,m}`) and
   the sources in `linux/`, `windows/` and `elinux/` `CMakeLists.txt`. Their methods now

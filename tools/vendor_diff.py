@@ -41,6 +41,9 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 # What crates.io adds to a published crate, and Fogata's own notes: not part of the fork.
 IGNORED = {".cargo_vcs_info.json", ".cargo-ok", "Cargo.toml.orig", "Cargo.lock", "FOGATA.md"}
 AGENT = {"User-Agent": "fogata-vendor-diff (https://github.com/holypandadev/Fogata)"}
+# The code of a Dart plugin: its Dart part and the native parts of the systems Fogata builds
+# for (a file of them left out needs a note in FOGATA.md as much as a changed one does).
+PUB_CODE = ("lib/", "linux/", "windows/", "macos/", "darwin/", "common/")
 
 
 def fetch(url):
@@ -151,13 +154,13 @@ def compare(name, folder, out):
         unpack(data, upstream, f"{vendored_name}-{version}")
         late, _ = behind("crates.io", version, newest, reviewed(folder, vendored_name))
         return report(f"vendor/{name}", f"{vendored_name} {version}{late}", folder, upstream,
-                      out, "src/")
+                      out, ("src/",))
 
 
 def report(where, what, folder, upstream, out, code):
     """Prints what differs in the fork `folder` (`where` in the repository) from `upstream`,
     as published (`what`: its name and version), adds the diff to `out`; returns the number
-    of changed files FOGATA.md does not name. A file removed outside the folder `code` (the
+    of changed files FOGATA.md does not name. A file removed outside the folders `code` (the
     package's own code) needs no note."""
     ours, theirs = files(folder), files(upstream)
     changed = sorted(p for p in ours & theirs
@@ -233,7 +236,7 @@ def compare_pub(folder, out):
     with tempfile.TemporaryDirectory(prefix="fogata-vendor-") as tmp:
         upstream = pathlib.Path(tmp) / "upstream"
         unpack(data, upstream, None)
-        return report(where, f"{name} {version}{late}", folder, upstream, out, "lib/")
+        return report(where, f"{name} {version}{late}", folder, upstream, out, PUB_CODE)
 
 
 def main():

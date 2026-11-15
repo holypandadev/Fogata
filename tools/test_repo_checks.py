@@ -11,6 +11,7 @@ watches (tools/beta/deadlines.py).
     python3 -I tools/test_repo_checks.py
 """
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -274,6 +275,22 @@ class VendorDiff(unittest.TestCase):
                 name, version = vendor_diff.pub_recorded(folder)
                 seen = vendor_diff.reviewed(folder, name)
                 self.assertNotEqual(seen, version)
+
+    def test_a_native_file_a_plugin_fork_leaves_out_needs_a_note(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            fork, upstream = pathlib.Path(tmp) / "fork", pathlib.Path(tmp) / "upstream"
+            for path in ["lib/a.dart", "linux/plugin.cc", "example/main.dart", "CHANGELOG.md"]:
+                (upstream / path).parent.mkdir(parents=True, exist_ok=True)
+                (upstream / path).write_text("code")
+            (fork / "lib").mkdir(parents=True)
+            (fork / "lib/a.dart").write_text("code")
+            (fork / "FOGATA.md").write_text("This is a 1.0.0.\n")
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(vendor_diff.report("a", "a 1.0.0", fork, upstream,
+                                                    io.StringIO(), vendor_diff.PUB_CODE), 1)
+                (fork / "FOGATA.md").write_text("Its `linux/plugin.cc` is left out.\n")
+                self.assertEqual(vendor_diff.report("a", "a 1.0.0", fork, upstream,
+                                                    io.StringIO(), vendor_diff.PUB_CODE), 0)
 
 
 class WebrtcStable(unittest.TestCase):

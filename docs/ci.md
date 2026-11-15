@@ -263,8 +263,10 @@ token that can only read; a failure there is for the maintainers to look at, it 
 - `vendor`: `tools/vendor_diff.py`, each vendored crate against the one published on
   crates.io at the version it records, and each forked Dart package of `app/third_party`
   (flutter_webrtc, tray_manager, desktop_drop) against pub.dev at the version its
-  `pubspec.yaml` records: the files changed, which `FOGATA.md` must name, and whether a newer
-  version is out (a Dart fork behind also shows as a warning on the run). A fork whose
+  `pubspec.yaml` records: the files changed, and the files of the package's code left out
+  (for a Dart plugin, its native code for Linux, Windows and macOS too), which `FOGATA.md`
+  must name, and whether a newer version is out (a Dart fork behind also shows as a warning
+  on the run). A fork whose
   `FOGATA.md` has a line "Reviewed against <name> <version>" was read against that newer
   version, what it brings taken or left out there: while that is the newest, the fork shows
   as reviewed, without a warning. The whole diff is the `vendor-diff` artifact. Report only.
