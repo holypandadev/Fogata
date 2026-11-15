@@ -50,9 +50,6 @@ impl Node {
             if lan::is_name(&address) {
                 continue;
             }
-            // Given (an invite, a link, a code, by hand) or remembered from a friend or
-            // member reached there.
-            addr::vouch_for([&address]);
             match address.iter().last() {
                 Some(Protocol::P2p(peer)) => match by_peer.iter_mut().find(|(p, _)| *p == peer) {
                     Some((_, addrs)) => addrs.push(address),

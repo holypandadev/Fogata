@@ -52,37 +52,48 @@ QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
    `net.core.wmem_max` allows, with its default twice the default buffer, which packets
    to three or more such addresses could still fill: change 5 bounds those). Test:
    `the_send_buffer_has_room_past_the_packets_one_silent_address_holds`.
-5. Dials to addresses of the device's own networks take turns, so that whatever peers a DHT
-   node makes up at addresses there where no host is, the packets that wait for those
-   neighbours take a bounded part of the send buffer, and a dial the node vouched for is
-   never kept waiting by them. `src/on_link.rs` (new, a public module): `DialRoom` gives
-   each such dial a share of what may wait (14 KiB for a dial, 32 KiB for a hole punch),
-   held while the dial runs and for 3.5 s after unless its address answered, as its last
-   packets may wait that long. The room is in two parts: `vouch(ip)`, which the node calls
-   just before it dials an address it has a reason of its own to (mDNS, a member's or
-   friend's addresses, a punch, an address the person gave), notes the address in a
-   process-wide registry (as `src/datagram.rs` keeps its own) for `VOUCHED_FOR` (60 s),
-   256 addresses at most, the oldest going first; dials to those take their turns in
-   `VOUCHED_IN_ALL` (64 KiB), and every other dial in `IN_ALL` (112 KiB, eight dials), which
-   can never take the first. Each part holds 32 KiB for one address at most; both together
-   are 42% of what the kernel gives with `net.core.wmem_max` at its default, and under the
-   default buffer without change 4 (the notes at the top of the file work the figures out
-   from how Linux holds those packets). In each part the others wait their turn, the one
-   whose address holds least first, within the time the dial has (`handshake_timeout`,
-   which the wait counts in). An address that set up a connection,
-   while it is open and for ten minutes after, needs no turn, nor does the loopback or any
-   address off those networks. `src/transport.rs`: each listener keeps its interfaces'
+5. On Linux and Android, dials to addresses of the device's own networks take turns, so
+   that whatever peers a DHT node makes up at addresses there where no host is, the packets
+   that wait for those neighbours take a bounded part of the send buffer; elsewhere every
+   dial goes at once, as upstream (`TURNS` in `src/transport.rs`: the figures are Linux's,
+   and nothing was measured elsewhere). `src/on_link.rs` (new, a public module): `DialRoom`
+   gives each such dial a share of what may wait (14 KiB for a dial, 32 KiB for a hole
+   punch), held while the dial runs and for 3.5 s after unless a reply came from its
+   address, as its last packets may wait that long; a dial that sent nothing gives it back
+   at once. The room is in two parts. `vouch(ip, peer)`, which the node calls just before
+   it dials a peer at an address mDNS answered from or the person gave, notes them in a
+   process-wide registry (as `src/datagram.rs` keeps its own) for `VOUCHED_FOR` (60 s), 256
+   at most, the oldest going first; dials to that peer there take their turns in
+   `VOUCHED_IN_ALL` (64 KiB), and every other dial, another peer's at the same address
+   included, in `IN_ALL` (112 KiB, eight dials), which never takes the first part's room.
+   Dials in the vouched part still wait for each other. Each part holds 32 KiB for one
+   address at most; both together are 42% of what the kernel gives with
+   `net.core.wmem_max` at its default, and under the default buffer without change 4 (the
+   notes at the top of the file work the figures out from how Linux holds those packets).
+   In each part the others wait their turn, the one whose address holds least first, within
+   the time the dial has (`handshake_timeout`, which the wait counts in); a waiter that
+   leaves lets the ones behind it go, and one whose address starts answering goes at once.
+   A dial whose turn came with less than 1 s left, or never came, is not made and fails as
+   `Error::NoTurn` (new), which says nothing was sent. An address with a connection open,
+   or that answered (a connection, or any reply to a dial) in the last 10 s, needs no turn,
+   nor does the loopback or any address off those networks; IPv4 169.254.0.0/16 and IPv6
+   fe80::/10 are always on the link. What answered, lingers or was vouched for is forgotten
+   when an interface address goes. `src/transport.rs`: each listener keeps its interfaces'
    networks from the interface watcher, and `dial` waits for the turn before the first
-   packet of a dial or a punch; `src/connection/connecting.rs` and `src/connection.rs` note
-   the remote address of every connection set up (incoming or outgoing) as one that answers
-   until it closes. Tests: `dials_to_addresses_that_have_not_answered_wait_for_room`,
+   packet of a dial or a punch (after the check for a punch already going);
+   `src/connection/connecting.rs` and `src/connection.rs` note the remote address of every
+   connection set up (incoming or outgoing) as one that answers until it closes, and any
+   other reply as an answer. Tests: `dials_to_addresses_that_have_not_answered_wait_for_room`,
    `a_dial_whose_address_answered_gives_its_room_back_at_once`,
-   `a_punch_is_not_passed_by_later_dials`, `an_address_that_holds_nothing_goes_first`,
+   `a_dial_that_got_a_reply_does_not_linger`, `a_dial_that_sent_nothing_does_not_linger`,
+   `a_waiting_dial_goes_when_its_address_answers`, `a_punch_is_not_passed_by_later_dials`,
+   `a_dial_behind_a_punch_that_leaves_goes_at_once`, `an_address_that_holds_nothing_goes_first`,
    `a_dial_that_goes_away_leaves_no_room_taken`, `an_address_that_answered_needs_no_turn`,
    `a_waiting_dial_is_woken_when_lingering_room_comes_back`,
    `a_vouched_dial_goes_at_once_while_the_others_are_full`,
    `dials_not_vouched_for_never_take_vouched_room`, `each_part_keeps_one_address_to_its_share`,
-   `vouches_expire_and_are_bounded`, `vouching_puts_an_address_in_the_vouched_part`,
+   `vouches_expire_and_are_bounded`, `vouching_is_for_one_peer_at_one_address`,
+   `a_change_of_networks_forgets_answers_vouches_and_lingering_room`,
    `dials_to_the_devices_own_networks_take_turns`; the network lab's `media-silent` and
    `lan-first-contact`.
 

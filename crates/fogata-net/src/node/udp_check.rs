@@ -216,6 +216,8 @@ pub(super) fn udp_lost(error: &(dyn std::error::Error + 'static)) -> bool {
         if let Some(quic) = e.downcast_ref::<libp2p::quic::Error>() {
             match quic {
                 libp2p::quic::Error::HandshakeTimedOut => return true,
+                // Nothing was sent (see `not_tried`).
+                libp2p::quic::Error::NoTurn => return false,
                 libp2p::quic::Error::Io(io) => {
                     next = Some(io);
                     continue;
@@ -243,6 +245,53 @@ pub(super) fn udp_lost(error: &(dyn std::error::Error + 'static)) -> bool {
     // the transport below and without a source: read what it says. Every attempt must have
     // timed out or been refused by the system.
     every_attempt_lost(&error.to_string())
+}
+
+/// Whether a failed dial never sent anything: every address it tried waited for its turn to
+/// send to this device's own network and got none (`libp2p::quic::Error::NoTurn`, Linux
+/// only). It says nothing of the peer, nor of whether UDP gets out: neither the UDP check
+/// nor a candidate's failures count it.
+pub(super) fn not_tried(error: &libp2p::swarm::DialError) -> bool {
+    match error {
+        libp2p::swarm::DialError::Transport(attempts) => {
+            !attempts.is_empty()
+                && attempts.iter().all(|(_, e)| match e {
+                    libp2p::core::transport::TransportError::Other(e) => no_turn(e),
+                    _ => false,
+                })
+        }
+        _ => false,
+    }
+}
+
+/// Whether `error` is, or wraps only, [`libp2p::quic::Error::NoTurn`].
+fn no_turn(error: &(dyn std::error::Error + 'static)) -> bool {
+    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error);
+    while let Some(e) = next {
+        if let Some(quic) = e.downcast_ref::<libp2p::quic::Error>() {
+            return matches!(quic, libp2p::quic::Error::NoTurn);
+        }
+        if let Some(io) = e.downcast_ref::<std::io::Error>()
+            && let Some(inner) = io.get_ref()
+        {
+            next = Some(inner);
+            continue;
+        }
+        next = e.source();
+    }
+    // The DNS transport's list of attempts, in words: every one of them had no turn.
+    let words = libp2p::quic::Error::NoTurn.to_string();
+    let text = error.to_string();
+    let leaves: Vec<&str> = text
+        .split("\n - ")
+        .map(str::trim)
+        .filter(|leaf| !leaf.is_empty() && *leaf != "Multiple dial errors occurred:")
+        .map(|leaf| {
+            leaf.trim_start_matches("Multiple dial errors occurred:")
+                .trim()
+        })
+        .collect();
+    !leaves.is_empty() && leaves.iter().all(|leaf| leaf.ends_with(words.as_str()))
 }
 
 /// What a dial error's own words say: each attempt in `text` ("Multiple dial errors
@@ -490,5 +539,35 @@ mod tests {
         let mixed = "Multiple dial errors occurred:\n - Handshake with the remote timed out.\n - Handshake failed: tls: bad certificate";
         assert!(!lost(Error::other(mixed)));
         assert!(!lost(Error::other("Multiple dial errors occurred:")));
+        assert!(!lost(Error::other(libp2p::quic::Error::NoTurn)));
+    }
+
+    /// A dial that never got its turn to send (`NoTurn`) is not tried: neither the UDP
+    /// check nor a candidate's failures count it; one that also timed out somewhere is.
+    #[test]
+    fn a_dial_that_never_got_its_turn_was_not_tried() {
+        use libp2p::{core::transport::TransportError, swarm::DialError};
+        use std::io::Error;
+        let at = a("/ip4/203.0.113.40/udp/4001/quic-v1");
+        let no_turn = || TransportError::Other(Error::other(libp2p::quic::Error::NoTurn));
+        let timed_out =
+            || TransportError::Other(Error::other(libp2p::quic::Error::HandshakeTimedOut));
+        assert!(not_tried(&DialError::Transport(vec![
+            (at.clone(), no_turn()),
+            (at.clone(), no_turn()),
+        ])));
+        assert!(!not_tried(&DialError::Transport(vec![
+            (at.clone(), no_turn()),
+            (at.clone(), timed_out()),
+        ])));
+        assert!(!not_tried(&DialError::Transport(vec![])));
+        assert!(!udp_lost(&Error::other(libp2p::quic::Error::NoTurn)));
+        // As the DNS transport words a list of attempts.
+        let words = libp2p::quic::Error::NoTurn.to_string();
+        let listed = format!("Multiple dial errors occurred:\n - {words}\n - {words}");
+        assert!(not_tried(&DialError::Transport(vec![(
+            at.clone(),
+            TransportError::Other(Error::other(listed))
+        )])));
     }
 }

@@ -256,7 +256,6 @@ impl Node {
         for (peer, addresses) in due {
             self.interesting.insert(peer);
             self.wanted.want(peer);
-            addr::vouch_for(&addresses);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addresses)
                 .condition(PeerCondition::NotDialing)

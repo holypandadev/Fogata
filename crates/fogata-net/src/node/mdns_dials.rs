@@ -76,6 +76,19 @@ fn mdns_address_ok(address: &Multiaddr, by: std::net::IpAddr, own: &OwnNetworks)
     }
 }
 
+/// Of `addresses`, those a response sent from that very address told of (`own`, see
+/// [`MdnsDials::own`]): a host answered from there now. Any other address a response gave
+/// is only its sender's word, which a neighbour can make up for any number of peers.
+fn tellers_own<'a>(
+    addresses: &'a [Multiaddr],
+    own: &'a [(std::net::IpAddr, Multiaddr)],
+) -> impl Iterator<Item = &'a Multiaddr> + 'a {
+    addresses.iter().filter(move |a| {
+        own.iter()
+            .any(|(by, told)| told == *a && addr::ip(told) == Some(*by))
+    })
+}
+
 /// The dials mDNS findings started for one peer that have not ended, the addresses they
 /// were given, and those told of since past [`MAX_MDNS_DIALLED`], for when they end.
 #[derive(Default)]
@@ -429,7 +442,8 @@ impl Node {
     /// with the others ([`Self::mdns_dialling`]) until it ends.
     fn start_mdns_dial(&mut self, peer: PeerId, addresses: Vec<Multiaddr>) {
         if !addresses.is_empty() {
-            addr::vouch_for(&addresses);
+            let own = self.mdns_dialling.get(&peer).map(|d| d.own.as_slice());
+            addr::vouch_for(Some(peer), tellers_own(&addresses, own.unwrap_or_default()));
             let opts = DialOpts::peer_id(peer)
                 .addresses(addresses.clone())
                 .condition(PeerCondition::Disconnected)
@@ -569,6 +583,27 @@ mod tests {
         limits,
         tests::{inspect, lone_member},
     };
+
+    /// Only the addresses a response told of from that very address are vouched for: a
+    /// neighbour naming a peer at other local addresses vouches for none of them.
+    #[test]
+    fn mdns_vouches_only_for_the_tellers_own_address() {
+        let at = |s: &str| -> Multiaddr { s.parse().unwrap() };
+        let own_answer = at("/ip4/192.168.1.66/udp/4001/quic-v1");
+        let named = at("/ip4/192.168.1.67/udp/4001/quic-v1");
+        let addresses = vec![own_answer.clone(), named.clone()];
+        let own = vec![
+            (
+                std::net::IpAddr::from([192, 168, 1, 66]),
+                own_answer.clone(),
+            ),
+            // A neighbour at .66 telling of .67: not its own.
+            (std::net::IpAddr::from([192, 168, 1, 66]), named.clone()),
+        ];
+        let vouched: Vec<&Multiaddr> = tellers_own(&addresses, &own).collect();
+        assert_eq!(vouched, [&own_answer]);
+        assert_eq!(tellers_own(&addresses, &[]).count(), 0);
+    }
 
     /// A response names a peer at its own address, at local ones, and at public and loopback
     /// ones of other hosts, and at this device's own address: only the first two are

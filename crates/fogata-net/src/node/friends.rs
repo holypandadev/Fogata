@@ -953,7 +953,7 @@ impl Node {
             self.contact(peer);
         } else if !addrs.is_empty() {
             // The person gave the link.
-            addr::vouch_for(&addrs);
+            addr::vouch_for(Some(peer), &addrs);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
                 .condition(PeerCondition::DisconnectedAndNotDialing)

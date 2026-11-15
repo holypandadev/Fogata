@@ -26,7 +26,7 @@ use libp2p::{
 };
 
 use crate::{
-    addr::{self, OwnNetworks, Reach},
+    addr::{OwnNetworks, Reach},
     strangers::Wanted,
 };
 
@@ -81,10 +81,6 @@ impl Punches {
             .iter()
             .cloned()
             .partition(|a| own.may_dial(a, Reach::SamePlace));
-        // DCUtR runs only over a relayed connection, and a member's relay serves only peers
-        // that proved membership to it: the punch is arranged with a member, whose own
-        // addresses these are (see `addr::vouch_for`).
-        addr::vouch_for(&kept);
         if refused.is_empty() {
             return Ok(());
         }

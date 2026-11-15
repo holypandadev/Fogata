@@ -20,6 +20,7 @@ use super::{
     dial::PUNCHED_WITHIN,
     is_loopback,
     network::{probe_lost_udp, v6_net},
+    udp_check,
 };
 use crate::{NodeEvent, Path, addr, addr::local_block, behaviour::BehaviourEvent, short_peer};
 
@@ -115,7 +116,9 @@ impl Node {
                 error,
             } => {
                 self.explicit_dials.remove(&connection_id);
-                self.count_failed_dial(&error);
+                if !udp_check::not_tried(&error) {
+                    self.count_failed_dial(&error);
+                }
             }
             SwarmEvent::OutgoingConnectionError {
                 peer_id: Some(peer),
@@ -134,12 +137,16 @@ impl Node {
                 connection_id,
             } => {
                 self.explicit_dials.remove(&connection_id);
-                self.count_failed_dial(&error);
+                // A dial that never got its turn to send says nothing of the peer.
+                let not_tried = udp_check::not_tried(&error);
+                if !not_tried {
+                    self.count_failed_dial(&error);
+                }
                 self.punch_dials.remove(&connection_id);
                 self.dialling_found.remove(&peer);
                 self.mdns_dial_failed(peer, connection_id);
                 // A lost member that cannot be reached yet is no stale announcement to rest.
-                if !self.is_redial(peer, connection_id) {
+                if !not_tried && !self.is_redial(peer, connection_id) {
                     self.on_dial_error(peer, &error)
                 }
             }

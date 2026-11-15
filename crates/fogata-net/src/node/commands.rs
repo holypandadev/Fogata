@@ -9,7 +9,11 @@ use fogata_proto::MemberRequest;
 use libp2p::{PeerId, multiaddr::Protocol};
 
 use super::{GroupSlot, Node, Pending, group_changes, now_ms};
-use crate::{Command, addr::Reach, group::GroupSetup};
+use crate::{
+    Command,
+    addr::{self, Reach},
+    group::GroupSetup,
+};
 
 /// Whether friends and members see a device as away (see [`Node::shown_away`]).
 fn shown_away(away: bool, hidden: bool, in_room: bool) -> bool {
@@ -140,6 +144,8 @@ impl Node {
                         }
                     }
                 }
+                // The person gave them (by hand, an invite).
+                addr::vouch_for(None, &addrs);
                 self.dial_addresses(addrs);
             }
             Command::MergeGroup(log) => {

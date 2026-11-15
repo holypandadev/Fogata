@@ -14,7 +14,7 @@ use libp2p::{
 
 use super::members::bytes;
 use super::{Node, ON_ITS_WAY_AT_MOST, Pending, RecordSent, SEARCH_HARD, now_ms};
-use crate::{NodeEvent, Path, addr};
+use crate::{NodeEvent, Path};
 
 /// How long after a peer the relay no longer serves was disconnected it is dialled again
 /// ([`Node::let_go`]).
@@ -97,8 +97,6 @@ impl Node {
                 continue;
             };
             self.wanted.want(peer);
-            // Where the member was connected from a moment ago.
-            addr::vouch_for(&addresses);
             self.dial_opts(
                 DialOpts::peer_id(peer)
                     .addresses(addresses)

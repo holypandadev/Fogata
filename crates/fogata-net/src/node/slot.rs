@@ -137,13 +137,7 @@ impl Node {
                 // in any /24, but a carrier-grade NAT or unique-local IPv6 one only of a
                 // network this device is on, never one of a VPN it is not on.
                 if self.only_relayed(peer) {
-                    let lan: Vec<Multiaddr> = self
-                        .member_lan_for(peer, &own, Reach::SamePlace)
-                        .cloned()
-                        .collect();
-                    // Sent by the member itself; the others are the DHT's.
-                    addr::vouch_for(&lan);
-                    addrs.extend(lan);
+                    addrs.extend(self.member_lan_for(peer, &own, Reach::SamePlace).cloned());
                 }
                 (*peer, addrs)
             })

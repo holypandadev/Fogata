@@ -121,21 +121,31 @@ impl<P: Provider> GenTransport<P> {
         }
     }
 
-    /// Fogata: whether a dial to `ip` waits for its turn (see `on_link`): an address of one
-    /// of the networks this device is on, but its loopback, that has not answered lately.
+    /// Fogata: whether a dial to `ip` waits for its turn (see `on_link`), on the systems
+    /// whose way of holding packets the turns are made for ([`TURNS`]): an address of one of
+    /// the networks this device is on, or a link-local one (always on the link, whether or
+    /// not an interface has an address of that range), but its loopback, that has not
+    /// answered lately.
     fn needs_turn(&self, ip: &IpAddr) -> bool {
-        !ip.is_loopback()
-            && self
-                .listeners
-                .iter()
-                .any(|l| l.networks.iter().any(|net| net.contains(ip)))
-            && !self.dial_room.answers(ip)
+        TURNS && self.on_link(ip) && !self.dial_room.answers(ip)
     }
 
-    /// Fogata: a turn to dial `ip` with `cost` bytes of packets that may wait, when it
-    /// needs one.
-    fn turn(&self, ip: IpAddr, cost: usize) -> Option<Turn> {
-        self.needs_turn(&ip).then(|| self.dial_room.take(ip, cost))
+    /// Fogata: whether `ip` is on a link of this device: a link-local address, or one of
+    /// the networks of its interfaces; never its loopback.
+    fn on_link(&self, ip: &IpAddr) -> bool {
+        !ip.is_loopback()
+            && (is_link_local(ip)
+                || self
+                    .listeners
+                    .iter()
+                    .any(|l| l.networks.iter().any(|net| net.contains(ip))))
+    }
+
+    /// Fogata: a turn to dial `peer` (when the dial names one) at `ip` with `cost` bytes of
+    /// packets that may wait, when it needs one.
+    fn turn(&self, ip: IpAddr, peer: Option<PeerId>, cost: usize) -> Option<Turn> {
+        self.needs_turn(&ip)
+            .then(|| self.dial_room.take(ip, peer, cost))
     }
 
     /// Create a new [`quinn::Endpoint`] with the given configs.
@@ -268,6 +278,24 @@ impl<P: Provider> GenTransport<P> {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const SEND_BUFFER: usize = 2 * 1024 * 1024;
 
+/// Fogata: whether dials to the device's own networks take turns (see `on_link`): where
+/// [`SEND_BUFFER`] is asked for, the systems whose figures the turns are made from and
+/// measured on. Elsewhere every dial goes at once, as upstream.
+const TURNS: bool = cfg!(any(target_os = "linux", target_os = "android"));
+
+/// Fogata: a dial whose turn comes with less than this left of its time is not started: a
+/// handshake needs a round trip and more, and it would only leave packets waiting.
+const MIN_LEFT: Duration = Duration::from_secs(1);
+
+/// Fogata: IPv4 169.254.0.0/16 and IPv6 fe80::/10, on the link whatever the interfaces'
+/// addresses say.
+fn is_link_local(ip: &IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ip.is_link_local(),
+        IpAddr::V6(ip) => (ip.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
 /// Fogata: asks for [`SEND_BUFFER`] where packets that wait for a neighbour count against
 /// the socket. A refusal leaves the default buffer.
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -373,18 +401,31 @@ impl<P: Provider> Transport for GenTransport<P> {
                 }
                 // Fogata: a dial to the device's own network waits for room first, within
                 // the time it has.
-                let turn = self.turn(socket_addr.ip(), on_link::DIAL_HOLDS);
+                let turn = self.turn(socket_addr.ip(), peer_id, on_link::DIAL_HOLDS);
                 let room = self.dial_room.clone();
                 Ok(Box::pin(async move {
                     let started = Instant::now();
-                    let _held = wait_turn(turn, handshake_timeout).await?;
+                    let held = wait_turn(turn, handshake_timeout).await?;
+                    let left = handshake_timeout.saturating_sub(started.elapsed());
+                    if left < MIN_LEFT {
+                        if let Some(held) = held {
+                            held.unsent();
+                        }
+                        return Err(Error::NoTurn);
+                    }
                     // This `"l"` seems necessary because an empty string is an invalid domain
                     // name. While we don't use domain names, the underlying rustls library
                     // is based upon the assumption that we do.
-                    let connecting = endpoint
-                        .connect_with(client_config, socket_addr, "l")
-                        .map_err(ConnectError)?;
-                    let left = handshake_timeout.saturating_sub(started.elapsed());
+                    let connecting = match endpoint.connect_with(client_config, socket_addr, "l") {
+                        Ok(connecting) => connecting,
+                        Err(e) => {
+                            if let Some(held) = held {
+                                held.unsent();
+                            }
+                            return Err(ConnectError(e).into());
+                        }
+                    };
+                    let _held = held;
                     Connecting::new(connecting, left, room).await
                 }))
             }
@@ -400,20 +441,6 @@ impl<P: Provider> Transport for GenTransport<P> {
                     .map_err(Self::Error::from)?;
 
                 tracing::debug!("Preparing for hole-punch from {addr}");
-
-                // Fogata: a punch to the device's own network waits for room first, within
-                // the time it has, and holds it while it punches.
-                let turn = self.turn(socket_addr.ip(), on_link::PUNCH_HOLDS);
-                let timeout = self.handshake_timeout;
-                let punching = async move {
-                    let started = Instant::now();
-                    let _held = match wait_turn(turn, timeout).await {
-                        Ok(held) => held,
-                        Err(e) => return e,
-                    };
-                    let left = timeout.saturating_sub(started.elapsed());
-                    hole_puncher::<P>(socket, socket_addr, left).await
-                };
 
                 let (sender, receiver) = oneshot::channel();
 
@@ -431,6 +458,27 @@ impl<P: Provider> Transport for GenTransport<P> {
                     Entry::Vacant(entry) => {
                         entry.insert(sender);
                     }
+                };
+
+                // Fogata: a punch to the device's own network waits for room first, within
+                // the time it has, and holds it while it punches.
+                let turn = self.turn(socket_addr.ip(), Some(peer_id), on_link::PUNCH_HOLDS);
+                let timeout = self.handshake_timeout;
+                let punching = async move {
+                    let started = Instant::now();
+                    let held = match wait_turn(turn, timeout).await {
+                        Ok(held) => held,
+                        Err(e) => return e,
+                    };
+                    let left = timeout.saturating_sub(started.elapsed());
+                    if left < MIN_LEFT {
+                        if let Some(held) = held {
+                            held.unsent();
+                        }
+                        return Error::NoTurn;
+                    }
+                    let _held = held;
+                    hole_puncher::<P>(socket, socket_addr, left).await
                 };
 
                 Ok(Box::pin(async move {
@@ -501,14 +549,15 @@ impl<P: Provider> Transport for GenTransport<P> {
     }
 }
 
-/// Fogata: waits for `turn`, when there is one, for `timeout` at most.
+/// Fogata: waits for `turn`, when there is one, for `timeout` at most: a dial that never
+/// got its turn sent nothing, and says so ([`Error::NoTurn`]).
 async fn wait_turn(turn: Option<Turn>, timeout: Duration) -> Result<Option<Held>, Error> {
     let Some(turn) = turn else {
         return Ok(None);
     };
     match futures::future::select(turn, futures_timer::Delay::new(timeout)).await {
         Either::Left((held, _)) => Ok(Some(held)),
-        Either::Right(_) => Err(Error::HandshakeTimedOut),
+        Either::Right(_) => Err(Error::NoTurn),
     }
 }
 
@@ -670,6 +719,9 @@ impl<P: Provider> Listener<P> {
                 }
                 Ok(IfEvent::Down(inet)) => {
                     self.networks.remove(&inet);
+                    // Fogata: what answered, lingers or was vouched for may be of the network
+                    // that went (see `on_link`).
+                    self.room.forget_network();
                     if let Some(listen_addr) =
                         ip_to_listenaddr(&endpoint_addr, inet.addr(), self.version)
                     {
@@ -1088,14 +1140,16 @@ mod tests {
         let listening = transport
             .create_socket("127.0.0.1:0".parse().unwrap())
             .unwrap();
-        let dialling = GenTransport::<crate::tokio::Provider>::dialling_socket(
-            "127.0.0.1:0".parse().unwrap(),
-        )
-        .unwrap();
+        let dialling =
+            GenTransport::<crate::tokio::Provider>::dialling_socket("127.0.0.1:0".parse().unwrap())
+                .unwrap();
 
         for socket in [&listening, &dialling] {
             let room = socket2::SockRef::from(socket).send_buffer_size().unwrap();
-            assert!(room >= 2 * default, "{room} bytes, the default is {default}");
+            assert!(
+                room >= 2 * default,
+                "{room} bytes, the default is {default}"
+            );
         }
     }
 
@@ -1117,9 +1171,17 @@ mod tests {
             listener.networks.insert("127.0.0.0/8".parse().unwrap());
         }
         let own: IpAddr = "198.18.0.7".parse().unwrap();
-        assert!(transport.needs_turn(&own));
-        assert!(!transport.needs_turn(&"198.18.1.7".parse().unwrap()));
-        assert!(!transport.needs_turn(&"127.0.0.1".parse().unwrap()));
+        assert!(transport.on_link(&own));
+        assert_eq!(
+            transport.needs_turn(&own),
+            TURNS,
+            "only where the turns are kept"
+        );
+        assert!(!transport.on_link(&"198.18.1.7".parse().unwrap()));
+        assert!(!transport.on_link(&"127.0.0.1".parse().unwrap()));
+        // Link-local addresses are on the link, though no interface has one.
+        assert!(transport.on_link(&"169.254.3.4".parse().unwrap()));
+        assert!(transport.on_link(&"fe80::1".parse().unwrap()));
         let answered = transport.dial_room.answered(own);
         assert!(!transport.needs_turn(&own));
         drop(answered);

@@ -49,13 +49,15 @@ pub struct Connecting {
     /// established, fails or is dropped (see `Config::retry_above`).
     _counted: Option<Counted>,
     /// Fogata: where the remote address is noted as one that answers once the connection is
-    /// set up (see `on_link`).
+    /// set up, or once anything came back from it (see `on_link`).
     room: DialRoom,
+    remote: std::net::IpAddr,
 }
 
 impl Connecting {
     pub(crate) fn new(connection: quinn::Connecting, timeout: Duration, room: DialRoom) -> Self {
         Connecting {
+            remote: connection.remote_address().ip(),
             connecting: select(connection, Delay::new(timeout)),
             _counted: None,
             room,
@@ -71,6 +73,7 @@ impl Connecting {
     ) -> Self {
         pending.fetch_add(1, Ordering::SeqCst);
         Connecting {
+            remote: connection.remote_address().ip(),
             connecting: select(connection, Delay::new(timeout)),
             _counted: Some(Counted(pending)),
             room,
@@ -121,12 +124,23 @@ impl Future for Connecting {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let connection = match futures::ready!(self.connecting.poll_unpin(cx)) {
             Either::Right(_) => return Poll::Ready(Err(Error::HandshakeTimedOut)),
-            Either::Left((connection, _)) => connection.map_err(ConnectionError)?,
+            Either::Left((Ok(connection), _)) => connection,
+            Either::Left((Err(e), _)) => {
+                // Fogata: anything but silence came back from the remote (a refusal, a
+                // version it does not speak, an error of its handshake): a host is there.
+                if !matches!(
+                    e,
+                    quinn::ConnectionError::TimedOut | quinn::ConnectionError::LocallyClosed
+                ) {
+                    self.room.replied(self.remote);
+                }
+                return Poll::Ready(Err(ConnectionError(e).into()));
+            }
         };
-
+        // Fogata: a host answered, whether or not it proves the peer expected.
+        let answered = self.room.answered(connection.remote_address().ip());
         let peer_id = Self::remote_peer_id(&connection)?;
         crate::datagram::register(peer_id, connection.clone());
-        let answered = self.room.answered(connection.remote_address().ip());
         let muxer = Connection::new(connection, Some(answered));
         Poll::Ready(Ok((peer_id, muxer)))
     }

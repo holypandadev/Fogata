@@ -103,6 +103,12 @@ pub enum Error {
     /// Error when holepunching for a remote is already in progress
     #[error("Already punching hole for {0}).")]
     HolePunchInProgress(SocketAddr),
+
+    /// Fogata: the dial waited for its turn to send to the device's own network and did not
+    /// get one in its time (see `on_link`): nothing was sent, so nothing says whether the
+    /// remote is there.
+    #[error("No turn to dial an address of this device's own network came in time.")]
+    NoTurn,
 }
 
 /// Dialing a remote peer failed.

@@ -455,6 +455,8 @@ pub(crate) fn start_with(
         node.info(note);
     }
     node.bootstrap(&config.bootstrap);
+    // The person gave them.
+    addr::vouch_for(None, &config.peers);
     node.dial_addresses(config.peers);
     node.remembered = config.remembered;
     node.remembered.truncate(MAX_REMEMBERED);
