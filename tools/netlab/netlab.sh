@@ -1744,7 +1744,8 @@ EOF2
             done
         fi
         # shellcheck disable=SC2086  # the DHT nodes, two words each
-        (sleep 100) | ip netns exec A env RUST_LOG=warn,fogata_net=debug,libp2p_swarm=debug \
+        (sleep 100) | ip netns exec A \
+            env RUST_LOG=warn,fogata_net=debug,libp2p_swarm=debug,libp2p_mdns=debug \
             timeout 100 "$BIN" --data-dir "$WORK/data-A" chat lab --nick A --port 41000 \
             $liars $BOOT > "$WORK/A.out" 2>&1 &
         PIDS+=($!)
@@ -1765,6 +1766,16 @@ EOF2
         echo "--- A found C over mDNS at ${found:-never}; connected to C at ${connected:-never}," \
             "$after ms later"
         grep -m1 -E "\+ C \[[^]]*\] connected" "$WORK/A.out" || true
+        # What mDNS and the dials to C did, when it took long or never happened.
+        if [[ $after == never ]] || (( after > 3000 )); then
+            echo "--- A: $(grep -c 'discovered' "$WORK/A.out" || true) mDNS findings; first:"
+            grep -m3 -E 'discovered|mDNS|mdns' "$WORK/A.out" | cut -c1-240 || true
+            echo "--- A: dials at 192.168.60.2:"
+            grep '192\.168\.60\.2' "$WORK/A.out" | grep -v 'discovered' | head -5 |
+                cut -c1-240 || true
+            echo "--- C, last lines:"
+            tail -5 "$WORK/C.out" | cut -c1-240
+        fi
         if [[ $after != never ]] && (( after <= 3000 )); then
             echo "result: PASS   logs: $WORK"
             exit 0
