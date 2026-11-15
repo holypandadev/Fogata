@@ -217,6 +217,21 @@ pub(crate) fn is_relayed(addr: &Multiaddr) -> bool {
     addr.iter().any(|p| matches!(p, Protocol::P2pCircuit))
 }
 
+/// Tells the QUIC transport that this node has a reason of its own to dial `addresses`
+/// (mDNS saw the peer there, a member or friend sent them, the person gave them), just
+/// before it dials them: dials to those of the device's own networks then take their turns
+/// apart from the ones no one vouched for (see `on_link` in `vendor/libp2p-quic`), which
+/// made-up peers named by DHT nodes fill. Never for an address known only from the DHT.
+pub(crate) fn vouch_for<'a>(addresses: impl IntoIterator<Item = &'a Multiaddr>) {
+    for address in addresses {
+        if !is_relayed(address)
+            && let Some(ip) = ip(address)
+        {
+            libp2p::quic::on_link::vouch(ip);
+        }
+    }
+}
+
 /// `addr` without a trailing `/p2p/<id>`.
 pub(crate) fn without_peer(addr: &Multiaddr) -> Multiaddr {
     addr.iter()

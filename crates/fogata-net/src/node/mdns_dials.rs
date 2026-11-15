@@ -429,6 +429,7 @@ impl Node {
     /// with the others ([`Self::mdns_dialling`]) until it ends.
     fn start_mdns_dial(&mut self, peer: PeerId, addresses: Vec<Multiaddr>) {
         if !addresses.is_empty() {
+            addr::vouch_for(&addresses);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addresses.clone())
                 .condition(PeerCondition::Disconnected)

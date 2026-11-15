@@ -9,10 +9,19 @@
 //! full it sends nothing to anyone: a call's sound and picture stop. Anyone who answers a
 //! DHT lookup can name made-up peers at such addresses, as many as it likes, so the dials to
 //! addresses of the device's own networks that have not answered yet take turns here: each
-//! holds a share of [`IN_ALL`] (and of [`PER_ADDRESS`] for its address) while it runs and
-//! for [`LINGER`] after, unless its address answered, and the others wait for room. An
-//! address that set up a connection lately (see [`ANSWERED_FOR`]) needs no turn, nor does
-//! the loopback or any address off those networks: a router answers for those.
+//! holds a share of the room (and of [`PER_ADDRESS`] for its address) while it runs and for
+//! [`LINGER`] after, unless its address answered, and the others wait for room. An address
+//! that set up a connection lately (see [`ANSWERED_FOR`]) needs no turn, nor does the
+//! loopback or any address off those networks: a router answers for those.
+//!
+//! Made-up peers named faster than the room comes back would keep a real device there
+//! waiting with them, so the room is in two parts. The node vouches ([`vouch`]) for an
+//! address it has a reason of its own to dial (mDNS saw it there, a member or friend sent
+//! it, the person gave it), just before it dials it; for [`VOUCHED_FOR`] after, dials to
+//! that address take their turns in [`VOUCHED_IN_ALL`], which no other dial ever takes, and
+//! every other dial takes its turn in [`IN_ALL`] as before. The transport knows nothing of
+//! where an address came from: a dial the node did not vouch for is only counted with the
+//! others, never refused.
 //!
 //! The figures come from how Linux holds such packets:
 //! - A neighbour that does not answer is asked three times a second apart, and then every
@@ -29,9 +38,12 @@
 //! - A hole punch sends a packet of 64 random bytes every 10 to 200 ms, about 29 in three
 //!   seconds and very rarely more than 40: 32 KiB ([`PUNCH_HOLDS`]).
 //! - A socket's default buffer is 212992 bytes (`net.core.wmem_default`), and what it may
-//!   ask for is capped by `net.core.wmem_max`, the same by default. [`IN_ALL`], eight dials
-//!   at once, is about half of the default buffer: whatever a lookup's answers name, the
-//!   other half stays for everything else, without counting on a larger buffer.
+//!   ask for is capped by `net.core.wmem_max`, the same by default; the transport asks for
+//!   more on Linux, so with that cap at its default the kernel gives twice it, 425984 bytes.
+//!   Both parts together, [`IN_ALL`] + [`VOUCHED_IN_ALL`] = 114688 + 65536 = 180224 bytes,
+//!   are 42% of that, so 245760 bytes stay for everything else whatever a lookup's answers
+//!   name; and they stay under the default buffer itself (85% of it) where the larger one
+//!   is not given.
 //!
 //! The same turns are kept on every system, so the device behaves alike everywhere; they cost
 //! nothing but a wait for room when more than eight new addresses of the local network are
@@ -42,7 +54,7 @@ use std::{
     future::Future,
     net::IpAddr,
     pin::Pin,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{Arc, Mutex, MutexGuard, OnceLock, PoisonError},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -54,10 +66,18 @@ use futures_timer::Delay;
 pub(crate) const DIAL_HOLDS: usize = 14 * 1024;
 /// The packets a hole punch can leave waiting for a neighbour at one time.
 pub(crate) const PUNCH_HOLDS: usize = 32 * 1024;
-/// What the dials to one address may hold at once: two dials, or one punch.
+/// What the dials to one address may hold at once in each part of the room: two dials, or
+/// one punch.
 pub(crate) const PER_ADDRESS: usize = 32 * 1024;
-/// What the dials to every such address may hold at once.
+/// What the dials to every such address the node did not vouch for may hold at once: eight
+/// dials, 114688 bytes.
 pub(crate) const IN_ALL: usize = 8 * DIAL_HOLDS;
+/// What the dials to addresses the node vouched for may hold at once: two punches, or four
+/// dials, 65536 bytes.
+pub(crate) const VOUCHED_IN_ALL: usize = 2 * PUNCH_HOLDS;
+/// A socket's default send buffer on Linux (`net.core.wmem_default`).
+const DEFAULT_BUFFER: usize = 212992;
+const _: () = assert!(IN_ALL + VOUCHED_IN_ALL < DEFAULT_BUFFER);
 /// How long a dial whose address did not answer still holds its room after it ends: its
 /// last packets may still wait for the neighbour that long.
 pub(crate) const LINGER: Duration = Duration::from_millis(3500);
@@ -65,6 +85,88 @@ pub(crate) const LINGER: Duration = Duration::from_millis(3500);
 pub(crate) const ANSWERED_FOR: Duration = Duration::from_secs(10 * 60);
 /// Addresses that answered, kept at most; the one that answered longest ago goes first.
 const MAX_ANSWERED: usize = 256;
+/// How long an address the node vouched for keeps its turns in [`VOUCHED_IN_ALL`]: the
+/// node vouches again before each dial, and a dial waits for its turn 7 s at most, so this
+/// covers a dial and the tries mDNS makes again soon after.
+pub const VOUCHED_FOR: Duration = Duration::from_secs(60);
+/// Addresses vouched for, kept at most; past it, the one vouched for longest ago goes.
+pub const MAX_VOUCHED: usize = 256;
+
+/// Notes that the node has a reason of its own to dial `ip` (see the module's notes): for
+/// [`VOUCHED_FOR`] from now, dials to it take their turns apart from those no one vouched
+/// for. Never for an address known only from the DHT.
+pub fn vouch(ip: IpAddr) {
+    vouches().vouch(ip, Instant::now());
+}
+
+/// Whether the node vouched for `ip` within [`VOUCHED_FOR`].
+pub(crate) fn vouched(ip: &IpAddr) -> bool {
+    vouches().holds(ip, Instant::now())
+}
+
+/// The addresses the node vouched for, in this process.
+fn vouches() -> MutexGuard<'static, Vouches> {
+    static VOUCHES: OnceLock<Mutex<Vouches>> = OnceLock::new();
+    VOUCHES
+        .get_or_init(Mutex::default)
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Addresses the node vouched for, with when it last did.
+#[derive(Debug, Default)]
+struct Vouches {
+    at: HashMap<IpAddr, Instant>,
+}
+
+impl Vouches {
+    fn vouch(&mut self, ip: IpAddr, now: Instant) {
+        self.at.insert(ip, now);
+        if self.at.len() > MAX_VOUCHED {
+            self.at
+                .retain(|_, at| now.saturating_duration_since(*at) < VOUCHED_FOR);
+        }
+        while self.at.len() > MAX_VOUCHED {
+            let oldest = self.at.iter().min_by_key(|(_, at)| **at).map(|(ip, _)| *ip);
+            match oldest {
+                Some(oldest) => self.at.remove(&oldest),
+                None => break,
+            };
+        }
+    }
+
+    fn holds(&self, ip: &IpAddr, now: Instant) -> bool {
+        self.at
+            .get(ip)
+            .is_some_and(|at| now.saturating_duration_since(*at) < VOUCHED_FOR)
+    }
+}
+
+/// Which part of the room a dial takes its turn in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Part {
+    /// Dials to addresses the node vouched for: [`VOUCHED_IN_ALL`].
+    Vouched,
+    /// Every other dial: [`IN_ALL`].
+    Other,
+}
+
+impl Part {
+    fn of(ip: &IpAddr) -> Self {
+        if vouched(ip) {
+            Part::Vouched
+        } else {
+            Part::Other
+        }
+    }
+
+    fn room(self) -> usize {
+        match self {
+            Part::Vouched => VOUCHED_IN_ALL,
+            Part::Other => IN_ALL,
+        }
+    }
+}
 
 /// The room dials to the device's own networks share (see the module's notes).
 #[derive(Clone, Debug, Default)]
@@ -72,16 +174,56 @@ pub(crate) struct DialRoom(Arc<Mutex<Room>>);
 
 #[derive(Debug, Default)]
 struct Room {
-    held: usize,
-    by_address: HashMap<IpAddr, usize>,
+    vouched: Share,
+    other: Share,
     /// Room of dials that ended, given back at the time noted.
-    lingering: Vec<(Instant, IpAddr, usize)>,
-    /// Dials waiting for room, in the order they came.
-    waiting: VecDeque<Waiter>,
+    lingering: Vec<(Instant, Part, IpAddr, usize)>,
     next_waiter: u64,
     /// Addresses that set up a connection: how many of them are open, and when the last
     /// one ended (or began, while one is open).
     answered: HashMap<IpAddr, (usize, Instant)>,
+}
+
+/// One part of the room.
+#[derive(Debug, Default)]
+struct Share {
+    held: usize,
+    by_address: HashMap<IpAddr, usize>,
+    /// Dials waiting for room in this part, in the order they came.
+    waiting: VecDeque<Waiter>,
+}
+
+impl Share {
+    fn give_back(&mut self, ip: IpAddr, cost: usize) {
+        self.held = self.held.saturating_sub(cost);
+        if let Some(at) = self.by_address.get_mut(&ip) {
+            *at = at.saturating_sub(cost);
+            if *at == 0 {
+                self.by_address.remove(&ip);
+            }
+        }
+    }
+
+    /// Takes the next waiter that fits in `room` out of the queue, with its room counted:
+    /// among those whose address has room, the one whose address holds least (the earliest
+    /// of those), and none past it.
+    fn next(&mut self, room: usize) -> Option<Waiter> {
+        let best = self
+            .waiting
+            .iter()
+            .enumerate()
+            .filter_map(|(i, w)| {
+                let at = self.by_address.get(&w.ip).copied().unwrap_or(0);
+                (at + w.cost <= PER_ADDRESS).then_some((at, i))
+            })
+            .min()
+            .map(|(_, i)| i)
+            .filter(|i| self.held + self.waiting[*i].cost <= room)?;
+        let waiter = self.waiting.remove(best)?;
+        self.held += waiter.cost;
+        *self.by_address.entry(waiter.ip).or_default() += waiter.cost;
+        Some(waiter)
+    }
 }
 
 #[derive(Debug)]
@@ -102,13 +244,10 @@ impl Room {
             .is_some_and(|(open, since)| *open > 0 || since.elapsed() < ANSWERED_FOR)
     }
 
-    fn give_back(&mut self, ip: IpAddr, cost: usize) {
-        self.held = self.held.saturating_sub(cost);
-        if let Some(at) = self.by_address.get_mut(&ip) {
-            *at = at.saturating_sub(cost);
-            if *at == 0 {
-                self.by_address.remove(&ip);
-            }
+    fn share(&mut self, part: Part) -> &mut Share {
+        match part {
+            Part::Vouched => &mut self.vouched,
+            Part::Other => &mut self.other,
         }
     }
 
@@ -117,8 +256,8 @@ impl Room {
         let mut i = 0;
         while i < self.lingering.len() {
             if self.lingering[i].0 <= now {
-                let (_, ip, cost) = self.lingering.swap_remove(i);
-                self.give_back(ip, cost);
+                let (_, part, ip, cost) = self.lingering.swap_remove(i);
+                self.share(part).give_back(ip, cost);
             } else {
                 i += 1;
             }
@@ -160,19 +299,24 @@ impl DialRoom {
         }
     }
 
-    /// A turn to dial `ip` with `cost` bytes of packets that may wait: at once when there
-    /// is room, else when dials before it give theirs back. Among those waiting whose
-    /// address has room, the one whose address holds least goes first (the earliest of
-    /// those), so made-up peers at a few addresses do not keep a real one at another address
-    /// waiting behind all of theirs; and none goes past it, so a punch is not kept waiting
-    /// by dials.
+    /// A turn to dial `ip` with `cost` bytes of packets that may wait, in the part of the
+    /// room the node's vouching gives it (see [`vouch`]): at once when there is room there,
+    /// else when dials before it there give theirs back. Among those waiting in a part
+    /// whose address has room, the one whose address holds least goes first (the earliest
+    /// of those), so made-up peers at a few addresses do not keep a real one at another
+    /// address waiting behind all of theirs; and none goes past it, so a punch is not kept
+    /// waiting by dials.
     pub(crate) fn take(&self, ip: IpAddr, cost: usize) -> Turn {
+        self.take_in(Part::of(&ip), ip, cost)
+    }
+
+    fn take_in(&self, part: Part, ip: IpAddr, cost: usize) -> Turn {
         let (receiver, id, granted) = {
             let mut room = self.lock();
             let (sender, receiver) = oneshot::channel();
             let id = room.next_waiter;
             room.next_waiter += 1;
-            room.waiting.push_back(Waiter {
+            room.share(part).waiting.push_back(Waiter {
                 id,
                 ip,
                 cost,
@@ -184,53 +328,42 @@ impl DialRoom {
         hand_out(granted);
         Turn {
             room: self.clone(),
+            part,
             id,
             receiver,
             timer: None,
         }
     }
 
-    /// Takes the waiters that fit now out of the queue, with their room counted.
+    /// Takes the waiters that fit now out of the queues, with their room counted.
     fn grant(&self, room: &mut Room) -> Granted {
         let mut granted = Vec::new();
-        loop {
-            let best = room
-                .waiting
-                .iter()
-                .enumerate()
-                .filter_map(|(i, w)| {
-                    let at = room.by_address.get(&w.ip).copied().unwrap_or(0);
-                    (at + w.cost <= PER_ADDRESS).then_some((at, i))
-                })
-                .min()
-                .map(|(_, i)| i)
-                .filter(|i| room.held + room.waiting[*i].cost <= IN_ALL);
-            let Some(waiter) = best.and_then(|i| room.waiting.remove(i)) else {
-                return granted;
-            };
-            room.held += waiter.cost;
-            *room.by_address.entry(waiter.ip).or_default() += waiter.cost;
-            granted.push((
-                waiter.turn,
-                Held {
-                    room: self.clone(),
-                    ip: waiter.ip,
-                    cost: waiter.cost,
-                },
-            ));
+        for part in [Part::Vouched, Part::Other] {
+            while let Some(waiter) = room.share(part).next(part.room()) {
+                granted.push((
+                    waiter.turn,
+                    Held {
+                        room: self.clone(),
+                        part,
+                        ip: waiter.ip,
+                        cost: waiter.cost,
+                    },
+                ));
+            }
         }
+        granted
     }
 
     /// The room of a dial that ended: given back now when its address answered, else once
     /// its packets can no longer be waiting.
-    fn release(&self, ip: IpAddr, cost: usize) {
+    fn release(&self, part: Part, ip: IpAddr, cost: usize) {
         let granted = {
             let mut room = self.lock();
             let now = Instant::now();
             if room.answers(&ip) {
-                room.give_back(ip, cost);
+                room.share(part).give_back(ip, cost);
             } else {
-                room.lingering.push((now + LINGER, ip, cost));
+                room.lingering.push((now + LINGER, part, ip, cost));
             }
             room.expire(now);
             self.grant(&mut room)
@@ -238,10 +371,17 @@ impl DialRoom {
         hand_out(granted);
     }
 
+    /// What dials not vouched for hold, and how many of them wait.
     #[cfg(test)]
     fn held(&self) -> (usize, usize) {
-        let room = self.lock();
-        (room.held, room.waiting.len())
+        self.held_in(Part::Other)
+    }
+
+    #[cfg(test)]
+    fn held_in(&self, part: Part) -> (usize, usize) {
+        let mut room = self.lock();
+        let share = room.share(part);
+        (share.held, share.waiting.len())
     }
 }
 
@@ -257,13 +397,14 @@ fn hand_out(granted: Granted) {
 #[derive(Debug)]
 pub(crate) struct Held {
     room: DialRoom,
+    part: Part,
     ip: IpAddr,
     cost: usize,
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
-        self.room.release(self.ip, self.cost);
+        self.room.release(self.part, self.ip, self.cost);
     }
 }
 
@@ -271,6 +412,7 @@ impl Drop for Held {
 #[derive(Debug)]
 pub(crate) struct Turn {
     room: DialRoom,
+    part: Part,
     id: u64,
     receiver: oneshot::Receiver<Held>,
     /// Wakes the dial when the next lingering room is due, which nothing else would.
@@ -314,7 +456,11 @@ impl Future for Turn {
 impl Drop for Turn {
     fn drop(&mut self) {
         let id = self.id;
-        self.room.lock().waiting.retain(|w| w.id != id);
+        self.room
+            .lock()
+            .share(self.part)
+            .waiting
+            .retain(|w| w.id != id);
     }
 }
 
@@ -341,6 +487,7 @@ mod tests {
 
     use super::*;
 
+    /// Addresses no test vouches for in this process.
     fn ip(last: u8) -> IpAddr {
         IpAddr::from([192, 168, 1, last])
     }
@@ -360,6 +507,18 @@ mod tests {
         for (at, ..) in &mut room.lock().lingering {
             *at = past;
         }
+    }
+
+    /// Fills the room of dials no one vouched for with eight dials at four addresses.
+    fn fill_other(room: &DialRoom) -> Vec<Held> {
+        let mut held = Vec::new();
+        for last in [1, 2, 3, 4] {
+            for _ in 0..2 {
+                held.extend(ready(&mut room.take(ip(last), DIAL_HOLDS)));
+            }
+        }
+        assert_eq!(room.held(), (IN_ALL, 0));
+        held
     }
 
     /// Dials to one address take two places at once, dials to all of them eight, and the
@@ -414,13 +573,7 @@ mod tests {
     #[test]
     fn a_punch_is_not_passed_by_later_dials() {
         let room = DialRoom::default();
-        let mut held = Vec::new();
-        for last in [1, 2, 3, 4] {
-            for _ in 0..2 {
-                held.extend(ready(&mut room.take(ip(last), DIAL_HOLDS)));
-            }
-        }
-        assert_eq!(room.held(), (IN_ALL, 0));
+        let mut held = fill_other(&room);
         let mut punch = room.take(ip(9), PUNCH_HOLDS);
         let mut dial = room.take(ip(8), DIAL_HOLDS);
         drop(held.pop());
@@ -442,13 +595,7 @@ mod tests {
     #[test]
     fn an_address_that_holds_nothing_goes_first() {
         let room = DialRoom::default();
-        let mut held = Vec::new();
-        for last in [1, 2, 3, 4] {
-            for _ in 0..2 {
-                held.extend(ready(&mut room.take(ip(last), DIAL_HOLDS)));
-            }
-        }
-        assert_eq!(held.len(), 8);
+        let mut held = fill_other(&room);
         // Made-up peers at an address that will hold one dial, and a real one at another.
         let mut made_up: Vec<Turn> = (0..20).map(|_| room.take(ip(4), DIAL_HOLDS)).collect();
         let mut real = room.take(ip(6), DIAL_HOLDS);
@@ -463,6 +610,109 @@ mod tests {
         let mut next: Vec<Held> = made_up.iter_mut().filter_map(ready).collect();
         assert_eq!(next.len(), 1, "the other place went elsewhere");
         next.clear();
+    }
+
+    /// While dials no one vouched for fill their room and many more wait, each at an address
+    /// of its own (made-up peers all over the network), a dial to an address the node
+    /// vouched for gets its turn at once; and those in its part wait only for each other.
+    #[test]
+    fn a_vouched_dial_goes_at_once_while_the_others_are_full() {
+        let room = DialRoom::default();
+        let mut held = fill_other(&room);
+        let mut made_up: Vec<Turn> = (0..200u8)
+            .map(|i| room.take(IpAddr::from([192, 168, 2, i]), DIAL_HOLDS))
+            .collect();
+        assert_eq!(room.held(), (IN_ALL, 200));
+
+        let real = ready(&mut room.take_in(Part::Vouched, ip(50), DIAL_HOLDS));
+        assert!(real.is_some(), "a vouched dial waited behind made-up ones");
+        let punch = ready(&mut room.take_in(Part::Vouched, ip(51), PUNCH_HOLDS));
+        assert!(punch.is_some());
+        assert_eq!(room.held_in(Part::Vouched), (DIAL_HOLDS + PUNCH_HOLDS, 0));
+        // Its own part full: the next vouched dial waits for room there.
+        let mut third = room.take_in(Part::Vouched, ip(52), PUNCH_HOLDS);
+        assert!(ready(&mut third).is_none());
+        drop(punch);
+        linger_over(&room);
+        assert!(
+            ready(&mut third).is_some(),
+            "vouched room did not come back"
+        );
+        // Room given back in the other part goes to the dials waiting there.
+        drop(held.pop());
+        linger_over(&room);
+        let next: Vec<Held> = made_up.iter_mut().filter_map(ready).collect();
+        assert_eq!(next.len(), 1);
+        drop(real);
+    }
+
+    /// Dials no one vouched for never take the room of vouched ones, however much of it is
+    /// free.
+    #[test]
+    fn dials_not_vouched_for_never_take_vouched_room() {
+        let room = DialRoom::default();
+        let _held = fill_other(&room);
+        assert_eq!(room.held_in(Part::Vouched), (0, 0));
+        let mut more = room.take(ip(5), DIAL_HOLDS);
+        assert!(ready(&mut more).is_none(), "it took vouched room");
+        assert_eq!(room.held_in(Part::Vouched), (0, 0));
+        assert_eq!(room.held(), (IN_ALL, 1));
+    }
+
+    /// Each part keeps its own share for one address.
+    #[test]
+    fn each_part_keeps_one_address_to_its_share() {
+        let room = DialRoom::default();
+        let mut turns: Vec<Turn> = (0..3)
+            .map(|_| room.take_in(Part::Vouched, ip(7), DIAL_HOLDS))
+            .collect();
+        let held: Vec<Held> = turns.iter_mut().filter_map(ready).collect();
+        assert_eq!(held.len(), 2, "one address held more than its share");
+        assert_eq!(room.held_in(Part::Vouched), (2 * DIAL_HOLDS, 1));
+    }
+
+    /// Vouching lasts [`VOUCHED_FOR`], and the newest [`MAX_VOUCHED`] addresses are kept.
+    #[test]
+    fn vouches_expire_and_are_bounded() {
+        let mut vouches = Vouches::default();
+        let start = Instant::now();
+        let a = IpAddr::from([10, 0, 0, 1]);
+        vouches.vouch(a, start);
+        assert!(vouches.holds(&a, start + VOUCHED_FOR - Duration::from_millis(1)));
+        assert!(!vouches.holds(&a, start + VOUCHED_FOR));
+        // Vouched again, it lasts again.
+        vouches.vouch(a, start + VOUCHED_FOR);
+        assert!(vouches.holds(&a, start + VOUCHED_FOR + Duration::from_secs(1)));
+
+        let mut vouches = Vouches::default();
+        for i in 0..(MAX_VOUCHED + 10) {
+            let at = start + Duration::from_millis(i as u64);
+            vouches.vouch(IpAddr::from([10, 1, (i / 256) as u8, i as u8]), at);
+        }
+        let now = start + Duration::from_secs(1);
+        assert_eq!(vouches.at.len(), MAX_VOUCHED);
+        assert!(
+            !vouches.holds(&IpAddr::from([10, 1, 0, 0]), now),
+            "oldest kept"
+        );
+        assert!(!vouches.holds(&IpAddr::from([10, 1, 0, 9]), now));
+        assert!(vouches.holds(&IpAddr::from([10, 1, 0, 10]), now));
+        let last = MAX_VOUCHED + 9;
+        assert!(vouches.holds(&IpAddr::from([10, 1, (last / 256) as u8, last as u8]), now));
+    }
+
+    /// The node's call puts an address in the vouched part; others stay where they were.
+    #[test]
+    fn vouching_puts_an_address_in_the_vouched_part() {
+        let vouched_ip = IpAddr::from([198, 51, 100, 77]);
+        assert_eq!(Part::of(&vouched_ip), Part::Other);
+        vouch(vouched_ip);
+        assert_eq!(Part::of(&vouched_ip), Part::Vouched);
+        assert_eq!(Part::of(&IpAddr::from([198, 51, 100, 78])), Part::Other);
+        let room = DialRoom::default();
+        let _held = ready(&mut room.take(vouched_ip, DIAL_HOLDS)).unwrap();
+        assert_eq!(room.held_in(Part::Vouched), (DIAL_HOLDS, 0));
+        assert_eq!(room.held(), (0, 0));
     }
 
     /// A dial that goes away while it waits leaves the queue, and one that goes away with

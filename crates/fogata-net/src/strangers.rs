@@ -842,6 +842,9 @@ impl<B: NetworkBehaviour> NetworkBehaviour for StrangerDials<B> {
                         .collect(),
                     None => opened,
                 };
+                // Sealed with a member's or friend's key: theirs to name (see
+                // `addr::vouch_for`); the others may be the DHT's.
+                addr::vouch_for(&out);
                 out.extend(found);
                 out
             }

@@ -952,6 +952,8 @@ impl Node {
         if self.swarm.is_connected(&peer) {
             self.contact(peer);
         } else if !addrs.is_empty() {
+            // The person gave the link.
+            addr::vouch_for(&addrs);
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
                 .condition(PeerCondition::DisconnectedAndNotDialing)

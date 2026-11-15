@@ -152,6 +152,8 @@ impl Node {
     /// connection of its own.
     pub(super) fn dial_quic(&mut self, peer: PeerId, quic: Vec<Multiaddr>) {
         self.quic_dialled.insert(peer, Instant::now());
+        // What the member sent, or where it is connected from.
+        addr::vouch_for(&quic);
         let opts = DialOpts::peer_id(peer)
             .addresses(quic)
             .condition(PeerCondition::Always)

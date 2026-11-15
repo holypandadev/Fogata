@@ -64,7 +64,7 @@ mod config;
 mod connection;
 pub mod datagram;
 mod hole_punching;
-mod on_link;
+pub mod on_link;
 mod provider;
 mod transport;
 
