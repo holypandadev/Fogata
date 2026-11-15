@@ -57,7 +57,8 @@ groups it found nobody of and for its friends), since the other's record may not
 findable yet at the first look, and the next one was half a minute or more away: two
 devices started in the same seconds took 32 or 52 s now and then (about one run in ten of
 the lab's `dht-liars`); with the three looks, thirty runs in a row took 18 to 27 s
-(`.github/workflows/netlab.yml`). With every connection kept for
+(`.github/workflows/netlab.yml`), and thirty-four more with the made-up members made near
+the key took 18 to 28 s. With every connection kept for
 60 s after its last use and most DHT nodes reached over TCP, a device held 200 to 600 open
 sockets, one file descriptor each; desktop apps on macOS may only open 256. The node
 therefore treats DHT nodes as strangers:
