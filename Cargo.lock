@@ -1474,6 +1474,7 @@ dependencies = [
  "fogata-proto",
  "fogata-state",
  "fogata-update",
+ "futures",
  "hex",
  "qrcode",
  "rustix",

@@ -46,7 +46,7 @@ SCENARIOS=(selftest cone-cone cone-cone-member cone-symmetric cone-symmetric-mem
     symmetric-symmetric-member member-lost-direct home-two-routers home-two-routers-firewall
     home-two-routers-closed group-join friends-link friends-code friends-later friends-later-code
     friends-remove friends-ex-mutual room-files network-check network-check-negative fake-observed inbound-flood
-    silent-flood tcp-known tcp-slow mdns-flood mdns-stale dht-liars lan-sealed direct-apart transfer-cone-cone transfer-lan transfer-cone-symmetric
+    silent-flood tcp-known tcp-slow mdns-flood mdns-stale dht-liars media-silent lan-sealed direct-apart transfer-cone-cone transfer-lan transfer-cone-symmetric
     transfer-two-routers transfer-two-routers-back update-chain update-refusals)
 
 if [[ -z "${NETLAB_INSIDE:-}" ]]; then
@@ -1611,6 +1611,71 @@ EOF2
             # lookup's places for 10 s, must not keep them apart until the next lookup,
             # half a minute later.
             [[ $after != never ]] && (( after <= 30 )) || pass=0
+        done
+        if [[ $pass == 1 ]]; then
+            echo "result: PASS   logs: $WORK"
+            exit 0
+        fi
+        echo "result: FAIL   logs: $WORK"
+        exit 1 ;;
+    media-silent)
+        # A and B, members on one network, send each other a datagram every 20 ms, as a
+        # call's sound goes (the QUIC datagrams of vendor/libp2p-quic, change 1). Twelve DHT
+        # nodes that A asks first answer every lookup with eight made-up members each, four
+        # of the nodes at each of three addresses of that network where no host is: A dials
+        # them, and on Linux its packets there wait for a neighbour that never answers,
+        # counted against its one UDP socket. With the system's limit on send buffers left
+        # at its default, the longest gap between the datagrams either one receives must stay
+        # close to the pace: a full socket would stop the sound for seconds.
+        limits=$(sysctl net.core.wmem_max net.core.wmem_default | tr '\n' ' ')
+        public_host A 203.0.113.21
+        public_host B 203.0.113.22
+        members A B
+        liars=""
+        for i in $(seq 1 12); do
+            public_host "L$i" "203.0.113.$((100 + i))"
+            start_dht "L$i" 4001 --peer "$DHT1" --lies 8 \
+                --lie-at "/ip4/203.0.113.$((91 + i % 3))/udp/41000/quic-v1"
+            liars="$liars --bootstrap $DHT_ADDR"
+        done
+        ip netns exec B timeout 200 "$BIN" --data-dir "$WORK/data-B" lab-datagrams lab \
+            --seconds 60 --port 41000 --no-mdns $BOOT > "$WORK/B.out" 2>&1 &
+        b_pid=$!
+        PIDS+=($!)
+        ip netns exec A env RUST_LOG=warn,fogata_net=debug timeout 200 "$BIN" \
+            --data-dir "$WORK/data-A" lab-datagrams lab --seconds 60 --port 41000 --no-mdns \
+            --peer /ip4/203.0.113.22/udp/41000/quic-v1 $liars $BOOT > "$WORK/A.out" 2>&1 &
+        a_pid=$!
+        PIDS+=($!)
+        # The most bytes waiting in A's UDP sockets, as the system counts them, and the
+        # most they may hold.
+        (
+            peak=0 limit=0
+            while kill -0 "$a_pid" 2> /dev/null; do
+                while read -r t tb; do
+                    (( t > peak )) && peak=$t
+                    limit=$tb
+                done < <(in_ns A ss -u -a -m -n 'sport = :41000' | grep -o 'skmem:([^)]*)' |
+                    sed -E 's/.*,t([0-9]+),tb([0-9]+),.*/\1 \2/')
+                echo "$peak $limit" > "$WORK/queue"
+                sleep 0.1
+            done
+        ) &
+        PIDS+=($!)
+        wait "$a_pid" "$b_pid" 2> /dev/null || true
+        read -r peak limit < "$WORK/queue" || true
+        echo "=== $SCENARIO"
+        echo "--- $limits"
+        echo "--- A: $(grep -c 'found a member announcement' "$WORK/A.out" || true) made-up" \
+            "members taken; most bytes waiting in its socket: ${peak:-?} of ${limit:-?}"
+        pass=1
+        for device in A B; do
+            line=$(grep -m1 '^RESULT' "$WORK/$device.out" || true)
+            echo "--- $device: ${line:-no result}"
+            gap=$(sed -n 's/.*longest_gap_ms=\([0-9]*\).*/\1/p' <<< "$line")
+            got=$(sed -n 's/.* received=\([0-9]*\).*/\1/p' <<< "$line")
+            # A minute at 20 ms is 3000 datagrams; some may be lost, none may wait long.
+            [[ -n $gap && $gap -le 400 && ${got:-0} -ge 2500 ]] || pass=0
         done
         if [[ $pass == 1 ]]; then
             echo "result: PASS   logs: $WORK"

@@ -219,6 +219,11 @@ enum Command {
     #[cfg(feature = "lab")]
     #[command(hide = true)]
     LabSoak(soak::SoakArgs),
+    /// Lab only: send a member a steady stream of datagrams, as a call's media goes, and
+    /// say how long the longest gap between those received from it was.
+    #[cfg(feature = "lab")]
+    #[command(hide = true)]
+    LabDatagrams(lab::DatagramArgs),
 }
 
 /// The bytes a hex argument writes.
@@ -361,6 +366,8 @@ async fn main() -> Result<()> {
         Command::LabOpen { records } => lab::open_records(store()?, &records)?,
         #[cfg(feature = "lab")]
         Command::LabSoak(args) => soak::run(store()?, args).await?,
+        #[cfg(feature = "lab")]
+        Command::LabDatagrams(args) => lab::datagrams(store()?, args).await?,
     }
     Ok(())
 }

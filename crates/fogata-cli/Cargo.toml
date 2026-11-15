@@ -19,6 +19,7 @@ fogata-net.workspace = true
 fogata-proto.workspace = true
 fogata-state.workspace = true
 fogata-update.workspace = true
+futures = { workspace = true, optional = true }
 hex.workspace = true
 qrcode.workspace = true
 serde.workspace = true
@@ -37,7 +38,7 @@ rustix = { version = "1.1.5", default-features = false, features = ["std", "fs"]
 # The network lab's tools and test switches (every lab-* subcommand and --lab-* flag, release
 # --lab): left out of the program that ships. tools/netlab/netlab.sh builds its own copy with
 # this feature, and tools/check.sh tests and lints it with it.
-lab = ["fogata-core/lab"]
+lab = ["fogata-core/lab", "dep:futures"]
 
 [lints]
 workspace = true

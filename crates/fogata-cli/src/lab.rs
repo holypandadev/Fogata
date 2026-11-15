@@ -101,3 +101,117 @@ pub fn open_records(store: Store, records: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+/// `lab-datagrams`: what a call's media goes as, measured. Once a member connects, sends it
+/// a datagram every `interval_ms` (the unreliable QUIC datagrams a call's sound and picture
+/// go in), takes the member's, and says how long the longest wait between two received
+/// ones was: a socket that stops sending for a while shows here as a long gap.
+#[derive(clap::Args)]
+pub struct DatagramArgs {
+    /// Group whose members to send to.
+    group: String,
+    /// Milliseconds between two datagrams sent, as a voice call's 20 ms.
+    #[arg(long, default_value_t = 20)]
+    interval_ms: u64,
+    /// Bytes in each, about an encrypted voice packet.
+    #[arg(long, default_value_t = 160)]
+    size: usize,
+    /// How long to send and listen once the member connected.
+    #[arg(long, default_value_t = 60)]
+    seconds: u64,
+    #[command(flatten)]
+    net: crate::chat::NetArgs,
+}
+
+pub async fn datagrams(store: Store, args: DatagramArgs) -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    use anyhow::bail;
+    use fogata_net::{GroupSetup, NodeEvent, datagram};
+    use futures::StreamExt;
+
+    let (identity, _) = store.identity()?;
+    let log = store.load_log(&store.group(&args.group)?)?;
+    let (node, mut events) = fogata_net::start(args.net.node_config(
+        identity,
+        vec![GroupSetup::Member(log)],
+        None,
+    ))?;
+    let checker = node.clone();
+    let mut received = datagram::receive(1024, move |peer| checker.is_member(peer));
+
+    let peer = loop {
+        let event = tokio::time::timeout(Duration::from_secs(120), events.recv())
+            .await
+            .context("no member connected within two minutes")?;
+        match event {
+            Some(NodeEvent::MemberConnected { peer, path, .. }) => {
+                say!("member connected ({path})");
+                break peer;
+            }
+            Some(NodeEvent::Info(text)) => say!("· {text}"),
+            Some(_) => {}
+            None => bail!("the node stopped"),
+        }
+    };
+    tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            if let NodeEvent::Info(text) = event {
+                say!("· {text}");
+            }
+        }
+    });
+
+    let interval = Duration::from_millis(args.interval_ms.max(1));
+    let size = args.size.max(16);
+    let end = tokio::time::Instant::now() + Duration::from_secs(args.seconds);
+    let mut tick = tokio::time::interval(interval);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut report = tokio::time::interval(Duration::from_secs(5));
+    let (mut sent, mut unsent, mut got) = (0u64, 0u64, 0u64);
+    let mut last: Option<Instant> = None;
+    let mut longest = Duration::ZERO;
+    let mut longest_at = String::new();
+    let mut seq = 0u64;
+    loop {
+        tokio::select! {
+            () = tokio::time::sleep_until(end) => break,
+            _ = tick.tick() => {
+                seq += 1;
+                let mut packet = vec![0u8; size];
+                packet[..8].copy_from_slice(&seq.to_be_bytes());
+                match datagram::link(&peer) {
+                    Some(link) if link.send(packet.into()).is_ok() => sent += 1,
+                    _ => unsent += 1,
+                }
+            }
+            Some((from, _)) = received.next() => {
+                if from != peer {
+                    continue;
+                }
+                let now = Instant::now();
+                got += 1;
+                if let Some(before) = last {
+                    let gap = now - before;
+                    if gap > longest {
+                        longest = gap;
+                        longest_at = crate::clock();
+                    }
+                }
+                last = Some(now);
+            }
+            _ = report.tick() => {
+                say!(
+                    "datagrams: sent {sent}, not sent {unsent}, received {got}, longest gap {} ms",
+                    longest.as_millis()
+                );
+            }
+        }
+    }
+    println!(
+        "RESULT sent={sent} unsent={unsent} received={got} longest_gap_ms={} at={longest_at}",
+        longest.as_millis()
+    );
+    node.shutdown().await?;
+    Ok(())
+}
