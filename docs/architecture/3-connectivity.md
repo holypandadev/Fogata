@@ -117,23 +117,48 @@ therefore treats DHT nodes as strangers:
   addresses of the device's own networks that have not answered lately take turns
   (`vendor/libp2p-quic`, change 5): each holds room for the packets it may leave waiting
   (14 KiB for a dial, 32 KiB for a hole punch) while it runs and for 3.5 s after, the
-  longest such a packet waits, and they hold 32 KiB for one address and 112 KiB in all at
-  most, about half of the default buffer, whatever a lookup's answers name. The others
-  wait, within the time the dial has, the one whose address holds least first, so a real
-  device at another address goes before made-up ones at a few addresses as soon as room
-  comes back. A limit: made-up members at many such addresses, named faster than the turns
-  come back (eight per 10.5 s at worst), all hold nothing and go in the order they came,
-  so a real device there not met before can wait the whole 7 s its dial has, and fail, on
-  every try while that lasts. An
-  address that set up a connection in the last ten minutes takes no turn, nor does any
-  address off the device's own networks, so members already met there, and every address
-  on the internet, are dialled at once. In `media-silent` two devices send each other a
-  datagram every 20 ms, as a call's sound goes, while twelve DHT nodes name made-up members
-  at three such addresses to one of them, with `net.core.wmem_max` at its default: before
-  the turns its socket filled (429600 bytes waiting of 425984) and the longest gap between
-  datagrams was 6.1 s one way and 9.2 s the other; with them, at most 75456 bytes waited,
-  each side received 3000 of the 3001 datagrams sent, and the longest gap was 22 ms both
-  ways.
+  longest such a packet waits. The node vouches for an address just before it dials it
+  when it has a reason of its own to (`addr::vouch_for`): mDNS told of the peer there, a
+  member or friend sent it (sealed local addresses, the local addresses a member sends, a
+  hole punch, which runs only over a member's relay), or the person gave it (an invite, a
+  link, the addresses given at start) or it was remembered from a member or friend reached
+  there. Dials to an address vouched for in the last minute take their turns in 64 KiB of
+  their own, which no other dial ever takes; every other dial, among them those to
+  candidates and DHT nodes that only DHT answers named, takes its turn in 112 KiB, as
+  before there were two parts. Each part holds
+  32 KiB for one address at most; the 176 KiB of both are 42% of what the kernel gives
+  the socket with `net.core.wmem_max` at its default, and under the default buffer itself.
+  In each part the others wait, within the time the dial has, the one whose address holds
+  least first. An address that set up a connection in the last ten minutes takes no turn,
+  nor does any address off the device's own networks, so members already met there, and
+  every address on the internet, are dialled at once. What is left, as limits:
+  - Someone on the local network can tell of made-up peers over mDNS, and those are vouched
+    for too. The node lets in 8 new peers from one address and then 8 a minute, 32 from
+    all addresses and then 32 a minute, and dials each at 16 local addresses at most: that
+    is more than the 64 KiB lets through (four dials per 10.5 s at worst), so such a
+    neighbour can keep a real device there waiting the whole 7 s its dial has, and failing,
+    on every try while it lasts, as made-up DHT answers could before the two parts.
+  - A real member that only the DHT named, at an address of the device's own network
+    that is not private (both on one public network, or one IPv6 /64), waits with the
+    made-up candidates in the 112 KiB: made-up members at many such addresses, named
+    faster than the turns there come back (eight per 10.5 s at worst), hold nothing and go
+    in the order they came, so its dial can wait the whole 7 s and fail on every try while
+    that lasts. It is still reached when it dials this device (an incoming connection takes
+    no turn, and both ends dial the members their lookups find), when mDNS tells of it
+    (from its own address, which is then vouched for), or through a member connected to
+    both that relays between them, and the hole punch after it.
+
+  In `media-silent` two devices send each other a datagram every 20 ms, as a call's sound
+  goes, while twelve DHT nodes name made-up members at three such addresses to one of
+  them, with `net.core.wmem_max` at its default: before the turns its socket filled
+  (429600 bytes waiting of 425984) and the longest gap between datagrams was 6.1 s one way
+  and 9.2 s the other; with them, at most 58560 bytes waited, each side received 2999 or
+  3000 of the 3000 datagrams sent, and the longest gap was 26 ms. In `lan-first-contact` a
+  device finds over mDNS a member it never reached, on a private network of its own, while
+  twelve DHT nodes name made-up members at 24 addresses of its public network where no
+  host is: with the turns in one part, its dial to the member waited 6.6 s; with the two
+  parts it connected 1 to 2 ms after the device found the member, as with no one lying
+  (1 ms).
 - **Candidates that never answer** (announcements of sessions that ended, members that
   closed the app) are tried six times, rested for ten minutes, and forgotten after three
   such rests; a later lookup that still finds them announced brings them back. While
