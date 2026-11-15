@@ -48,35 +48,56 @@ pub struct Connecting {
     /// Fogata: counts this one among the incoming connections being set up until it is
     /// established, fails or is dropped (see `Config::retry_above`).
     _counted: Option<Counted>,
-    /// Fogata: where the remote address is noted as one that answers once the connection is
-    /// set up, or once anything came back from it (see `on_link`).
+    /// Fogata: for a remote address on one of the device's links, where it is noted as one
+    /// that answers once the connection is set up, or, for a dial of this device's, once
+    /// anything came back from it (see `on_link`).
+    on_link: Option<OnLink>,
+}
+
+/// Fogata: see [`Connecting::on_link`].
+#[derive(Debug)]
+struct OnLink {
     room: DialRoom,
     remote: std::net::IpAddr,
+    /// This device dialled it: a reply to its own packets cannot come from a forged source.
+    dialled: bool,
 }
 
 impl Connecting {
-    pub(crate) fn new(connection: quinn::Connecting, timeout: Duration, room: DialRoom) -> Self {
+    /// A dial of this device's; `room` when the remote address is on one of its links.
+    pub(crate) fn new(
+        connection: quinn::Connecting,
+        timeout: Duration,
+        room: Option<DialRoom>,
+    ) -> Self {
         Connecting {
-            remote: connection.remote_address().ip(),
+            on_link: room.map(|room| OnLink {
+                room,
+                remote: connection.remote_address().ip(),
+                dialled: true,
+            }),
             connecting: select(connection, Delay::new(timeout)),
             _counted: None,
-            room,
         }
     }
 
-    /// An incoming connection, counted in `pending` while it is being set up.
+    /// An incoming connection, counted in `pending` while it is being set up; `room` when
+    /// the remote address is on one of the device's links.
     pub(crate) fn counted(
         connection: quinn::Connecting,
         timeout: Duration,
         pending: Arc<AtomicUsize>,
-        room: DialRoom,
+        room: Option<DialRoom>,
     ) -> Self {
         pending.fetch_add(1, Ordering::SeqCst);
         Connecting {
-            remote: connection.remote_address().ip(),
+            on_link: room.map(|room| OnLink {
+                room,
+                remote: connection.remote_address().ip(),
+                dialled: false,
+            }),
             connecting: select(connection, Delay::new(timeout)),
             _counted: Some(Counted(pending)),
-            room,
         }
     }
 }
@@ -126,22 +147,26 @@ impl Future for Connecting {
             Either::Right(_) => return Poll::Ready(Err(Error::HandshakeTimedOut)),
             Either::Left((Ok(connection), _)) => connection,
             Either::Left((Err(e), _)) => {
-                // Fogata: anything but silence came back from the remote (a refusal, a
-                // version it does not speak, an error of its handshake): a host is there.
-                if !matches!(
-                    e,
-                    quinn::ConnectionError::TimedOut | quinn::ConnectionError::LocallyClosed
-                ) {
-                    self.room.replied(self.remote);
+                // Fogata: to a dial of this device's, anything but silence came back (a
+                // refusal, a version it does not speak, an error of its handshake): a host is
+                // there. Not for an incoming one, whose first packet's source anyone can forge.
+                if let Some(on_link) = self.on_link.as_ref().filter(|o| o.dialled)
+                    && !matches!(
+                        e,
+                        quinn::ConnectionError::TimedOut | quinn::ConnectionError::LocallyClosed
+                    )
+                {
+                    on_link.room.replied(on_link.remote);
                 }
                 return Poll::Ready(Err(ConnectionError(e).into()));
             }
         };
-        // Fogata: a host answered, whether or not it proves the peer expected.
-        let answered = self.room.answered(connection.remote_address().ip());
+        // Fogata: a host answered, whether or not it proves the peer expected; a completed
+        // handshake, incoming too, cannot come from a forged source.
+        let answered = self.on_link.as_ref().map(|o| o.room.answered(o.remote));
         let peer_id = Self::remote_peer_id(&connection)?;
         crate::datagram::register(peer_id, connection.clone());
-        let muxer = Connection::new(connection, Some(answered));
+        let muxer = Connection::new(connection, answered);
         Poll::Ready(Ok((peer_id, muxer)))
     }
 }

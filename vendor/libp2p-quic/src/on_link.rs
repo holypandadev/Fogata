@@ -46,8 +46,11 @@
 //!   more on Linux, so with that cap at its default the kernel gives twice it, 425984 bytes.
 //!   The dials that take turns leave [`IN_ALL`] + [`VOUCHED_IN_ALL`] = 114688 + 65536 =
 //!   180224 bytes waiting at most, 42% of that (85% of the default buffer itself, where the
-//!   larger one is not given). Packets to addresses that answered lately, and replies to
-//!   incoming handshakes, are not counted: they go to hosts that are there.
+//!   larger one is not given). Packets to addresses that answered lately are not counted:
+//!   they go to hosts that are there. Nor are replies to incoming handshakes, though the
+//!   first packet of one can come from a forged source on the device's own network, which
+//!   leaves the reply waiting for a neighbour that is not there; an incoming handshake that
+//!   does not complete never counts as an answer.
 //! - A neighbour that answered stays known (reachable, then stale) and packets to it leave at
 //!   once. Once the host has gone, the next packet starts the kernel's checks: 5 s before it
 //!   asks, then three asks a second apart, and only then does it forget the neighbour and
@@ -57,7 +60,10 @@
 //!
 //! The turns cost a wait for room when more than eight new addresses of the local network
 //! are dialled at once and some never answer, and a dial that waited its whole time fails
-//! without sending anything (`Error::NoTurn`).
+//! without sending anything (`Error::NoTurn`). Limits: a hole punch waits for its turn even
+//! while the peer's incoming connection, which would make it needless, is being set up; and
+//! handing out turns looks through every waiter each time, so a crowd of waiters (bounded by
+//! the dials libp2p runs at once) costs time quadratic in their number.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -95,7 +101,10 @@ pub(crate) const LINGER: Duration = Duration::from_millis(3500);
 /// needs no turn (see the module's notes).
 pub(crate) const ANSWERED_FOR: Duration = Duration::from_secs(10);
 /// Addresses that answered, kept at most; the one that answered longest ago goes first.
+/// Only addresses on the device's links are noted.
 const MAX_ANSWERED: usize = 256;
+/// How often a waiting dial looks again for room at the latest, whatever woke it or not.
+const RECHECK: Duration = Duration::from_millis(250);
 /// How long the node's vouching for a peer at an address lasts: the node vouches again
 /// before each dial, and a dial waits for its turn 7 s at most, so this covers a dial and
 /// the tries mDNS makes again soon after.
@@ -320,21 +329,20 @@ impl DialRoom {
         }
     }
 
-    /// Notes that a dial to `ip` got a reply, whatever came of it: a host is there.
+    /// Notes that a dial of this device's to `ip`, an address on one of its links, got a
+    /// reply, whatever came of it: a host is there. Never for an incoming handshake that did
+    /// not complete, whose source anyone can forge.
     pub(crate) fn replied(&self, ip: IpAddr) {
         self.settle(|room| room.note_answer(ip, false));
     }
 
-    /// Forgets what answered, gives back what lingers and forgets the node's vouching: the
-    /// device's networks changed, and the same numbers may now name other hosts, or none.
+    /// Forgets the node's vouching and the answers of addresses with no connection open:
+    /// the device's networks changed, and the same numbers may now name other hosts, or
+    /// none. Open connections stay counted, and what lingers lingers out: its packets may
+    /// still wait in the kernel.
     pub(crate) fn forget_network(&self) {
         vouches().at.clear();
-        self.settle(|room| {
-            room.answered.clear();
-            for (_, part, ip, cost) in std::mem::take(&mut room.lingering) {
-                room.share(part).give_back(ip, cost);
-            }
-        });
+        self.settle(|room| room.answered.retain(|_, (open, _)| *open > 0));
     }
 
     /// Changes the room with `change`, then hands out the turns that fit.
@@ -518,11 +526,11 @@ impl Future for Turn {
                 hand_out(granted);
                 continue;
             }
-            let Some(due) = due else {
-                self.timer = None;
-                return Poll::Pending;
-            };
-            if self.timer.as_ref().is_none_or(|(at, _)| *at != due) {
+            // Woken when lingering room is due, and in any case every [`RECHECK`]: room may
+            // come to linger after this poll, which wakes only the waiters it serves.
+            let recheck = Instant::now() + RECHECK;
+            let due = due.map_or(recheck, |due| due.min(recheck));
+            if self.timer.as_ref().is_none_or(|(at, _)| *at > due) {
                 let wait = due.saturating_duration_since(Instant::now());
                 self.timer = Some((due, Delay::new(wait)));
             }
@@ -869,10 +877,11 @@ mod tests {
         assert_eq!(room.held_now(), (DIAL_HOLDS, 0));
     }
 
-    /// A change of the device's networks forgets what answered and the node's vouching, and
-    /// gives back what lingers.
+    /// A change of the device's networks forgets the node's vouching and the answers of
+    /// addresses with no connection open; open connections stay counted, and what lingers
+    /// lingers out.
     #[test]
-    fn a_change_of_networks_forgets_answers_vouches_and_lingering_room() {
+    fn a_change_of_networks_forgets_vouches_and_closed_answers() {
         let _vouching = VOUCHING.lock().unwrap_or_else(PoisonError::into_inner);
         let at = IpAddr::from([198, 51, 100, 90]);
         let peer = PeerId::random();
@@ -882,10 +891,39 @@ mod tests {
         drop(dial);
         assert_eq!(room.held_now(), (DIAL_HOLDS, 0), "it did not linger");
         room.replied(ip(41));
+        let open = room.answered(ip(42));
         room.forget_network();
-        assert_eq!(room.held_now(), (0, 0));
+        assert_eq!(
+            room.held_now(),
+            (DIAL_HOLDS, 0),
+            "lingering room came back early"
+        );
         assert!(!room.answers(&ip(41)));
         assert_eq!(Part::of(at, Some(peer)), Part::Other);
+        // Still open: still answering, and counted. A second connection opens, the first
+        // closes: the address still has one open.
+        assert!(room.answers(&ip(42)));
+        let second = room.answered(ip(42));
+        drop(open);
+        assert_eq!(room.lock().answered[&ip(42)].0, 1);
+        drop(second);
+    }
+
+    /// A dial that waits while nothing lingers yet still gets its turn when the room that
+    /// comes to linger after it was last polled comes back, with nothing else happening.
+    #[cfg(feature = "tokio")]
+    #[tokio::test]
+    async fn a_dial_waiting_before_room_lingers_goes_when_it_comes_back() {
+        let room = DialRoom::default();
+        let held = fill_other(&room);
+        let task = tokio::spawn(take(&room, ip(60), DIAL_HOLDS));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(room.lock().lingering.is_empty());
+        assert_eq!(room.held_now(), (IN_ALL, 1), "it was not waiting");
+        // The eight dials end unanswered: their room lingers, and nothing else happens.
+        drop(held);
+        let got = tokio::time::timeout(LINGER * 2, task).await;
+        assert!(got.is_ok(), "the waiting dial was never woken");
     }
 
     /// A dial that goes away while it waits leaves the queue, and one that goes away with

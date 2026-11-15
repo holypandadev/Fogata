@@ -77,13 +77,15 @@ QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
    `Error::NoTurn` (new), which says nothing was sent. An address with a connection open,
    or that answered (a connection, or any reply to a dial) in the last 10 s, needs no turn,
    nor does the loopback or any address off those networks; IPv4 169.254.0.0/16 and IPv6
-   fe80::/10 are always on the link. What answered, lingers or was vouched for is forgotten
-   when an interface address goes. `src/transport.rs`: each listener keeps its interfaces'
+   fe80::/10 are always on the link. Only addresses on the device's links are noted, and a
+   reply counts only to a dial of this device's. When an interface address goes, what was
+   vouched for and what answered with no connection open now are forgotten; what lingers
+   lingers out. A waiting dial looks for room again every 250 ms at the latest. `src/transport.rs`: each listener keeps its interfaces'
    networks from the interface watcher, and `dial` waits for the turn before the first
    packet of a dial or a punch (after the check for a punch already going);
    `src/connection/connecting.rs` and `src/connection.rs` note the remote address of every
-   connection set up (incoming or outgoing) as one that answers until it closes, and any
-   other reply as an answer. Tests: `dials_to_addresses_that_have_not_answered_wait_for_room`,
+   connection set up (incoming or outgoing) on one of its links as one that answers until
+   it closes, and any other reply to a dial of this device's as an answer. Tests: `dials_to_addresses_that_have_not_answered_wait_for_room`,
    `a_dial_whose_address_answered_gives_its_room_back_at_once`,
    `a_dial_that_got_a_reply_does_not_linger`, `a_dial_that_sent_nothing_does_not_linger`,
    `a_waiting_dial_goes_when_its_address_answers`, `a_punch_is_not_passed_by_later_dials`,
@@ -93,7 +95,8 @@ QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
    `a_vouched_dial_goes_at_once_while_the_others_are_full`,
    `dials_not_vouched_for_never_take_vouched_room`, `each_part_keeps_one_address_to_its_share`,
    `vouches_expire_and_are_bounded`, `vouching_is_for_one_peer_at_one_address`,
-   `a_change_of_networks_forgets_answers_vouches_and_lingering_room`,
+   `a_change_of_networks_forgets_vouches_and_closed_answers`,
+   `a_dial_waiting_before_room_lingers_goes_when_it_comes_back`,
    `dials_to_the_devices_own_networks_take_turns`; the network lab's `media-silent` and
    `lan-first-contact`.
 

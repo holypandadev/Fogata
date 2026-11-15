@@ -264,22 +264,11 @@ pub(super) fn not_tried(error: &libp2p::swarm::DialError) -> bool {
     }
 }
 
-/// Whether `error` is, or wraps only, [`libp2p::quic::Error::NoTurn`].
+/// Whether `error`'s own words say that every attempt in it had no turn
+/// ([`libp2p::quic::Error::NoTurn`]). The words decide, not the chain of sources: the error
+/// comes wrapped in the transports' `Either`, whose source skips it, and the DNS transport
+/// gathers its attempts in a list of its own, whose source would be the last one alone.
 fn no_turn(error: &(dyn std::error::Error + 'static)) -> bool {
-    let mut next: Option<&(dyn std::error::Error + 'static)> = Some(error);
-    while let Some(e) = next {
-        if let Some(quic) = e.downcast_ref::<libp2p::quic::Error>() {
-            return matches!(quic, libp2p::quic::Error::NoTurn);
-        }
-        if let Some(io) = e.downcast_ref::<std::io::Error>()
-            && let Some(inner) = io.get_ref()
-        {
-            next = Some(inner);
-            continue;
-        }
-        next = e.source();
-    }
-    // The DNS transport's list of attempts, in words: every one of them had no turn.
     let words = libp2p::quic::Error::NoTurn.to_string();
     let text = error.to_string();
     let leaves: Vec<&str> = text

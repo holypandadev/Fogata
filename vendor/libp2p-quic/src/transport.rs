@@ -133,12 +133,7 @@ impl<P: Provider> GenTransport<P> {
     /// Fogata: whether `ip` is on a link of this device: a link-local address, or one of
     /// the networks of its interfaces; never its loopback.
     fn on_link(&self, ip: &IpAddr) -> bool {
-        !ip.is_loopback()
-            && (is_link_local(ip)
-                || self
-                    .listeners
-                    .iter()
-                    .any(|l| l.networks.iter().any(|net| net.contains(ip))))
+        on_link_in(self.listeners.iter().flat_map(|l| l.networks.iter()), ip)
     }
 
     /// Fogata: a turn to dial `peer` (when the dial names one) at `ip` with `cost` bytes of
@@ -287,6 +282,12 @@ const TURNS: bool = cfg!(any(target_os = "linux", target_os = "android"));
 /// handshake needs a round trip and more, and it would only leave packets waiting.
 const MIN_LEFT: Duration = Duration::from_secs(1);
 
+/// Fogata: whether `ip` is on a link of this device, whose interfaces' networks are
+/// `networks`: a link-local address, or one of those networks; never its loopback.
+fn on_link_in<'a>(mut networks: impl Iterator<Item = &'a IpNet>, ip: &IpAddr) -> bool {
+    !ip.is_loopback() && (is_link_local(ip) || networks.any(|net| net.contains(ip)))
+}
+
 /// Fogata: IPv4 169.254.0.0/16 and IPv6 fe80::/10, on the link whatever the interfaces'
 /// addresses say.
 fn is_link_local(ip: &IpAddr) -> bool {
@@ -402,12 +403,15 @@ impl<P: Provider> Transport for GenTransport<P> {
                 // Fogata: a dial to the device's own network waits for room first, within
                 // the time it has.
                 let turn = self.turn(socket_addr.ip(), peer_id, on_link::DIAL_HOLDS);
-                let room = self.dial_room.clone();
+                let room = self
+                    .on_link(&socket_addr.ip())
+                    .then(|| self.dial_room.clone());
                 Ok(Box::pin(async move {
                     let started = Instant::now();
+                    let waited = turn.is_some();
                     let held = wait_turn(turn, handshake_timeout).await?;
                     let left = handshake_timeout.saturating_sub(started.elapsed());
-                    if left < MIN_LEFT {
+                    if waited && left < MIN_LEFT {
                         if let Some(held) = held {
                             held.unsent();
                         }
@@ -466,12 +470,13 @@ impl<P: Provider> Transport for GenTransport<P> {
                 let timeout = self.handshake_timeout;
                 let punching = async move {
                     let started = Instant::now();
+                    let waited = turn.is_some();
                     let held = match wait_turn(turn, timeout).await {
                         Ok(held) => held,
                         Err(e) => return e,
                     };
                     let left = timeout.saturating_sub(started.elapsed());
-                    if left < MIN_LEFT {
+                    if waited && left < MIN_LEFT {
                         if let Some(held) = held {
                             held.unsent();
                         }
@@ -795,13 +800,16 @@ impl<P: Provider> Stream for Listener<P> {
                     let local_addr = socketaddr_to_multiaddr(&self.socket_addr(), self.version);
                     let remote_addr = connecting.remote_address();
                     let send_back_addr = socketaddr_to_multiaddr(&remote_addr, self.version);
+                    // Fogata: only addresses on the device's links are noted (see `on_link`).
+                    let room = on_link_in(self.networks.iter(), &remote_addr.ip())
+                        .then(|| self.room.clone());
 
                     let event = TransportEvent::Incoming {
                         upgrade: Connecting::counted(
                             connecting,
                             self.handshake_timeout,
                             self.pending_inbound.clone(),
-                            self.room.clone(),
+                            room,
                         ),
                         local_addr,
                         send_back_addr,
