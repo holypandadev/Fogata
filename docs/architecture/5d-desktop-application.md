@@ -229,8 +229,9 @@ The room shows a tile per person (a green ring and bars while they talk, a cross
 microphone when muted, their camera when it is on) and a wider tile per shared screen. The
 controls turn the microphone, camera and screen on and off, pick a screen or window to
 share, open the device choices, hide or show the chat and leave. Files picked with the
-chat's clip or dropped anywhere on the room (`desktop_drop` 0.8.0, our copy in
-`app/third_party/desktop_drop`: later versions depend on the MPL `dbus` package) wait above
+chat's clip or dropped anywhere on the room (`desktop_drop` 0.8.4, our copy in
+`app/third_party/desktop_drop`, without the MPL `dbus` package its Dart side asks the portal
+with; 0.9 needs a `cross_file` that `file_selector` does not take yet) wait above
 the message box, each with its size and the folder it is in, a small picture for images and
 a button to take it out; only files of this computer go: on Linux a drop is taken only as a
 list of files (`text/uri-list`, its `file:` entries), never as text that reads as a path, and
@@ -248,7 +249,9 @@ and Windows (the long s and the Kelvin sign as s and k), Windows' trailing dots 
 and its short names (`APPDAT~1`), and where each really is, links followed. The user's
 Library is looked for under the account's own folder as well as under `HOME`, which macOS's
 App Sandbox points at the application's container. Inside a Flatpak, files dropped from
-outside the sandbox arrive as the document portal's paths (`/run/user/<id>/doc/...`), and
+outside the sandbox arrive as the document portal's paths (`/run/user/<id>/doc/...`): the
+plugin takes the FileTransfer portal's target first there and asks the portal for its files
+while the drop lasts, and
 it is the portal that decides what the application may read: only what the person dragged
 is exported. A file waiting or being sent is not added again; files that fail wait again without
 changing the tab, and a send stops when the room is left. Files picked with the file picker do not ask. Send (or Enter) shares them with the message

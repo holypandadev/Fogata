@@ -145,6 +145,7 @@ class DesktopDrop {
               target,
               text,
             ).map((e) => DropItemFile(e)).toList(),
+            rawText: text,
           ),
         );
         break;

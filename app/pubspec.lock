@@ -95,7 +95,7 @@ packages:
       path: "third_party/desktop_drop"
       relative: true
     source: path
-    version: "0.8.0"
+    version: "0.8.4"
   fake_async:
     dependency: "direct dev"
     description:

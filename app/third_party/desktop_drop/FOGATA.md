@@ -1,8 +1,8 @@
 # desktop_drop in Fogata
 
-This is desktop_drop 0.8.0 from pub.dev (Apache-2.0, see LICENSE), without its `example`
-and `test` folders, its README.md a short note pointing here. It stays on 0.8.0 (see the
-end).
+This is desktop_drop 0.8.4 from pub.dev (Apache-2.0, see LICENSE), without its `example`
+and `test` folders, its README.md a short note pointing here. It stays on 0.8.4, the last
+version before 0.9 (see the end).
 
 Changed, each place marked `Fogata:` in the code:
 
@@ -18,32 +18,44 @@ Changed, each place marked `Fogata:` in the code:
   handed on as a path, and so is any other target (`text/x-moz-url`, `_NETSCAPE_URL`,
   `x-special/gnome-copied-files`, plain text). Its paths are read as POSIX ones on every
   system, as a Linux desktop writes them, so its tests give the same answer on Windows.
+- The FileTransfer portal (`application/vnd.portal.filetransfer`), which 0.8.1 added, is
+  taken in `linux/desktop_drop_plugin.cc` itself, not in the Dart part through the dbus
+  package (MPL-2.0), which this copy does not depend on: inside the Flatpak only (where
+  `/.flatpak-info` is), the portal's target comes before the list of files, so a source
+  that offers it hands its files to the sandbox through it. The plugin asks the portal for
+  the files (`RetrieveFiles`, through GIO, at most five seconds) while the drop is still
+  going, as 0.9.0 does, since a source may end its transfer once the drop is finished (in
+  0.8.1 to 0.8.4 the Dart part asks after it), and hands them on as a `text/uri-list` of
+  the document portal's paths, which `linuxDropPaths` reads as any other. A portal that
+  gives nothing drops nothing. Outside the Flatpak the targets are those of 0.8.0.
+- `lib/src/channel.dart` no longer has 0.8.1's `performOperation_portal` (above), and its
+  `performOperation_linux` is Fogata's (above); it hands on the text of a Linux drop as
+  `rawText`, as published (the application does not read it).
 - `pubspec.yaml` no longer says `resolution: workspace`, which only fits the plugin's own
-  repository.
+  repository, and does not depend on dbus.
 
 Nothing else is changed: macOS, Windows, Android and the web are as published.
 
-Reviewed against desktop_drop 0.9.2 (2026-11-12): the fork stays on 0.8.0.
+From 0.8.0 to 0.8.4, taken as published: `rawText` on `DropDoneEvent` and
+`DropDoneDetails`, `lib/src/events.dart` exported, Android's Gradle set-up for both kinds of
+Kotlin set-up (not built by Fogata).
 
-- 0.8.1 to 0.8.4 depend on the dbus package (MPL-2.0), for 0.8.1's one feature: on Linux, a
-  drag from a sandboxed application hands its files through the FileTransfer portal
-  (`application/vnd.portal.filetransfer`), whose key the plugin turns into paths the
-  document portal opens. The rest is Android's Gradle set-up.
-- 0.9.0 is a rewrite: a native bridge through Dart's C API on every system, a new API
+Reviewed against desktop_drop 0.9.2 (2026-11-15): the fork stays on 0.8.4.
+
+- 0.9.0 needs cross_file 0.4, and file_selector, which the application uses for its file
+  picker, takes cross_file 0.3 only (file_selector_platform_interface 2.7.0, the newest):
+  pub cannot give the application both. 0.9 can come once file_selector takes 0.4.
+- 0.9.0 is also a rewrite: a native bridge through Dart's C API on every system, a new API
   (`onDrop` with typed items in place of `onDragDone`, `onEnter`/`onLeave`, `enabled`, one
-  target per drop chosen by hit testing), Flutter 3.47.7, cross_file 0.4 and three new
-  packages (cross_file_platform_interface, cross_file_web, mime). Its Linux code is new,
-  so Fogata's change above would have to be made again on it, and every drop target of the
-  application rewritten (`lib/src/outgoing.dart`). Its fixes: the portal transfer kept
-  alive until its files are found (Linux, the 0.8.1 feature), mouse events let through to
-  native views outside a drag (macOS; Fogata embeds no native view), drops on the web.
-- 0.9.1 (a crash at start on Windows, from tasks of 0.9.0's own native bridge) and 0.9.2
-  (Android's Gradle) fix 0.9.0's code only.
-
-Nothing there fixes what Fogata uses of 0.8.0 (files dropped on a window, on Linux, Windows
-and macOS). One thing is worth a decision: in the Flatpak, which sees no more of the
-computer than its downloads folder, a file dragged from outside it arrives, by the code (not
-tried), as a path the application cannot read, unless the source hands it over through the FileTransfer portal,
-which 0.8.0 does not take. Taking that portal's target on Linux, with the portal asked
-through GIO (no new package), in Fogata's `linux/desktop_drop_plugin.cc`, would let such
-drops through.
+  target per drop chosen by hit testing, temporary files of virtual sources that last
+  only as long as `onDrop`), Flutter 3.47.7 and three new packages
+  (cross_file_platform_interface, cross_file_web, mime). Taking it means every drop target
+  of the application (`lib/src/outgoing.dart`) and the tests that drop through the plugin's
+  channel written again. Its Linux code takes files only from a `text/uri-list`, as
+  `file:` entries of this computer (or the portal's), which is what Fogata's change above
+  does; a query in an entry is read there as part of the name.
+- Its fixes: the portal transfer kept alive until its files are found (Linux; done here in
+  the plugin, above), mouse events let through to native views outside a drag (macOS;
+  Fogata embeds no native view), drops on the web. 0.9.1 (a crash at start on Windows,
+  from tasks of 0.9.0's own native bridge) and 0.9.2 (Android's Gradle) fix 0.9.0's code
+  only.
