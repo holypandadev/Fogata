@@ -39,7 +39,7 @@ use libp2p_identity::PeerId;
 use quinn::rustls::pki_types::CertificateDer;
 use quinn_proto::TransportError;
 
-use crate::{Connection, ConnectionError, Error};
+use crate::{Connection, ConnectionError, Error, on_link::DialRoom};
 
 /// A QUIC connection currently being negotiated.
 #[derive(Debug)]
@@ -48,13 +48,17 @@ pub struct Connecting {
     /// Fogata: counts this one among the incoming connections being set up until it is
     /// established, fails or is dropped (see `Config::retry_above`).
     _counted: Option<Counted>,
+    /// Fogata: where the remote address is noted as one that answers once the connection is
+    /// set up (see `on_link`).
+    room: DialRoom,
 }
 
 impl Connecting {
-    pub(crate) fn new(connection: quinn::Connecting, timeout: Duration) -> Self {
+    pub(crate) fn new(connection: quinn::Connecting, timeout: Duration, room: DialRoom) -> Self {
         Connecting {
             connecting: select(connection, Delay::new(timeout)),
             _counted: None,
+            room,
         }
     }
 
@@ -63,11 +67,13 @@ impl Connecting {
         connection: quinn::Connecting,
         timeout: Duration,
         pending: Arc<AtomicUsize>,
+        room: DialRoom,
     ) -> Self {
         pending.fetch_add(1, Ordering::SeqCst);
         Connecting {
             connecting: select(connection, Delay::new(timeout)),
             _counted: Some(Counted(pending)),
+            room,
         }
     }
 }
@@ -120,7 +126,8 @@ impl Future for Connecting {
 
         let peer_id = Self::remote_peer_id(&connection)?;
         crate::datagram::register(peer_id, connection.clone());
-        let muxer = Connection::new(connection);
+        let answered = self.room.answered(connection.remote_address().ip());
+        let muxer = Connection::new(connection, Some(answered));
         Poll::Ready(Ok((peer_id, muxer)))
     }
 }

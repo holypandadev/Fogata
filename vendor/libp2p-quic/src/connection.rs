@@ -47,6 +47,9 @@ pub struct Connection {
     >,
     /// Future to wait for the connection to be closed.
     closing: Option<BoxFuture<'static, quinn::ConnectionError>>,
+    /// Fogata: notes the remote address as one that answers while the connection is open
+    /// (see `on_link`).
+    _answered: Option<crate::on_link::Answered>,
 }
 
 impl Connection {
@@ -54,12 +57,13 @@ impl Connection {
     ///
     /// This function assumes that the [`quinn::Connection`] is completely fresh and none of
     /// its methods has ever been called. Failure to comply might lead to logic errors and panics.
-    fn new(connection: quinn::Connection) -> Self {
+    fn new(connection: quinn::Connection, answered: Option<crate::on_link::Answered>) -> Self {
         Self {
             connection,
             incoming: None,
             outgoing: None,
             closing: None,
+            _answered: answered,
         }
     }
 }

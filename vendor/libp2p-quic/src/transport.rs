@@ -33,7 +33,7 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll, Waker},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use futures::{
@@ -43,7 +43,7 @@ use futures::{
     ready,
     stream::{SelectAll, StreamExt},
 };
-use if_watch::IfEvent;
+use if_watch::{IfEvent, IpNet};
 use libp2p_core::{
     Endpoint, Transport,
     multiaddr::{Multiaddr, Protocol},
@@ -56,6 +56,7 @@ use crate::{
     ConnectError, Connecting, Connection, Error,
     config::{Config, QuinnConfig},
     hole_punching::hole_puncher,
+    on_link::{self, DialRoom, Held, Turn},
     provider::Provider,
 };
 
@@ -92,6 +93,9 @@ pub struct GenTransport<P: Provider> {
     waker: Option<Waker>,
     /// Holepunching attempts
     hole_punch_attempts: HashMap<SocketAddr, oneshot::Sender<Connecting>>,
+    /// Fogata: the turns of dials to addresses of the device's own networks that have not
+    /// answered yet (see `on_link`).
+    dial_room: DialRoom,
 }
 
 #[expect(deprecated)]
@@ -113,7 +117,25 @@ impl<P: Provider> GenTransport<P> {
             waker: None,
             support_draft_29,
             hole_punch_attempts: Default::default(),
+            dial_room: DialRoom::default(),
         }
+    }
+
+    /// Fogata: whether a dial to `ip` waits for its turn (see `on_link`): an address of one
+    /// of the networks this device is on, but its loopback, that has not answered lately.
+    fn needs_turn(&self, ip: &IpAddr) -> bool {
+        !ip.is_loopback()
+            && self
+                .listeners
+                .iter()
+                .any(|l| l.networks.iter().any(|net| net.contains(ip)))
+            && !self.dial_room.answers(ip)
+    }
+
+    /// Fogata: a turn to dial `ip` with `cost` bytes of packets that may wait, when it
+    /// needs one.
+    fn turn(&self, ip: IpAddr, cost: usize) -> Option<Turn> {
+        self.needs_turn(&ip).then(|| self.dial_room.take(ip, cost))
     }
 
     /// Create a new [`quinn::Endpoint`] with the given configs.
@@ -241,7 +263,8 @@ impl<P: Provider> GenTransport<P> {
 /// device's own network) filled a buffer of the default size, and the one socket then sent
 /// nothing to any peer until they were dropped, calls' media included. The kernel gives
 /// what `net.core.wmem_max` allows: with its default, twice the default buffer, so the
-/// packets one such address holds leave half of it free.
+/// packets one such address holds leave half of it free. What dials to several such
+/// addresses may leave waiting is bounded apart from this (see `on_link`).
 #[cfg(any(target_os = "linux", target_os = "android"))]
 const SEND_BUFFER: usize = 2 * 1024 * 1024;
 
@@ -283,6 +306,7 @@ impl<P: Provider> Transport for GenTransport<P> {
                 self.retry_above,
                 self.retries.clone(),
             ),
+            self.dial_room.clone(),
             version,
         )?;
         self.listeners.push(listener);
@@ -347,14 +371,21 @@ impl<P: Provider> Transport for GenTransport<P> {
                 if version == ProtocolVersion::Draft29 {
                     client_config.version(0xff00_001d);
                 }
+                // Fogata: a dial to the device's own network waits for room first, within
+                // the time it has.
+                let turn = self.turn(socket_addr.ip(), on_link::DIAL_HOLDS);
+                let room = self.dial_room.clone();
                 Ok(Box::pin(async move {
+                    let started = Instant::now();
+                    let _held = wait_turn(turn, handshake_timeout).await?;
                     // This `"l"` seems necessary because an empty string is an invalid domain
                     // name. While we don't use domain names, the underlying rustls library
                     // is based upon the assumption that we do.
                     let connecting = endpoint
                         .connect_with(client_config, socket_addr, "l")
                         .map_err(ConnectError)?;
-                    Connecting::new(connecting, handshake_timeout).await
+                    let left = handshake_timeout.saturating_sub(started.elapsed());
+                    Connecting::new(connecting, left, room).await
                 }))
             }
             (Endpoint::Listener, _) => {
@@ -370,7 +401,19 @@ impl<P: Provider> Transport for GenTransport<P> {
 
                 tracing::debug!("Preparing for hole-punch from {addr}");
 
-                let hole_puncher = hole_puncher::<P>(socket, socket_addr, self.handshake_timeout);
+                // Fogata: a punch to the device's own network waits for room first, within
+                // the time it has, and holds it while it punches.
+                let turn = self.turn(socket_addr.ip(), on_link::PUNCH_HOLDS);
+                let timeout = self.handshake_timeout;
+                let punching = async move {
+                    let started = Instant::now();
+                    let _held = match wait_turn(turn, timeout).await {
+                        Ok(held) => held,
+                        Err(e) => return e,
+                    };
+                    let left = timeout.saturating_sub(started.elapsed());
+                    hole_puncher::<P>(socket, socket_addr, left).await
+                };
 
                 let (sender, receiver) = oneshot::channel();
 
@@ -391,8 +434,8 @@ impl<P: Provider> Transport for GenTransport<P> {
                 };
 
                 Ok(Box::pin(async move {
-                    futures::pin_mut!(hole_puncher);
-                    match futures::future::select(receiver, hole_puncher).await {
+                    futures::pin_mut!(punching);
+                    match futures::future::select(receiver, punching).await {
                         Either::Left((message, _)) => {
                             let (inbound_peer_id, connection) = message
                                 .expect(
@@ -458,6 +501,17 @@ impl<P: Provider> Transport for GenTransport<P> {
     }
 }
 
+/// Fogata: waits for `turn`, when there is one, for `timeout` at most.
+async fn wait_turn(turn: Option<Turn>, timeout: Duration) -> Result<Option<Held>, Error> {
+    let Some(turn) = turn else {
+        return Ok(None);
+    };
+    match futures::future::select(turn, futures_timer::Delay::new(timeout)).await {
+        Either::Left((held, _)) => Ok(Some(held)),
+        Either::Right(_) => Err(Error::HandshakeTimedOut),
+    }
+}
+
 impl From<Error> for TransportError<Error> {
     fn from(err: Error) -> Self {
         TransportError::Other(err)
@@ -503,6 +557,11 @@ struct Listener<P: Provider> {
     close_listener_waker: Option<Waker>,
 
     listening_addresses: HashSet<IpAddr>,
+
+    /// Fogata: the networks of the interfaces, from the interface watcher, and the turns of
+    /// dials to them (see `on_link`).
+    networks: HashSet<IpNet>,
+    room: DialRoom,
 }
 
 impl<P: Provider> Listener<P> {
@@ -512,6 +571,7 @@ impl<P: Provider> Listener<P> {
         endpoint: quinn::Endpoint,
         handshake_timeout: Duration,
         (pending_inbound, retry_above, retries): (Arc<AtomicUsize>, usize, Arc<AtomicUsize>),
+        room: DialRoom,
         version: ProtocolVersion,
     ) -> Result<Self, Error> {
         let if_watcher;
@@ -549,6 +609,8 @@ impl<P: Provider> Listener<P> {
             pending_event,
             close_listener_waker: None,
             listening_addresses,
+            networks: HashSet::new(),
+            room,
         })
     }
 
@@ -591,6 +653,7 @@ impl<P: Provider> Listener<P> {
         loop {
             match ready!(P::poll_if_event(if_watcher, cx)) {
                 Ok(IfEvent::Up(inet)) => {
+                    self.networks.insert(inet);
                     if let Some(listen_addr) =
                         ip_to_listenaddr(&endpoint_addr, inet.addr(), self.version)
                     {
@@ -606,6 +669,7 @@ impl<P: Provider> Listener<P> {
                     }
                 }
                 Ok(IfEvent::Down(inet)) => {
+                    self.networks.remove(&inet);
                     if let Some(listen_addr) =
                         ip_to_listenaddr(&endpoint_addr, inet.addr(), self.version)
                     {
@@ -685,6 +749,7 @@ impl<P: Provider> Stream for Listener<P> {
                             connecting,
                             self.handshake_timeout,
                             self.pending_inbound.clone(),
+                            self.room.clone(),
                         ),
                         local_addr,
                         send_back_addr,
@@ -1032,6 +1097,33 @@ mod tests {
             let room = socket2::SockRef::from(socket).send_buffer_size().unwrap();
             assert!(room >= 2 * default, "{room} bytes, the default is {default}");
         }
+    }
+
+    /// Fogata: a dial to an address of a network this device is on waits for its turn
+    /// (see `on_link`) unless that address answered lately; one to its loopback or to
+    /// another network does not.
+    #[tokio::test]
+    async fn dials_to_the_devices_own_networks_take_turns() {
+        let keypair = libp2p_identity::Keypair::generate_ed25519();
+        let mut transport = crate::tokio::Transport::new(Config::new(&keypair));
+        transport
+            .listen_on(
+                ListenerId::next(),
+                "/ip4/0.0.0.0/udp/0/quic-v1".parse().unwrap(),
+            )
+            .unwrap();
+        for listener in transport.listeners.iter_mut() {
+            listener.networks.insert("198.18.0.0/24".parse().unwrap());
+            listener.networks.insert("127.0.0.0/8".parse().unwrap());
+        }
+        let own: IpAddr = "198.18.0.7".parse().unwrap();
+        assert!(transport.needs_turn(&own));
+        assert!(!transport.needs_turn(&"198.18.1.7".parse().unwrap()));
+        assert!(!transport.needs_turn(&"127.0.0.1".parse().unwrap()));
+        let answered = transport.dial_room.answered(own);
+        assert!(!transport.needs_turn(&own));
+        drop(answered);
+        assert!(!transport.needs_turn(&own), "answered a moment ago");
     }
 
     #[cfg(feature = "tokio")]

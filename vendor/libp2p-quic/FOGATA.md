@@ -50,8 +50,29 @@ QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
    buffer, and the socket sent nothing to any peer for seconds. `src/transport.rs`: every
    socket asks for a 2 MiB send buffer on Linux (`SEND_BUFFER`; the kernel gives what
    `net.core.wmem_max` allows, with its default twice the default buffer, which packets
-   to three or more such addresses could still fill). Test:
+   to three or more such addresses could still fill: change 5 bounds those). Test:
    `the_send_buffer_has_room_past_the_packets_one_silent_address_holds`.
+5. Dials to addresses of the device's own networks take turns, so that whatever peers a DHT
+   node makes up at addresses there where no host is, the packets that wait for those
+   neighbours take about half of the default send buffer at most, without counting on
+   change 4. `src/on_link.rs` (new): `DialRoom` gives each such dial a share of what may
+   wait (14 KiB for a dial, 32 KiB for a hole punch; 32 KiB for one address and 112 KiB,
+   eight dials, in all; the notes at the top of the file work the figures out from how
+   Linux holds those packets), held while the dial runs and for 3.5 s after unless its
+   address answered, as its last packets may wait that long. The others wait their turn,
+   the one whose address holds least first, within the time the dial has
+   (`handshake_timeout`, which the wait counts in). An address that set up a connection,
+   while it is open and for ten minutes after, needs no turn, nor does the loopback or any
+   address off those networks. `src/transport.rs`: each listener keeps its interfaces'
+   networks from the interface watcher, and `dial` waits for the turn before the first
+   packet of a dial or a punch; `src/connection/connecting.rs` and `src/connection.rs` note
+   the remote address of every connection set up (incoming or outgoing) as one that answers
+   until it closes. Tests: `dials_to_addresses_that_have_not_answered_wait_for_room`,
+   `a_dial_whose_address_answered_gives_its_room_back_at_once`,
+   `a_punch_is_not_passed_by_later_dials`, `an_address_that_holds_nothing_goes_first`,
+   `a_dial_that_goes_away_leaves_no_room_taken`, `an_address_that_answered_needs_no_turn`,
+   `a_waiting_dial_is_woken_when_lingering_room_comes_back`,
+   `dials_to_the_devices_own_networks_take_turns`; the network lab's `media-silent`.
 
 To move to a new upstream version: download it, apply these changes again, keep this list
 true, and run `tools/vendor_diff.py libp2p-quic` to see that nothing else differs.
