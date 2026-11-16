@@ -86,6 +86,12 @@ test built as a profile and as a debug build, and then, in the call lab
 (`tools/call-lab`, with `LOAD_MAX=9` and its own display `:172`), the microphone checks
 `media devices alone late muted unplug switch broken hang noise` on the debug build and
 `late` again with PipeWire's quantum left free (`LAB_FIXED_QUANTUM=0`, a part of its own),
+`unmute:headset` and `unmute:speakers` (a part of their own, with ffmpeg making the room's
+sound: the other side holds a tone while the microphone is turned off and on; with a headset
+every word and the room's noise for 12.5 s after each unmute must go out within 6 dB of
+the same unmute's last, and with speakers the tone must go back to it at least 20 dB under
+the words, `tools/call-lab/unmute_check.py`; only a libwebrtc with WebRTC patch 0010
+passes the headset part),
 `rejoin` on the profile build, a shared screen's sound beside a loopback and a combined
 output (`CALL_LAB_LOOPBACK=1`: a's log must say `passed on, not linked` and never link
 `pipewire-pulse`), calls of 4 copies with a camera and with a shared screen for 60 s on the

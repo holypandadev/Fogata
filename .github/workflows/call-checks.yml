@@ -82,7 +82,7 @@ jobs:
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb x11-utils dbus-x11 pipewire \
             pipewire-pulse wireplumber pulseaudio-utils pipewire-alsa libasound2-plugins \
-            systemd-coredump
+            systemd-coredump ffmpeg
           # The lab's sound sessions are unprivileged user namespaces, which Ubuntu's
           # AppArmor refuses by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
@@ -216,6 +216,29 @@ jobs:
         run: |
           failed=0
           for check in media devices alone late muted unplug switch broken hang noise; do
+            echo "::group::mic.sh $check"
+            if tools/call-lab/mic.sh "$check" | tee "$RUNNER_TEMP/mic.out"; then
+              echo "mic $check|pass|" >> "$PARTS"
+            else
+              why=$(grep -m 1 '^  problem: ' "$RUNNER_TEMP/mic.out" | sed 's/^  problem: //; s/|/:/g' | cut -c1-200 || true)
+              echo "mic $check|fail|$why" >> "$PARTS"
+              echo "::error::mic.sh $check failed"
+              failed=1
+            fi
+            echo "::endgroup::"
+          done
+          exit $failed
+
+      # A microphone turned on again while the other side holds a tone, with a headset and
+      # with speakers (tools/call-lab/mic.sh unmute:headset, unmute:speakers; the room's
+      # sound is made with ffmpeg): what the other side hears of it must be as later in
+      # the call, and its tone must not go back to it (tools/call-lab/unmute_check.py).
+      - name: Turning the microphone on again while the other side talks
+        if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
+        timeout-minutes: 20
+        run: |
+          failed=0
+          for check in unmute:headset unmute:speakers; do
             echo "::group::mic.sh $check"
             if tools/call-lab/mic.sh "$check" | tee "$RUNNER_TEMP/mic.out"; then
               echo "mic $check|pass|" >> "$PARTS"
