@@ -1,0 +1,55 @@
+Mark changes of audio devices in the macOS audio engine device
+
+WebRTC patch 0011 makes the echo controller anew at the next start of recording after a
+change of audio devices. WebRTC-SDK's AudioEngineDevice, the audio device module of the
+macOS framework, marks one (MarkAudioDevicesChanged) when the system's list of devices
+changes, when the default output or input changes (after its debounce), and when an output
+or input other than the current one is chosen. Not marked: an output switching its data
+source on the same device (the headphone jack of Macs that show headphones and internal
+speakers as one device), which neither the list nor the default shows; and the engine's
+configuration changes, which it may also post as it reconfigures itself.
+
+diff --git a/modules/audio_device/audio_engine_device.mm b/modules/audio_device/audio_engine_device.mm
+index 53a2f59..fc29488 100644
+--- a/modules/audio_device/audio_engine_device.mm
++++ b/modules/audio_device/audio_engine_device.mm
+@@ -265,6 +265,8 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
+       if (old_output_device_ids != output_device_ids_ ||
+           old_input_device_ids != input_device_ids_) {
+         LOGI() << "Did update devices";
++        // Fogata: another room maybe (WebRTC patch 0011).
++        MarkAudioDevicesChanged();
+ 
+         // Current device
+         if (engine_state_.output_device_id != kAudioObjectUnknown) {
+@@ -312,6 +314,8 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
+                      RTC_DCHECK_RUN_ON(thread_);
+                      LOGI() << "Processing debounced default device update for selector: "
+                             << selector;
++                     // Fogata: another room maybe (WebRTC patch 0011).
++                     MarkAudioDevicesChanged();
+ 
+                      if (selector == kAudioHardwarePropertyDefaultOutputDevice) {
+                        LOGI() << "Did update default output device";
+@@ -902,6 +906,10 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
+ 
+   // Set as default device if index == 0
+   AudioDeviceID output_device_id = index == 0 ? kAudioObjectUnknown : output_device_ids_[index - 1];
++  // Fogata: another output may be another room (WebRTC patch 0011).
++  if (output_device_id != engine_state_.output_device_id) {
++    MarkAudioDevicesChanged();
++  }
+ 
+   int32_t result = ModifyEngineState([output_device_id](EngineState state) -> EngineState {
+     state.output_device_id = output_device_id;
+@@ -1047,6 +1055,10 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
+ 
+   // Set as default device if index == 0
+   AudioDeviceID input_device_id = index == 0 ? kAudioObjectUnknown : input_device_ids_[index - 1];
++  // Fogata: as for the output (WebRTC patch 0011).
++  if (input_device_id != engine_state_.input_device_id) {
++    MarkAudioDevicesChanged();
++  }
+ 
+   int32_t result = ModifyEngineState([input_device_id](EngineState state) -> EngineState {
+     state.input_device_id = input_device_id;

@@ -1,0 +1,325 @@
+Mark changes of audio devices, and test when the echo controller restarts
+
+WebRTC patch 0011 makes the echo controller anew at the next start of recording after a
+change of audio devices. AudioDeviceImpl marks one (webrtc::MarkAudioDevicesChanged) when
+an output or input is chosen other than the last asked for (on the worker thread, also
+while playing or recording: the device's own restart there does not pass through the audio
+state, and the next microphone turned on again makes it anew), and when the device module
+tells of devices that came or went (OnDevicesUpdated).
+
+test/echo_call.test.cc builds WebRTC's audio state with a real audio processing (an echo
+controller that counts how it was made and restarted) and a mock audio device: a call's
+start makes the echo controller anew, the first and every later one; a microphone turned
+off and on again in the call restarts it, every time; a change of devices while it was off
+makes it anew once, and one while recording runs counts at the next start too; a start of
+recording that fails makes and restarts nothing, and leaves the call and a change it was
+told for the next start. Built in again: the library shows only its own API.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 7486756..50a7c5c 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -379,6 +379,7 @@ if (rtc_include_tests) {
+        "test/shared_encoder.test.cc",
+        "test/echo_restart.test.cc",
+        "test/echo_room.test.cc",
++       "test/echo_call.test.cc",
+ 
+        # Built in again: the library shows only its own API.
+        "src/internal/vp8_size_gate.cc",
+diff --git a/src/rtc_audio_device_impl.cc b/src/rtc_audio_device_impl.cc
+index 32e3ed1..820940b 100644
+--- a/src/rtc_audio_device_impl.cc
++++ b/src/rtc_audio_device_impl.cc
+@@ -56,6 +56,12 @@ int32_t AudioDeviceImpl::RecordingDeviceName(uint16_t index,
+ int32_t AudioDeviceImpl::SetPlayoutDevice(uint16_t index) {
+   worker_thread_->PostTask([this, index] {
+     RTC_DCHECK_RUN_ON(worker_thread_);
++    // Fogata: another output may be another room: the next microphone on makes
++    // the echo controller anew (WebRTC patch 0011).
++    if (index != playout_index_) {
++      playout_index_ = index;
++      webrtc::MarkAudioDevicesChanged();
++    }
+     if (audio_device_module_->Playing()) {
+       audio_device_module_->StopPlayout();
+       audio_device_module_->SetPlayoutDevice(index);
+@@ -71,6 +77,11 @@ int32_t AudioDeviceImpl::SetPlayoutDevice(uint16_t index) {
+ int32_t AudioDeviceImpl::SetRecordingDevice(uint16_t index) {
+   worker_thread_->PostTask([this, index] {
+     RTC_DCHECK_RUN_ON(worker_thread_);
++    // Fogata: as for the output (WebRTC patch 0011).
++    if (index != recording_index_) {
++      recording_index_ = index;
++      webrtc::MarkAudioDevicesChanged();
++    }
+     if (audio_device_module_->Recording()) {
+       audio_device_module_->StopRecording();
+       audio_device_module_->SetRecordingDevice(index);
+@@ -122,6 +133,8 @@ int32_t AudioDeviceImpl::OnDeviceChange(OnDeviceChangeCallback listener) {
+ }
+ 
+ void AudioDeviceImpl::OnDevicesUpdated() {
++  // Fogata: devices came or went (WebRTC patch 0011).
++  webrtc::MarkAudioDevicesChanged();
+   webrtc::MutexLock lock(&listener_mutex_);
+   if (listener_) listener_();
+ }
+diff --git a/src/rtc_audio_device_impl.h b/src/rtc_audio_device_impl.h
+index 1ec6733..ea0195a 100644
+--- a/src/rtc_audio_device_impl.h
++++ b/src/rtc_audio_device_impl.h
+@@ -49,6 +49,10 @@ class AudioDeviceImpl : public RTCAudioDevice, public webrtc::AudioDeviceObserve
+   webrtc::scoped_refptr<webrtc::AudioDeviceModule> audio_device_module_;
+   webrtc::Thread* worker_thread_ = nullptr;
+   webrtc::Mutex listener_mutex_;
++  // Fogata: the devices last asked for, on the worker thread (-1: none yet). Another
++  // one marks a change of devices (webrtc::MarkAudioDevicesChanged).
++  int playout_index_ = -1;
++  int recording_index_ = -1;
+   OnDeviceChangeCallback listener_ RTC_GUARDED_BY(listener_mutex_) = nullptr;
+ };
+ 
+diff --git a/test/echo_call.test.cc b/test/echo_call.test.cc
+new file mode 100644
+index 0000000..9a9e998
+--- /dev/null
++++ b/test/echo_call.test.cc
+@@ -0,0 +1,237 @@
++// WebRTC's audio state and audio processing with Fogata's patches 0010 and 0011
++// (tools/webrtc/patches/webrtc): a call's start makes the echo controller anew;
++// only a microphone turned on again in the call recording stopped in restarts it
++// for recording, and not after a change of audio devices
++// (MarkAudioDevicesChanged). Built in again with mocks: the library shows only
++// its own API.
++
++#include <memory>
++
++#include "api/audio/audio_device.h"
++#include "api/audio/audio_processing.h"
++#include "api/audio/builtin_audio_processing_builder.h"
++#include "api/audio/echo_control.h"
++#include "api/make_ref_counted.h"
++#include "api/scoped_refptr.h"
++#include "audio/audio_state.h"
++#include "call/test/mock_audio_receive_stream.h"
++#include "call/test/mock_audio_send_stream.h"
++#include "modules/audio_device/include/mock_audio_device.h"
++#include "modules/audio_mixer/audio_mixer_impl.h"
++#include "test/create_test_environment.h"
++#include "test/gmock.h"
++#include "test/gtest.h"
++
++namespace {
++
++using ::testing::Return;
++
++// An echo controller that restarts for recording, counting each restart.
++class Restartable : public webrtc::EchoControl {
++ public:
++  explicit Restartable(int* restarted) : restarted_(restarted) {}
++  void AnalyzeRender(webrtc::AudioBuffer*) override {}
++  void AnalyzeCapture(webrtc::AudioBuffer*) override {}
++  void ProcessCapture(webrtc::AudioBuffer*, bool) override {}
++  void ProcessCapture(webrtc::AudioBuffer*, webrtc::AudioBuffer*,
++                      bool) override {}
++  Metrics GetMetrics() const override { return Metrics(); }
++  void SetAudioBufferDelay(int) override {}
++  bool ActiveProcessing() const override { return true; }
++  bool RestartForRecording() override {
++    ++*restarted_;
++    return true;
++  }
++
++ private:
++  int* const restarted_;
++};
++
++class Factory : public webrtc::EchoControlFactory {
++ public:
++  Factory(int* made, int* restarted) : made_(made), restarted_(restarted) {}
++  using webrtc::EchoControlFactory::Create;
++  std::unique_ptr<webrtc::EchoControl> Create(const webrtc::Environment&,
++                                              int, int, int) override {
++    ++*made_;
++    return std::make_unique<Restartable>(restarted_);
++  }
++
++ private:
++  int* const made_;
++  int* const restarted_;
++};
++
++// One audio state with a real audio processing (echo controller from Factory)
++// and a mock audio device whose recording starts unless told to fail.
++class EchoCall : public ::testing::Test {
++ protected:
++  EchoCall() {
++    apm_ = webrtc::BuiltinAudioProcessingBuilder()
++               .SetEchoControlFactory(
++                   std::make_unique<Factory>(&made_, &restarted_))
++               .Build(webrtc::CreateTestEnvironment());
++    webrtc::AudioProcessing::Config config;
++    config.echo_canceller.enabled = true;
++    apm_->ApplyConfig(config);
++    apm_->Initialize();
++    adm_ = webrtc::test::MockAudioDeviceModule::CreateNice();
++    ON_CALL(*adm_, Recording()).WillByDefault([this] { return recording_; });
++    ON_CALL(*adm_, StartRecording()).WillByDefault([this] {
++      if (fail_) {
++        return -1;
++      }
++      recording_ = true;
++      return 0;
++    });
++    ON_CALL(*adm_, StopRecording()).WillByDefault([this] {
++      recording_ = false;
++      return 0;
++    });
++    webrtc::AudioState::Config state_config;
++    state_config.audio_mixer = webrtc::AudioMixerImpl::Create();
++    state_config.audio_processing = apm_;
++    state_config.audio_device_module = adm_;
++    state_ =
++        webrtc::make_ref_counted<webrtc::internal::AudioState>(state_config);
++  }
++
++  // A call starts: what was made and restarted since the counts were taken.
++  void Count() {
++    made_before_ = made_;
++    restarted_before_ = restarted_;
++  }
++  int Made() const { return made_ - made_before_; }
++  int Restarted() const { return restarted_ - restarted_before_; }
++
++  int made_ = 0;
++  int restarted_ = 0;
++  int made_before_ = 0;
++  int restarted_before_ = 0;
++  bool recording_ = false;
++  bool fail_ = false;
++  webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
++  webrtc::scoped_refptr<webrtc::test::MockAudioDeviceModule> adm_;
++  webrtc::scoped_refptr<webrtc::internal::AudioState> state_;
++  webrtc::test::MockAudioSendStream voice_;
++  webrtc::test::MockAudioReceiveStream heard_;
++};
++
++// A call's start makes the echo controller anew, whatever came before: the first
++// call, and one after another that ended (its streams gone).
++TEST_F(EchoCall, ACallsStartMakesItAnew) {
++  Count();
++  state_->AddReceivingStream(&heard_);
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_TRUE(recording_);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
++
++  // The call ends with the microphone on, and another starts.
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++  Count();
++  state_->AddReceivingStream(&heard_);
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
++
++  // The call ends while the microphone is off, and another starts.
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  state_->AddReceivingStream(&heard_);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
++
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}
++
++// The microphone turned off and on again in a call that went on playing restarts
++// it, every time.
++TEST_F(EchoCall, AnUnmuteInTheCallRestartsIt) {
++  state_->AddReceivingStream(&heard_);
++  state_->AddSendingStream(&voice_, 48000, 1);
++  for (int i = 0; i < 3; ++i) {
++    state_->RemoveSendingStream(&voice_);
++    EXPECT_FALSE(recording_);
++    Count();
++    state_->AddSendingStream(&voice_, 48000, 1);
++    EXPECT_EQ(Made(), 0);
++    EXPECT_EQ(Restarted(), 1);
++  }
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}
++
++// A change of devices while the microphone is off makes it anew at the next start
++// in the call, once: the start after it restarts again.
++TEST_F(EchoCall, AChangeOfDevicesMakesItAnewOnce) {
++  state_->AddReceivingStream(&heard_);
++  state_->AddSendingStream(&voice_, 48000, 1);
++  state_->RemoveSendingStream(&voice_);
++  webrtc::MarkAudioDevicesChanged();
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
++
++  state_->RemoveSendingStream(&voice_);
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++
++  // A change while recording runs counts at the next start too.
++  webrtc::MarkAudioDevicesChanged();
++  state_->RemoveSendingStream(&voice_);
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
++
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}
++
++// A start of recording that fails touches nothing, and takes nothing it was
++// told: neither the call it stopped in nor a change of devices.
++TEST_F(EchoCall, AFailedStartRestartsNothingAndKeepsWhatItWasTold) {
++  state_->AddReceivingStream(&heard_);
++  state_->AddSendingStream(&voice_, 48000, 1);
++
++  // Failed, then started: still the same call.
++  state_->RemoveSendingStream(&voice_);
++  fail_ = true;
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_FALSE(recording_);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 0);
++  state_->RemoveSendingStream(&voice_);
++  fail_ = false;
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++
++  // A change of devices, a failed start, then a start: the change still counts.
++  state_->RemoveSendingStream(&voice_);
++  webrtc::MarkAudioDevicesChanged();
++  fail_ = true;
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 0);
++  state_->RemoveSendingStream(&voice_);
++  fail_ = false;
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
++
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}
++
++}  // namespace

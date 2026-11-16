@@ -44,6 +44,13 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    `RTCVideoSource`'s `enableFogataSharedEncode` (the plugin marks its ScreenCaptureKit
    source), and the field trial `Fogata-SharedScreenEncode/Enabled/` turns it on (see
    "Checking patch 7" below for what it took to share on a Mac).
+8. `0008-mark-changes-of-audio-devices`: WebRTC-SDK's `AudioEngineDevice` marks a change of
+   audio devices (`MarkAudioDevicesChanged`, `patches/webrtc/0011`) when the system's list
+   of devices or its default output or input changes, and when another output or input is
+   chosen, so that the next microphone turned on again makes the echo controller anew. Not
+   seen: an output switching its data source on the same device (a headphone jack shown
+   with the internal speakers as one device), and the engine's configuration changes,
+   which it may also post as it reconfigures itself.
 
 The macOS framework is all these patches are for: the iOS framework and WebRTC's own
 Objective-C tests, which still name the VideoToolbox codecs, are not built from them.

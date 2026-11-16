@@ -1,0 +1,418 @@
+Make the echo controller anew after a change of audio devices
+
+Patch 0010 keeps what AEC3 learned of the room when a microphone is turned on again in a
+call: with a headset, that there is no echo. A headset taken off for speakers while the
+microphone was off then kept that, and the other side heard themselves for seconds after
+the unmute, until AEC3 found the echo (in the call lab: -14 dBFS at the loudest for 6.4 s at
+the median, against 0.3 s for an AEC3 made anew).
+
+Whatever learns of a change of audio devices now marks it, from any thread
+(MarkAudioDevicesChanged, api/audio/audio_device.h: a count for the library), and
+AudioState makes the echo controller anew at the next start of recording when the count
+moved since recording last started, rather than restarting it. A change while recording
+runs counts at the next start too. A start that fails takes nothing. False marks cost what
+0009 cost: one unmute on a headset holds the microphone down for its first seconds.
+
+Marked here:
+- PulseAudio (Linux): a sink or source added or removed, a change of the server's default
+  output or input (asked for and compared: the server tells of other changes too), a
+  change of a sink's or source's active port (asked for and compared, per device: an
+  analog jack switching the same card from headphones to speakers; a volume change is a
+  change too and does not count), one of the module's own streams moved by the server to
+  another device, and the server lost or back (TellDevicesUpdated). Subscribed from the
+  connection on (SubscribeToDevices), and again when the server comes back.
+- Windows Core Audio: an endpoint added, removed or changing state, and a change of the
+  default device (IMMNotificationClient), from the thread that tells them.
+The wrapper marks a device chosen (another index than the last asked for) and a change of
+the device list (wrapper patch 0021); the macOS engine device marks its own (apple patch
+0008).
+
+diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
+index 23219a0..b757324 100644
+--- a/api/audio/audio_device.h
++++ b/api/audio/audio_device.h
+@@ -11,6 +11,7 @@
+ #ifndef API_AUDIO_AUDIO_DEVICE_H_
+ #define API_AUDIO_AUDIO_DEVICE_H_
+ 
++#include <atomic>
+ #include <cstdint>
+ #include <optional>
+ 
+@@ -206,6 +207,21 @@ class AudioDeviceObserver {
+   virtual void OnDevicesUpdated() {}
+ };
+ 
++// Fogata: how many changes of audio devices were seen in the process: a device
++// chosen, one plugged in or out, the default or a device's port changed, a stream
++// moved by the sound server. Whatever learns of one calls MarkAudioDevicesChanged,
++// from any thread; AudioState reads the count each time recording starts, and a
++// microphone turned on again after a change makes the echo controller anew rather
++// than keeping what it learned of the room (patch 0011). One count for the library
++// (built as one binary), whatever its factories.
++inline std::atomic<uint64_t>& AudioDevicesChangedCount() {
++  static std::atomic<uint64_t> count{0};
++  return count;
++}
++inline void MarkAudioDevicesChanged() {
++  AudioDevicesChangedCount().fetch_add(1, std::memory_order_relaxed);
++}
++
+ }  // namespace webrtc
+ 
+ #endif  // API_AUDIO_AUDIO_DEVICE_H_
+diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+index 7edf7d9..8ec9e28 100644
+--- a/audio/audio_state.cc
++++ b/audio/audio_state.cc
+@@ -221,12 +221,22 @@ void AudioState::StartRecordingForCall() {
+   }
+   const bool same_call = stopped_in_call_;
+   stopped_in_call_ = false;
++  // Fogata, patch 0011: and with the same devices: any change of them seen since
++  // recording last started (MarkAudioDevicesChanged) may have changed the room (a
++  // headset taken off for speakers), and makes it anew.
++  const uint64_t devices = AudioDevicesChangedCount().load();
++  const bool same_devices = devices == devices_seen_;
++  devices_seen_ = devices;
+   if (!config_.audio_processing) {
+     return;
+   }
+-  if (same_call) {
++  if (same_call && same_devices) {
+     config_.audio_processing->RestartEchoControllerForRecording();
+   } else {
++    if (same_call) {
++      RTC_LOG(LS_INFO) << "AudioState: audio devices changed since recording "
++                          "last started";
++    }
+     config_.audio_processing->RestartEchoController();
+   }
+ }
+diff --git a/audio/audio_state.h b/audio/audio_state.h
+index 7a7104e..47ccf80 100644
+--- a/audio/audio_state.h
++++ b/audio/audio_state.h
+@@ -79,6 +79,8 @@ class AudioState : public webrtc::AudioState {
+   // Fogata: recording stopped while streams were received and played, and they
+   // have been ever since: the same call, the same room (StartRecordingForCall).
+   bool stopped_in_call_ RTC_GUARDED_BY(&worker_thread_checker_) = false;
++  // Fogata: AudioDevicesChangedCount() when recording last started (patch 0011).
++  uint64_t devices_seen_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
+ 
+   // Transports mixed audio from the mixer to the audio device and
+   // recorded audio to the sending streams.
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
+index 982d2ba..b7244db 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -1041,6 +1041,7 @@ int32_t AudioDeviceLinuxPulse::InitPlayout() {
+ 
+   // Set the state callback function for the stream
+   LATE(pa_stream_set_state_callback)(_playStream, PaStreamStateCallback, this);
++  LATE(pa_stream_set_moved_callback)(_playStream, PaStreamMovedCallback, this);
+ 
+   // Mark playout side as initialized
+   {
+@@ -1150,6 +1151,7 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
+ 
+   // Set the state callback function for the stream
+   LATE(pa_stream_set_state_callback)(_recStream, PaStreamStateCallback, this);
++  LATE(pa_stream_set_moved_callback)(_recStream, PaStreamMovedCallback, this);
+ 
+   // Mark recording side as initialized
+   _recIsInitialized = true;
+@@ -1236,6 +1238,7 @@ int32_t AudioDeviceLinuxPulse::StopRecording() {
+ 
+   // Unset this here so that we don't get a TERMINATED callback
+   LATE(pa_stream_set_state_callback)(_recStream, nullptr, nullptr);
++  LATE(pa_stream_set_moved_callback)(_recStream, nullptr, nullptr);
+ 
+   const pa_stream_state_t stream_state = LATE(pa_stream_get_state)(_recStream);
+   if (stream_state != PA_STREAM_UNCONNECTED &&
+@@ -1366,6 +1369,7 @@ int32_t AudioDeviceLinuxPulse::StopPlayout() {
+ 
+   // Unset this here so that we don't get a TERMINATED callback
+   LATE(pa_stream_set_state_callback)(_playStream, nullptr, nullptr);
++  LATE(pa_stream_set_moved_callback)(_playStream, nullptr, nullptr);
+ 
+   const pa_stream_state_t stream_state = LATE(pa_stream_get_state)(_playStream);
+   if (stream_state != PA_STREAM_UNCONNECTED &&
+@@ -1445,6 +1449,8 @@ int32_t AudioDeviceLinuxPulse::SetObserver(AudioDeviceObserver* observer) {
+ }
+ 
+ void AudioDeviceLinuxPulse::TellDevicesUpdated() {
++  // Fogata, patch 0011: the server lost or back, a device followed again.
++  MarkAudioDevicesChanged();
+   // Under the lock, so an observer going away (SetObserver(nullptr)) waits for it.
+   MutexLock lock(&observer_mutex_);
+   if (observer_ != nullptr) {
+@@ -1571,18 +1577,8 @@ void AudioDeviceLinuxPulse::ServerBack() {
+   RTC_LOG(LS_INFO) << "PulseAudio sound server back";
+   _mixerManager.SetPulseAudioObjects(_paMainloop, _paContext);
+   // Hears of the sinks and sources the server adds, for a chosen device not listed
+-  // yet (Restore).
+-  PaLock();
+-  LATE(pa_context_set_subscribe_callback)(_paContext, PaSubscribeCallback, this);
+-  pa_operation* subscribed = LATE(pa_context_subscribe)(
+-      _paContext,
+-      static_cast<pa_subscription_mask_t>(PA_SUBSCRIPTION_MASK_SINK |
+-                                          PA_SUBSCRIPTION_MASK_SOURCE),
+-      nullptr, nullptr);
+-  if (subscribed != nullptr) {
+-    LATE(pa_operation_unref)(subscribed);
+-  }
+-  PaUnLock();
++  // yet (Restore), and of every change of devices (patch 0011).
++  SubscribeToDevices();
+   // Another server may run at another rate.
+   InitSamplingFrequency();
+   Restore(0);
+@@ -1746,18 +1742,139 @@ void AudioDeviceLinuxPulse::PaStreamStateCallback(pa_stream* p, void* pThis) {
+   static_cast<AudioDeviceLinuxPulse*>(pThis)->PaStreamStateCallbackHandler(p);
+ }
+ 
+-void AudioDeviceLinuxPulse::PaSubscribeCallback(pa_context* /*c*/,
++void AudioDeviceLinuxPulse::PaSubscribeCallback(pa_context* c,
+                                                 pa_subscription_event_type_t t,
+-                                                uint32_t /*index*/,
++                                                uint32_t index,
+                                                 void* pThis) {
+   // Fogata: on the mainloop thread; the worker thread looks for the chosen devices.
+-  if ((t & PA_SUBSCRIPTION_EVENT_TYPE_MASK) != PA_SUBSCRIPTION_EVENT_NEW) {
++  auto* self = static_cast<AudioDeviceLinuxPulse*>(pThis);
++  const int facility = t & PA_SUBSCRIPTION_EVENT_FACILITY_MASK;
++  const int type = t & PA_SUBSCRIPTION_EVENT_TYPE_MASK;
++  // Patch 0011: the defaults (asked for and compared: the server tells of other
++  // changes too), a sink or source added or removed, a port changed (asked for
++  // and compared: a volume change is a change too).
++  if (facility == PA_SUBSCRIPTION_EVENT_SERVER) {
++    pa_operation* op =
++        LATE(pa_context_get_server_info)(c, PaDefaultsCallback, self);
++    if (op != nullptr) {
++      LATE(pa_operation_unref)(op);
++    }
+     return;
+   }
+-  auto* self = static_cast<AudioDeviceLinuxPulse*>(pThis);
++  const bool source = facility == PA_SUBSCRIPTION_EVENT_SOURCE;
++  if (type == PA_SUBSCRIPTION_EVENT_REMOVE) {
++    (source ? self->source_ports_ : self->sink_ports_).erase(index);
++    RTC_LOG(LS_INFO) << "PulseAudio: a " << (source ? "source" : "sink")
++                     << " went: audio devices changed";
++    MarkAudioDevicesChanged();
++    return;
++  }
++  pa_operation* op =
++      source ? LATE(pa_context_get_source_info_by_index)(
++                   c, index, PaPortSourceCallback, self)
++             : LATE(pa_context_get_sink_info_by_index)(c, index,
++                                                       PaPortSinkCallback, self);
++  if (op != nullptr) {
++    LATE(pa_operation_unref)(op);
++  }
++  if (type != PA_SUBSCRIPTION_EVENT_NEW) {
++    return;
++  }
++  RTC_LOG(LS_INFO) << "PulseAudio: a " << (source ? "source" : "sink")
++                   << " came: audio devices changed";
++  MarkAudioDevicesChanged();
+   self->PostToWorker([self] { self->FollowChosen(); });
+ }
+ 
++void AudioDeviceLinuxPulse::SubscribeToDevices() {
++  PaLock();
++  sink_ports_.clear();
++  source_ports_.clear();
++  defaults_known_ = false;
++  LATE(pa_context_set_subscribe_callback)(_paContext, PaSubscribeCallback, this);
++  pa_operation* ops[] = {
++      LATE(pa_context_subscribe)(
++          _paContext,
++          static_cast<pa_subscription_mask_t>(PA_SUBSCRIPTION_MASK_SINK |
++                                              PA_SUBSCRIPTION_MASK_SOURCE |
++                                              PA_SUBSCRIPTION_MASK_SERVER),
++          nullptr, nullptr),
++      // The ports and defaults as they are, to tell a change from them.
++      LATE(pa_context_get_sink_info_list)(_paContext, PaPortSinkCallback, this),
++      LATE(pa_context_get_source_info_list)(_paContext, PaPortSourceCallback,
++                                            this),
++      LATE(pa_context_get_server_info)(_paContext, PaDefaultsCallback, this)};
++  for (pa_operation* op : ops) {
++    if (op != nullptr) {
++      LATE(pa_operation_unref)(op);
++    }
++  }
++  PaUnLock();
++}
++
++void AudioDeviceLinuxPulse::NotePort(bool source,
++                                     uint32_t index,
++                                     const char* port) {
++  auto& ports = source ? source_ports_ : sink_ports_;
++  const std::string name = port != nullptr ? port : "";
++  auto known = ports.find(index);
++  if (known != ports.end() && known->second != name) {
++    RTC_LOG(LS_INFO) << "PulseAudio: a " << (source ? "source" : "sink")
++                     << "'s port changed to " << name
++                     << ": audio devices changed";
++    MarkAudioDevicesChanged();
++  }
++  ports[index] = name;
++}
++
++void AudioDeviceLinuxPulse::PaPortSinkCallback(pa_context* /*c*/,
++                                               const pa_sink_info* i,
++                                               int eol,
++                                               void* pThis) {
++  if (eol == 0 && i != nullptr) {
++    static_cast<AudioDeviceLinuxPulse*>(pThis)->NotePort(
++        false, i->index, i->active_port ? i->active_port->name : nullptr);
++  }
++}
++
++void AudioDeviceLinuxPulse::PaPortSourceCallback(pa_context* /*c*/,
++                                                 const pa_source_info* i,
++                                                 int eol,
++                                                 void* pThis) {
++  if (eol == 0 && i != nullptr) {
++    static_cast<AudioDeviceLinuxPulse*>(pThis)->NotePort(
++        true, i->index, i->active_port ? i->active_port->name : nullptr);
++  }
++}
++
++void AudioDeviceLinuxPulse::PaDefaultsCallback(pa_context* /*c*/,
++                                               const pa_server_info* i,
++                                               void* pThis) {
++  if (i == nullptr) {
++    return;
++  }
++  auto* self = static_cast<AudioDeviceLinuxPulse*>(pThis);
++  const std::string sink = i->default_sink_name ? i->default_sink_name : "";
++  const std::string source =
++      i->default_source_name ? i->default_source_name : "";
++  if (self->defaults_known_ &&
++      (sink != self->default_sink_ || source != self->default_source_)) {
++    RTC_LOG(LS_INFO) << "PulseAudio: the default output or input changed: "
++                        "audio devices changed";
++    MarkAudioDevicesChanged();
++  }
++  self->default_sink_ = sink;
++  self->default_source_ = source;
++  self->defaults_known_ = true;
++}
++
++void AudioDeviceLinuxPulse::PaStreamMovedCallback(pa_stream* /*p*/,
++                                                  void* /*pThis*/) {
++  RTC_LOG(LS_INFO) << "PulseAudio: a stream moved to another device: audio "
++                      "devices changed";
++  MarkAudioDevicesChanged();
++}
++
+ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
+   RTC_LOG(LS_VERBOSE) << "context state cb";
+ 
+@@ -2113,6 +2230,9 @@ int32_t AudioDeviceLinuxPulse::InitPulseAudio() {
+     return -1;
+   }
+ 
++  // Fogata: every change of devices from now on (patch 0011).
++  SubscribeToDevices();
++
+   return 0;
+ }
+ 
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.h b/modules/audio_device/linux/audio_device_pulse_linux.h
+index cc22fae..4fe0c52 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.h
++++ b/modules/audio_device/linux/audio_device_pulse_linux.h
+@@ -16,6 +16,7 @@
+ #include <atomic>
+ #include <cstddef>
+ #include <cstdint>
++#include <map>
+ #include <string>
+ 
+ #include "absl/functional/any_invocable.h"
+@@ -224,6 +225,23 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+   void Restore(int round);
+   void FollowChosen();
+   void TellDevicesUpdated();
++  // Fogata, patch 0011: hears of the sinks and sources the server adds and removes,
++  // of its defaults and of their ports, and marks every change
++  // (MarkAudioDevicesChanged); a stream moved marks too.
++  void SubscribeToDevices();
++  void NotePort(bool source, uint32_t index, const char* port);
++  static void PaStreamMovedCallback(pa_stream* p, void* pThis);
++  static void PaPortSinkCallback(pa_context* c,
++                                 const pa_sink_info* i,
++                                 int eol,
++                                 void* pThis);
++  static void PaPortSourceCallback(pa_context* c,
++                                   const pa_source_info* i,
++                                   int eol,
++                                   void* pThis);
++  static void PaDefaultsCallback(pa_context* c,
++                                 const pa_server_info* i,
++                                 void* pThis);
+   void PostToWorker(absl::AnyInvocable<void() &&> task,
+                     TimeDelta delay = TimeDelta::Zero());
+   // The sound server's own name of the device at `index` of the list (empty for
+@@ -402,6 +420,13 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+   // as soon as the server adds it.
+   bool play_on_default_ = false;
+   bool rec_on_default_ = false;
++  // Fogata, patch 0011: each sink's and source's active port, and the server's
++  // defaults, as last seen; on the mainloop thread (or under its lock).
++  std::map<uint32_t, std::string> sink_ports_;
++  std::map<uint32_t, std::string> source_ports_;
++  std::string default_sink_;
++  std::string default_source_;
++  bool defaults_known_ = false;
+   Mutex observer_mutex_;
+   AudioDeviceObserver* observer_ RTC_GUARDED_BY(observer_mutex_) = nullptr;
+   ScopedTaskSafety task_safety_;
+diff --git a/modules/audio_device/linux/pulseaudiosymboltable_linux.h b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
+index 5f4599f..62840c9 100644
+--- a/modules/audio_device/linux/pulseaudiosymboltable_linux.h
++++ b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
+@@ -77,6 +77,7 @@ namespace adm_linux_pulse {
+   X(pa_stream_peek)                        \
+   X(pa_stream_readable_size)               \
+   X(pa_stream_set_buffer_attr)             \
++  X(pa_stream_set_moved_callback)          \
+   X(pa_stream_set_overflow_callback)       \
+   X(pa_stream_set_read_callback)           \
+   X(pa_stream_set_state_callback)          \
+diff --git a/modules/audio_device/win/audio_device_core_win.cc b/modules/audio_device/win/audio_device_core_win.cc
+index 00a201f..f6cbfbc 100644
+--- a/modules/audio_device/win/audio_device_core_win.cc
++++ b/modules/audio_device/win/audio_device_core_win.cc
+@@ -3903,22 +3903,27 @@ void AudioDeviceWindowsCore::DeviceStateListener::SetObserver(AudioDeviceObserve
+ 
+ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDeviceStateChanged(LPCWSTR pwstrDeviceId, DWORD dwNewState) {
+   RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnDeviceStateChanged => " << pwstrDeviceId << ", NewState => " << dwNewState;
++  // Fogata, patch 0011: an endpoint came, went or changed its state.
++  MarkAudioDevicesChanged();
+   if(callback_) callback_->OnDevicesUpdated();
+   return S_OK;
+ }
+ 
+ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDeviceAdded(LPCWSTR pwstrDeviceId) {
+   RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnDeviceAdded => " << pwstrDeviceId;
++  MarkAudioDevicesChanged();  // Fogata, patch 0011.
+   return S_OK;
+ }
+ 
+ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDeviceRemoved(LPCWSTR pwstrDeviceId) {
+   RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnDeviceRemoved => " << pwstrDeviceId;
++  MarkAudioDevicesChanged();  // Fogata, patch 0011.
+   return S_OK;
+ }
+ 
+ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDefaultDeviceChanged(EDataFlow flow, ERole role, LPCWSTR pwstrDefaultDeviceId) {
+   RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnDefaultDeviceChanged => " << pwstrDefaultDeviceId;
++  MarkAudioDevicesChanged();  // Fogata, patch 0011.
+   return S_OK;
+ }
+ 

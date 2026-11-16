@@ -1,4 +1,4 @@
-Align the echo canceller anew when recording starts, and keep what it knows of the room
+Restart the echo canceller for a microphone turned on again in a call, keeping what it knows of the room
 
 Patch 0009 made AEC3 anew each time the audio device started recording again: at a call's
 start, and when a microphone turned off (the voice channel only receiving) is turned on
@@ -11,61 +11,40 @@ the other side's sound plays. Measured in the call lab with a headset and the ot
 holding a tone: after each unmute the first words went out about 17 dB weaker and the
 room's noise about 10 dB lower for 3 to 6 s, which then came back at once, as a step.
 
-The audio processing now asks the echo controller to restart for recording
-(EchoControl::RestartForRecording) before making it anew. AEC3 drops the played sound
-queued while nothing was recorded, and at its next recorded block resets its render buffer
-and delay estimator as a new AEC3 does at its first, and its echo remover as at a delay
-change (kBufferFlush: filters, ERLE, initial state, suppressor's initial state), which is
-all the alignment the stale state of 0009 was about; but whether there is an echo path at
-all (transparent mode) is the room's, not the alignment's, and is kept
-(EchoPathVariability::recording_restarted, AecState::HandleEchoPathChange). As a new
-AEC3, the restarted one processes nothing before fresh played sound arrives
-(render_properly_started_). Another echo controller still is made anew.
+Only where nothing can have changed the room is it kept. AudioState tells a microphone
+turned on again in the call recording stopped in (the call's streams received and played
+all along since: stopped_in_call_) from a call's start, and only there asks the audio
+processing to restart its echo controller for recording
+(AudioProcessing::RestartEchoControllerForRecording, EchoControl::RestartForRecording); a
+call's start makes it anew as 0009 did (RestartEchoController, unchanged): between calls
+the room and the devices may have changed. Patch 0011 makes it anew after a change of audio
+devices too.
 
-AudioProcessingImpl calls it with both its locks held (EchoCanceller3 checks its race
+Restarted, AEC3 drops the played sound queued while nothing was recorded, and at its next
+recorded block resets its render buffer and delay estimator as a new AEC3 does at its first,
+and its echo remover as at a delay change (kBufferFlush: filters, ERLE, initial state,
+suppressor's initial state), which is all the alignment the stale state of 0009 was about;
+but whether there is an echo path at all (transparent mode) is the room's, not the
+alignment's, and is kept (EchoPathVariability::recording_restarted,
+AecState::HandleEchoPathChange). As a new AEC3, the restarted one processes nothing before
+fresh played sound arrives (render_properly_started_). Another echo controller still is
+made anew.
+
+AudioProcessingImpl restarts it with both its locks held (EchoCanceller3 checks its race
 checkers). The request still comes after the audio device's StartRecording returns, so
-that a recording that fails to start never restarts it (wrapper patch 0018's test); the
-capture thread may process a frame or two before it, which the restart then realigns.
+that a recording that fails to start never restarts it (wrapper patches 0018 and 0021);
+the capture thread may process a frame or two before it, which the restart then realigns.
 
-Every call after the first in a process keeps the AEC3 of the one before, realigned.
-
-Measured in the call lab with wrapper patch 0019 (mic.sh unmute; 10 runs of each case
-unless said, as medians with the range; "heard" is how long the other side's voice came
-back to them above -50 dBFS):
-- with a headset and the other side holding a tone (unmute:headset, 3 runs of three
-  unmutes): the first word after an unmute went out at 0 dB against the later ones (-8 dB
-  on average before, -17 at worst) and the room's noise in the first 0.5 s at 0 dB (-12
-  before);
-- a call's start with speakers, the other side talking: their voice came back at -49 dBFS
-  at its loudest (-74 to -29) and was heard 0.9 s (0 to 6); with 0009, -56 dBFS (-81 to
-  -46) and 0 s (0 to 2.5). Without render_properly_started_ the restarted AEC3 began from
-  stale played sound: -36 dBFS (-70 to -25), heard 5.5 s (0 to 8.8);
-- unmutes with speakers (20): heard 0.4 s (0 to 2.7), as with 0009 (0.5 s);
-- the cost: a headset taken off for speakers while the microphone was off. The transparent
-  mode kept says there is no echo, and the other side heard themselves after the unmute at
-  -14 dBFS at the loudest (-20 to -12) for 6.4 s (2.3 to 14.5), where a new AEC3 let
-  -31 dBFS (-50 to -19) through for 0.3 s (0 to 2.6). It happens only when the room
-  changes while the microphone is off;
-- with speakers (unmute:speakers, 3 runs) the other's tone did not go back to them at an
-  unmute;
-- the echo check (mic.sh echo): no turn of 78 let through without stalls; 1 of 103 with
-  PipeWire's quantum free and stalls of 20 and 40 ms; 8 of 164 in 6 runs at 480 with
-  stalls of 40 and 80 ms (4 of 158 without render_properly_started_, 7 of 131 with wrapper
-  patch 0019 alone, within the runs' scatter); a call's first turn 71 dB under one's own
-  voice at the median (37 at the least);
-- the other side talking over one's words (4 runs, against 3 with 0009) cut as much of
-  them, at a call's start, right after an unmute and later.
-
-Tried and left out, each measured against the above in the same series:
-- forcing an echo path change at the first delay found after the restart (to leave the
-  transparent mode as soon as an echo is found): a call's start came back at -40 dBFS and
-  was heard 3.5 s (6 runs), and the headset taken off was no shorter (5.3 s);
-- the delay headroom of wrapper patch 0019 after a reset (AEC3 aligns from the audio
-  device's delay with 2 blocks whatever its configuration): a call's start at -36 dBFS,
-  heard 5.2 s (6 runs);
-- legacy transparent mode taking a filter as sane within 5 blocks past that headroom rather
-  than within 5 blocks: a call's start heard 2.2 s (0 to 6.2), and the headset taken off
-  no shorter (5.5 s).
+Measured in the call lab with wrapper patch 0019 (mic.sh unmute), as first written, when
+every start restarted AEC3: with a headset and the other side holding a tone, the first
+word after an unmute went out at 0 dB against the later ones (-8 dB on average before, -17
+at worst) and the room's noise in the first 0.5 s at 0 dB (-12 before). Without
+render_properly_started_ a call's start sent the other side's voice back for 5.5 s at the
+median (10 runs); forcing an echo path change at the first delay found after a restart,
+keeping wrapper patch 0019's headroom after a reset and judging the transparent mode's sane
+filter from that headroom were each tried and made a call's start worse. With a call's
+start now made anew, and a change of devices (patch 0011), the figures are in
+app/third_party/flutter_webrtc/FOGATA.md.
 
 diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
 index 9b28e82..cd90465 100644
@@ -227,14 +206,124 @@ index 45b33c2..a9d46c6 100644
  };
  
  }  // namespace webrtc
+diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
+index c7fd326..510c4b1 100644
+--- a/api/audio/audio_processing.h
++++ b/api/audio/audio_processing.h
+@@ -530,6 +530,12 @@ class RTC_EXPORT AudioProcessing : public RefCountInterface {
+   // alignment of what was played with what is recorded. Takes both locks.
+   virtual void RestartEchoController() {}
+ 
++  // Fogata: for a microphone turned on again in a call that kept playing: the
++  // echo controller restarts for recording (EchoControl::RestartForRecording),
++  // aligning again and keeping what it learned of the room, and one that cannot
++  // is made anew (RestartEchoController). Takes both locks.
++  virtual void RestartEchoControllerForRecording() { RestartEchoController(); }
++
+   // Set to true when the output of AudioProcessing will be muted or in some
+   // other way not used. Ideally, the captured audio would still be processed,
+   // but some components may change behavior based on this information.
+diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+index f63352c..7edf7d9 100644
+--- a/audio/audio_state.cc
++++ b/audio/audio_state.cc
+@@ -81,6 +81,7 @@ void AudioState::SetPlayout(bool enabled) {
+   } else {
+     // Disable playout.
+     config_.audio_device_module->StopPlayout();
++    stopped_in_call_ = false;
+   }
+   playout_enabled_ = enabled;
+   UpdateNullAudioPollerState();
+@@ -115,6 +116,8 @@ void AudioState::RemoveReceivingStream(AudioReceiveStreamInterface* stream) {
+   config_.audio_mixer->RemoveSource(stream->source());
+   if (receiving_streams_.empty()) {
+     config_.audio_device_module->StopPlayout();
++    // Fogata: the call is over; the next recording starts another (patch 0010).
++    stopped_in_call_ = false;
+   }
+   UpdateNullAudioPollerState();
+ }
+@@ -134,6 +137,7 @@ void AudioState::SetRecording(bool enabled) {
+   } else {
+     // Disable recording.
+     adm->StopRecording();
++    stopped_in_call_ = false;
+   }
+   recording_enabled_ = enabled;
+ }
+@@ -167,6 +171,9 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
+   UpdateAudioTransportWithSendingStreams();
+   if (sending_streams_.empty()) {
+     config_.audio_device_module->StopRecording();
++    // Fogata: the microphone turned off in a call that goes on playing (the voice
++    // channel only receiving): its next start is in the same call (patch 0010).
++    stopped_in_call_ = !receiving_streams_.empty() && playout_enabled_;
+   }
+ }
+ 
+@@ -202,11 +209,24 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
+ // added while recording runs (a second connection, a shared screen's sound),
+ // muting or replacing a track, and the device itself starting again (a device
+ // chosen, a sound server back) leave it as it is.
++//
++// Fogata, patch 0010: only a start in the call recording stopped in (a microphone
++// turned on again, the call's streams received and played all along) restarts the
++// echo controller for recording, which keeps what it learned of the room (with a
++// headset, that there is no echo). A call's start makes it anew as above: between
++// calls the room and the devices may have changed.
+ void AudioState::StartRecordingForCall() {
+   if (config_.audio_device_module->StartRecording() != 0) {
+     return;
+   }
+-  if (config_.audio_processing) {
++  const bool same_call = stopped_in_call_;
++  stopped_in_call_ = false;
++  if (!config_.audio_processing) {
++    return;
++  }
++  if (same_call) {
++    config_.audio_processing->RestartEchoControllerForRecording();
++  } else {
+     config_.audio_processing->RestartEchoController();
+   }
+ }
+diff --git a/audio/audio_state.h b/audio/audio_state.h
+index 7742337..7a7104e 100644
+--- a/audio/audio_state.h
++++ b/audio/audio_state.h
+@@ -67,8 +67,8 @@ class AudioState : public webrtc::AudioState {
+   void UpdateAudioTransportWithSendingStreams()
+       RTC_RUN_ON(&worker_thread_checker_);
+   void UpdateNullAudioPollerState() RTC_RUN_ON(&worker_thread_checker_);
+-  // Fogata: starts the audio device's recording, and makes the echo controller
+-  // anew once it records.
++  // Fogata: starts the audio device's recording, and once it records makes the
++  // echo controller anew, or restarts it in the call it stopped in (patch 0010).
+   void StartRecordingForCall() RTC_RUN_ON(&worker_thread_checker_);
+ 
+   RTC_NO_UNIQUE_ADDRESS SequenceChecker worker_thread_checker_{
+@@ -76,6 +76,9 @@ class AudioState : public webrtc::AudioState {
+   const AudioState::Config config_;
+   bool recording_enabled_ RTC_GUARDED_BY(&worker_thread_checker_) = true;
+   bool playout_enabled_ RTC_GUARDED_BY(&worker_thread_checker_) = true;
++  // Fogata: recording stopped while streams were received and played, and they
++  // have been ever since: the same call, the same room (StartRecordingForCall).
++  bool stopped_in_call_ RTC_GUARDED_BY(&worker_thread_checker_) = false;
+ 
+   // Transports mixed audio from the mixer to the audio device and
+   // recorded audio to the sending streams.
 diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
-index d2ea94c..038242c 100644
+index d2ea94c..4afed86 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
 +++ b/modules/audio_processing/audio_processing_impl.cc
-@@ -1842,6 +1842,13 @@ void AudioProcessingImpl::InitializeHighPassFilter(bool forced_reset) {
- void AudioProcessingImpl::RestartEchoController() {
-   MutexLock lock_render(&mutex_render_);
-   MutexLock lock_capture(&mutex_capture_);
+@@ -1846,6 +1846,20 @@ void AudioProcessingImpl::RestartEchoController() {
+   InitializeEchoController();
+ }
+ 
++void AudioProcessingImpl::RestartEchoControllerForRecording() {
++  MutexLock lock_render(&mutex_render_);
++  MutexLock lock_capture(&mutex_capture_);
 +  // Fogata: AEC3 aligns again and keeps what it learned of the room (patch
 +  // 0010); another echo controller is made anew.
 +  if (submodules_.echo_controller &&
@@ -242,6 +331,22 @@ index d2ea94c..038242c 100644
 +    RTC_LOG(LS_INFO) << "AudioProcessing: echo controller aligned anew";
 +    return;
 +  }
-   RTC_LOG(LS_INFO) << "AudioProcessing: echo controller made anew";
-   InitializeEchoController();
- }
++  RTC_LOG(LS_INFO) << "AudioProcessing: echo controller made anew";
++  InitializeEchoController();
++}
++
+ void AudioProcessingImpl::InitializeEchoController() {
+   submodules_.echo_controller.reset();
+   capture_.linear_aec_output.reset();
+diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
+index 2f8ead4..f4b8afd 100644
+--- a/modules/audio_processing/audio_processing_impl.h
++++ b/modules/audio_processing/audio_processing_impl.h
+@@ -93,6 +93,7 @@ class AudioProcessingImpl : public AudioProcessing {
+   void SetRuntimeSetting(RuntimeSetting setting) override;
+   bool PostRuntimeSetting(RuntimeSetting setting) override;
+   void RestartEchoController() override;
++  void RestartEchoControllerForRecording() override;
+ 
+   // Capture-side exclusive methods possibly running APM in a
+   // multi-threaded manner. Acquire the capture lock.
