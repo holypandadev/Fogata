@@ -22,10 +22,10 @@ every connection is gone). Tested by the wrapper's test/voice_engine_muted.test.
 engine's constructor).
 
 diff --git a/media/engine/webrtc_voice_engine.cc b/media/engine/webrtc_voice_engine.cc
-index e6312c2..fba1984 100644
+index 793519f6f1..a0a2927426 100644
 --- a/media/engine/webrtc_voice_engine.cc
 +++ b/media/engine/webrtc_voice_engine.cc
-@@ -842,6 +842,36 @@ AudioProcessing* WebRtcVoiceEngine::apm() const {
+@@ -844,6 +844,36 @@ AudioProcessing* WebRtcVoiceEngine::apm() const {
    return apm_.get();
  }
  
@@ -62,7 +62,7 @@ index e6312c2..fba1984 100644
  AudioState* WebRtcVoiceEngine::audio_state() {
    RTC_DCHECK_RUN_ON(&worker_thread_checker_);
    RTC_DCHECK(audio_state_);
-@@ -1698,6 +1728,8 @@ bool WebRtcVoiceSendChannel::RemoveSendStream(uint32_t ssrc) {
+@@ -1708,6 +1738,8 @@ bool WebRtcVoiceSendChannel::RemoveSendStream(uint32_t ssrc) {
    }
  
    it->second->SetSend(false);
@@ -71,7 +71,7 @@ index e6312c2..fba1984 100644
  
    delete it->second;
    send_streams_.erase(it);
-@@ -1821,14 +1853,9 @@ bool WebRtcVoiceSendChannel::MuteStream(uint32_t ssrc, bool muted) {
+@@ -1844,14 +1876,9 @@ bool WebRtcVoiceSendChannel::MuteStream(uint32_t ssrc, bool muted) {
    // This implementation is not ideal, instead we should signal the AGC when
    // the mic channel is muted/unmuted. We can't do it today because there
    // is no good way to know which stream is mapping to the mic channel.
@@ -90,7 +90,7 @@ index e6312c2..fba1984 100644
    return true;
  }
 diff --git a/media/engine/webrtc_voice_engine.h b/media/engine/webrtc_voice_engine.h
-index 7b788ac..94e503b 100644
+index 7cc47d876b..f064d86f54 100644
 --- a/media/engine/webrtc_voice_engine.h
 +++ b/media/engine/webrtc_voice_engine.h
 @@ -19,6 +19,7 @@
@@ -101,7 +101,7 @@ index 7b788ac..94e503b 100644
  #include <vector>
  
  #include "absl/base/nullability.h"
-@@ -137,6 +138,13 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+@@ -138,6 +139,13 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
  
    AudioDeviceModule* adm();
    AudioProcessing* apm() const;
@@ -115,7 +115,7 @@ index 7b788ac..94e503b 100644
    std::vector<RtpHeaderExtensionCapability> GetRtpHeaderExtensions(
        const FieldTrialsView* field_trials) const override;
  
-@@ -172,6 +180,14 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+@@ -173,6 +181,14 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
    const scoped_refptr<AudioDecoderFactory> decoder_factory_;
    // The audio processing module.
    scoped_refptr<AudioProcessing> apm_ RTC_GUARDED_BY(worker_thread_checker_);

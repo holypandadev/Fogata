@@ -1,7 +1,8 @@
 Lets the factory be given the AudioTransport that carries the microphone's sound to the
 senders, which the wrapper uses for custom audio sources. From webrtc-sdk/libwebrtc's
-patches/custom_audio_source_m150.patch, moved to M156 (CreatePeerConnectionFactory now
-has two overloads, and the voice engine makes its AudioState in a helper).
+patches/custom_audio_source_m150.patch, moved to M158 (CreatePeerConnectionFactory has one
+overload left, without a worker thread, and the voice engine makes its AudioState in a
+helper).
 
 diff --git a/api/audio/audio_device_defines.h b/api/audio/audio_device_defines.h
 index 8976eca0f8..642562af5f 100644
@@ -37,10 +38,10 @@ index 8976eca0f8..642562af5f 100644
  };
  
 diff --git a/api/create_peerconnection_factory.cc b/api/create_peerconnection_factory.cc
-index 2aa03a652f..ef8dd568fe 100644
+index 1a2765bcff..f48c605c00 100644
 --- a/api/create_peerconnection_factory.cc
 +++ b/api/create_peerconnection_factory.cc
-@@ -46,7 +46,8 @@ scoped_refptr<PeerConnectionFactoryInterface> CreateFactory(
+@@ -43,7 +43,8 @@ scoped_refptr<PeerConnectionFactoryInterface> CreatePeerConnectionFactory(
      scoped_refptr<AudioMixer> audio_mixer,
      scoped_refptr<AudioProcessing> audio_processing,
      std::unique_ptr<AudioFrameProcessor> audio_frame_processor,
@@ -49,8 +50,8 @@ index 2aa03a652f..ef8dd568fe 100644
 +    scoped_refptr<AudioTransportFactory> audio_transport_factory) {
    PeerConnectionFactoryDependencies dependencies;
    dependencies.network_thread = network_thread;
-   dependencies.worker_thread = worker_thread;
-@@ -71,6 +72,9 @@ scoped_refptr<PeerConnectionFactoryInterface> CreateFactory(
+   dependencies.signaling_thread = signaling_thread;
+@@ -67,6 +68,9 @@ scoped_refptr<PeerConnectionFactoryInterface> CreatePeerConnectionFactory(
          std::make_unique<BuiltinAudioProcessingBuilder>();
  #endif
    }
@@ -60,38 +61,11 @@ index 2aa03a652f..ef8dd568fe 100644
    dependencies.audio_mixer = std::move(audio_mixer);
    dependencies.video_encoder_factory = std::move(video_encoder_factory);
    dependencies.video_decoder_factory = std::move(video_decoder_factory);
-@@ -99,7 +103,7 @@ scoped_refptr<PeerConnectionFactoryInterface> CreatePeerConnectionFactory(
-       std::move(audio_decoder_factory), std::move(video_encoder_factory),
-       std::move(video_decoder_factory), std::move(audio_mixer),
-       std::move(audio_processing), std::move(audio_frame_processor),
--      std::move(field_trials));
-+      std::move(field_trials), /*audio_transport_factory=*/nullptr);
- }
- 
- scoped_refptr<PeerConnectionFactoryInterface> CreatePeerConnectionFactory(
-@@ -114,13 +118,15 @@ scoped_refptr<PeerConnectionFactoryInterface> CreatePeerConnectionFactory(
-     scoped_refptr<AudioMixer> audio_mixer,
-     scoped_refptr<AudioProcessing> audio_processing,
-     std::unique_ptr<AudioFrameProcessor> audio_frame_processor,
--    std::unique_ptr<FieldTrialsView> field_trials) {
-+    std::unique_ptr<FieldTrialsView> field_trials,
-+    scoped_refptr<AudioTransportFactory> audio_transport_factory) {
-   return CreateFactory(
-       network_thread, worker_thread, signaling_thread, std::move(default_adm),
-       std::move(audio_encoder_factory), std::move(audio_decoder_factory),
-       std::move(video_encoder_factory), std::move(video_decoder_factory),
-       std::move(audio_mixer), std::move(audio_processing),
--      std::move(audio_frame_processor), std::move(field_trials));
-+      std::move(audio_frame_processor), std::move(field_trials),
-+      std::move(audio_transport_factory));
- }
- 
- }  // namespace webrtc
 diff --git a/api/create_peerconnection_factory.h b/api/create_peerconnection_factory.h
-index 2927a1216c..72125b4b31 100644
+index 08dbbb6658..bac01822df 100644
 --- a/api/create_peerconnection_factory.h
 +++ b/api/create_peerconnection_factory.h
-@@ -64,7 +64,8 @@ CreatePeerConnectionFactory(
+@@ -45,7 +45,8 @@ CreatePeerConnectionFactory(
      scoped_refptr<AudioMixer> audio_mixer,
      scoped_refptr<AudioProcessing> audio_processing,
      std::unique_ptr<AudioFrameProcessor> audio_frame_processor = nullptr,
@@ -124,7 +98,7 @@ index 81cb890185..be62c5d1f3 100644
          std::move(deps.video_encoder_factory),
          std::move(deps.video_decoder_factory), env.field_trials());
 diff --git a/api/peer_connection_interface.h b/api/peer_connection_interface.h
-index 7d1ce8f191..b362051e11 100644
+index e0c8425b38..9aaa08b95f 100644
 --- a/api/peer_connection_interface.h
 +++ b/api/peer_connection_interface.h
 @@ -128,6 +128,7 @@
@@ -135,7 +109,7 @@ index 7d1ce8f191..b362051e11 100644
  #include "media/base/media_config.h"
  // TODO(bugs.webrtc.org/7447): We plan to provide a way to let applications
  // inject a PacketSocketFactory and/or NetworkManager, and not expose
-@@ -1520,6 +1521,7 @@ struct RTC_EXPORT PeerConnectionFactoryDependencies final {
+@@ -1521,6 +1522,7 @@ struct RTC_EXPORT PeerConnectionFactoryDependencies final {
    scoped_refptr<AudioEncoderFactory> audio_encoder_factory;
    scoped_refptr<AudioDecoderFactory> audio_decoder_factory;
    scoped_refptr<AudioMixer> audio_mixer;
@@ -339,10 +313,10 @@ index bbd96897ce..160953700c 100644
  
    ~AudioState() override {}
 diff --git a/media/engine/webrtc_voice_engine.cc b/media/engine/webrtc_voice_engine.cc
-index 89f064fcdb..e6312c25f8 100644
+index c71faffb0a..793519f6f1 100644
 --- a/media/engine/webrtc_voice_engine.cc
 +++ b/media/engine/webrtc_voice_engine.cc
-@@ -482,13 +482,17 @@ scoped_refptr<AudioState> CreateAudioState(
+@@ -484,13 +484,17 @@ scoped_refptr<AudioState> CreateAudioState(
      scoped_refptr<AudioMixer> audio_mixer,
      AudioProcessing* apm,
      AudioDeviceModule* adm,
@@ -361,7 +335,7 @@ index 89f064fcdb..e6312c25f8 100644
    config.audio_processing = apm;
    config.audio_device_module = adm;
    if (audio_frame_processor) {
-@@ -508,7 +512,8 @@ WebRtcVoiceEngine::WebRtcVoiceEngine(
+@@ -510,7 +514,8 @@ WebRtcVoiceEngine::WebRtcVoiceEngine(
      scoped_refptr<AudioDecoderFactory> decoder_factory,
      scoped_refptr<AudioMixer> audio_mixer,
      scoped_refptr<AudioProcessing> audio_processing,
@@ -371,7 +345,7 @@ index 89f064fcdb..e6312c25f8 100644
      : env_(env),
        minimized_resampling_on_mobile_trial_enabled_(
            env_.field_trials().IsEnabled(
-@@ -523,7 +528,8 @@ WebRtcVoiceEngine::WebRtcVoiceEngine(
+@@ -525,7 +530,8 @@ WebRtcVoiceEngine::WebRtcVoiceEngine(
                                      std::move(audio_mixer),
                                      apm_.get(),
                                      adm_.get(),
@@ -382,10 +356,10 @@ index 89f064fcdb..e6312c25f8 100644
            LegacyCollectCodecs(encoder_factory_->GetSupportedEncoders(),
                                !payload_types_in_transport_trial_enabled_)),
 diff --git a/media/engine/webrtc_voice_engine.h b/media/engine/webrtc_voice_engine.h
-index af2b5107ad..7b788ac104 100644
+index aaa0307584..7cc47d876b 100644
 --- a/media/engine/webrtc_voice_engine.h
 +++ b/media/engine/webrtc_voice_engine.h
-@@ -83,7 +83,8 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
+@@ -84,7 +84,8 @@ class WebRtcVoiceEngine final : public VoiceEngineInterface {
                      scoped_refptr<AudioDecoderFactory> decoder_factory,
                      scoped_refptr<AudioMixer> audio_mixer,
                      scoped_refptr<AudioProcessing> audio_processing,

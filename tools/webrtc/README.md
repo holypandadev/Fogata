@@ -172,7 +172,7 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    with an older libstdc++ (webrtc-sdk/libwebrtc's own patches).
 2. `0002-custom-audio-transport`: the factory takes the `AudioTransport` the wrapper uses
    for custom audio sources (webrtc-sdk/libwebrtc `custom_audio_source_m150.patch`,
-   moved to M156).
+   moved to M158).
 3. `0003-audio-device-observer`: from webrtc-sdk/webrtc, the audio device module tells
    an observer when devices come and go (the wrapper's `OnDeviceChange`, used on
    Windows), and PulseAudio and ALSA start and stop recording more safely.

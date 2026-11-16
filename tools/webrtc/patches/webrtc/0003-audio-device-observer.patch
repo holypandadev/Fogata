@@ -5,7 +5,7 @@ recording and playout more safely; the audio device buffer takes a new transport
 media runs. The Apple audio engine parts of the same commit are left out.
 
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
-index 3091389d23..23219a06b8 100644
+index 1f90f83a68..9a7d7690d9 100644
 --- a/api/audio/audio_device.h
 +++ b/api/audio/audio_device.h
 @@ -20,6 +20,7 @@
@@ -16,9 +16,9 @@ index 3091389d23..23219a06b8 100644
  
  class AudioDeviceModule : public RefCountInterface {
   public:
-@@ -168,6 +169,11 @@ class AudioDeviceModule : public RefCountInterface {
-   // not be present in the stats.
-   virtual std::optional<Stats> GetStats() const { return std::nullopt; }
+@@ -185,6 +186,11 @@ class AudioDeviceModule : public RefCountInterface {
+     return std::nullopt;
+   }
  
 +  // Tells `observer` when audio devices come and go, where the platform says.
 +  virtual int32_t SetObserver(AudioDeviceObserver* observer) { return -1; }
@@ -28,7 +28,7 @@ index 3091389d23..23219a06b8 100644
  // Only supported on iOS.
  #if defined(WEBRTC_IOS)
    virtual int GetPlayoutAudioParameters(AudioParameters* params) const = 0;
-@@ -192,6 +198,14 @@ class AudioDeviceModuleForTest : public AudioDeviceModule {
+@@ -209,6 +215,14 @@ class AudioDeviceModuleForTest : public AudioDeviceModule {
    virtual int SetRecordingSampleRate(uint32_t sample_rate) = 0;
  };
  
