@@ -450,10 +450,13 @@ class DirectChats extends Piece {
 
   /// Adds files to send in the chat shown. Folders cannot go and are left out, and said
   /// so; a file already waiting is not added twice.
-  Future<void> addOutgoing(Iterable<String> paths) async {
+  Future<void> addOutgoing(
+    Iterable<String> paths, {
+    Map<String, String> real = const {},
+  }) async {
     final friend = open;
     if (friend == null) return;
-    final (files, folders) = await readOutgoing(paths);
+    final (files, folders) = await readOutgoing(paths, real: real);
     final list = outgoing.putIfAbsent(friend, () => []);
     for (final f in files) {
       if (!list.any((w) => w.path == f.path)) list.add(f);

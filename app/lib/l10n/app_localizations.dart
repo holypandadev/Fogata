@@ -1341,6 +1341,24 @@ abstract class L10n {
   /// **'{n, plural, =1{A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To share it, pick it with the paperclip.} other{{n} hidden or private files were left out: files like these are not added by dragging, since a web page can start a drag. To share them, pick them with the paperclip.}}'**
   String outgoingPrivateLeftOut(int n);
 
+  /// Error toast: files dragged onto a room were left out because this system cannot say where each really is (inside the Flatpak, the document portal is too old to say, or did not answer), so it cannot check that none is hidden or in a private place. {n} is how many. "the paperclip" is the room's button that picks files to share.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{A dragged file was left out: this system cannot tell where it comes from. To share it, pick it with the paperclip.} other{{n} dragged files were left out: this system cannot tell where they come from. To share them, pick them with the paperclip.}}'**
+  String outgoingUnknownPlaceLeftOut(int n);
+
+  /// Error toast: files dragged onto a room could not be read, as the application that started the drag handed them over in a way that does not reach Fogata's sandbox (a plain list of files). {n} is how many. "the paperclip" is the room's button that picks files to share.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{A dragged file could not be reached. To share it, pick it with the paperclip.} other{{n} dragged files could not be reached. To share them, pick them with the paperclip.}}'**
+  String outgoingUnreachableLeftOut(int n);
+
+  /// Error toast: files dragged onto a room were not taken at all, because {n} of them are hidden (their name starts with a dot) or in a private place; taking the others would have given the sandboxed application those too (Linux Flatpak). The person can drag the others again without them, or pick the private ones with the paperclip on purpose. "the paperclip" is the room's button that picks files to share.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{This drop was not taken: one of its files is hidden or private. Drag the others again without it. To share it, pick it with the paperclip.} other{This drop was not taken: {n} of its files are hidden or private. Drag the others again without them. To share them, pick them with the paperclip.}}'**
+  String outgoingDropDeclined(int n);
+
   /// Above the message box: files waiting to be shared. {n} is how many; {count} is that number again, drawn in its own style; {size} is their total size, like "48.2 MB". Keep the " · " separator before the size.
   ///
   /// In en, this message translates to:
@@ -9234,6 +9252,24 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'{n, plural, =1{A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To send it, pick it with the + button.} other{{n} hidden or private files were left out: files like these are not added by dragging, since a web page can start a drag. To send them, pick them with the + button.}}'**
   String directPrivateLeftOut(int n);
+
+  /// Error toast: files dragged onto a direct chat were left out because this system cannot say where each really is (inside the Flatpak, the document portal is too old to say, or did not answer), so it cannot check that none is hidden or in a private place. {n} is how many. "the + button" is the button beside the message box that picks files to send.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{A dragged file was left out: this system cannot tell where it comes from. To send it, pick it with the + button.} other{{n} dragged files were left out: this system cannot tell where they come from. To send them, pick them with the + button.}}'**
+  String directUnknownPlaceLeftOut(int n);
+
+  /// Error toast: files dragged onto a direct chat could not be read, as the application that started the drag handed them over in a way that does not reach Fogata's sandbox (a plain list of files). {n} is how many. "the + button" is the button beside the message box that picks files to send.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{A dragged file could not be reached. To send it, pick it with the + button.} other{{n} dragged files could not be reached. To send them, pick them with the + button.}}'**
+  String directUnreachableLeftOut(int n);
+
+  /// Error toast: files dragged onto a direct chat were not taken at all, because {n} of them are hidden (their name starts with a dot) or in a private place; taking the others would have given the sandboxed application those too (Linux Flatpak). The person can drag the others again without them, or pick the private ones with the + button on purpose. "the + button" is the button beside the message box that picks files to send.
+  ///
+  /// In en, this message translates to:
+  /// **'{n, plural, =1{This drop was not taken: one of its files is hidden or private. Drag the others again without it. To send it, pick it with the + button.} other{This drop was not taken: {n} of its files are hidden or private. Drag the others again without them. To send them, pick them with the + button.}}'**
+  String directDropDeclined(int n);
 
   /// Toast to a manager: someone asked to join the group {group} (with an invitation, or as a friend added to it), but their Fogata is too old for the group's protection. {name} is the person. Once they update, their invitation still works.
   ///

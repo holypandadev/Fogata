@@ -1004,6 +1004,42 @@ class L10nEs extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Se dejaron fuera $n archivos arrastrados: este sistema no puede saber de dónde vienen. Para compartirlos, elígelos con el clip.',
+      one: 'Se dejó fuera un archivo arrastrado: este sistema no puede saber de dónde viene. Para compartirlo, elígelo con el clip.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'No se pudo acceder a $n archivos arrastrados. Para compartirlos, elígelos con el clip.',
+      one: 'No se pudo acceder a un archivo arrastrado. Para compartirlo, elígelo con el clip.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'No se tomó este arrastre: $n de sus archivos son ocultos o privados. Arrastra los demás otra vez sin ellos. Para compartirlos, elígelos con el clip.',
+      one: 'No se tomó este arrastre: uno de sus archivos es oculto o privado. Arrastra los demás otra vez sin él. Para compartirlo, elígelo con el clip.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6629,6 +6665,42 @@ class L10nEs extends L10n {
       other:
           'Se dejaron fuera $n archivos ocultos o privados: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlos, elígelos con el botón +.',
       one: 'Se dejó fuera un archivo oculto o privado: los archivos así no se añaden arrastrando, porque una página web puede iniciar un arrastre. Para enviarlo, elígelo con el botón +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Se dejaron fuera $n archivos arrastrados: este sistema no puede saber de dónde vienen. Para enviarlos, elígelos con el botón +.',
+      one: 'Se dejó fuera un archivo arrastrado: este sistema no puede saber de dónde viene. Para enviarlo, elígelo con el botón +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'No se pudo acceder a $n archivos arrastrados. Para enviarlos, elígelos con el botón +.',
+      one: 'No se pudo acceder a un archivo arrastrado. Para enviarlo, elígelo con el botón +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'No se tomó este arrastre: $n de sus archivos son ocultos o privados. Arrastra los demás otra vez sin ellos. Para enviarlos, elígelos con el botón +.',
+      one: 'No se tomó este arrastre: uno de sus archivos es oculto o privado. Arrastra los demás otra vez sin él. Para enviarlo, elígelo con el botón +.',
     );
     return '$_temp0';
   }

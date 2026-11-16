@@ -905,6 +905,39 @@ class L10nZh extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n个拖入的文件未被添加：这个系统无法判断它们来自哪里。要共享它们，请用回形针按钮选择。',
+      one: '一个拖入的文件未被添加：这个系统无法判断它来自哪里。要共享它，请用回形针按钮选择。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n个拖入的文件无法访问。要共享它们，请用回形针按钮选择。',
+      one: '一个拖入的文件无法访问。要共享它，请用回形针按钮选择。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '未接受这次拖放：其中$n个文件是隐藏或私密的。请不带它们再拖一次其他文件。要共享它们，请用回形针按钮选择。',
+      one: '未接受这次拖放：其中一个文件是隐藏或私密的。请不带它再拖一次其他文件。要共享它，请用回形针按钮选择。',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6120,6 +6153,39 @@ class L10nZh extends L10n {
       locale: localeName,
       other: '$n个隐藏或私密的文件未被添加：网页也能发起拖动，所以这类文件不能通过拖动添加。要发送它们，请用 + 按钮选择。',
       one: '一个隐藏或私密的文件未被添加：网页也能发起拖动，所以这类文件不能通过拖动添加。要发送它，请用 + 按钮选择。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n个拖入的文件未被添加：这个系统无法判断它们来自哪里。要发送它们，请用 + 按钮选择。',
+      one: '一个拖入的文件未被添加：这个系统无法判断它来自哪里。要发送它，请用 + 按钮选择。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '$n个拖入的文件无法访问。要发送它们，请用 + 按钮选择。',
+      one: '一个拖入的文件无法访问。要发送它，请用 + 按钮选择。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: '未接受这次拖放：其中$n个文件是隐藏或私密的。请不带它们再拖一次其他文件。要发送它们，请用 + 按钮选择。',
+      one: '未接受这次拖放：其中一个文件是隐藏或私密的。请不带它再拖一次其他文件。要发送它，请用 + 按钮选择。',
     );
     return '$_temp0';
   }

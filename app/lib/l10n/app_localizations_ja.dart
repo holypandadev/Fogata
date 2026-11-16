@@ -921,6 +921,41 @@ class L10nJa extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'ドラッグしたファイル$n個を追加しませんでした。このシステムでは、ファイルがどこから来たのかを確認できません。共有するには、クリップボタンで選んでください。',
+      one: 'ドラッグしたファイルを追加しませんでした。このシステムでは、ファイルがどこから来たのかを確認できません。共有するには、クリップボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: 'ドラッグしたファイル$n個にアクセスできませんでした。共有するには、クリップボタンで選んでください。',
+      one: 'ドラッグしたファイルにアクセスできませんでした。共有するには、クリップボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'このドロップは受け付けませんでした。隠しファイルまたは非公開のファイルが$n個含まれています。それらを除いて、ほかのファイルをもう一度ドラッグしてください。共有するには、クリップボタンで選んでください。',
+      one: 'このドロップは受け付けませんでした。隠しファイルまたは非公開のファイルが含まれています。それを除いて、ほかのファイルをもう一度ドラッグしてください。共有するには、クリップボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6211,6 +6246,41 @@ class L10nJa extends L10n {
       other:
           '隠しファイルまたは非公開のファイル$n個を追加しませんでした。Webページがドラッグを始めることもあるため、このようなファイルはドラッグでは追加されません。送るには、+ボタンで選んでください。',
       one: '隠しファイルまたは非公開のファイルを追加しませんでした。Webページがドラッグを始めることもあるため、このようなファイルはドラッグでは追加されません。送るには、+ボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'ドラッグしたファイル$n個を追加しませんでした。このシステムでは、ファイルがどこから来たのかを確認できません。送るには、+ボタンで選んでください。',
+      one: 'ドラッグしたファイルを追加しませんでした。このシステムでは、ファイルがどこから来たのかを確認できません。送るには、+ボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other: 'ドラッグしたファイル$n個にアクセスできませんでした。送るには、+ボタンで選んでください。',
+      one: 'ドラッグしたファイルにアクセスできませんでした。送るには、+ボタンで選んでください。',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'このドロップは受け付けませんでした。隠しファイルまたは非公開のファイルが$n個含まれています。それらを除いて、ほかのファイルをもう一度ドラッグしてください。送るには、+ボタンで選んでください。',
+      one: 'このドロップは受け付けませんでした。隠しファイルまたは非公開のファイルが含まれています。それを除いて、ほかのファイルをもう一度ドラッグしてください。送るには、+ボタンで選んでください。',
     );
     return '$_temp0';
   }

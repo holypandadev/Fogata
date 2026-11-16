@@ -30,23 +30,46 @@ Changed, each place marked `Fogata:` in the code:
   cannot open. The portal's targets (`application/vnd.portal.filetransfer`, and the older
   `application/vnd.portal.files` GTK 3 also offers) come before the list of files: GTK takes
   the first target of the drop's list the source offers, and GTK and KDE applications offer
-  the portal's beside the list. The plugin asks the portal for the files (`RetrieveFiles`,
-  at most five seconds) while the drop is still going, as 0.9.0 does, since a source may end
-  its transfer once the drop is finished, and hands them on as a `text/uri-list` of the
-  paths the portal gave: the document portal's (`/run/user/<id>/doc/<id>/<name>`), or the
-  file's own where the sandbox sees it already (the downloads folder). A key that is empty
-  or not UTF-8, or a portal that gives nothing, drops nothing. A source that offers only the
-  list of files is read as before. Outside the Flatpak the targets are those of 0.8.0: the
-  list first, then the portal's, which GTK adds where a portal runs and which drop nothing.
-- A document portal's path says nothing of where the file really is: GTK hands every file
-  of a drag to the portal by itself, a page's drag that names `~/.ssh/id_ed25519` among
-  them, and it arrives as `/run/user/<id>/doc/<id>/id_ed25519`. So the plugin also answers
-  `documentHostPaths` (`lib/src/channel.dart`), asking the Documents portal where the
-  documents with the ids given really are (`GetHostPaths`, version 5 of its interface,
-  xdg-desktop-portal 1.19 and later) and giving each path as its bytes; an id the portal
-  does not answer for, or every id when it cannot be asked or is older, is left out. The
-  application judges each such file by that place (`app/lib/src/private_places.dart`,
-  `realPlace`), and one whose place cannot be learnt is not added.
+  the portal's beside the list.
+- The portal gives this application every file of a transfer it retrieves (`RetrieveFiles`
+  exports each one to it, to read, for good: the application can neither give a document
+  back nor delete it), before anything is judged, and GTK hands every file a drag names to
+  the portal by itself, a page's drag that names `~/.ssh/id_ed25519` among them. So inside
+  the Flatpak the plugin takes such a drop by hand (`drag-drop`, `gtk_drag_get_data`,
+  `gtk_drag_finish`; not `GTK_DEST_DEFAULT_DROP`): when the source also offers the list of
+  files, it reads the list first and asks the Dart part how many of its files are refused
+  by their names (`checkPortalDrop`, answered by `DesktopDrop.portalDropCheck`, which the
+  application sets: the rules stay there); only when none is does it ask for the portal's
+  target and the portal for the files. Otherwise the portal is never asked, nothing is
+  exported, and the drop is handed on as `declined` with that number (`portalRefusal` and
+  `portalCount` on `DropDoneEvent` and `DropDoneDetails`, files empty); with no
+  `portalDropCheck`, no such drop is taken. A source that offers only the portal's target
+  is asked as before. `RetrieveFiles` is asynchronous, two seconds at most, while the drop
+  is still going (the drag is finished once it answers), since a source may end its
+  transfer once the drop is finished; 0.9.0 also asks the portal in its plugin, before it
+  finishes the drag. The files are handed on as a `text/uri-list` of the paths the portal
+  gave: the document portal's (`/run/user/<id>/doc/<id>/<name>`), or the file's own where
+  the sandbox sees it already (the downloads folder). A key that is empty or not UTF-8, a
+  portal that gives nothing or no answer in time, is handed on as `unreached`, with the
+  number of files the list named (1 when it was not read). A source that offers only the
+  list of files is read as before. Outside the Flatpak the targets and the drop are those
+  of 0.8.0: the list first, then the portal's, which GTK adds where a portal runs and which
+  drop nothing, taken by `GTK_DEST_DEFAULT_ALL`.
+- A document portal's path says nothing of where the file really is. So the plugin also
+  answers `documentHostPaths` (`lib/src/channel.dart`), asking the Documents portal where
+  the documents with the ids given really are (`GetHostPaths`, version 5 of its interface,
+  which xdg-desktop-portal's changelog lists under 1.19.0; two seconds at most) and giving
+  each path as its bytes; an id the portal does not answer for (not given to this
+  application) is left out, and when the portal cannot be asked, is older or gives no
+  answer in time, the call fails. The application asks once for a drop's files and judges
+  each by that place (`app/lib/src/private_places.dart`, `realPlaces`): one the portal does
+  not vouch for is not added, and one whose place cannot be learnt is not added either,
+  with a notice of its own. This check stays after the one by names: a link in a plain
+  folder to `~/.ssh/id_ed25519` passes the list's names, the portal follows it, and only
+  its real place shows where it leads. That file is not added, but it stays exported to
+  the application, which cannot give it back. A file whose name is not UTF-8 cannot be
+  dropped inside the Flatpak: the portal's answer is read with such bytes replaced, and no
+  longer ends in the document's name, so it is not taken.
 - `lib/src/channel.dart`'s `performOperation_linux` is Fogata's (above); it hands on the
   text of a Linux drop as `rawText`, as published (the application does not read it), and
   `lib/src/events.dart` and `lib/src/drop_target.dart` say so of `rawText`, which here is

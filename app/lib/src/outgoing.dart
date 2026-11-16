@@ -23,6 +23,9 @@ class DropTo {
     required this.title,
     required this.note,
     required this.leftOut,
+    required this.unknownLeftOut,
+    required this.unreachable,
+    required this.declined,
     required this.at,
     required this.add,
   });
@@ -35,8 +38,11 @@ class DropTo {
     ),
     note: l10n.outgoingDropNote,
     leftOut: l10n.outgoingPrivateLeftOut,
+    unknownLeftOut: l10n.outgoingUnknownPlaceLeftOut,
+    unreachable: l10n.outgoingUnreachableLeftOut,
+    declined: l10n.outgoingDropDeclined,
     at: () => state.roomState.roomGroup,
-    add: state.addOutgoing,
+    add: (paths, real) => state.addOutgoing(paths, real: real),
   );
 
   /// The direct chat shown, with the friend called [name]: the files wait in its message
@@ -45,8 +51,11 @@ class DropTo {
     title: l10n.directDropTitle(name),
     note: l10n.directDropNote,
     leftOut: l10n.directPrivateLeftOut,
+    unknownLeftOut: l10n.directUnknownPlaceLeftOut,
+    unreachable: l10n.directUnreachableLeftOut,
+    declined: l10n.directDropDeclined,
     at: () => state.direct.open,
-    add: state.direct.addOutgoing,
+    add: (paths, real) => state.direct.addOutgoing(paths, real: real),
   );
 
   /// The big title over what files are dragged on.
@@ -58,12 +67,26 @@ class DropTo {
   /// The error said when `n` hidden or private files were left out of a drop.
   final String Function(int n) leftOut;
 
+  /// The error said when `n` files were left out because this system cannot tell where
+  /// they really are ([judgeDropped]'s `unknown`).
+  final String Function(int n) unknownLeftOut;
+
+  /// The error said when `n` dropped files could not be reached (inside the Flatpak, a
+  /// plain list of files names paths the sandbox does not see).
+  final String Function(int n) unreachable;
+
+  /// The error said when a drop was not taken at all because `n` of its files are hidden
+  /// or private (inside the Flatpak, judged before the portal is asked: see
+  /// [refusedByName]).
+  final String Function(int n) declined;
+
   /// The chat the files go to now. Looking at a drop's files takes a moment: when this
   /// changed meanwhile, the drop is not added to the chat shown since.
   final Object? Function() at;
 
-  /// Adds the files to that chat.
-  final Future<void> Function(List<String> paths) add;
+  /// Adds the files to that chat, with where each really is when that is known
+  /// ([readOutgoing]).
+  final Future<void> Function(List<String> paths, Map<String, String> real) add;
 }
 
 /// Files dragged over a chat (the room, or a direct chat): it dims and says where they
@@ -105,21 +128,58 @@ class _DropZoneState extends State<DropZone> {
 
   /// Adds what was dropped on the chat [at]. A web page can start a drag whose list names
   /// any file of this computer, whatever the browser, so those that are hidden or in a
-  /// private place ([privatePaths], which also follows links and `..`) are never added by
-  /// dragging: the rest is, and the person is told how to share such a file on purpose
-  /// (picked with the chat's own button, which no page can do for them).
+  /// private place ([judgeDropped], which also follows links and `..`) are never added by
+  /// dragging, nor those whose real place this system cannot tell: the rest is, and the
+  /// person is told how to share such a file on purpose (picked with the chat's own
+  /// button, which no page can do for them). Inside the Flatpak, a file that is not there
+  /// is said so too: a source that hands over a plain list of files names paths the
+  /// sandbox does not see. The sandbox sees no more of the computer whether such a path is
+  /// there or not, so the notice says nothing of the person's other files.
   Future<void> _addTo(DropTo to, Object? at, List<String> paths) async {
-    final private = (await privatePaths(paths)).toSet();
+    final judged = await judgeDropped(paths);
+    final left = {...judged.private, ...judged.unknown};
+    final chosen = <String>[], unreachable = <String>[];
+    for (final p in paths) {
+      if (left.contains(p)) continue;
+      if (inFlatpak &&
+          await FileSystemEntity.type(p) == FileSystemEntityType.notFound) {
+        unreachable.add(p);
+      } else {
+        chosen.add(p);
+      }
+    }
     // The chat may have changed meanwhile.
     if (!mounted || to.at() != at) return;
-    if (private.isNotEmpty) {
-      widget.state.say(to.leftOut(private.length), error: true);
+    if (judged.private.isNotEmpty) {
+      widget.state.say(to.leftOut(judged.private.length), error: true);
     }
-    final chosen = [
-      for (final p in paths)
-        if (!private.contains(p)) p,
-    ];
-    if (chosen.isNotEmpty) await to.add(chosen);
+    if (judged.unknown.isNotEmpty) {
+      widget.state.say(to.unknownLeftOut(judged.unknown.length), error: true);
+    }
+    if (unreachable.isNotEmpty) {
+      widget.state.say(to.unreachable(unreachable.length), error: true);
+    }
+    if (chosen.isNotEmpty) await to.add(chosen, judged.real);
+  }
+
+  /// A drop whose files the drop plugin did not take from the FileTransfer portal (inside
+  /// the Flatpak): said, and nothing added.
+  void _refused(DropDoneDetails details) {
+    final n = details.portalCount < 1 ? 1 : details.portalCount;
+    final to = _to;
+    widget.state.say(
+      details.portalRefusal == LinuxPortalRefusal.declined
+          ? to.declined(n)
+          : to.unreachable(n),
+      error: true,
+    );
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    // Inside the Flatpak, the drop plugin asks before it takes a drop from the portal.
+    DesktopDrop.instance.portalDropCheck = refusedByName;
   }
 
   @override
@@ -131,6 +191,10 @@ class _DropZoneState extends State<DropZone> {
       onDragExited: (_) => setState(() => _over = false),
       onDragDone: (details) {
         setState(() => _over = false);
+        if (details.portalRefusal != null) {
+          _refused(details);
+          return;
+        }
         // Files of this computer only: see readOutgoing.
         _add([
           for (final f in details.files)

@@ -1010,6 +1010,48 @@ class L10nFr extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n fichiers glissés ont été laissés de côté : ce système ne peut pas savoir d’où ils viennent. Pour les partager, choisis-les avec le trombone.',
+      one: 'Un fichier glissé a été laissé de côté : ce système ne peut pas savoir d’où il vient. Pour le partager, choisis-le avec le trombone.',
+      zero:
+          '$n fichiers glissés ont été laissés de côté : ce système ne peut pas savoir d’où ils viennent. Pour les partager, choisis-les avec le trombone.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n fichiers glissés n’ont pas pu être atteints. Pour les partager, choisis-les avec le trombone.',
+      one: 'Un fichier glissé n’a pas pu être atteint. Pour le partager, choisis-le avec le trombone.',
+      zero:
+          '$n fichiers glissés n’ont pas pu être atteints. Pour les partager, choisis-les avec le trombone.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Ce dépôt n’a pas été pris : $n de ses fichiers sont cachés ou privés. Glisse les autres à nouveau sans eux. Pour les partager, choisis-les avec le trombone.',
+      one: 'Ce dépôt n’a pas été pris : un de ses fichiers est caché ou privé. Glisse les autres à nouveau sans lui. Pour le partager, choisis-le avec le trombone.',
+      zero:
+          'Ce dépôt n’a pas été pris : $n de ses fichiers sont cachés ou privés. Glisse les autres à nouveau sans eux. Pour les partager, choisis-les avec le trombone.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6618,6 +6660,48 @@ class L10nFr extends L10n {
       one: 'Un fichier caché ou privé a été laissé de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour l’envoyer, choisis-le avec le bouton +.',
       zero:
           '$n fichiers cachés ou privés ont été laissés de côté : ces fichiers ne s’ajoutent pas par glisser-déposer, car une page web peut lancer un glissement. Pour les envoyer, choisis-les avec le bouton +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n fichiers glissés ont été laissés de côté : ce système ne peut pas savoir d’où ils viennent. Pour les envoyer, choisis-les avec le bouton +.',
+      one: 'Un fichier glissé a été laissé de côté : ce système ne peut pas savoir d’où il vient. Pour l’envoyer, choisis-le avec le bouton +.',
+      zero:
+          '$n fichiers glissés ont été laissés de côté : ce système ne peut pas savoir d’où ils viennent. Pour les envoyer, choisis-les avec le bouton +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n fichiers glissés n’ont pas pu être atteints. Pour les envoyer, choisis-les avec le bouton +.',
+      one: 'Un fichier glissé n’a pas pu être atteint. Pour l’envoyer, choisis-le avec le bouton +.',
+      zero:
+          '$n fichiers glissés n’ont pas pu être atteints. Pour les envoyer, choisis-les avec le bouton +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Ce dépôt n’a pas été pris : $n de ses fichiers sont cachés ou privés. Glisse les autres à nouveau sans eux. Pour les envoyer, choisis-les avec le bouton +.',
+      one: 'Ce dépôt n’a pas été pris : un de ses fichiers est caché ou privé. Glisse les autres à nouveau sans lui. Pour l’envoyer, choisis-le avec le bouton +.',
+      zero:
+          'Ce dépôt n’a pas été pris : $n de ses fichiers sont cachés ou privés. Glisse les autres à nouveau sans eux. Pour les envoyer, choisis-les avec le bouton +.',
     );
     return '$_temp0';
   }

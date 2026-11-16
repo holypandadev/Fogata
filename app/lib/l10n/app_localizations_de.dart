@@ -1008,6 +1008,42 @@ class L10nDe extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n gezogene Dateien wurden weggelassen: Dieses System kann nicht erkennen, woher sie stammen. Wähle sie zum Teilen mit der Büroklammer aus.',
+      one: 'Eine gezogene Datei wurde weggelassen: Dieses System kann nicht erkennen, woher sie stammt. Wähle sie zum Teilen mit der Büroklammer aus.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n gezogene Dateien waren nicht erreichbar. Wähle sie zum Teilen mit der Büroklammer aus.',
+      one: 'Eine gezogene Datei war nicht erreichbar. Wähle sie zum Teilen mit der Büroklammer aus.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Diese Ablage wurde nicht übernommen: $n ihrer Dateien sind versteckt oder privat. Ziehe die anderen ohne sie noch einmal herein. Wähle sie zum Teilen mit der Büroklammer aus.',
+      one: 'Diese Ablage wurde nicht übernommen: Eine ihrer Dateien ist versteckt oder privat. Ziehe die anderen ohne sie noch einmal herein. Wähle sie zum Teilen mit der Büroklammer aus.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6579,6 +6615,42 @@ class L10nDe extends L10n {
       other:
           '$n versteckte oder private Dateien wurden weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.',
       one: 'Eine versteckte oder private Datei wurde weggelassen: Solche Dateien werden nicht per Ziehen hinzugefügt, da eine Webseite ein Ziehen starten kann. Wähle sie zum Senden mit der Schaltfläche + aus.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n gezogene Dateien wurden weggelassen: Dieses System kann nicht erkennen, woher sie stammen. Wähle sie zum Senden mit der Schaltfläche + aus.',
+      one: 'Eine gezogene Datei wurde weggelassen: Dieses System kann nicht erkennen, woher sie stammt. Wähle sie zum Senden mit der Schaltfläche + aus.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n gezogene Dateien waren nicht erreichbar. Wähle sie zum Senden mit der Schaltfläche + aus.',
+      one: 'Eine gezogene Datei war nicht erreichbar. Wähle sie zum Senden mit der Schaltfläche + aus.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Diese Ablage wurde nicht übernommen: $n ihrer Dateien sind versteckt oder privat. Ziehe die anderen ohne sie noch einmal herein. Wähle sie zum Senden mit der Schaltfläche + aus.',
+      one: 'Diese Ablage wurde nicht übernommen: Eine ihrer Dateien ist versteckt oder privat. Ziehe die anderen ohne sie noch einmal herein. Wähle sie zum Senden mit der Schaltfläche + aus.',
     );
     return '$_temp0';
   }

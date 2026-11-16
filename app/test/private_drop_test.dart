@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/app_state.dart';
 import 'package:fogata/src/host.dart';
+import 'package:fogata/src/l10n.dart';
 import 'package:fogata/src/outgoing.dart';
 import 'package:fogata/src/private_places.dart';
 import 'package:fogata/src/theme.dart';
@@ -40,7 +41,6 @@ void main() {
       '/home/leo/Pictures/blue lake.jpg',
       '/home/leo/Documents/plan.pdf',
       '/home/leo/Pictures/a..b.png',
-      '/run/user/1000/doc/ab12/plan.pdf',
       '/run/media/leo/USB/trip.mp4',
       '/tmp/plan.pdf',
       '/var/tmp/plan.pdf',
@@ -98,7 +98,7 @@ void main() {
   });
 
   test(
-    'Linux keeps /run, backups and mail private, not the portal or media',
+    'Linux keeps /run, the portal folder, backups and mail private, not media',
     () {
       for (final path in [
         '/var/backups/shadow.bak',
@@ -108,11 +108,15 @@ void main() {
         '/run/user/1000',
         '/run/secrets/token',
         '/run/user/1000/doc/../keyring/control',
+        // The document portal's folder: outside a sandbox it holds every document ever
+        // given to any sandboxed application (inside the Flatpak a document is judged by
+        // its real place instead).
+        '/run/user/1000/doc/ab12/plan.pdf',
+        '/run/flatpak/doc/ab12/plan.pdf',
       ]) {
         expect(private(path, HostSystem.linux), isTrue, reason: path);
       }
       for (final path in [
-        '/run/user/1000/doc/ab12/plan.pdf',
         '/run/media/leo/USB/trip.mp4',
         '/var/tmp/plan.pdf',
         '/var/backups-of-mine/plan.pdf',
@@ -334,10 +338,153 @@ void main() {
     tearDown(() {
       inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
       documentHostPaths = DesktopDrop.instance.documentHostPaths;
+      resolveLinks = (path) => File(path).resolveSymbolicLinks();
     });
 
     Future<List<String>> privateOf(List<String> paths) =>
         privatePaths(paths, homes: home);
+
+    test('the portal is asked once for a whole drop', () async {
+      // Each spelling of the folder, a link that leads to one, and files of the folder
+      // that are not documents: one question, with each id once.
+      resolveLinks = (path) async => path == '/home/leo/Desktop/plan.pdf'
+          ? '/run/flatpak/doc/a1b2c3d4/plan.pdf'
+          : path.replaceFirst('/run/user/1000/doc', '/run/flatpak/doc');
+      final judged = await judgeDropped([
+        '/run/user/1000/doc/a1b2c3d4/plan.pdf',
+        '/run/flatpak/doc/a1b2c3d4/plan.pdf',
+        '/home/leo/Desktop/plan.pdf',
+        '/run/user/1000/doc/ssh00001/id_ed25519',
+        '/run/user/1000/doc/a1b2c3d4/Photos/x.jpg',
+      ], homes: home);
+      expect(asked, [
+        ['a1b2c3d4', 'ssh00001'],
+      ]);
+      expect(judged.private, [
+        '/run/user/1000/doc/ssh00001/id_ed25519',
+        '/run/user/1000/doc/a1b2c3d4/Photos/x.jpg',
+      ]);
+      expect(judged.real, {
+        '/run/user/1000/doc/a1b2c3d4/plan.pdf': '/home/leo/Documents/plan.pdf',
+        '/run/flatpak/doc/a1b2c3d4/plan.pdf': '/home/leo/Documents/plan.pdf',
+        '/home/leo/Desktop/plan.pdf': '/home/leo/Documents/plan.pdf',
+      });
+      // A portal that does not answer costs one wait for the drop, not one a file.
+      asked.clear();
+      documentHostPaths = (ids) async {
+        asked.add(ids);
+        throw PlatformException(code: 'portal', message: 'Timeout was reached');
+      };
+      final unanswered = await judgeDropped([
+        '/run/user/1000/doc/a1b2c3d4/plan.pdf',
+        '/run/user/1000/doc/ssh00001/id_ed25519',
+      ], homes: home);
+      expect(asked, hasLength(1));
+      expect(unanswered.unknown, hasLength(2));
+    });
+
+    test('a link is judged where it leads, by the portal when it leads there', () async {
+      resolveLinks = (path) async => switch (path) {
+        // Flatpak's own link of the folder, and /var/run, which leads to /run.
+        '/run/user/1000/doc/ssh00001/id_ed25519' =>
+          '/run/flatpak/doc/ssh00001/id_ed25519',
+        '/var/run/user/1000/doc/ssh00001/id_ed25519' =>
+          '/run/flatpak/doc/ssh00001/id_ed25519',
+        '/var/run/user/1000/doc/a1b2c3d4/plan.pdf' =>
+          '/run/flatpak/doc/a1b2c3d4/plan.pdf',
+        // A link in a plain folder into a document the portal does not vouch for.
+        '/home/leo/Desktop/notes.txt' => '/run/flatpak/doc/unknown1/notes.txt',
+        _ => path,
+      };
+      expect(
+        await privateOf([
+          '/run/user/1000/doc/ssh00001/id_ed25519',
+          '/var/run/user/1000/doc/ssh00001/id_ed25519',
+          '/var/run/user/1000/doc/a1b2c3d4/plan.pdf',
+          '/home/leo/Desktop/notes.txt',
+        ]),
+        [
+          '/run/user/1000/doc/ssh00001/id_ed25519',
+          '/var/run/user/1000/doc/ssh00001/id_ed25519',
+          '/home/leo/Desktop/notes.txt',
+        ],
+      );
+      // Outside the Flatpak the portal's folder is private like the rest of /run, by
+      // whatever path it is reached.
+      inFlatpak = false;
+      expect(
+        await privateOf(['/var/run/user/1000/doc/a1b2c3d4/plan.pdf']),
+        hasLength(1),
+      );
+    });
+
+    test(
+      'before the portal is asked, the list is judged by its names',
+      () async {
+        expect(
+          await refusedByName([
+            '/home/leo/Documents/plan.pdf',
+            '/home/leo/.ssh/id_ed25519',
+            '/home/leo/Documents/.env',
+            '/home/leo/Pictures/../.gnupg/key',
+            '/run/user/1000/doc/a1b2c3d4/plan.pdf',
+          ], homes: home),
+          4,
+        );
+        expect(
+          await refusedByName([
+            '/home/leo/Documents/plan.pdf',
+            '/home/leo/Downloads/report.pdf',
+          ], homes: home),
+          0,
+        );
+        expect(asked, isEmpty);
+      },
+    );
+
+    test(
+      'the folder shown is the real one, with no further question',
+      () async {
+        final dir = Directory.systemTemp.createTempSync('fogata_portal');
+        addTearDown(() => dir.deleteSync(recursive: true));
+        final file = File('${dir.path}/plan.pdf')..writeAsStringSync('plan');
+        // As the sandbox sees a document: its path leads to Flatpak's mount of the folder.
+        resolveLinks = (path) async =>
+            path == file.path ? '/run/flatpak/doc/a1b2c3d4/plan.pdf' : path;
+        var (files, _) = await readOutgoing([file.path]);
+        expect(files.single.folder, '/home/leo/Documents');
+        expect(asked, hasLength(1));
+        // A drop's judgement hands its places on: nothing more is asked.
+        asked.clear();
+        (files, _) = await readOutgoing(
+          [file.path],
+          real: {file.path: '/home/leo/Documents/plan.pdf'},
+        );
+        expect(files.single.folder, '/home/leo/Documents');
+        expect(asked, isEmpty);
+        // With no answer, the folder is the sandbox's own.
+        documentHostPaths = (_) async =>
+            throw PlatformException(code: 'portal');
+        (files, _) = await readOutgoing([file.path]);
+        expect(files.single.folder, '/run/flatpak/doc/a1b2c3d4');
+      },
+      skip: Platform.isWindows,
+    );
+
+    test(
+      'with no plugin or no portal at all, a document is never added',
+      () async {
+        // The plugin's real channel, which nothing answers here: no mocked answer.
+        TestWidgetsFlutterBinding.ensureInitialized();
+        documentHostPaths = DesktopDrop.instance.documentHostPaths;
+        const plan = '/run/user/1000/doc/a1b2c3d4/plan.pdf';
+        final judged = await judgeDropped([plan], homes: home);
+        expect(judged.unknown, [plan]);
+        expect(judged.real, isEmpty);
+        expect(await privateOf([plan]), [plan]);
+        expect(await realPlace(plan), isNull);
+      },
+    );
 
     test('are judged by where the portal says they are', () async {
       const plan = '/run/user/1000/doc/a1b2c3d4/plan.pdf';
@@ -352,8 +499,15 @@ void main() {
         shadow,
       ]);
       expect(await realPlace(plan), '/home/leo/Documents/plan.pdf');
-      // Only the id is asked, never a place: the drag's data names none.
-      expect(asked.first, ['a1b2c3d4']);
+      // Only the ids are asked, once for the drop, never a place: the drag's data names
+      // none.
+      expect(asked.first, [
+        'a1b2c3d4',
+        'ssh00001',
+        'profile1',
+        'dotenv01',
+        'etc00001',
+      ]);
       // Where Flatpak mounts the portal's folder, to which /run/user/<uid>/doc leads: the
       // place a document is found at once its links are followed.
       expect(
@@ -370,27 +524,53 @@ void main() {
     });
 
     test('one whose real place cannot be learnt is never added', () async {
-      // Not given to this application, or no longer there.
-      expect(
-        await privateOf(['/run/user/1000/doc/unknown1/plan.pdf']),
-        hasLength(1),
-      );
-      // A portal older than GetHostPaths answers nothing at all, or an error.
-      places = {};
-      expect(
-        await privateOf(['/run/user/1000/doc/a1b2c3d4/plan.pdf']),
-        hasLength(1),
-      );
+      // Not given to this application, or no longer there: the portal answers, without
+      // it. That is no question of the system's, and it counts as private.
+      // [private, unknown] of a drop.
+      Future<List<List<String>>> judged(List<String> paths) async {
+        final j = await judgeDropped(paths, homes: home);
+        return [j.private, j.unknown];
+      }
+
+      const unknown = '/run/user/1000/doc/unknown1/plan.pdf';
+      expect(await privateOf([unknown]), [unknown]);
+      expect(await judged([unknown]), [
+        [unknown],
+        isEmpty,
+      ]);
+      // A portal older than GetHostPaths, one that gives no answer in time, no plugin:
+      // the plugin's error. Nothing is known of the file but its name, so it is left out
+      // as one whose place this system cannot tell, unless its name is hidden.
+      const plan = '/run/user/1000/doc/a1b2c3d4/plan.pdf';
+      const env = '/run/user/1000/doc/dotenv01/.env';
       for (final failure in <Exception>[
         MissingPluginException('no documentHostPaths'),
-        PlatformException(code: 'org.freedesktop.DBus.Error.UnknownMethod'),
+        PlatformException(
+          code: 'portal',
+          message: 'No such method “GetHostPaths”',
+        ),
+        PlatformException(code: 'portal', message: 'Timeout was reached'),
       ]) {
         documentHostPaths = (_) async => throw failure;
-        expect(
-          await privateOf(['/run/user/1000/doc/a1b2c3d4/plan.pdf']),
-          hasLength(1),
-        );
+        expect(await privateOf([plan, env]), [plan, env]);
+        expect(await judged([plan, env]), [
+          [env],
+          [plan],
+        ]);
+        expect(await realPlace(plan), isNull);
       }
+      // An answer that breaks in any other way is no answer either.
+      documentHostPaths = (_) async =>
+          throw StateError('an answer of another shape');
+      expect(await judged([plan, env]), [
+        [env],
+        [plan],
+      ]);
+      // Any other file is judged as before, without the portal.
+      expect(await judged(['/home/leo/Downloads/report.pdf']), [
+        isEmpty,
+        isEmpty,
+      ]);
     });
 
     test('an answer that does not fit the file is not believed', () async {
@@ -515,13 +695,16 @@ void main() {
       );
     });
 
-    test('outside the Flatpak nothing is asked, as before', () async {
-      inFlatpak = false;
-      const plan = '/run/user/1000/doc/ssh00001/id_ed25519';
-      expect(await realPlace(plan), plan);
-      expect(await privateOf([plan]), isEmpty);
-      expect(asked, isEmpty);
-    });
+    test(
+      'outside the Flatpak nothing is asked, and the folder is private',
+      () async {
+        inFlatpak = false;
+        const plan = '/run/user/1000/doc/ssh00001/id_ed25519';
+        expect(await realPlace(plan), plan);
+        expect(await privateOf([plan]), [plan]);
+        expect(asked, isEmpty);
+      },
+    );
   });
 
   group('what browsers drop on Linux', () {
@@ -772,7 +955,7 @@ void main() {
         documentHostPaths = DesktopDrop.instance.documentHostPaths;
       });
       documentHostPaths = (ids) async => {
-        if (ids.single == 'ssh00001')
+        if (ids.contains('ssh00001'))
           'ssh00001': Uint8List.fromList(
             utf8.encode('/home/leo/.ssh/id_ed25519'),
           ),
@@ -803,5 +986,134 @@ void main() {
       );
       expect(state.roomState.outgoing, isEmpty);
     }, skip: !Platform.isLinux);
+
+    group('inside the Flatpak', () {
+      setUp(() => inFlatpak = true);
+      tearDown(() {
+        inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
+        documentHostPaths = DesktopDrop.instance.documentHostPaths;
+      });
+
+      List<String> told(AppState state) => [
+        for (final t in state.toasts.list) t.text,
+      ];
+
+      testWidgets(
+        'a file whose place the portal cannot say is not called hidden or private',
+        (tester) async {
+          documentHostPaths = (_) async => throw PlatformException(
+            code: 'portal',
+            message: 'No such method “GetHostPaths”',
+          );
+          final state = await pump(tester);
+          await dropText(
+            tester,
+            'file:///run/user/1000/doc/a1b2c3d4/plan.pdf\r\n',
+          );
+          expect(waiting(state), isEmpty);
+          expect(told(state), [l10n.outgoingUnknownPlaceLeftOut(1)]);
+          expect(told(state).single, contains('cannot tell where'));
+        },
+        skip: !Platform.isLinux,
+      );
+
+      testWidgets('files a plain list names that the sandbox cannot reach are said so, the same '
+          'whether they are anywhere or not', (tester) async {
+        final state = await pump(tester);
+        // Neither is there for the copy: one in a folder that is (as the Flatpak sees
+        // the person's home but not their documents), one where nothing is. Both say
+        // the same, and the file that is there is added.
+        await drop(tester, [
+          '${dir.path}/Pictures/not-there.jpg',
+          '/home/nobody-${dir.path.hashCode}/Documents/plan.pdf',
+          plain,
+        ]);
+        expect(waiting(state), [plain]);
+        expect(told(state), [l10n.outgoingUnreachableLeftOut(2)]);
+        expect(told(state).single, contains('could not be reached'));
+      }, skip: !Platform.isLinux);
+
+      testWidgets(
+        'outside the Flatpak such a file is left out without a word',
+        (tester) async {
+          inFlatpak = false;
+          final state = await pump(tester);
+          await drop(tester, ['${dir.path}/Pictures/not-there.jpg']);
+          expect(waiting(state), isEmpty);
+          expect(told(state), isEmpty);
+        },
+        skip: !Platform.isLinux,
+      );
+
+      /// The plugin's word that it did not take a drop from the portal, as it sends it.
+      Future<void> refused(WidgetTester tester, String why, int n) async {
+        await tester.runAsync(() async {
+          final done = Completer<ByteData?>();
+          await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+            'desktop_drop',
+            const StandardMethodCodec().encodeMethodCall(
+              MethodCall('performOperation_linux', [
+                '',
+                [10.0, 20.0],
+                'text/uri-list',
+                why,
+                n,
+              ]),
+            ),
+            done.complete,
+          );
+          await done.future;
+          await Future<void>.delayed(const Duration(milliseconds: 100));
+        });
+        await tester.pump();
+      }
+
+      testWidgets(
+        'a drop the plugin did not take from the portal is said, and adds nothing',
+        (tester) async {
+          final state = await pump(tester);
+          await refused(tester, 'declined', 2);
+          expect(waiting(state), isEmpty);
+          expect(told(state), [l10n.outgoingDropDeclined(2)]);
+          expect(told(state).single, contains('Drag the others again'));
+          state.toasts.list.clear();
+          await refused(tester, 'unreached', 3);
+          expect(waiting(state), isEmpty);
+          expect(told(state), [l10n.outgoingUnreachableLeftOut(3)]);
+        },
+        skip: !Platform.isLinux,
+      );
+
+      testWidgets('the plugin learns how many files of a drop\'s list are refused before it asks the '
+          'portal', (tester) async {
+        await pump(tester);
+        Future<Object?> check(String list) async {
+          final reply = await tester.runAsync(() async {
+            final done = Completer<ByteData?>();
+            await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+              'desktop_drop',
+              const StandardMethodCodec().encodeMethodCall(
+                MethodCall('checkPortalDrop', [list]),
+              ),
+              done.complete,
+            );
+            return done.future;
+          });
+          return const StandardMethodCodec().decodeEnvelope(reply!);
+        }
+
+        expect(
+          await check(
+            '${Uri.file(secret)}\r\n${Uri.file(plain)}\r\n'
+            'file:///home/leo/Documents/.env\r\nhttps://example.com/a.png\r\n',
+          ),
+          2,
+        );
+        expect(await check('${Uri.file(plain)}\r\n'), 0);
+        // No judge, no portal: the plugin is told to leave it.
+        DesktopDrop.instance.portalDropCheck = null;
+        expect(await check('${Uri.file(plain)}\r\n'), -1);
+      }, skip: Platform.isWindows);
+    });
   });
 }

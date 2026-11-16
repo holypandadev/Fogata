@@ -242,8 +242,9 @@ anything but a regular file, too). Any other target a browser or a file manager 
 A web page can start a drag whose list names any file of the computer, whatever the browser,
 so a dropped file that is hidden (a name that starts with a dot), in a private place (a macOS
 `Library` outside iCloud Drive and the File Provider folders in `CloudStorage`, Windows
-`AppData`, the system folders of any drive or share, Linux `/run` outside the portal's
-documents and `/media`) or a link that leads to one is never added by dragging: the rest is,
+`AppData`, the system folders of any drive or share, Linux `/run` outside `/media`, the
+document portal's folder included, which outside a sandbox holds every document ever given
+to any sandboxed application) or a link that leads to one is never added by dragging: the rest is,
 and a notice says how to share such a file on purpose, picked with the clip, which no page
 can do. Names are read as the system reads them: `..` worked out, without their case on macOS
 and Windows (the long s and the Kelvin sign as s and k), Windows' trailing dots and spaces
@@ -252,20 +253,35 @@ Library is looked for under the account's own folder as well as under `HOME`, wh
 App Sandbox points at the application's container. The Flatpak sees no more of the
 computer than its downloads folder, so a drag's list of files names paths it cannot open
 anywhere else; there the FileTransfer portal's targets come first, which GTK and KDE
-applications offer beside the list: the plugin asks the portal for the files while the drop
-goes on, and they arrive as the document portal's paths (`/run/user/<id>/doc/<id>/<name>`,
-which leads to `/run/flatpak/doc/<id>/<name>` in the sandbox), or by their own path in the
-downloads folder. A document portal's path says nothing of where
-the file is, and GTK hands to the portal any file a drag names, a page's drag too: so a file
-in the portal's folder is judged by the place the Documents portal gives for its id
-(`GetHostPaths`, xdg-desktop-portal 1.19 and later), never by anything the drag carried, and
-the tray shows that place's folder. One whose place cannot be learnt is left out with the
-same notice: a portal too old to say, an id not given to Fogata, a path in the portal's
-folder that is not exactly `<id>/<name>` (under either name of the folder), an answer that is not an absolute path ending in
-the file's name. A source that offers only the list still hands over paths the Flatpak
-cannot open outside the downloads folder, and those are left out without a word, as files
-that are not there. Outside the Flatpak the list comes first, and nothing is asked of the
-portal. A file waiting or being sent is not added again; files that fail wait again without
+applications offer beside the list. The portal gives Fogata, for good, every file of a
+transfer it is asked for, before anything is judged (Fogata cannot give a document back),
+and GTK hands to the portal any file a drag names, a page's drag too. So the plugin takes
+such a drop by hand: it reads the list first, and when any of its files is hidden or in a
+private place by its name, the portal is never asked, nothing is exported, nothing of the
+drop is added, and a notice says the drop was not taken because of that file and that the
+others can be dragged again without it (or it shared with the clip). Only when every name
+passes are the files asked of the portal (two seconds at most), and they arrive as the
+document portal's paths (`/run/user/<id>/doc/<id>/<name>`, which leads to
+`/run/flatpak/doc/<id>/<name>` in the sandbox), or by their own path in the downloads
+folder; a portal that gives nothing in time is said with the notice below that the file
+could not be reached by dragging. A document portal's path says nothing of where the file
+is: so a file in the portal's folder is judged by the place the Documents portal gives for
+its id (`GetHostPaths`, version 5 of its interface, in xdg-desktop-portal's changelog from
+1.19.0; asked once a drop), never by anything the drag carried, and the tray shows that
+place's folder. That catches what names cannot: a link in an ordinary folder to a private
+file is not added, though its file stays exported to Fogata. One the portal does not vouch
+for is left out with the same notice as a private one: an id not given to Fogata, a path in
+the portal's folder that is not exactly `<id>/<name>` (under either name of the folder), an
+answer that is not an absolute path ending in the file's name (a name that is not UTF-8
+never does, so such a file cannot be dropped in the Flatpak). One whose place cannot be
+learnt because the portal cannot be asked (older, no answer in two seconds, no plugin) is
+left out too, with a notice of its own: this system cannot tell where a dragged file comes
+from, and the clip shares it (a hidden name is private all the same). A source that offers
+only the list hands over paths the Flatpak cannot open outside the downloads folder: those
+are left out with a notice that the file could not be reached by dragging and that the
+clip shares it, the same whether the path is there outside the sandbox or nowhere, since
+the sandbox sees neither. Outside the Flatpak the list comes first, nothing is asked of the
+portal, and a file that is not there is left out without a word, as before. A file waiting or being sent is not added again; files that fail wait again without
 changing the tab, and a send stops when the room is left. Files picked with the file picker do not ask. Send (or Enter) shares them with the message
 typed, if any, which goes first, and Esc takes them all out. Folders are left out, and
 said so. A file that follows its sender's message by a few seconds shows under it. A right

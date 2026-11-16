@@ -1013,6 +1013,48 @@ class L10nPt extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n arquivos arrastados ficaram de fora: este sistema não consegue saber de onde eles vêm. Para compartilhá-los, escolha-os com o clipe.',
+      one: 'Um arquivo arrastado ficou de fora: este sistema não consegue saber de onde ele vem. Para compartilhá-lo, escolha-o com o clipe.',
+      zero:
+          '$n arquivos arrastados ficaram de fora: este sistema não consegue saber de onde eles vêm. Para compartilhá-los, escolha-os com o clipe.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Não foi possível acessar $n arquivos arrastados. Para compartilhá-los, escolha-os com o clipe.',
+      one: 'Não foi possível acessar um arquivo arrastado. Para compartilhá-lo, escolha-o com o clipe.',
+      zero:
+          'Não foi possível acessar $n arquivos arrastados. Para compartilhá-los, escolha-os com o clipe.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Este arraste não foi aceito: $n dos arquivos são ocultos ou privados. Arraste os outros de novo sem eles. Para compartilhá-los, escolha-os com o clipe.',
+      one: 'Este arraste não foi aceito: um dos arquivos é oculto ou privado. Arraste os outros de novo sem ele. Para compartilhá-lo, escolha-o com o clipe.',
+      zero:
+          'Este arraste não foi aceito: $n dos arquivos são ocultos ou privados. Arraste os outros de novo sem eles. Para compartilhá-los, escolha-os com o clipe.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6616,6 +6658,48 @@ class L10nPt extends L10n {
       one: 'Um arquivo oculto ou privado ficou de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-lo, escolha-o com o botão +.',
       zero:
           '$n arquivos ocultos ou privados ficaram de fora: arquivos assim não são adicionados arrastando, porque uma página da web pode iniciar um arraste. Para enviá-los, escolha-os com o botão +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n arquivos arrastados ficaram de fora: este sistema não consegue saber de onde eles vêm. Para enviá-los, escolha-os com o botão +.',
+      one: 'Um arquivo arrastado ficou de fora: este sistema não consegue saber de onde ele vem. Para enviá-lo, escolha-o com o botão +.',
+      zero:
+          '$n arquivos arrastados ficaram de fora: este sistema não consegue saber de onde eles vêm. Para enviá-los, escolha-os com o botão +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Não foi possível acessar $n arquivos arrastados. Para enviá-los, escolha-os com o botão +.',
+      one: 'Não foi possível acessar um arquivo arrastado. Para enviá-lo, escolha-o com o botão +.',
+      zero:
+          'Não foi possível acessar $n arquivos arrastados. Para enviá-los, escolha-os com o botão +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Este arraste não foi aceito: $n dos arquivos são ocultos ou privados. Arraste os outros de novo sem eles. Para enviá-los, escolha-os com o botão +.',
+      one: 'Este arraste não foi aceito: um dos arquivos é oculto ou privado. Arraste os outros de novo sem ele. Para enviá-lo, escolha-o com o botão +.',
+      zero:
+          'Este arraste não foi aceito: $n dos arquivos são ocultos ou privados. Arraste os outros de novo sem eles. Para enviá-los, escolha-os com o botão +.',
     );
     return '$_temp0';
   }

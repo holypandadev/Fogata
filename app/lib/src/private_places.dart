@@ -62,10 +62,11 @@ bool isPrivatePlace(
             parts[1] == 'keychains');
   }
   if (parts.first == 'run') {
-    // Runtime files (sockets, secrets, agents) but not the portal's documents the person
-    // picked (`/run/user/<id>/doc`) nor mounted drives.
-    if (parts.length > 1 && parts[1] == 'media') return false;
-    return !(parts.length > 3 && parts[1] == 'user' && parts[3] == 'doc');
+    // Runtime files (sockets, secrets, key daemons), but not mounted drives. The document
+    // portal's folder (`/run/user/<id>/doc`) is private too: outside a sandbox it holds
+    // every document ever given to any sandboxed application, and inside the Flatpak a
+    // document there is judged by its real place instead ([realPlace]).
+    return !(parts.length > 1 && parts[1] == 'media');
   }
   return false;
 }
@@ -192,50 +193,101 @@ String? _accountHome() {
   }
 }
 
-/// Those of [paths] that are hidden or in a private place ([isPrivatePlace]), looking at
-/// where each really is as well as at how it was named: a link in a plain folder can point
-/// into `.ssh`, and inside the Flatpak a file of the document portal is judged by the place
-/// the portal says it is in ([realPlace]), one whose place cannot be learnt as private.
-/// [homes] are the user's folders ([homeFolders]) unless a test gives them. Read without
-/// holding up the window.
-///
-/// A hard link to a private file, made in a plain folder, is not found: nothing tells it
-/// from the file itself. Making one takes the user's own rights over that folder, and so
-/// is no web page's doing.
+/// Those of [paths] that are not added by dragging, in their order: those [judgeDropped]
+/// finds private, and those whose real place cannot be learnt.
 Future<List<String>> privatePaths(
   Iterable<String> paths, {
   List<String>? homes,
 }) async {
-  final folders = homes ?? homeFolders;
-  final homesNow = folders.isEmpty ? const [''] : folders;
-  final found = <String>[];
-  for (final path in paths) {
-    bool privateHere(String path) =>
-        homesNow.any((home) => isPrivatePlace(path, system: host, home: home));
-    Future<bool> privateThere(String path) async {
-      final real = await realPlace(path);
-      // A document is judged by its real place alone, which ends in its own name: Flatpak
-      // shows the portal's folder at `/run/flatpak/doc`, which is no private place.
-      return real == null || privateHere(real);
-    }
+  final judged = await judgeDropped(paths, homes: homes);
+  final left = {...judged.private, ...judged.unknown};
+  return [
+    for (final path in paths)
+      if (left.contains(path)) path,
+  ];
+}
 
-    var private = await privateThere(path);
-    if (!private) {
-      try {
-        final linked = await File(path).resolveSymbolicLinks();
-        if (linked != path) private = await privateThere(linked);
-      } on Exception {
-        // Gone, unreadable or no path: it will not be added either.
-      }
+/// [isPrivatePlace] by any of [homes] ([homeFolders] unless a test gives them).
+bool _privateHere(String path, List<String>? homes) {
+  final folders = homes ?? homeFolders;
+  return (folders.isEmpty ? const [''] : folders).any(
+    (home) => isPrivatePlace(path, system: host, home: home),
+  );
+}
+
+/// How many of [paths] are hidden or in a private place by their names alone
+/// ([isPrivatePlace]): inside the Flatpak, the files a drop's list of files names on the
+/// computer, judged before the FileTransfer portal is asked for them (the drop plugin's
+/// `portalDropCheck`), since the portal gives this application every file of a drop for
+/// good, a refused one too. Nothing of them is read: the sandbox does not see them. A link
+/// among them is only found once the portal has given its file ([judgeDropped]).
+Future<int> refusedByName(List<String> paths, {List<String>? homes}) async =>
+    paths.where((path) => _privateHere(path, homes)).length;
+
+/// What [judgeDropped] found of a drop.
+typedef DropJudgement = ({
+  /// Hidden, in a private place, or not vouched for by the document portal.
+  List<String> private,
+
+  /// Whose real place cannot be learnt: the portal could not be asked.
+  List<String> unknown,
+
+  /// Where each of the others really is, links followed: the folder the tray shows.
+  Map<String, String> real,
+});
+
+/// Of the dropped [paths], those that are hidden or in a private place
+/// ([isPrivatePlace]), looking at where each really is as well as at how it was named: a
+/// link in a plain folder can point into `.ssh`, and inside the Flatpak a file of the
+/// document portal is judged by the place the portal says it is in ([realPlaces]); one the
+/// portal does not vouch for (not given to this application, an answer that does not fit,
+/// a path in its folder that is not exactly one of its files) is private too. Apart, as
+/// `unknown`, those whose real place cannot be learnt because the portal could not be
+/// asked (too old for GetHostPaths, no answer in time): nothing is known of them but their
+/// name, and a hidden one is private all the same. The portal is asked once for the whole
+/// drop. [homes] are the user's folders ([homeFolders]) unless a test gives them. Read
+/// without holding up the window.
+///
+/// A hard link to a private file, made in a plain folder, is not found: nothing tells it
+/// from the file itself. Making one takes the user's own rights over that folder, and so
+/// is no web page's doing.
+Future<DropJudgement> judgeDropped(
+  Iterable<String> paths, {
+  List<String>? homes,
+}) async {
+  final given = paths.toList();
+  final linked = <String, String>{};
+  for (final path in given) {
+    try {
+      linked[path] = await resolveLinks(path);
+    } on Exception {
+      // Gone, unreadable or no path: it will not be added either.
     }
-    if (private) found.add(path);
   }
-  return found;
+  final places = await realPlaces([...given, ...linked.values]);
+  final private = <String>[], unknown = <String>[];
+  final real = <String, String>{};
+  for (final path in given) {
+    // A document is judged by its real place alone, which ends in its own name: Flatpak
+    // shows the portal's folder at `/run/flatpak/doc`, to which `/run/user/<id>/doc`
+    // leads.
+    final where = [places[path]!, ?places[linked[path]]];
+    if (where.any((w) => w.unknown)) {
+      final name = _parts(path, false).lastOrNull ?? '';
+      (name.startsWith('.') ? private : unknown).add(path);
+    } else if (where.any(
+      (w) => w.place == null || _privateHere(w.place!, homes),
+    )) {
+      private.add(path);
+    } else {
+      real[path] = where.last.place!;
+    }
+  }
+  return (private: private, unknown: unknown, real: real);
 }
 
 /// Whether this runs inside a Flatpak, where files can come through the document portal;
 /// the tests set it.
-@visibleForTesting
 bool inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
 
 /// Asks the document portal where its files with these ids really are (the drop plugin's
@@ -243,6 +295,11 @@ bool inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
 @visibleForTesting
 Future<Map<String, Uint8List>> Function(List<String> ids) documentHostPaths =
     DesktopDrop.instance.documentHostPaths;
+
+/// Where [path] leads, links followed, as the system says; the tests put their own in its
+/// place.
+Future<String> Function(String path) resolveLinks = (path) =>
+    File(path).resolveSymbolicLinks();
 
 /// How many of [parts] name the document portal's folder as a sandboxed application sees
 /// it: `/run/user/<uid>/doc`, or `/run/flatpak/doc`, where Flatpak mounts it and to which
@@ -290,33 +347,69 @@ bool inDocumentPortal(String path) => _portalFolder(_parts(path, false)) > 0;
   return (id: parts[folder], name: parts[folder + 1]);
 }
 
-/// Where the file at [path] really is, as far as this application can know it: inside the
+/// What is known of where a file really is ([realPlaces]): its place, or null when it must
+/// not be added by dragging; and whether that is because the portal could not be asked.
+typedef RealPlace = ({String? place, bool unknown});
+
+/// Where the file at [path] really is ([realPlaces]).
+Future<String?> realPlace(String path) async =>
+    (await realPlaces([path]))[path]!.place;
+
+/// Where each of [paths] really is, as far as this application can know it: inside the
 /// Flatpak, for a path in the document portal's folder ([inDocumentPortal]), the path the
-/// Documents portal gives for its id ([documentHostPaths]), never one a drag's data named;
-/// any other path is its own place. Null when that cannot be learnt, and the file must then
-/// be taken as private: a path in the portal's folder that is not exactly one of its files
-/// ([portalDocument]), an id the portal does not answer for (not given to this application,
-/// or a portal too old to say), or an answer that is not an absolute path ending in the
-/// file's own name, or is in the portal's folder itself.
-Future<String?> realPlace(String path) async {
-  if (!inFlatpak || !inDocumentPortal(path)) return path;
-  final document = portalDocument(path);
-  if (document == null) return null;
+/// Documents portal gives for its id ([documentHostPaths]), never one a drag's data named,
+/// asked once for all of them; any other path is its own place. The place is null when it
+/// cannot be learnt, and the file must then not be added by dragging: a path in the
+/// portal's folder that is not exactly one of its files ([portalDocument]), an id the portal
+/// does not answer for (not given to this application), an answer that is not an absolute
+/// path ending in the file's own name or is in the portal's folder itself, or, `unknown`,
+/// a portal that cannot be asked (too old to say, no answer in time, no plugin). A name
+/// that is not UTF-8 never ends the portal's answer as it does the path (the bytes it
+/// cannot read are read as U+FFFD), so such a document is not taken.
+Future<Map<String, RealPlace>> realPlaces(Iterable<String> paths) async {
+  const refused = (place: null, unknown: false);
+  final found = <String, RealPlace>{};
+  final documents = <String, ({String id, String name})>{};
+  for (final path in paths) {
+    if (!inFlatpak || !inDocumentPortal(path)) {
+      found[path] = (place: path, unknown: false);
+      continue;
+    }
+    final document = portalDocument(path);
+    if (document == null) {
+      found[path] = refused;
+    } else {
+      documents[path] = document;
+    }
+  }
+  if (documents.isEmpty) return found;
   final Map<String, Uint8List> places;
   try {
-    places = await documentHostPaths([document.id]);
-  } on Exception catch (error) {
+    places = await documentHostPaths(
+      {for (final d in documents.values) d.id}.toList(),
+    );
+  } catch (error) {
+    // Whatever went wrong (the plugin's error, an answer of another shape), nothing is
+    // known of these files.
     debugPrint('the document portal says no real place: $error');
-    return null;
+    for (final path in documents.keys) {
+      found[path] = (place: null, unknown: true);
+    }
+    return found;
   }
-  final bytes = places[document.id];
-  if (bytes == null) return null;
-  final real = utf8.decode(bytes, allowMalformed: true);
-  if (!real.startsWith('/') ||
-      real.contains('\x00') ||
-      inDocumentPortal(real) ||
-      _parts(real, false).lastOrNull != document.name) {
-    return null;
+  for (final MapEntry(key: path, value: document) in documents.entries) {
+    final bytes = places[document.id];
+    final real = bytes == null
+        ? null
+        : utf8.decode(bytes, allowMalformed: true);
+    found[path] =
+        real == null ||
+            !real.startsWith('/') ||
+            real.contains('\x00') ||
+            inDocumentPortal(real) ||
+            _parts(real, false).lastOrNull != document.name
+        ? refused
+        : (place: real, unknown: false);
   }
-  return real;
+  return found;
 }

@@ -3,7 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../photo.dart';
-import '../private_places.dart' show realPlace;
+import '../private_places.dart' show realPlaces, resolveLinks;
 import '../rust/api/app.dart' as api;
 import '../rust/api/types.dart';
 import '../safe_image.dart';
@@ -75,8 +75,13 @@ enum OutgoingState { pending, sending, shared, failed }
 /// application dropped, read from wherever the application started), a device or a pipe
 /// (read without end), one that is gone or that comes twice is left out. Read without
 /// holding up the window: a folder on a slow or network disk could take long to answer.
-Future<(List<OutgoingFile>, int)> readOutgoing(Iterable<String> paths) async {
-  final files = <OutgoingFile>[];
+/// [real] is where each path really is when the caller learnt it already (a drop's
+/// judgement, `judgeDropped`); for the others it is asked here, once for them all.
+Future<(List<OutgoingFile>, int)> readOutgoing(
+  Iterable<String> paths, {
+  Map<String, String> real = const {},
+}) async {
+  final found = <({String path, String name, int size, String linked})>[];
   var folders = 0;
   for (final path in paths) {
     if (!File(path).isAbsolute) continue;
@@ -86,28 +91,38 @@ Future<(List<OutgoingFile>, int)> readOutgoing(Iterable<String> paths) async {
       continue;
     }
     if (type != FileSystemEntityType.file) continue;
-    if (files.any((f) => f.path == path)) continue;
+    if (found.any((f) => f.path == path)) continue;
     // Windows takes either slash between folders.
     final name = path
         .split(Platform.isWindows ? RegExp(r'[\\/]') : RegExp('/'))
         .last;
     try {
-      final linked = await File(path).resolveSymbolicLinks();
-      // The document portal's path names a folder of its own for each file
-      // (`/run/user/<id>/doc/<id>`), which tells the person nothing.
-      final real = File(await realPlace(linked) ?? linked);
-      files.add(
-        OutgoingFile(
-          path,
-          name,
-          await File(path).length(),
-          folder: real.parent.path,
-        ),
-      );
+      final linked = real[path] ?? await resolveLinks(path);
+      found.add((
+        path: path,
+        name: name,
+        size: await File(path).length(),
+        linked: linked,
+      ));
     } on FileSystemException {
       // Gone meanwhile.
     }
   }
+  // The document portal's path names a folder of its own for each file
+  // (`/run/user/<id>/doc/<id>`), which tells the person nothing.
+  final places = await realPlaces([
+    for (final f in found)
+      if (!real.containsKey(f.path)) f.linked,
+  ]);
+  final files = [
+    for (final f in found)
+      OutgoingFile(
+        f.path,
+        f.name,
+        f.size,
+        folder: File(places[f.linked]?.place ?? f.linked).parent.path,
+      ),
+  ];
   return (files, folders);
 }
 

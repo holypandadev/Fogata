@@ -36,10 +36,23 @@ class DropDoneEvent extends DropEvent {
   /// macOS, or when the platform channel doesn't provide it).
   final String? rawText;
 
+  /// Fogata: inside the Flatpak, when the files a source offered through the FileTransfer
+  /// portal were not taken, why: [LinuxPortalRefusal.declined], the drop's list of files
+  /// named [portalCount] files the application refuses (`DesktopDrop.portalDropCheck`), so
+  /// the portal was not asked and nothing of the drop was exported to the sandbox; or
+  /// [LinuxPortalRefusal.unreached], the portal gave none of its [portalCount] files in
+  /// time. [files] is empty then. Null for any other drop.
+  final LinuxPortalRefusal? portalRefusal;
+
+  /// Fogata: how many files [portalRefusal] is about.
+  final int portalCount;
+
   DropDoneEvent({
     required Offset location,
     required this.files,
     this.rawText,
+    this.portalRefusal,
+    this.portalCount = 0,
   }) : super(location);
 
   @override
@@ -47,3 +60,7 @@ class DropDoneEvent extends DropEvent {
     return '$runtimeType($location, $files, rawText: ${rawText != null ? 'present' : 'null'})';
   }
 }
+
+/// Fogata: why the files a source offered through the FileTransfer portal were not taken
+/// (see [DropDoneEvent.portalRefusal]).
+enum LinuxPortalRefusal { declined, unreached }

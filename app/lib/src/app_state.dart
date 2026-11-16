@@ -1820,10 +1820,13 @@ class AppState extends ChangeNotifier {
 
   /// Adds files to send in the room, in the chat. Folders cannot be shared and are left
   /// out, and said so; a file already waiting, or being sent, is not added twice.
-  Future<void> addOutgoing(Iterable<String> paths) async {
+  Future<void> addOutgoing(
+    Iterable<String> paths, {
+    Map<String, String> real = const {},
+  }) async {
     final group = roomState.roomGroup;
     if (group == null) return;
-    final (files, folders) = await readOutgoing(paths);
+    final (files, folders) = await readOutgoing(paths, real: real);
     final list = roomState.outgoing.putIfAbsent(group, () => []);
     final going = _sending[group] ?? const <String>[];
     for (final f in files) {

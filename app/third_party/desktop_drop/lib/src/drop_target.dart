@@ -12,6 +12,8 @@ class DropDoneDetails {
     required this.localPosition,
     required this.globalPosition,
     this.rawText,
+    this.portalRefusal,
+    this.portalCount = 0,
   });
 
   final List<DropItem> files;
@@ -26,6 +28,12 @@ class DropDoneDetails {
   /// Is `null` on platforms where raw text isn't exposed (Windows,
   /// macOS, or when the platform channel doesn't provide it).
   final String? rawText;
+
+  /// Fogata: [DropDoneEvent.portalRefusal].
+  final LinuxPortalRefusal? portalRefusal;
+
+  /// Fogata: [DropDoneEvent.portalCount].
+  final int portalCount;
 }
 
 class DropEventDetails {
@@ -177,6 +185,8 @@ class _DropTargetState extends State<DropTarget> {
         localPosition: position,
         globalPosition: globalPosition,
         rawText: event.rawText,
+        portalRefusal: event.portalRefusal,
+        portalCount: event.portalCount,
       ));
     }
   }

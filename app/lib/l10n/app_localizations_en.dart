@@ -996,6 +996,42 @@ class L10nEn extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n dragged files were left out: this system cannot tell where they come from. To share them, pick them with the paperclip.',
+      one: 'A dragged file was left out: this system cannot tell where it comes from. To share it, pick it with the paperclip.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n dragged files could not be reached. To share them, pick them with the paperclip.',
+      one: 'A dragged file could not be reached. To share it, pick it with the paperclip.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'This drop was not taken: $n of its files are hidden or private. Drag the others again without them. To share them, pick them with the paperclip.',
+      one: 'This drop was not taken: one of its files is hidden or private. Drag the others again without it. To share it, pick it with the paperclip.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6444,6 +6480,42 @@ class L10nEn extends L10n {
       other:
           '$n hidden or private files were left out: files like these are not added by dragging, since a web page can start a drag. To send them, pick them with the + button.',
       one: 'A hidden or private file was left out: files like it are not added by dragging, since a web page can start a drag. To send it, pick it with the + button.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n dragged files were left out: this system cannot tell where they come from. To send them, pick them with the + button.',
+      one: 'A dragged file was left out: this system cannot tell where it comes from. To send it, pick it with the + button.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n dragged files could not be reached. To send them, pick them with the + button.',
+      one: 'A dragged file could not be reached. To send it, pick it with the + button.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'This drop was not taken: $n of its files are hidden or private. Drag the others again without them. To send them, pick them with the + button.',
+      one: 'This drop was not taken: one of its files is hidden or private. Drag the others again without it. To send it, pick it with the + button.',
     );
     return '$_temp0';
   }

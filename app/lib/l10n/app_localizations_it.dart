@@ -1001,6 +1001,42 @@ class L10nIt extends L10n {
   }
 
   @override
+  String outgoingUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n file trascinati sono stati lasciati fuori: questo sistema non può sapere da dove vengono. Per condividerli, sceglili con la graffetta.',
+      one: 'Un file trascinato è stato lasciato fuori: questo sistema non può sapere da dove viene. Per condividerlo, sceglilo con la graffetta.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Non è stato possibile raggiungere $n file trascinati. Per condividerli, sceglili con la graffetta.',
+      one: 'Non è stato possibile raggiungere un file trascinato. Per condividerlo, sceglilo con la graffetta.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String outgoingDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Questo trascinamento non è stato accettato: $n dei file sono nascosti o privati. Trascina di nuovo gli altri senza di essi. Per condividerli, sceglili con la graffetta.',
+      one: 'Questo trascinamento non è stato accettato: uno dei file è nascosto o privato. Trascina di nuovo gli altri senza di esso. Per condividerlo, sceglilo con la graffetta.',
+    );
+    return '$_temp0';
+  }
+
+  @override
   String outgoingToShare(int n, String count, String size) {
     String _temp0 = intl.Intl.pluralLogic(
       n,
@@ -6569,6 +6605,42 @@ class L10nIt extends L10n {
       other:
           '$n file nascosti o privati sono stati lasciati fuori: file come questi non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarli, sceglili con il pulsante +.',
       one: 'Un file nascosto o privato è stato lasciato fuori: file come questo non si aggiungono trascinandoli, perché una pagina web può avviare un trascinamento. Per inviarlo, sceglilo con il pulsante +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnknownPlaceLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          '$n file trascinati sono stati lasciati fuori: questo sistema non può sapere da dove vengono. Per inviarli, sceglili con il pulsante +.',
+      one: 'Un file trascinato è stato lasciato fuori: questo sistema non può sapere da dove viene. Per inviarlo, sceglilo con il pulsante +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directUnreachableLeftOut(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Non è stato possibile raggiungere $n file trascinati. Per inviarli, sceglili con il pulsante +.',
+      one: 'Non è stato possibile raggiungere un file trascinato. Per inviarlo, sceglilo con il pulsante +.',
+    );
+    return '$_temp0';
+  }
+
+  @override
+  String directDropDeclined(int n) {
+    String _temp0 = intl.Intl.pluralLogic(
+      n,
+      locale: localeName,
+      other:
+          'Questo trascinamento non è stato accettato: $n dei file sono nascosti o privati. Trascina di nuovo gli altri senza di essi. Per inviarli, sceglili con il pulsante +.',
+      one: 'Questo trascinamento non è stato accettato: uno dei file è nascosto o privato. Trascina di nuovo gli altri senza di esso. Per inviarlo, sceglilo con il pulsante +.',
     );
     return '$_temp0';
   }
