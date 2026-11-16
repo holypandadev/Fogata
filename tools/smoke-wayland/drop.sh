@@ -28,10 +28,13 @@
 #      under the first's judgement
 #   17 ~/Documents/plan.pdf from a source whose portal transfer also holds
 #      ~/Documents/other.pdf, unlike its list
-#   18 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
-#   19 the document portal's path drop 18 brought, named by a source that offers the
+#   18 ~/Documents/plan.pdf from a source slow to give its list and key, and within that,
+#      ~/.ssh/id_ed25519 dragged from another window onto the copy
+#   19 the same, ~/Downloads/report.pdf in place of the key: it must be taken
+#   20 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
+#   21 the document portal's path drop 20 brought, named by a source that offers the
 #      list alone, as a page could name a file the portal gave Fogata before (when
-#      drop 18 brought one)
+#      drop 20 brought one)
 # The copy's drop zone writes, for each drop, the paths the drop plugin handed over, the
 # files it took (with the folder shown) and what it said (drop_portal_test.dart); the drag
 # source's log says which targets the copy asked for, the copy's log each RetrieveFiles call
@@ -310,15 +313,21 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     SECOND=back drag_twice "$res" 15 "$h/Documents/plan.pdf" -- "$key"
     drag_twice "$res" 16 "$h/Documents/plan.pdf" -- "$key"
     drag "$res" 17 --transfer "$h/Documents/other.pdf" "$h/Documents/plan.pdf"
-    drag "$res" 18 "$h/Documents/innocent.jpg"
-    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-18.txt" 2> /dev/null | cut -c5-)
+    # A source slow to give its list and key (it sleeps three seconds when asked), and
+    # within that, another drag dropped on the copy: the first drop's replies are still
+    # owed when it is given up, and must be taken for neither the key's drop (18) nor an
+    # ordinary one (19).
+    drag_twice "$res" 18 --slow "$h/Documents/plan.pdf" -- "$key"
+    drag_twice "$res" 19 --slow "$h/Documents/plan.pdf" -- "$h/Downloads/report.pdf"
+    drag "$res" 20 "$h/Documents/innocent.jpg"
+    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-20.txt" 2> /dev/null | cut -c5-)
     if [[ -n $earlier ]]; then
-      drag "$res" 19 --uri-only "$earlier"
+      drag "$res" 21 --uri-only "$earlier"
     else
       # No drag: the copy writes down that nothing came.
-      : > "$res/drop-19-go"
+      : > "$res/drop-21-go"
       for _ in $(seq 400); do
-        grep -qs '^end' "$res/drop-19.txt" && break
+        grep -qs '^end' "$res/drop-21.txt" && break
         sleep 0.1
       done
     fi
@@ -346,10 +355,10 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       took "$res" 13 two-in-a-row report.pdf
       # No list: nothing it takes.
       judge "$res" 14 portal-only - - none
-      for n in 15 16 17; do
+      for n in 15 16 17 18 19; do
         say "before $n: (not judged) $(grep -v '^seen' "$res/drop-$n.txt" 2> /dev/null | tr '\n' ' ')"
       done
-      judge "$res" 18 link-to-ssh 0 - 0
+      judge "$res" 20 link-to-ssh 0 - 0
     else
       private="hidden or private" unreached="could not be reached"
       declined="Drag the others again"
@@ -402,15 +411,23 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       judge "$res" 17 transfer-unlike-list 0 - 1 "$unreached"
       retrieved "$res" 17 transfer-unlike-list yes
       exported "$res" 17 transfer-unlike-list other.pdf yes
+      # The slow source's drop is given up while it still waits for its list and key: it
+      # could not be reached; the key's drop is declined as itself, the portal asked for
+      # nothing, and an ordinary drop after it is taken as itself.
+      judge "$res" 18 slow-then-key 0 - 2 "$declined"
+      judge "$res" 18 slow-then-key 0 - 2 "$unreached"
+      retrieved "$res" 18 slow-then-key no
+      exported "$res" 18 slow-then-key .ssh/id_ed25519 no
+      took "$res" 19 slow-then-report report.pdf
       # A link in a plain folder is only found once the portal has given its file: the
       # document stays given to the copy, which cannot give it back.
-      judge "$res" 18 link-to-ssh 0 - 1 "$private"
-      retrieved "$res" 18 link-to-ssh yes
-      exported "$res" 18 link-to-ssh .ssh/id_ed25519 yes
+      judge "$res" 20 link-to-ssh 0 - 1 "$private"
+      retrieved "$res" 20 link-to-ssh yes
+      exported "$res" 20 link-to-ssh .ssh/id_ed25519 yes
       if [[ -n $earlier ]]; then
-        judge "$res" 19 earlier-document 0 - 1 "$private"
+        judge "$res" 21 earlier-document 0 - 1 "$private"
       else
-        say "$name 19 earlier-document: WRONG: drop 18 brought no document portal path"
+        say "$name 21 earlier-document: WRONG: drop 20 brought no document portal path"
         failed=1
       fi
     fi
