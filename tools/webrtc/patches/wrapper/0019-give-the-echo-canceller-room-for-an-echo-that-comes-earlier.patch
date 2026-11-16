@@ -11,29 +11,29 @@ more later. An echo that comes later (silence played on an underflow) stays insi
 filter.
 
 The processing now asks AEC3 for 512 samples (8 blocks, 32 ms) of headroom and makes the
-refined and coarse filters, and their lengths for the first second, 8 blocks longer, so that
-they reach as far after the echo as before; the same for the multichannel configuration.
+refined and coarse filters 8 blocks longer (21), so that they reach as far after the echo as
+before; the same for the multichannel configuration. The filters of a call's first second
+keep WebRTC's 12 blocks: lengthened too, they converged more slowly and a call's first turn
+went out less cancelled (57 dB under one's own voice at the median instead of 76, once only
+18 dB).
 
 Measured in the call lab (tools/call-lab/mic.sh echo, ECHO_STALL stopping the session's
 PipeWire now and then, the echo's move timed in the samples each copy wrote and read),
-without the patch, then with 16, 32 and 48 ms of headroom:
-- moves up to 16 ms earlier followed by a turn let through: 30 in 68, 2 in 66, 3 in 56,
-  9 in 63; moves of 16 to 32 ms: 26 in 79, 15 in 78, 4 in 76, 11 in 66; over 32 ms: 13 in
-  53, 9 in 53, 8 in 46, 10 in 51;
-- PipeWire's quantum left free (256 samples there, as on a desktop), stalls of 20 and 40 ms:
-  42 turns let through in 228, 15 in 231, 7 in 227, 29 in 225;
-- the quantum fixed at 480, stalls of 40 and 80 ms: 19 in 128, 14 in 130, 6 in 128, 13 in
+without the patch, then with 16, 32 (this patch) and 48 ms of headroom:
+- moves up to 16 ms earlier followed by a turn let through: 30 in 68, 2 in 66, 4 in 73,
+  9 in 63; moves of 16 to 32 ms: 26 in 79, 15 in 78, 4 in 71, 11 in 66; over 32 ms: 13 in
+  53, 9 in 53, 8 in 52, 10 in 51;
+- PipeWire's quantum left free (256 samples there, as on a desktop), stalls of 20 and 40 ms
+  (four runs each with the measuring layer): 25 turns let through in 131, 5 in 132, 5 in
+  132, 14 in 129;
+- the quantum fixed at 480, stalls of 40 and 80 ms: 19 in 128, 14 in 130, 7 in 131, 13 in
   130;
-- without stalls: none in 363, 2 in 193 (the first two turns of one call), none in 95, 4 in
-  98. With 32 ms the first turn of a call is cancelled less at first (the other's voice sent
-  on 57 dB under one's own at the median, 76 dB without the patch; at worst 37 dB, 33 dB
-  without), the longer filters converging more slowly; the turns after it as before (71 dB
-  at the median, 73 without). 48 ms let turns through even without stalls.
-- WebRTC's audio threads used 2.96 % of a core with 32 ms, 2.88 % without (the same within
-  the runs' spread).
+- without stalls: none in 363, 2 in 193, none in 189, 4 in 98; a call's first turn 76 dB
+  under one's own voice at the median without the patch and with it, later turns 73 and
+  72 dB; WebRTC's audio threads used 2.88 % of a core with it and without.
 
 diff --git a/src/rtc_audio_processing_impl.cc b/src/rtc_audio_processing_impl.cc
-index 39cf151..03fa65f 100644
+index 39cf151..62c8964 100644
 --- a/src/rtc_audio_processing_impl.cc
 +++ b/src/rtc_audio_processing_impl.cc
 @@ -1,6 +1,7 @@
@@ -44,7 +44,7 @@ index 39cf151..03fa65f 100644
  #include "api/environment/environment_factory.h"
  #include "modules/audio_processing/audio_buffer.h"
  #include "modules/audio_processing/ns/ns_common.h"
-@@ -9,6 +10,31 @@
+@@ -9,6 +10,29 @@
  
  namespace libwebrtc {
  
@@ -57,7 +57,7 @@ index 39cf151..03fa65f 100644
 +// WebRTC's default headroom (32 samples at 16 kHz: 2 ms) the linear filter cannot reach
 +// such an echo, and a whole turn of the other's voice went back to them until the delay
 +// estimator found the echo again, a second or more later. 512 samples (8 blocks,
-+// 32 ms) of headroom, and filters 8 blocks longer (their first second's too), so that
++// 32 ms) of headroom, and filters 8 blocks longer, so that
 +// they still reach as far after the echo as WebRTC's own.
 +constexpr size_t kDelayHeadroomSamples = 512;
 +constexpr size_t kExtraFilterBlocks = kDelayHeadroomSamples / 64;
@@ -66,8 +66,6 @@ index 39cf151..03fa65f 100644
 +  config.delay.delay_headroom_samples = kDelayHeadroomSamples;
 +  config.filter.refined.length_blocks += kExtraFilterBlocks;
 +  config.filter.coarse.length_blocks += kExtraFilterBlocks;
-+  config.filter.refined_initial.length_blocks += kExtraFilterBlocks;
-+  config.filter.coarse_initial.length_blocks += kExtraFilterBlocks;
 +  return config;
 +}
 +
@@ -76,7 +74,7 @@ index 39cf151..03fa65f 100644
  class CustomProcessingAdapter : public webrtc::CustomProcessing {
   public:
    CustomProcessingAdapter() = default;
-@@ -84,6 +110,10 @@ RTCAudioProcessingImpl::RTCAudioProcessingImpl(const webrtc::Environment& env) {
+@@ -84,6 +108,10 @@ RTCAudioProcessingImpl::RTCAudioProcessingImpl(const webrtc::Environment& env) {
        render_pre_processor_);
  
    apm_ = webrtc::BuiltinAudioProcessingBuilder()

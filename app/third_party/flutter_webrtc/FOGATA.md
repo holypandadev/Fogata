@@ -478,24 +478,28 @@ that (`delay_headroom_samples`, 32 at 16 kHz): an echo even a few ms earlier was
 its linear filter's reach until its delay estimator found it again, a second or more
 later. A lost cycle is about 10 ms at a quantum of 480 or 512 and 21 ms at 1024.
 `tools/webrtc/patches/wrapper/0019` gives it 512 samples (32 ms) and filters 8 blocks
-longer. Measured with no patch, 16, 32 and 48 ms of room:
+longer, so that they reach as far after the echo as before; those of a call's first
+second keep WebRTC's 12 blocks. Measured with no patch, 16, 32 and 48 ms of room (turns
+let through):
 
 | | none | 16 ms | 32 ms | 48 ms |
 |---|---|---|---|---|
-| turns let through after a move of up to 16 ms | 30 of 68 | 2 of 66 | 3 of 56 | 9 of 63 |
-| after a move of 16 to 32 ms | 26 of 79 | 15 of 78 | 4 of 76 | 11 of 66 |
-| after a move of over 32 ms | 13 of 53 | 9 of 53 | 8 of 46 | 10 of 51 |
-| quantum free, stalls of 20 and 40 ms | 42 of 228 | 15 of 231 | 7 of 227 | 29 of 225 |
-| quantum 480, stalls of 40 and 80 ms | 19 of 128 | 14 of 130 | 6 of 128 | 13 of 130 |
-| no stalls | 0 of 363 | 2 of 193 | 0 of 95 | 4 of 98 |
-| a call's first turn, median under one's own voice | 76 dB | 75 dB | 57 dB | 60 dB |
+| after a move of up to 16 ms | 30 of 68 | 2 of 66 | 4 of 73 | 9 of 63 |
+| after a move of 16 to 32 ms | 26 of 79 | 15 of 78 | 4 of 71 | 11 of 66 |
+| after a move of over 32 ms | 13 of 53 | 9 of 53 | 8 of 52 | 10 of 51 |
+| quantum free, stalls of 20 and 40 ms | 25 of 131 | 5 of 132 | 5 of 132 | 14 of 129 |
+| quantum 480, stalls of 40 and 80 ms | 19 of 128 | 14 of 130 | 7 of 131 | 13 of 130 |
+| no stalls | 0 of 363 | 2 of 193 | 0 of 189 | 4 of 98 |
+| a call's first turn, median under one's own voice | 76 dB | 75 dB | 76 dB | 60 dB |
 
-With 32 ms the longer filters converge more slowly at the start of a call (its first turn
-is cancelled less, still far under the other's voice); later turns are as before, and
-WebRTC's audio threads use the same processor time within the runs' spread (2.96 % of a
-core against 2.88 %). 48 ms let turns through even without stalls. Moves larger than the
-room (a stall of a tenth of a second or more) still can. macOS's echo cancelling is
-Apple's voice processing and its WebRTC does not take the wrapper's patches.
+With the first second's filters 8 blocks longer as well, 32 ms helped as much against the
+stalls but a call's first turn went out less cancelled (57 dB at the median, once only
+18 dB): the longer filters converge more slowly. As patched, later turns are as before
+(72 dB at the median, 73 without) and WebRTC's audio threads use the same processor time
+(2.88 % of a core with it and without). 48 ms let turns through even without stalls.
+Moves larger than the room (a stall of a tenth of a second or more) still can. macOS's
+echo cancelling is Apple's voice processing and its WebRTC does not take the wrapper's
+patches.
 
 ## Sound of a shared screen (macOS)
 

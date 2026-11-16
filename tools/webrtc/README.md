@@ -267,8 +267,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     a mock audio device and a mock audio processing built in;
 19. the echo canceller (AEC3) has room for an echo that comes earlier than the one it
     found: 512 samples of delay headroom (8 blocks, 32 ms; WebRTC's default is 32, 2 ms)
-    and linear filters 8 blocks longer (21, and 20 for the first second), so that they
-    reach as far after the echo as before, in its mono and multichannel configurations.
+    and linear filters 8 blocks longer (21; those of a call's first second stay at 12, as
+    longer ones converged too slowly), so that they reach as far after the echo as
+    before, in its mono and multichannel configurations.
     A sound server that misses its deadlines (PipeWire on a busy computer) leaves out a
     cycle or more (10 to 21 ms each) of what was played or recorded, and the echo then
     comes earlier; one only a few milliseconds earlier was out of the filter's reach until
