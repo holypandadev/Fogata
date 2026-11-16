@@ -5,17 +5,21 @@
 // with --raw its arguments are the list's entries as they are (any URI, as a web page can
 // write them); with --second its window is another one (drop.sh's two drags in a row);
 // with --portal-only it offers the portal's targets alone, no list; with --slow it gives its
-// list three seconds after it is asked (a second drag can come meanwhile).
+// list three seconds after it is asked (a second drag can come meanwhile); with
+// --transfer <file> it hands the portal that file beside those of its list, as no GTK
+// application does (its transfer then holds another number of files than its list).
 // It says on stderr which targets each drag offered, which one the other side asked for, and
 // how the drag ended. tools/smoke-wayland/drop.sh drags from it.
 //
-//     drag_source [--uri-only | --portal-only] [--raw] [--second] [--slow] <file or URI>...
+//     drag_source [--uri-only | --portal-only] [--raw] [--second] [--slow]
+//                 [--transfer <file>] <file or URI>...
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <string.h>
 
 static gchar **uris;
 static gboolean slow = FALSE;
+static gchar **transfer;  // the portal's files, when --transfer gives it more
 
 static void on_begin(GtkWidget *widget, GdkDragContext *context, gpointer data) {
   GString *offered = g_string_new(NULL);
@@ -35,7 +39,8 @@ static void on_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData 
     fprintf(stderr, "drag source: asked for %s, waiting\n", name);
     g_usleep(3 * G_USEC_PER_SEC);
   }
-  gboolean given = gtk_selection_data_set_uris(selection, uris);
+  gboolean given = gtk_selection_data_set_uris(
+      selection, transfer != NULL && strcmp(name, "text/uri-list") != 0 ? transfer : uris);
   fprintf(stderr, "drag source: asked for %s: %s\n", name, given ? "given" : "NOT given");
   g_free(name);
 }
@@ -57,6 +62,7 @@ static void on_map(GtkWidget *widget, gpointer data) {
 int main(int argc, char **argv) {
   gtk_init(&argc, &argv);
   gboolean uri_only = FALSE, portal_only = FALSE, raw = FALSE, second = FALSE;
+  gchar *extra = NULL;
   GPtrArray *list = g_ptr_array_new();
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--uri-only") == 0) {
@@ -79,6 +85,10 @@ int main(int argc, char **argv) {
       second = TRUE;
       continue;
     }
+    if (strcmp(argv[i], "--transfer") == 0 && i + 1 < argc) {
+      extra = g_filename_to_uri(argv[++i], NULL, NULL);
+      continue;
+    }
     gchar *uri = raw ? g_strdup(argv[i]) : g_filename_to_uri(argv[i], NULL, NULL);
     if (uri == NULL) {
       fprintf(stderr, "drag source: %s is no absolute path\n", argv[i]);
@@ -88,8 +98,17 @@ int main(int argc, char **argv) {
   }
   if (list->len == 0) {
     fprintf(stderr, "usage: drag_source [--uri-only | --portal-only] [--raw] [--second] "
-                    "[--slow] <file>...\n");
+                    "[--slow] [--transfer <file>] <file>...\n");
     return 2;
+  }
+  if (extra != NULL) {
+    GPtrArray *more = g_ptr_array_new();
+    for (guint i = 0; i < list->len; i++) {
+      g_ptr_array_add(more, g_strdup(g_ptr_array_index(list, i)));
+    }
+    g_ptr_array_add(more, extra);
+    g_ptr_array_add(more, NULL);
+    transfer = (gchar **)g_ptr_array_free(more, FALSE);
   }
   g_ptr_array_add(list, NULL);
   uris = (gchar **)g_ptr_array_free(list, FALSE);

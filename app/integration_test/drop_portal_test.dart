@@ -109,13 +109,40 @@ Future<void> _drops(WidgetTester tester, String out) async {
     state.roomState.outgoing.clear();
     state.toasts.list.clear();
     refusals.clear();
+    // The drops FOGATA_TEST_SLOW_JUDGE names: the first judgement before the portal is
+    // asked takes three seconds, so that another drag can come meanwhile (a copy whose
+    // plugin judges nothing has no such judge).
+    final slow = (_env['FOGATA_TEST_SLOW_JUDGE'] ?? '')
+        .split(' ')
+        .contains('$n');
+    Object? judge;
+    if (slow) {
+      try {
+        judge = (DesktopDrop.instance as dynamic).portalDropCheck;
+        var first = true;
+        (DesktopDrop.instance as dynamic).portalDropCheck =
+            (List<String> paths) async {
+              if (first) {
+                first = false;
+                stderr.writeln('drop test: judging drop $n slowly');
+                await Future<void>.delayed(const Duration(seconds: 3));
+              }
+              return await (judge as dynamic)(paths) as int;
+            };
+      } on NoSuchMethodError {
+        // The plugin before the portal.
+      }
+    }
     final handedBefore = handed.length;
     final until = DateTime.now().add(const Duration(seconds: 20));
     while (handed.length == handedBefore && DateTime.now().isBefore(until)) {
       await _wait(tester, const Duration(milliseconds: 100));
     }
     // What was dropped is looked at, then added, without holding up the window.
-    await _wait(tester, const Duration(seconds: 2));
+    await _wait(tester, Duration(seconds: slow ? 6 : 2));
+    if (judge != null) {
+      (DesktopDrop.instance as dynamic).portalDropCheck = judge;
+    }
     final lines = <String>[
       if (handed.length == handedBefore) 'raw none',
       for (final drop in handed.skip(handedBefore))
