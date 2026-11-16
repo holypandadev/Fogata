@@ -781,6 +781,13 @@ elif check == "echo":
     # WebRTC and the sound server, not the loop), and a turn got through with none before
     # it. They are told beside each such turn, with what else changed.
     turns_judged, leaks = [0], [0]
+    # The stalls of the session's PipeWire made on purpose (ECHO_STALL, lab.sh's lab_stalls).
+    stalls = []
+    if (run / "stalls.log").exists():
+        for line in (run / "stalls.log").read_text().splitlines():
+            fields = line.split()
+            if len(fields) == 2:
+                stalls.append((float(fields[0]), fields[1]))
 
     def leak(copy, line, at, stretch):
         """Fails a turn whose echo got through, and tells what the timing log shows from 5 s
@@ -791,6 +798,11 @@ elif check == "echo":
         notes.append(
             f"{stretch}: {copy}'s turn let through at {at % 1000:.1f}: {count} xruns of the "
             f"lab's nodes from 5 s before" + (f" (first {first})" if first else "")
+            + "".join(
+                f"; PipeWire stalled {ms} ms at {t - at:+.1f} s"
+                for t, ms in stalls
+                if at - 5 <= t <= at + 1.8
+            )
         )
         notes.extend(
             f"  in the 5 s before {copy}'s leak at {at % 1000:.1f}: {c}"

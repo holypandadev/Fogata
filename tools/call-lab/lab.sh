@@ -460,6 +460,33 @@ lab_echo_proof() {
   echo $! > "$RUN/echo-proof.pid"
 }
 
+# The sound server missing its deadlines, on purpose (mic.sh echo, ECHO_STALL=<ms>,<ms>...):
+# once both copies are in the call, every 6 to 9 s, the session's PipeWire is stopped for
+# the next of those times and continued, each logged as "<time> <ms>" to $RUN/stalls.log.
+# Around such a stall the sound server leaves out some of what a copy played or recorded,
+# and its echo comes earlier than its echo canceller has it, as on a busy computer (the
+# lab's PipeWire has no realtime scheduling: the session has no system bus for RTKit).
+lab_stalls() { # "ms,ms,..."
+  local list=$1
+  (
+    IFS=, read -ra stalls <<< "$list"
+    i=0
+    trap 'kill -CONT "$(cat "$CALL_LAB_SESSION/pipewire.pid")" 2>/dev/null; exit 0' TERM HUP INT
+    until [ -e "$M/level-a.txt" ] && [ -e "$M/level-b.txt" ]; do sleep 1; done
+    while true; do
+      sleep $((6 + RANDOM % 4))
+      ms=${stalls[$((i % ${#stalls[@]}))]}
+      i=$((i + 1))
+      pid=$(cat "$CALL_LAB_SESSION/pipewire.pid" 2> /dev/null) || continue
+      echo "$(date +%s.%N | cut -c1-14) $ms" >> "$RUN/stalls.log"
+      kill -STOP "$pid" 2> /dev/null || continue
+      sleep "$(awk -v ms="$ms" 'BEGIN { print ms / 1000 }')"
+      kill -CONT "$pid"
+    done
+  ) &
+  echo $! > "$RUN/stalls.pid"
+}
+
 # Records what each copy of $2 plays (its silent output's monitor, 16-bit mono at 16 kHz)
 # for every stretch copy $1 marks (mark-<$1>-<stretch>-start and -end, call_test.dart's
 # _mark), to $RUN/played/<stretch>-<role>.raw; and what plays into the server when the
@@ -516,7 +543,7 @@ lab_stop() {
   local f
   for f in "$RUN"/[a-h].pid; do [ -e "$f" ] && lab_kill "$(cat "$f")" "$BUNDLE"; done
   for f in "$RUN"/tone-?.pid "$RUN/tone-apps.pid" "$RUN/recorder.pid" "$RUN/phases.pid" \
-    "$RUN/echo-proof.pid" "$RUN/moving.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
+    "$RUN/echo-proof.pid" "$RUN/moving.pid" "$RUN/stalls.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
   for f in "$RUN"/played/*.pids; do
     # shellcheck disable=SC2046
     [ -e "$f" ] && kill $(cat "$f") 2> /dev/null

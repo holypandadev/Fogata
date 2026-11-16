@@ -68,7 +68,13 @@
 #            stream's latency and the computer's load are logged once a second
 #            (timing.py; ECHO_TIMING=0 for none), and told beside every turn whose echo
 #            got through (which fails, whatever came before it); a load over the number
-#            of processors fails the run as too busy to judge
+#            of processors fails the run as too busy to judge. ECHO_STALL=<ms>,<ms>... stops
+#            the session's PipeWire for those times in turn, every 6 to 9 s, as a busy
+#            computer's sound server misses its deadlines (lab.sh's lab_stalls, logged to
+#            stalls.log): around a stall the sound server leaves out some of what a copy
+#            played or recorded, its echo comes earlier, and with WebRTC's echo canceller as
+#            it is a turn is let through now and then (ECHO_STALL=40,80,150,300: 13 of 103
+#            turns in three runs, none of 763 without it)
 #   noise    a enters with noise suppression on and its microphone on, a fan's steady
 #            noise in it (tone.py fan), and b with its microphone on a silent source, so
 #            that a plays nothing; a never mutes. (With b's tone playing at a, a's echo
@@ -145,6 +151,7 @@ if [ "${1:-}" = --inside ]; then
       lab_copy b 2 1 FOGATA_TEST_MIC_CASE=echo FOGATA_TEST_ECHO_PAUSES="${ECHO_PAUSES:-1 10}" \
         FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}" "${mono[@]}"
       lab_phase_recorder b "a b"
+      [ -n "${ECHO_STALL:-}" ] && lab_stalls "$ECHO_STALL"
       ;;
     noise)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=noise FOGATA_TEST_NOISE_SECONDS="${NOISE_SECONDS:-6}" \
@@ -262,7 +269,7 @@ for check in "${checks[@]}"; do
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
   [ "${LAB_FIXED_QUANTUM:-1}" = 0 ] && echo "LAB_FIXED_QUANTUM=0" >> "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
-  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
+  [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} ECHO_STALL=${ECHO_STALL:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1
   CALL_LAB_ALSA=$alsa "$HERE/session.sh" "$RUN/session" "$0" --inside "$name"
