@@ -258,16 +258,21 @@ transfer it is asked for, before anything is judged (Fogata cannot give a docume
 and GTK hands to the portal any file a drag names, a page's drag too. So the plugin takes
 such a drop by hand: the portal is asked only for a drop that lands on a room or chat that
 takes drops, and only once the drop's list of files has been read and judged. When any of
-its files is hidden or in a private place by its name (as Fogata reads the list, and as
-the source's GIO, which builds the transfer, reads it), the portal is never asked, nothing
-is exported, nothing of the drop is added, and a notice says the drop was not taken because
-of that file and that the others can be dragged again without it (or it shared with the
-clip). A list with an entry that is no plain file of this computer (a query, a fragment,
-another host, another scheme, as a page can write one), or with none, is not judged: the
-portal is not asked, and the notice below says the file could not be reached by dragging,
-as it does when the drop takes more than five seconds before the portal is asked. Once
-asked, the portal's answer is taken whenever it comes within 20 seconds; files it gives
-later stay exported, untaken, with that notice. They arrive as the document portal's paths
+its files is hidden or in a private place by its name (as Fogata reads the list, and as GIO
+reads it, which is how a GTK source builds the transfer from the same list), the portal is
+never asked, nothing is exported, nothing of the drop is added, and a notice says the drop
+was not taken because of that file and that the others can be dragged again without it (or
+it shared with the clip). A list with an entry that is no plain file of this computer (a
+query, a fragment, another host, another scheme, as a page can write one), or with none,
+and a source that offers the portal's target without a list, are not judged: the portal is
+not asked, and the notice below says the file could not be reached by dragging, as it does
+when the drop takes more than five seconds before the portal is asked. That what the
+portal holds is what the list named rests on the source building both from one list, as GTK
+does; a transfer of another number of files is not taken, though exported by then. Once
+asked, the portal's answer is taken (or judged) whenever it comes within 20 seconds, even
+when another drag came meanwhile; files it gives later stay exported, untaken, with that
+notice. On Wayland a new drag that enters the window takes over GDK's one drop context: a
+drop still going is then given up, nothing done for it on the new drag's offer. The files arrive as the document portal's paths
 (`/run/user/<id>/doc/<id>/<name>`, which leads to `/run/flatpak/doc/<id>/<name>` in the
 sandbox), or by their own path in the downloads folder. A document portal's path says nothing of where the file
 is: so a file in the portal's folder is judged by the place the Documents portal gives for

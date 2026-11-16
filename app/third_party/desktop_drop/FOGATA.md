@@ -36,41 +36,53 @@ Changed, each place marked `Fogata:` in the code:
   back nor delete it), before anything is judged, and GTK hands every file a drag names to
   the portal by itself, a page's drag that names `~/.ssh/id_ed25519` among them. So inside
   the Flatpak the plugin takes every drop by hand (`drag-drop`, `gtk_drag_get_data`,
-  `gtk_drag_finish`; not `GTK_DEST_DEFAULT_DROP`). For a drop that offers the portal's
-  target it asks the Dart part first (`checkPortalDrop`) where the drop is and, when the
-  source also offers the list of files, the list's text and the paths the plugin's GIO
-  reads in it (the source's own GIO builds the transfer from the same list, and reads as
-  files entries the Dart part does not: a query, a fragment, another host). The Dart part
-  answers -2 when no drop target that takes drops holds the point (`DesktopDrop.holds`),
-  -1 when the list cannot be judged (`portalListPaths`: every entry must be a file of this
-  computer by `linuxDropPaths`, at least one, with one absolute path of GIO's for each) or
-  there is no judge or it fails, else how many entries `DesktopDrop.portalDropCheck`, which
-  the application sets (the rules stay there), refuses by either reading. Only 0 asks for
-  the portal's target and the portal for the files. Otherwise the portal is never asked,
-  nothing is exported, and the drop is handed on as `declined` with that number, or
-  `unreached` for -1 (`portalRefusal` and `portalCount` on `DropDoneEvent` and
-  `DropDoneDetails`, files empty), or not at all for -2. A source that offers no list is
-  judged by where the drop is alone. Before the portal is asked the drop may take five
-  seconds (a list that never comes, a Dart part that never answers: `unreached`); once it
-  is asked (asynchronously), its answer is taken, or judged, whenever it comes within 20
-  seconds, since a source may end its transfer once the drop is finished (0.9.0 also asks
-  the portal in its plugin, before it finishes the drag). A portal that answers later has
-  still exported the files, which are then not taken, and the person is told they could not
-  be reached. The files are handed on as a `text/uri-list` of the paths the portal gave:
-  the document portal's (`/run/user/<id>/doc/<id>/<name>`), or the file's own where the
-  sandbox sees it already (the downloads folder). A key that is empty or not UTF-8, no
-  session bus (got once, without holding up the window), a portal that gives nothing, is
-  handed on as `unreached`, with the number of files the list named (1 when it was not
-  read). One drop at a time: a new one ends the one before (without finishing it when it is
-  the same drag context, as Wayland keeps one a seat), data is taken only when it is what
-  the drop going asked for at the time of its own `drag-drop`, and a window destroyed
-  meanwhile ends it. What is reported back to the source does not depend on whether the
+  `gtk_drag_finish`; not `GTK_DEST_DEFAULT_DROP`), and asks the portal only for a drop
+  whose list of files the Dart part has read and judged first (`checkPortalDrop`): the
+  drop's point, the list's text, and the paths the plugin's GIO reads in its `file:`
+  entries (GIO is asked about no other scheme). The Dart part answers -2 when no drop
+  target that takes drops holds the point (`DesktopDrop.holds`), -1 when there is no list
+  (a source that offers the portal's target alone: nothing would have judged what its
+  transfer holds), when the list cannot be judged (`portalListPaths`: every entry must be a
+  file of this computer by `linuxDropPaths`, at least one, with one absolute path of GIO's
+  for each), or when there is no judge or it fails, else how many distinct entries
+  `DesktopDrop.portalDropCheck`, which the application sets (the rules stay there),
+  refuses by either reading. Only 0 asks for the portal's target and the portal for the
+  files. Otherwise the portal is never asked, nothing is exported, and the drop is handed
+  on as `declined` with that number, or `unreached` for -1 (`portalRefusal` and
+  `portalCount` on `DropDoneEvent` and `DropDoneDetails`, files empty), or not at all for
+  -2. That the transfer holds the files the list named rests on the source building both
+  targets from one list, as GTK's `gtk_selection_data_set_uris` does, with the GIO calls the
+  plugin makes; a transfer that gives another number of files than the list had entries is
+  not taken (`unreached`), though the portal has exported its files by then.
+- Before the portal is asked, or before the data of a drop that offers no portal's target
+  comes, a drop may take five seconds (`unreached`). Once the portal is asked
+  (asynchronously), its answer is taken, or judged, whenever it comes within 20 seconds,
+  since a source may end its transfer once the drop is finished (0.9.0 also asks the portal
+  in its plugin, before it finishes the drag), and so is the answer to a drop given up
+  meanwhile for another drag: its files were exported, and are judged as any others. A
+  portal that answers later than 20 seconds has still exported the files, which are then not
+  taken, and the person is told they could not be reached. The files are handed on as a
+  `text/uri-list` of the paths the portal gave: the document portal's
+  (`/run/user/<id>/doc/<id>/<name>`), or the file's own where the sandbox sees it already
+  (the downloads folder). A key that is empty or not UTF-8, no session bus (got once,
+  without holding up the window), a portal that gives nothing, is handed on as
+  `unreached`, with the number of distinct files the list named (1 when there was none).
+- One drop at a time. On Wayland GDK keeps one drop context a seat, and a new drag that
+  enters the window takes it over, its offer in place of the dropped one's (and cancels a
+  read still going, with a reply of no data); every time is 0 there. So each drag that
+  enters starts a new generation (`drag-motion`, seen for every drag with
+  `gtk_drag_dest_set_track_motion`; `drag-leave`), which gives up a drop still going without
+  finishing it, and `gtk_drag_finish` and `gtk_drag_get_data` are only called for a drop of
+  the generation still current, from an idle callback of low priority, after GDK has handled
+  the events already come. Data is taken only when it is of the target the drop going asked
+  for (and, where times are given, as on X11, of its own time). A window destroyed meanwhile
+  gives the drop up. What is reported back to the source does not depend on whether the
   files could be taken (a page could learn from it whether a file it named is there): a
   drop that offered the portal's target is always reported taken. A drop of no target the
   plugin takes is finished as refused. A source that offers only the list of files is read
-  as before. Outside the Flatpak the targets and the drop are those of 0.8.0: the list first,
-  then the portal's, which GTK adds where a portal runs and which drop nothing, taken by
-  `GTK_DEST_DEFAULT_ALL`.
+  as before. Outside the Flatpak the targets and the drop are those of 0.8.0: the list
+  first, then the portal's, which GTK adds where a portal runs and which drop nothing, taken
+  by `GTK_DEST_DEFAULT_ALL`.
 - A document portal's path says nothing of where the file really is. So the plugin also
   answers `documentHostPaths` (`lib/src/channel.dart`), asking the Documents portal where
   the documents with the ids given really are (`GetHostPaths`, version 5 of its interface,

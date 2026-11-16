@@ -744,6 +744,32 @@ void main() {
           reason: line,
         );
       }
+      // An entry that is no plain file refuses the list by itself, even where GIO's
+      // reading has no entry for it to differ by.
+      expect(
+        portalListPaths(
+          'file:///home/leo/a.pdf\r\nhttps://example.com/a.png\r\n',
+          ['/home/leo/a.pdf'],
+        ),
+        isNull,
+      );
+      // GIO splits the list at LF alone and ends an entry at a CR, and a comment is a line
+      // that starts with `#`: a list read otherwise here is not judged. These are what the
+      // plugin hands over for them (g_uri_list_extract_uris, then GIO for `file:` only).
+      expect(
+        portalListPaths(
+          'file:///home/leo/a.pdf\rfile:///home/leo/.ssh/id_ed25519\r\n',
+          ['/home/leo/a.pdf'],
+        ),
+        isNull,
+      );
+      expect(
+        portalListPaths(' #x\r\nfile:///home/leo/a.pdf\r\n', [
+          '',
+          '/home/leo/a.pdf',
+        ]),
+        isNull,
+      );
       // No file at all, or only lines that are none.
       for (final text in [
         '',
@@ -1210,8 +1236,16 @@ void main() {
           ),
           1,
         );
-        // A source that offers no list: only where the drop is counts.
-        expect(await check(null), 0);
+        // A file listed twice is one file refused.
+        expect(
+          await check(
+            '${Uri.file(secret)}\r\n${Uri.file(secret)}\r\n${Uri.file(plain)}\r\n',
+          ),
+          1,
+        );
+        // A source that offers no list: nothing judged what its transfer holds, so the
+        // portal is never asked.
+        expect(await check(null), -1);
         // Where no drop target takes it, nothing is asked of the portal.
         expect(await check('${Uri.file(plain)}\r\n', at: [-50.0, -50.0]), -2);
         expect(await check(null, at: [-50.0, -50.0]), -2);

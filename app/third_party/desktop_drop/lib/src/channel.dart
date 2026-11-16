@@ -199,23 +199,24 @@ class DesktopDrop {
         // drop's files (which gives this application each of them for good): -2 when no
         // drop target takes a drop where it is, -1 when its list cannot be judged
         // (portalListPaths) or there is no judge or it fails, else how many files the
-        // application refuses (portalDropCheck); the portal is asked only for 0. A source
-        // that offers no list (null) is judged by where the drop is alone.
+        // application refuses (portalDropCheck), each counted once; the portal is asked
+        // only for 0. A source that offers no list (null) is never asked: nothing judged
+        // what its transfer holds.
         final args = call.arguments as List;
         final point = (args[0] as List).cast<double>();
         if (!holds(Offset(point[0], point[1]))) return -2;
         final check = portalDropCheck;
         if (check == null) return -1;
         final text = args[1] as String?;
-        if (text == null) return 0;
+        if (text == null) return -1;
         final entries = portalListPaths(text, (args[2] as List).cast<String>());
         if (entries == null) return -1;
         try {
-          var refused = 0;
+          final refused = <String>{};
           for (final entry in entries) {
-            if (await check(entry) > 0) refused++;
+            if (await check(entry) > 0) refused.add(entry.first);
           }
-          return refused;
+          return refused.length;
         } catch (error) {
           debugPrint('desktop_drop: no judgement of the drop: $error');
           return -1;
