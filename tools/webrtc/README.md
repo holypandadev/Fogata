@@ -266,15 +266,16 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
 18. the test of WebRTC's patch 0009 (`test/echo_restart.test.cc`), with the audio state,
     a mock audio device and a mock audio processing built in;
 19. the echo canceller (AEC3) has room for an echo that comes earlier than the one it
-    found: 256 samples of delay headroom (4 blocks, 16 ms; WebRTC's default is 32, 2 ms)
-    and linear filters 4 blocks longer (17), so that they reach as far after the echo as
-    before, in its mono and multichannel configurations. A sound server that misses its
-    deadlines (PipeWire on a busy computer) leaves out some of what was played or
-    recorded, and the echo then comes earlier; one only a few milliseconds earlier was
-    out of the filter's reach until the delay estimator found it again, a second or more
-    later, and a turn of the other person's voice went back to them. Measured in the
-    call lab (`mic.sh echo` with `ECHO_STALL`, PipeWire's quantum left free): see
-    `app/third_party/flutter_webrtc/FOGATA.md`.
+    found: 512 samples of delay headroom (8 blocks, 32 ms; WebRTC's default is 32, 2 ms)
+    and linear filters 8 blocks longer (21, and 20 for the first second), so that they
+    reach as far after the echo as before, in its mono and multichannel configurations.
+    A sound server that misses its deadlines (PipeWire on a busy computer) leaves out a
+    cycle or more (10 to 21 ms each) of what was played or recorded, and the echo then
+    comes earlier; one only a few milliseconds earlier was out of the filter's reach until
+    the delay estimator found it again, a second or more later, and a turn of the other
+    person's voice went back to them. 16, 32 and 48 ms were measured in the call lab
+    (`mic.sh echo` with `ECHO_STALL`): the patch's header and
+    `app/third_party/flutter_webrtc/FOGATA.md` give the figures.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

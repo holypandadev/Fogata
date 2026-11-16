@@ -476,12 +476,26 @@ misses its deadlines it leaves out some of what was played or recorded, and the 
 reaches the microphone earlier than the echo canceller has it. AEC3 keeps 2 ms of room for
 that (`delay_headroom_samples`, 32 at 16 kHz): an echo even a few ms earlier was out of
 its linear filter's reach until its delay estimator found it again, a second or more
-later. `tools/webrtc/patches/wrapper/0019` gives it 256 samples (16 ms) and filters 4
-blocks longer. Moves of up to 16 ms were then followed by a turn let through 2 times in
-66 (30 in 68 before); with PipeWire's quantum free, as on a desktop, and stalls of 20 and
-40 ms, 15 turns in 231 were let through (42 in 228 before). Larger moves (a stall of a
-tenth of a second or more) still can. macOS's echo cancelling is Apple's voice processing
-and its WebRTC does not take the wrapper's patches.
+later. A lost cycle is about 10 ms at a quantum of 480 or 512 and 21 ms at 1024.
+`tools/webrtc/patches/wrapper/0019` gives it 512 samples (32 ms) and filters 8 blocks
+longer. Measured with no patch, 16, 32 and 48 ms of room:
+
+| | none | 16 ms | 32 ms | 48 ms |
+|---|---|---|---|---|
+| turns let through after a move of up to 16 ms | 30 of 68 | 2 of 66 | 3 of 56 | 9 of 63 |
+| after a move of 16 to 32 ms | 26 of 79 | 15 of 78 | 4 of 76 | 11 of 66 |
+| after a move of over 32 ms | 13 of 53 | 9 of 53 | 8 of 46 | 10 of 51 |
+| quantum free, stalls of 20 and 40 ms | 42 of 228 | 15 of 231 | 7 of 227 | 29 of 225 |
+| quantum 480, stalls of 40 and 80 ms | 19 of 128 | 14 of 130 | 6 of 128 | 13 of 130 |
+| no stalls | 0 of 363 | 2 of 193 | 0 of 95 | 4 of 98 |
+| a call's first turn, median under one's own voice | 76 dB | 75 dB | 57 dB | 60 dB |
+
+With 32 ms the longer filters converge more slowly at the start of a call (its first turn
+is cancelled less, still far under the other's voice); later turns are as before, and
+WebRTC's audio threads use the same processor time within the runs' spread (2.96 % of a
+core against 2.88 %). 48 ms let turns through even without stalls. Moves larger than the
+room (a stall of a tenth of a second or more) still can. macOS's echo cancelling is
+Apple's voice processing and its WebRTC does not take the wrapper's patches.
 
 ## Sound of a shared screen (macOS)
 
