@@ -195,6 +195,17 @@ static void end_drop(gboolean finish, gboolean success, const gchar *text,
                      const gchar *target, const gchar *status, gint64 count) {
   g_autoptr(Drop) drop = current_drop;
   current_drop = nullptr;
+  // The replies it still waits for are owed: each is ignored when it comes, whichever way
+  // the drop ended, so that none is taken as the next drop's.
+  if (drop->want_list) {
+    owe(gdk_atom_intern_static_string("text/uri-list"));
+  }
+  if (drop->want_key) {
+    owe(drop->portal);
+  }
+  if (drop->want_plain) {
+    owe(drop->plain);
+  }
   if (finish) {
     gtk_drag_finish(drop->context, drop->portal != GDK_NONE ? TRUE : success, FALSE,
                     drop->time);
@@ -211,15 +222,6 @@ static void end_drop(gboolean finish, gboolean success, const gchar *text,
 // files are still judged when they come: see on_retrieved).
 static void give_up(GdkDragContext *context) {
   Drop *drop = current_drop;
-  if (drop->want_list) {
-    owe(gdk_atom_intern_static_string("text/uri-list"));
-  }
-  if (drop->want_key) {
-    owe(drop->portal);
-  }
-  if (drop->want_plain) {
-    owe(drop->plain);
-  }
   if (drop->ending) {
     end_drop(drop->context != context, drop->success, drop->text, drop->target,
              drop->status, drop->count);
@@ -516,18 +518,32 @@ void on_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context,
             : nullptr;
   if (sandboxed) {
     Drop *drop = current_drop;
-    // A reply owed to a drop given up: one with no data (on Wayland, a cancelled read), or
-    // of another time than the drop going's (on X11). On Wayland a reply with data always
-    // comes before the next drag's enter is handled, so it is never one of these.
+    // A reply owed to a drop that has ended (end_drop) comes before any of the next drop's
+    // for the same target: that drop asked later (on Wayland, after the next drag's enter
+    // cancelled the old reads, which then answer with no data). So while one is owed for
+    // this target, the reply is that one, data or not, and is ignored. On X11 a reply of
+    // another time than the drop going's is not its own either.
     const gboolean other_time = time != GDK_CURRENT_TIME && drop != nullptr &&
                                 drop->time != GDK_CURRENT_TIME && drop->time != time;
-    if ((!given || other_time || drop == nullptr) && owed_reply(target)) {
+    if (owed_reply(target)) {
       return;
     }
-    if (drop == nullptr || drop->ending || other_time) {
+    if (drop == nullptr || other_time) {
       return;
     }
     const GdkAtom list = gdk_atom_intern_static_string("text/uri-list");
+    if (drop->ending) {
+      // An answer to a drop whose end is decided: taken as come, so it is no longer owed
+      // when the drop ends (end_drop).
+      if (drop->want_plain && target == drop->plain) {
+        drop->want_plain = FALSE;
+      } else if (drop->want_list && target == list) {
+        drop->want_list = FALSE;
+      } else if (drop->want_key && target == drop->portal) {
+        drop->want_key = FALSE;
+      }
+      return;
+    }
     if (drop->want_plain && target == drop->plain) {
       // Fogata: as GTK_DEST_DEFAULT_DROP takes it outside the Flatpak: a list of files,
       // and nothing when the source gave no data.

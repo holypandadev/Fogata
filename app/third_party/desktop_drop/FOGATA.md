@@ -84,9 +84,10 @@ Changed, each place marked `Fogata:` in the code:
   `drag-motion` should the enter not have come through there. It gives up a drop still
   going: the person is told it could not be reached (unless its end was decided, or the
   portal was asked, whose files are still judged when they come), it is finished only
-  where its drag context is its own (X11; on Wayland the context is the new drag's now),
-  and the replies still owed to it are counted and ignored when they come: on Wayland a
-  reply with no data (its cancelled read), on X11 one of its own time. That count is by
+  where its drag context is its own (X11; on Wayland the context is the new drag's now).
+  The replies a drop still waits for when it ends, given up or not, are counted, and while
+  one is owed for a target the next reply for it is taken as that one and ignored, data or
+  not (it comes before any later drop's, which asked later). That count is by
   target, as nothing GTK hands on tells one request from another on Wayland; a later drop's
   own reply of no data for the same target, coming first, would be taken for the old one,
   and that drop ends when its time is up. Otherwise `gtk_drag_finish` is only called for a
