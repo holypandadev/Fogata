@@ -649,7 +649,13 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   (WebRTC's own: to -58), often silence that Opus then does not send; typing: 5.6 dB lower
   (WebRTC's own: 1.4 dB); clean speech: 0.2 dB lower, the octave around 8 kHz 3 dB lower.
   RNNoise takes about 60 µs of every 10 ms at 48 kHz, 0.6 % of one core here, and the same
-  on WebRTC's audio thread in a real call (WebRTC's own suppressor: 0.1 %).
+  on WebRTC's audio thread in a real call (WebRTC's own suppressor: 0.1 %). A steady noise
+  that comes back at once after being held down is taken for speech for a moment: WebRTC's
+  echo canceller, made anew at each start of the recording, holds the microphone about
+  23 dB down while the other side's sound plays in its first seconds and then lets go at
+  once; in the call lab RNNoise let the noise through for 0.2 to 0.5 s after that as a
+  rule, once for 4.5 s. The lab's noise check (`tools/call-lab/mic.sh noise`) therefore
+  plays nothing at the copy it measures.
 - Each person's voice can play louder or quieter on this device only, from 0 to 200 %, or
   not at all ("Mute for me"): the gain is set on the received audio track, nothing changes
   for the others, and the choice is kept per person in `app.json` for the next calls. The

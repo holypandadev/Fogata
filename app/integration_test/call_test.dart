@@ -4828,7 +4828,8 @@ Timer _logLevels(AppState state) {
 /// - `again`: after muting and unmuting.
 ///
 /// mic_check.py judges them: the noise must be as low in `start` as in `on` and `again`,
-/// well under `off`. Copy b only stays in the call.
+/// well under `off`. Copy b only stays in the call, its microphone on a silent source
+/// (mic.sh), so that nothing plays at a.
 Future<void> _noise(WidgetTester tester, AppState state) async {
   if (_copies != 2) throw StateError('the noise check takes two copies');
   if (_role != 'a') {

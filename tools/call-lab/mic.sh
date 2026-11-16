@@ -70,7 +70,12 @@
 #            got through (which fails, whatever came before it); a load over the number
 #            of processors fails the run as too busy to judge
 #   noise    a enters with noise suppression on and its microphone on, a fan's steady
-#            noise in it (tone.py fan), and b with its own on; a never mutes. a's level as
+#            noise in it (tone.py fan), and b with its microphone on a silent source, so
+#            that a plays nothing; a never mutes. (With b's tone playing at a, a's echo
+#            canceller, made anew at each start of its recording, held the noise ~23 dB
+#            down for its first seconds and let it go at once about 6 s after b's sound
+#            began: on a runner just as noise suppression was turned off, and RNNoise,
+#            which takes such a return for speech, was left as it heard it.) a's level as
 #            its processing puts it out (call_test.dart's level log) is taken over four
 #            stretches of NOISE_SECONDS (default 6): as it entered, with noise suppression
 #            turned off, with it on again, and after muting and unmuting. Judged
@@ -144,7 +149,7 @@ if [ "${1:-}" = --inside ]; then
     noise)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=noise FOGATA_TEST_NOISE_SECONDS="${NOISE_SECONDS:-6}" \
         FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}"
-      lab_copy b 2 1 FOGATA_TEST_MIC_CASE=noise
+      lab_copy b 2 off FOGATA_TEST_MIC_CASE=noise
       ;;
     quit)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"

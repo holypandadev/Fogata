@@ -986,7 +986,12 @@ elif check == "noise":
     # in milliseconds and the level, 0 to 1, every 200 ms), over the stretches it marked:
     # as it entered with noise suppression on and its microphone on (start), with noise
     # suppression turned off (off), on again (on), and after muting and unmuting (again).
-    # A fan's steady noise is all its microphone has (tone.py fan).
+    # A fan's steady noise is all its microphone has (tone.py fan), and nothing plays at
+    # a: b records from a silent source. With b's tone as a's far end, a's echo canceller
+    # held the noise about 23 dB down for its first seconds after each start of a's
+    # recording and then let it go at once, near the end of start and again; RNNoise took
+    # that return for speech and let the noise through for up to seconds, the more so
+    # when it was turned off just after it (on began where it had stopped).
     # The application's noise suppression lowers such a noise by 25 dB and more; this
     # much is asked of every stretch with it on. libwebrtc without WebRTC patch 0008 left
     # its processing of the microphone off from the entry until the microphone was muted
@@ -1020,6 +1025,8 @@ elif check == "noise":
         return sorted(20 * math.log10(v) if v > 0 else FLOOR for v in inside)
 
     names = ("start", "off", "on", "again")
+    if "labb_mic" in sources_between("b", 0, 1e12):
+        problems.append("b recorded from its microphone's tone: a's noise is not alone in what a processes")
     read = {name: stretch(name) for name in names}
     if None in read.values():
         missing = [name for name in names if read[name] is None]
