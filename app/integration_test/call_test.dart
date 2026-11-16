@@ -4906,6 +4906,7 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
     () => call.peers.values.any((p) => p.connected),
     seconds: 120,
   );
+  _mark('connected');
   await _wait(tester, Duration(seconds: settle));
   _mark('settled');
   for (var n = 1; n <= offs.length; n++) {
