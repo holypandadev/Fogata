@@ -2,10 +2,10 @@
 
 The macOS plugin is written against webrtc-sdk's Objective-C SDK (the AVAudioEngine audio
 device module, desktop capture, audio processing...), not the C++ wrapper.
-`patches/apple` carries it to WebRTC M156:
+`patches/apple` carries it to WebRTC M158:
 
 1. `0001-webrtc-sdk-objc-sdk`: webrtc-sdk/webrtc's m150_release (2a0b277) moved to
-   branch-head 8078 (on top of `patches/webrtc`, which the Mac's build applies first: its
+   branch-head 8127 (on top of `patches/webrtc`, which the Mac's build applies first: its
    voice engine keeps webrtc-sdk's own rule for a muted sender, beside `patches/webrtc/0008`), without Android and the tvOS/visionOS build fork, and without what
    Fogata never uses: the frame and data packet cryptor, H.265, its changes to the
    VideoToolbox H.264 encoder and decoder, and its OpenGL view.
@@ -15,7 +15,7 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    the plugin's renderer reads.
 3. `0003-m156-build-fixes`: what 0001 needed to build on a Mac: M156's media targets, no
    `HAVE_NO_MEDIA`, and the network thread in place of webrtc-sdk's separate worker thread,
-   which M156 no longer has.
+   which M158 no longer has.
 4. `0004-opus-and-vp8-only`: the codecs calls use and nothing else, as in the Linux and
    Windows library. The audio codec factories make Opus alone (no G.711, G.722, iLBC, L16
    or multichannel Opus); the default video codec factories, which the plugin's own
@@ -71,7 +71,7 @@ x64 (`args/common.gn`, `args/mac.gn`, macOS 12 and later), joins them with `lipo
 that the framework exports no class of a codec other than Opus and VP8 and names no source
 file of one (nor of the frame cryptor), makes
 `WebRTC.xcframework` with WebRTC's `LICENSE` and the licences of everything built in
-(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m156.8078.9/WebRTC.xcframework.zip`
+(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m158.8127.1/WebRTC.xcframework.zip`
 with its SHA-256.
 
 To change the port, fix it in `~/webrtc-work/webrtc/src`, build again with `--no-prepare`,

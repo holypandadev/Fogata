@@ -5,8 +5,8 @@ The Linux and Windows app links `libwebrtc`: WebRTC with webrtc-sdk's C++ wrappe
 written against. These scripts build it from source, at the commits `pins.sh` names, with
 the patches in `patches/`:
 
-- **WebRTC branch-head 8078**, the branch of Chrome 156. webrtc-sdk's prebuilt releases
-  were six milestones behind (m150), without the security fixes Chrome made since.
+- **WebRTC branch-head 8127**, the branch of Chrome 158. webrtc-sdk's prebuilt releases
+  were eight milestones behind (m150), without the security fixes Chrome made since.
 - **Only the codecs calls use**: VP8 (with its retransmission codec) and Opus. No H.264,
   H.265, VP9, AV1 (encoder or decoder), G.722, PCM or L16 is built in, so none can be
   negotiated and no decoder of one is there for what others send. The app's SDP filters
@@ -19,7 +19,7 @@ the patches in `patches/`:
   (`fogataFrameTooLarge`), which keeps the sender out of the call. Interframes after a
   refused keyframe are refused too until the next keyframe let through.
 - **Only the wrapper's API is exported** from the Linux library, as in webrtc-sdk's
-  builds (WebRTC M156 has parts in Rust whose bridge would otherwise be exported).
+  builds (WebRTC M158 has parts in Rust whose bridge would otherwise be exported).
 - **Cameras through the Camera portal and PipeWire on Linux**, when asked (the plugin asks
   in a Flatpak): the wrapper opened cameras through V4L2 alone (`/dev/video*`), which a
   Flatpak has only with every device of the computer. It asks xdg-desktop-portal's Camera
@@ -85,7 +85,7 @@ wrapper's tests of the size check, of the microphone's channels, of the voice en
 muted state, of the echo controller made anew, of the arrays it hands across and of the
 shared screen encoder, and writes into `<work>/dist`:
 
-    fogata-libwebrtc.m156.8078.9/libwebrtc-linux-x64-release.zip   (+ .sha256)
+    fogata-libwebrtc.m158.8127.1/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
 laid out like webrtc-sdk's archives (`linux-x64-release/{lib,include,LICENSE,NOTICE.md}`).
 `NOTICE.md` holds the licence of WebRTC and of every library built into it, as WebRTC's
@@ -147,14 +147,14 @@ Cross-compiled on Linux with a Visual Studio toolchain packed once on Windows:
 
 ## Building for macOS
 
-On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`):
+On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`):
 `MACOS.md`, `build-macos.sh`, and `app/macos/WebRTC-SDK.podspec` for CocoaPods.
 
 ## Changing what is built
 
 - Which milestone a branch-head is: in the fetched tree, `git -C <work>/webrtc/src log -1`
-  shows the pinned commit, a merge into that branch titled `[M156] ...` and ending in
-  `Cr-Commit-Position: refs/branch-heads/8078@{#n}` and `Cr-Branched-From:` (the commit of
+  shows the pinned commit, a merge into that branch titled `[M158] ...` and ending in
+  `Cr-Commit-Position: refs/branch-heads/8127@{#n}` and `Cr-Branched-From:` (the commit of
   main the branch started from). Which milestone Chrome's stable channel
   is on is in Chrome's release notes.
 - A new WebRTC branch: change `WEBRTC_BRANCH`/`WEBRTC_COMMIT` in `pins.sh`, run `fetch.sh`,

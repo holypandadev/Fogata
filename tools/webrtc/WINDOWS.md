@@ -10,7 +10,7 @@ Linux build.
 
 The packager of the pinned depot_tools takes only **Visual Studio 2026** and the Windows SDK
 the WebRTC branch names (`SDK_VERSION` in `build/vs_toolchain.py` of the WebRTC tree:
-**10.0.28000.0** for branch-head 8078). On the Windows computer:
+**10.0.28000.0** for branch-head 8127). On the Windows computer:
 
 1. Free at least **20 GB** on C: (Visual Studio 2026 Build Tools with C++ about 8 GB, the SDK
    about 3 GB, the archive and its temporary copy about 5 GB). On a VM with less room on
@@ -52,7 +52,7 @@ it case-insensitively with ciopfs, which needs FUSE and libfuse 2: on Ubuntu the
 `libfuse2t64`, or its two libraries unpacked anywhere and named with `LD_LIBRARY_PATH`), applies the patches, builds with
 `args/common.gn` and `args/win-x64.gn`, and writes
 
-    <work>/dist/fogata-libwebrtc.m156.8078.9/libwebrtc-win-x64-release.zip   (+ .sha256)
+    <work>/dist/fogata-libwebrtc.m158.8127.1/libwebrtc-win-x64-release.zip   (+ .sha256)
 
 with `win-x64-release/{lib/libwebrtc.dll, lib/libwebrtc.dll.lib, include, LICENSE,
 NOTICE.md}`, as webrtc-sdk's Windows archives are laid out. Put its SHA-256 into
