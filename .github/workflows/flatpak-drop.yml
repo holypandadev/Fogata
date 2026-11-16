@@ -1,0 +1,171 @@
+# Files dragged onto Fogata running as a Flatpak, on KDE Plasma Wayland, by a real drag
+# (tools/smoke-wayland/drop.sh, docs/ci.md "Dropping files on the Flatpak"), started by hand:
+#
+#   gh workflow run flatpak-drop.yml --ref <branch or tag> [-f before=<commit>]
+#
+# It builds the copy of the commit run, and one of `before` (by default the last commit
+# before the application took the FileTransfer portal; empty, none) with that commit's drop
+# plugin and check of private places: both debug builds of
+# app/integration_test/drop_portal_test.dart, made into Flatpaks by tools/beta/flatpak.sh
+# with the application's own permissions. The session runs in a container of Ubuntu 26.04,
+# whose KDE Plasma 6 and xdg-desktop-portal 1.21 (the Documents portal's GetHostPaths)
+# GitHub's own image does not have. The run fails when a drop did not do what it should.
+# Nothing here signs or publishes anything, and the job's token can only read.
+name: Flatpak drop
+
+on:
+  workflow_dispatch:
+    inputs:
+      before:
+        description: The commit whose drop plugin and check of private places a second copy takes (empty, no second copy)
+        required: false
+        default: 89c9730216a94bb61fa7db10d0a2f8afd0dd2623
+
+permissions:
+  contents: read
+
+env:
+  FLUTTER_VERSION: 3.47.8
+  CARGO_TERM_COLOR: never
+  FOGATA_UPDATE_WEB: "off"
+  # Started by hand, the input as given (empty: no earlier copy); on a push (a branch that
+  # tries this workflow), the default. (In GitHub's expressions an empty value is false, so
+  # `inputs.before || default` would never give an empty one.)
+  BEFORE: ${{ github.event_name == 'workflow_dispatch' && inputs.before || github.event_name != 'workflow_dispatch' && '89c9730216a94bb61fa7db10d0a2f8afd0dd2623' || '' }}
+  # The session's system, pinned by its digest as the actions are by their commits. What
+  # its apt and Flathub install in it is not pinned: the newest of Ubuntu 26.04 and of the
+  # 26.08 runtime, as a person's computer would have.
+  IMAGE: ubuntu:26.04@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  drop:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Make room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Install the system packages
+        timeout-minutes: 20
+        run: |
+          codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+          curl -fsS --max-time 15 -o /dev/null \
+              "http://azure.archive.ubuntu.com/ubuntu/dists/$codename/InRelease" || {
+            [[ ! -f /etc/apt/apt-mirrors.txt ]] ||
+              sudo sed -i '/azure\.archive\.ubuntu\.com/d' /etc/apt/apt-mirrors.txt
+          }
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update
+          $apt install -y --no-install-recommends \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install the Rust of rust-toolchain.toml
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: app/third_party/flutter_webrtc/third_party/downloads
+          key: linux-webrtc-${{ hashFiles('app/third_party/flutter_webrtc/third_party/libwebrtc_version.ini') }}
+
+      # Those of its tests that only Linux runs (the drop plugin's own Linux path).
+      - name: The tests of the check of private places, on Linux
+        run: |
+          cd app
+          flutter pub get
+          flutter test test/private_drop_test.dart
+
+      - name: Build the copies
+        timeout-minutes: 90
+        run: |
+          mkdir -p "$RUNNER_TEMP/bundles"
+          if [[ -n $BEFORE ]]; then
+            changed=(app/third_party/desktop_drop app/lib/src/private_places.dart
+              app/lib/src/state/room_state.dart app/lib/src/outgoing.dart app/lib/src/app_state.dart
+              app/lib/src/direct_state.dart app/lib/l10n)
+            git checkout "$BEFORE" -- "${changed[@]}"
+            (cd app && flutter build linux --debug -t integration_test/drop_portal_test.dart)
+            tar -C app/build/linux/x64/debug -cf "$RUNNER_TEMP/bundles/before.tar" bundle
+            git checkout HEAD -- "${changed[@]}"
+            git status --short
+            [[ -z $(git status --porcelain -- "${changed[@]}") ]] ||
+              { echo "::error::the commit's own files did not come back"; exit 1; }
+          fi
+          (cd app && flutter build linux --debug -t integration_test/drop_portal_test.dart)
+          tar -C app/build/linux/x64/debug -cf "$RUNNER_TEMP/bundles/after.tar" bundle
+          ls -la "$RUNNER_TEMP/bundles"
+
+      - name: Drag files onto the copies on KDE Plasma Wayland
+        timeout-minutes: 45
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          mkdir -p "$RUNNER_TEMP/lab"
+          # shellcheck disable=SC2016
+          docker run --rm --privileged -v "$GITHUB_WORKSPACE:/work" -v "$RUNNER_TEMP/bundles:/bundles:ro" \
+            -v "$RUNNER_TEMP/lab:/lab" -w /work "$IMAGE" bash -c '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get -o Acquire::Retries=3 update > /lab/apt.log
+            apt-get -o Acquire::Retries=3 install -y --no-install-recommends \
+              ca-certificates flatpak fuse3 dbus-daemon dbus-bin util-linux kwin-wayland xwayland \
+              xdg-desktop-portal xdg-desktop-portal-kde pipewire wireplumber pipewire-pulse \
+              pulseaudio-utils at-spi2-core python3 python3-dbus python3-gi gir1.2-atspi-2.0 \
+              libkf6service-bin gcc libc6-dev pkg-config libgtk-3-dev libwayland-dev libwayland-bin \
+              plasma-wayland-protocols libglib2.0-bin libgl1-mesa-dri libegl-mesa0 gnupg \
+              >> /lab/apt.log
+            echo "xdg-desktop-portal $(dpkg-query -W -f "\${Version}" xdg-desktop-portal), kwin $(dpkg-query -W -f "\${Version}" kwin-wayland), gtk $(dpkg-query -W -f "\${Version}" libgtk-3-0t64)"
+            flatpak remote-add --system --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+            flatpak install --system --noninteractive -y flathub org.freedesktop.Platform//26.08 > /lab/runtime.log
+            copies=()
+            for name in before after; do
+              [[ -e /bundles/$name.tar ]] || continue
+              rm -rf "/lab/$name-bundle" "/lab/$name-flatpak"
+              mkdir -p "/lab/$name-bundle"
+              tar -C "/lab/$name-bundle" -xf "/bundles/$name.tar"
+              tools/beta/flatpak.sh "/lab/$name-bundle/bundle" "/lab/$name-flatpak" --unsigned --test-bundle
+              copies+=("$name=/lab/$name-flatpak/Fogata.flatpak")
+            done
+            export LANG=C.UTF-8
+            # Where Xwayland makes its socket, as on any desktop (the image has none).
+            mkdir -p -m 1777 /tmp/.X11-unix /tmp/.ICE-unix
+            tools/smoke-wayland/drop.sh /lab/out "${copies[@]}"
+          ' 2>&1 | tee "$RUNNER_TEMP/lab/run.log"
+          status=${PIPESTATUS[0]}
+          { echo '### Drops'; echo '```'; cat "$RUNNER_TEMP/lab/out/summary.txt" 2> /dev/null; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - name: Keep the logs
+        if: always()
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$RUNNER_TEMP/lab" 2> /dev/null || true
+          # The copies' folders and the flatpak repositories are large and say nothing more.
+          rm -rf "$RUNNER_TEMP/lab/before-bundle" "$RUNNER_TEMP/lab/after-bundle" \
+            "$RUNNER_TEMP/lab/before-flatpak" "$RUNNER_TEMP/lab/after-flatpak" \
+            "$RUNNER_TEMP/lab/out/session/home/.local/share/flatpak" || true
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: flatpak-drop
+          path: ${{ runner.temp }}/lab
+          if-no-files-found: ignore
+          retention-days: 14

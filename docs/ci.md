@@ -72,6 +72,8 @@ and sees it update itself to the newest one from the releases page (the same doc
 step 7). `.github/workflows/netlab.yml`, by hand, runs the network lab on one of GitHub's
 computers (the same document, "Checks before a release", 3), and
 `.github/workflows/call-checks.yml` the Linux calls of the same list (2): see below.
+`.github/workflows/flatpak-drop.yml`, by hand, drags files onto the Flatpak on KDE Plasma
+Wayland: see "Dropping files on the Flatpak" below.
 
 ## The calls before a release
 
@@ -113,6 +115,38 @@ GitHub's computers have 4 processors: the call of 4 copies with a camera takes t
 (a load of about 18, each copy at some 93% of a processor, 20 to 22 pictures a second where
 a shared screen keeps 30) and still passes; the calls with a shared screen, of 6 copies
 too, stay near a load of 10.
+
+## Dropping files on the Flatpak
+
+`.github/workflows/flatpak-drop.yml`, started by hand (`gh workflow run flatpak-drop.yml
+--ref <branch or tag>`), drags files onto Fogata running as a Flatpak with a real drag, in
+about 45 minutes (docs/architecture/5d-desktop-application.md says what a drop does
+there). It builds the commit's copy of `app/integration_test/drop_portal_test.dart`, a room's
+drop zone that writes down what each drop handed over, took and said, and one of an
+earlier commit's drop plugin and check of private places beside it (`-f before=<commit>`;
+by default the last commit before the application took the FileTransfer portal; `-f
+before=` for none), runs `test/private_drop_test.dart`, whose drops through the plugin's
+channel only Linux runs, and makes both copies Flatpaks with the application's own
+permissions (`tools/beta/flatpak.sh --unsigned --test-bundle`). Then, in a container of
+Ubuntu 26.04 (GitHub's Ubuntu 24.04 has neither KDE Plasma 6 nor an xdg-desktop-portal with
+the Documents portal's `GetHostPaths`, 1.19 and later), `tools/smoke-wayland/drop.sh` runs
+the session of `tools/smoke-wayland/session.sh` with `/dev/fuse` for the document portal
+and drags a GTK window outside the sandbox onto each copy with KWin's fake input: files
+from the downloads folder, from another folder, from `~/.ssh`, a hidden one, the key
+written as a page can write it (a fragment, a query, another host), two together, the same
+from a source that offers only the list of files, one that is nowhere, two drags in a row,
+the key from a source that offers no list, the key dragged over the copy and dropped on it
+while the copy judges another drop (slowly, by `FOGATA_TEST_SLOW_JUDGE`), a source whose
+portal transfer holds another number of files than its list, a link to the key and a
+document of the portal named by a list. Each drop's line says what the copy took, the
+folder it shows, its notice, the targets it asked for, whether the copy's plugin called
+`RetrieveFiles` (by its own log) and, after the drops of the key, whether the portal holds
+a document of it for the copy (`flatpak documents`). The container's image is pinned by its
+digest; what apt and Flathub install in it is the newest.
+The run fails when a drop of the commit's copy did not do what it should, or the earlier
+copy did not do what that commit did; the run's summary has every line, and the session's
+folders and logs are the run's artifact, kept 14 days. `drop.sh` needs what it names at its
+start; it has only been run in that container.
 
 ## A call's memory over hours
 
