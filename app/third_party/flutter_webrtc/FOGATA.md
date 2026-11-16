@@ -501,6 +501,35 @@ Moves larger than the room (a stall of a tenth of a second or more) still can. m
 echo cancelling is Apple's voice processing and its WebRTC does not take the wrapper's
 patches.
 
+## A microphone turned on again while the other side talks (Linux, Windows)
+
+Turning the microphone off has the voice channel only receive, which stops the audio
+device's recording; turning it on starts it again, and patch 0009 made AEC3 anew there, as
+at a call's start. A new AEC3 does not know whether the room has an echo. With a headset
+there is none, and AEC3 lets the microphone through untouched while the other side talks
+only once its transparent mode has seen 6 s of their sound without echo; until then its
+suppressor takes the microphone for echo whenever their sound plays. Measured in the call
+lab (`tools/call-lab/mic.sh unmute`, the other side holding a tone, three runs of three
+unmutes each): the first words after an unmute went out 8 dB weaker on average (17 dB at
+worst) and the room's noise 12 dB lower, for 3 to 6 s, and then came back at once.
+`tools/webrtc/patches/webrtc/0010` keeps the transparent mode when recording starts again:
+AEC3 still drops what it aligned of the played sound with the recorded one (what 0009 was
+for), but not what it knows of the room.
+
+| unmute, the other side holding a tone | before | after |
+|---|---|---|
+| headset: first word, against the later ones | -8 dB (-17 at worst) | 0 dB |
+| headset: noise in the first 0.5 s, against later | -12 dB | 0 dB |
+| speakers: noise in the first 0.5 s, against later | -8 dB | -2 dB |
+| speakers: the other's tone sent back between the first words (median) | -59 dBFS | -61 dBFS |
+
+With the other side talking in words, now and then, the unmute changed little before and
+after. A call's start is unchanged: a new call's AEC3 knows nothing of the room either, and
+with a headset its first seconds hold the noise down by about 10 dB as before. The echo
+check with both patches let 0 of 98 turns through without stalls, 2 of 131 with the
+quantum free and stalls of 20 and 40 ms, and 2 of 97 at 480 with stalls of 40 and 80 ms;
+every call's first turn stayed cancelled.
+
 ## Sound of a shared screen (macOS)
 
 macOS's WebRTC hands what its audio module records to every channel of sound that sends,

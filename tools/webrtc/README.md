@@ -209,6 +209,16 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    of speech go back to them, until it noticed (once a second) the played blocks piled
    up. `patches/apple/0001` keeps this in its own `AudioState::AddSendingStream`.
 
+10. `0010-align-the-echo-canceller-anew-when-recording-starts`: instead of making AEC3
+   anew (0009), the audio processing asks it to restart for recording
+   (`EchoControl::RestartForRecording`): it drops the played sound queued while nothing
+   was recorded and, at its next recorded block, resets its render buffer and delay
+   estimator as a new AEC3 does and its echo remover as at a delay change, but keeps its
+   transparent mode (whether there is an echo path at all). A new AEC3 with a headset held
+   the microphone down while the other side talked, until its transparent mode had seen
+   6 s of their sound without echo: after every unmute the first words went out weaker
+   and the room's noise came back as a step. Another echo controller is still made anew.
+
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
 `patches/wrapper` (to webrtc-sdk/libwebrtc):
