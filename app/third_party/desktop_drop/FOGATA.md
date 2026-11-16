@@ -46,8 +46,8 @@ Changed, each place marked `Fogata:` in the code:
   file of this computer by `linuxDropPaths`, at least one, with one absolute path of GIO's
   for each), or when there is no judge or it fails, else how many distinct entries
   `DesktopDrop.portalDropCheck`, which the application sets (the rules stay there),
-  refuses by either reading. Only 0 asks for the portal's target and the portal for the
-  files. Otherwise the portal is never asked, nothing is exported, and the drop is handed
+  refuses by either reading. Only 0 calls `RetrieveFiles` (the call that exports) with the key
+  this drop's source gave. Otherwise the portal is never asked, nothing is exported, and the drop is handed
   on as `declined` with that number, or `unreached` for -1 (`portalRefusal` and
   `portalCount` on `DropDoneEvent` and `DropDoneDetails`, files empty), or not at all for
   -2. That the transfer holds the files the list named rests on the source building both
@@ -68,21 +68,38 @@ Changed, each place marked `Fogata:` in the code:
   without holding up the window), a portal that gives nothing, is handed on as
   `unreached`, with the number of distinct files the list named (1 when there was none).
 - One drop at a time. On Wayland GDK keeps one drop context a seat, and a new drag that
-  enters the window takes it over, its offer in place of the dropped one's (and cancels a
-  read still going, with a reply of no data); every time is 0 there. So each drag that
-  enters starts a new generation (`drag-motion`, seen for every drag with
-  `gtk_drag_dest_set_track_motion`; `drag-leave`), which gives up a drop still going without
-  finishing it, and `gtk_drag_finish` and `gtk_drag_get_data` are only called for a drop of
-  the generation still current, from an idle callback of low priority, after GDK has handled
-  the events already come. Data is taken only when it is of the target the drop going asked
-  for (and, where times are given, as on X11, of its own time). A window destroyed meanwhile
-  gives the drop up. What is reported back to the source does not depend on whether the
-  files could be taken (a page could learn from it whether a file it named is there): a
-  drop that offered the portal's target is always reported taken. A drop of no target the
-  plugin takes is finished as refused. A source that offers only the list of files is read
-  as before. Outside the Flatpak the targets and the drop are those of 0.8.0: the list
-  first, then the portal's, which GTK adds where a portal runs and which drop nothing, taken
-  by `GTK_DEST_DEFAULT_ALL`.
+  enters the window puts its offer in it at once (GTK 3.24's `data_device_enter` calls
+  `gdk_wayland_selection_set_offer`, which clears the old offer's read buffers: each read
+  still going is cancelled, and answered with no data once its cancelled read returns,
+  through `selection_buffer_unref`; GTK's own selection timeout is only a last resort);
+  every time is 0 there. So everything a drop needs from its source, the list and the
+  portal's key, is asked for in `drag-drop` itself, where the offer is certainly its own
+  (two reads of different targets may be pending on one offer together: GDK keeps a read
+  buffer a target, and each `gtk_drag_get_data` has its own requestor window; so may they
+  on X11, where each converts the selection for its own window); the key is kept until the
+  list has passed. Each drag that enters the window starts a new generation, seen at
+  `GDK_DRAG_ENTER` by an event handler that calls `gtk_main_do_event` after
+  (`gdk_event_handler_set`; gtk_init's handler is `gtk_main_do_event`, and neither the
+  application nor Flutter's GTK embedding installs another), and again at its first
+  `drag-motion` should the enter not have come through there. It gives up a drop still
+  going: the person is told it could not be reached (unless its end was decided, or the
+  portal was asked, whose files are still judged when they come), it is finished only
+  where its drag context is its own (X11; on Wayland the context is the new drag's now),
+  and the replies still owed to it are counted and ignored when they come: on Wayland a
+  reply with no data (its cancelled read), on X11 one of its own time. That count is by
+  target, as nothing GTK hands on tells one request from another on Wayland; a later drop's
+  own reply of no data for the same target, coming first, would be taken for the old one,
+  and that drop ends when its time is up. Otherwise `gtk_drag_finish` is only called for a
+  drop of the drag still current, from an idle callback of low priority, after GDK has
+  handled the events already come. Once a drop's end is decided, every answer that comes
+  after is ignored; one deadline covers everything up to the `RetrieveFiles` call. A
+  window destroyed meanwhile gives the drop up. What is reported back to the source does
+  not depend on whether the files could be taken (a page could learn from it whether a file
+  it named is there): a drop that offered the portal's target is always reported taken. A
+  drop of no target the plugin takes is finished as refused. A source that offers only the
+  list of files is read as before. Outside the Flatpak the targets and the drop are those of
+  0.8.0: the list first, then the portal's, which GTK adds where a portal runs and which
+  drop nothing, taken by `GTK_DEST_DEFAULT_ALL`.
 - A document portal's path says nothing of where the file really is. So the plugin also
   answers `documentHostPaths` (`lib/src/channel.dart`), asking the Documents portal where
   the documents with the ids given really are (`GetHostPaths`, version 5 of its interface,

@@ -78,17 +78,22 @@ static void send_drop(FlMethodChannel *channel, const gchar *text, gint x, gint 
 // that takes it is); a source that offers no list is never asked. The guarantee rests on
 // the source building both targets from one list, as GTK's gtk_selection_data_set_uris
 // does (with the GIO calls the plugin makes); a transfer that gives another number of files
-// than the list named is not taken, though the portal has exported them by then.
+// than the list had entries is not taken, though the portal has exported them by then.
 //
-// One drop at a time, and GDK keeps one drop context a seat on Wayland: a new drag that
-// enters the window takes it over, its offer in place of the dropped one's (GDK cancels a
-// read still going for the old one, with a reply of no data). So every drag that enters
-// starts a new generation (on_drag_motion), which ends a drop still going without finishing
-// it, and nothing is done to the drag context (gtk_drag_finish, gtk_drag_get_data) for a
-// drop whose generation has passed. Those steps are taken from an idle callback of low
-// priority, after GDK has handled the events already come (a new drag's enter among them),
-// and only for data of the target the drop going asked for (and, where the time tells, as
-// on X11, of its own time: on Wayland every time is 0).
+// Everything a drop needs from its source, the list and the portal's key, is asked for in
+// "drag-drop" itself, where the drag context's offer is certainly this drop's: GDK keeps
+// one drop context a seat on Wayland, and a new drag that enters the window puts its offer
+// in it. The key alone exports nothing: only RetrieveFiles does, called once the list has
+// passed, with the key this drop's source gave. A new drag that enters gives the drop going
+// up (on_drag_enter, with drag-motion as a second guard): it is finished there only where
+// its drag context is its own (X11; on Wayland the context is the new drag's now), the
+// person is told it could not be reached unless the portal was asked already (whose files
+// are then still judged), and the replies still owed to it are not taken for another
+// drop's: GDK on Wayland cancels the reads of the old offer when the new one comes, and
+// answers each with no data once its cancelled read returns; on X11 an answer carries its
+// own drop's time. gtk_drag_finish is called from an idle callback of low priority, after
+// GDK has handled the events already come (a new drag's enter among them), and only for a
+// drop of the drag still current.
 typedef struct {
   guint serial;
   guint generation;  // of the drag that dropped it
@@ -97,15 +102,18 @@ typedef struct {
   FlMethodChannel *channel;
   gint x, y;
   guint time;
-  GdkAtom portal;    // the portal's target the source offers, or GDK_NONE
-  GdkAtom awaiting;  // what was asked for and has not come, or GDK_NONE
-  gchar *list;       // the list's text, once read
-  guint entries;     // how many entries of the list were judged
-  guint deadline;    // the timeout before the portal is asked (or a plain drop's data
-                     // comes), 0 once gone
-  guint idle;        // the step waiting for GDK's events, 0 when none
-  // The step: finish the drag and hand on what it brought, or ask for the portal's target.
-  gboolean ask_portal;
+  GdkAtom portal;     // the portal's target the source offers, or GDK_NONE
+  GdkAtom plain;      // for a drop that offers no portal's target, what was asked for
+  gboolean want_list, want_key, want_plain;  // asked for, not come yet
+  gchar *list;        // the list's text, once read
+  guint entries;      // how many entries of the list were judged
+  gchar *key;         // the portal's key, once given
+  gboolean no_key;    // the source gave no key
+  gboolean passed;    // the Dart part said the portal may be asked
+  gboolean retrieving;
+  gboolean ending;    // its end is decided: every later answer is ignored
+  guint deadline;     // until RetrieveFiles is called (or a plain drop's data comes)
+  guint idle;         // the end waiting for GDK's events, 0 when none
   gboolean success;
   gchar *text;
   const gchar *target;
@@ -123,6 +131,7 @@ static void drop_free(Drop *drop) {
   g_object_unref(drop->widget);
   g_object_unref(drop->context);
   g_free(drop->list);
+  g_free(drop->key);
   g_free(drop->text);
   g_free(drop);
 }
@@ -133,6 +142,23 @@ static guint drop_serial = 0;
 // Fogata: the drag over the window now: one more for each drag that enters it.
 static guint drag_generation = 0;
 static gboolean drag_inside = FALSE;
+// Fogata: replies still owed to drops given up, by target: each is ignored when it comes.
+static GHashTable *owed = nullptr;
+
+static void owe(GdkAtom target) {
+  const guint n = GPOINTER_TO_UINT(g_hash_table_lookup(owed, target));
+  g_hash_table_insert(owed, target, GUINT_TO_POINTER(n + 1));
+}
+
+// Whether a reply for [target] is one owed to a drop given up (and counts it as come).
+static gboolean owed_reply(GdkAtom target) {
+  const guint n = GPOINTER_TO_UINT(g_hash_table_lookup(owed, target));
+  if (n == 0) {
+    return FALSE;
+  }
+  g_hash_table_insert(owed, target, GUINT_TO_POINTER(n - 1));
+  return TRUE;
+}
 
 // The drop [serial] names, if it is still the one going.
 static Drop *drop_of(gpointer serial) {
@@ -141,16 +167,19 @@ static Drop *drop_of(gpointer serial) {
              : nullptr;
 }
 
-// How many files of this computer the list named, each once, or 1 when there is none.
+// How many files the list named, each once (by the path GIO reads for a `file:` entry,
+// so two spellings of one file count once), or 1 when there is none.
 static gint64 files_named(const gchar *list) {
   if (list == nullptr) {
     return 1;
   }
   g_auto(GStrv) uris = g_uri_list_extract_uris(list);
-  g_autoptr(GHashTable) files = g_hash_table_new(g_str_hash, g_str_equal);
+  g_autoptr(GHashTable) files = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, nullptr);
   for (gchar **uri = uris; uri != nullptr && *uri != nullptr; uri++) {
     if (g_ascii_strncasecmp(*uri, "file:", 5) == 0) {
-      g_hash_table_add(files, *uri);
+      g_autoptr(GFile) file = g_file_new_for_uri(*uri);
+      gchar *path = g_file_get_path(file);
+      g_hash_table_add(files, path != nullptr ? path : g_strdup(*uri));
     }
   }
   const guint named = g_hash_table_size(files);
@@ -158,8 +187,7 @@ static gint64 files_named(const gchar *list) {
 }
 
 // Ends the drop going: hands on [text] (or [status] and [count]) to the Dart part, unless
-// neither is given, and finishes the drag when [finish], which is only done from step()
-// for a drop of the drag that is still the current one. What is reported back to the
+// neither is given, and finishes the drag when [finish]. What is reported back to the
 // source does not depend on whether the files could be taken (a page could learn from it
 // whether a file it named is there): a drop that offered the portal's target is reported
 // taken, any other as GTK reports it, by whether its data came.
@@ -177,62 +205,76 @@ static void end_drop(gboolean finish, gboolean success, const gchar *text,
   }
 }
 
-// The step waiting for GDK's events: taken only while no other drag has entered since the
-// drop. Else the drop is given up, finishing nothing, and only files the portal gave are
-// still handed on (to be judged: they were exported already).
-static gboolean step(gpointer serial) {
+// Gives up the drop going for a new drag (whose drag context is [context]): finished only
+// where its context is its own, the replies it is owed left to be ignored, and the person
+// told it could not be reached unless its end was decided or the portal was asked (whose
+// files are still judged when they come: see on_retrieved).
+static void give_up(GdkDragContext *context) {
+  Drop *drop = current_drop;
+  if (drop->want_list) {
+    owe(gdk_atom_intern_static_string("text/uri-list"));
+  }
+  if (drop->want_key) {
+    owe(drop->portal);
+  }
+  if (drop->want_plain) {
+    owe(drop->plain);
+  }
+  if (drop->ending) {
+    end_drop(drop->context != context, drop->success, drop->text, drop->target,
+             drop->status, drop->count);
+  } else if (drop->retrieving) {
+    end_drop(drop->context != context, TRUE, nullptr, nullptr, nullptr, 0);
+  } else {
+    end_drop(drop->context != context, FALSE, nullptr, "text/uri-list", "unreached",
+             files_named(drop->list));
+  }
+}
+
+// A drag entered the window: a new generation (see Drop).
+static void drag_entered(GdkDragContext *context) {
+  drag_inside = TRUE;
+  drag_generation++;
+  if (current_drop != nullptr) {
+    give_up(context);
+  }
+}
+
+// The drop's end, once GDK's events are handled, for a drop of the drag still current.
+static gboolean finish_later(gpointer serial) {
   Drop *drop = drop_of(serial);
   if (drop == nullptr) {
     return G_SOURCE_REMOVE;
   }
   drop->idle = 0;
-  const gboolean current = drop->generation == drag_generation;
-  if (drop->ask_portal) {
-    drop->ask_portal = FALSE;
-    if (!current) {
-      end_drop(FALSE, FALSE, nullptr, nullptr, nullptr, 0);
-      return G_SOURCE_REMOVE;
-    }
-    drop->awaiting = drop->portal;
-    gtk_drag_get_data(drop->widget, drop->context, drop->portal, drop->time);
-    return G_SOURCE_REMOVE;
-  }
   g_autofree gchar *text = static_cast<gchar *>(g_steal_pointer(&drop->text));
-  if (!current && text == nullptr) {
-    end_drop(FALSE, FALSE, nullptr, nullptr, nullptr, 0);
-  } else {
-    end_drop(current, drop->success, text, drop->target, drop->status, drop->count);
-  }
+  end_drop(drop->generation == drag_generation, drop->success, text, drop->target,
+           drop->status, drop->count);
   return G_SOURCE_REMOVE;
 }
 
-// Waits for GDK's events before the drop's next step (see step()).
-static void later(Drop *drop) {
-  if (drop->idle == 0) {
-    drop->idle = g_idle_add_full(G_PRIORITY_LOW, step, GUINT_TO_POINTER(drop->serial),
-                                 nullptr);
-  }
-}
-
-// The drop's end, once GDK's events are handled.
+// Decides the drop's end, for good: every answer that comes after is ignored.
 static void end_later(Drop *drop, gboolean success, const gchar *text, const gchar *target,
                       const gchar *status, gint64 count) {
+  if (drop->ending) {
+    return;
+  }
+  drop->ending = TRUE;
   if (drop->deadline != 0) {
     g_source_remove(drop->deadline);
     drop->deadline = 0;
   }
-  drop->awaiting = GDK_NONE;
   drop->success = success;
-  g_free(drop->text);
   drop->text = g_strdup(text);
   drop->target = target;
   drop->status = status;
   drop->count = count;
-  later(drop);
+  drop->idle =
+      g_idle_add_full(G_PRIORITY_LOW, finish_later, GUINT_TO_POINTER(drop->serial), nullptr);
 }
 
-// The drop took too long before the portal was asked (a list that never came, a Dart part
-// that never answered), or its data never came: nothing was exported.
+// The drop took too long before the portal was asked (a list or key that never came, a
+// Dart part that never answered), or its data never came: nothing was exported.
 static gboolean on_deadline(gpointer serial) {
   Drop *drop = drop_of(serial);
   if (drop != nullptr) {
@@ -256,7 +298,7 @@ typedef struct {
 // portal's paths, or the file's own where the sandbox sees it already). These paths do not
 // say where a file really is: the Dart part asks the Documents portal that
 // (documentHostPaths) before it takes one. A portal that gives nothing, or another number
-// of files than the list it was judged by named, gives nothing to take.
+// of files than the list it was judged by had entries, gives nothing to take.
 static void on_retrieved(GObject *source, GAsyncResult *result, gpointer user_data) {
   g_autofree Retrieval *retrieval = static_cast<Retrieval *>(user_data);
   g_autoptr(GError) error = nullptr;
@@ -298,20 +340,34 @@ static void on_retrieved(GObject *source, GAsyncResult *result, gpointer user_da
   }
 }
 
-// Asks the FileTransfer portal for the files under [key], the source's data, while the
-// drop is still going: a source may end its transfer once the drop is finished. From here
-// the drop waits for the portal's answer alone, which is taken (or judged) whenever it
-// comes within kPortalWaitMs, even when the drop was given up meanwhile.
-static void retrieve(Drop *drop, const gchar *key) {
+// Asks the FileTransfer portal for the drop's files once its list has passed and its
+// source has given the key, while the drop is still going: a source may end its transfer
+// once the drop is finished. From here the drop waits for the portal's answer alone, which
+// is taken (or judged) whenever it comes within kPortalWaitMs, even when the drop was given
+// up meanwhile.
+static void retrieve_when_ready(Drop *drop) {
+  if (drop->ending || drop->retrieving || !drop->passed) {
+    return;
+  }
+  if (drop->no_key) {
+    end_later(drop, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop->list));
+    return;
+  }
+  if (drop->key == nullptr) {
+    return;
+  }
+  // The portal is asked only with text a D-Bus string can be.
+  if (*drop->key == '\0' || !g_utf8_validate(drop->key, -1, nullptr) ||
+      session_bus == nullptr) {
+    end_later(drop, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop->list));
+    return;
+  }
   if (drop->deadline != 0) {
     g_source_remove(drop->deadline);
     drop->deadline = 0;
   }
-  // The portal is asked only with text a D-Bus string can be.
-  if (*key == '\0' || !g_utf8_validate(key, -1, nullptr) || session_bus == nullptr) {
-    end_later(drop, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop->list));
-    return;
-  }
+  drop->retrieving = TRUE;
+  g_message("desktop_drop: RetrieveFiles for drop %u", drop->serial);
   auto *retrieval = g_new0(Retrieval, 1);
   retrieval->serial = drop->serial;
   retrieval->channel = drop->channel;
@@ -322,7 +378,7 @@ static void retrieve(Drop *drop, const gchar *key) {
   g_dbus_connection_call(
       session_bus, "org.freedesktop.portal.Documents", "/org/freedesktop/portal/documents",
       "org.freedesktop.portal.FileTransfer", "RetrieveFiles",
-      g_variant_new("(s@a{sv})", key,
+      g_variant_new("(s@a{sv})", drop->key,
                     g_variant_new_array(G_VARIANT_TYPE("{sv}"), nullptr, 0)),
       G_VARIANT_TYPE("(as)"), G_DBUS_CALL_FLAGS_NONE, kPortalWaitMs, nullptr, on_retrieved,
       retrieval);
@@ -337,7 +393,7 @@ static void on_checked(GObject *source, GAsyncResult *result, gpointer serial) {
   g_autoptr(FlMethodResponse) response =
       fl_method_channel_invoke_method_finish(FL_METHOD_CHANNEL(source), result, &error);
   Drop *drop = drop_of(serial);
-  if (drop == nullptr) {
+  if (drop == nullptr || drop->ending) {
     return;
   }
   gint64 refused = -1;
@@ -354,8 +410,8 @@ static void on_checked(GObject *source, GAsyncResult *result, gpointer serial) {
   } else if (refused != 0) {
     end_later(drop, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop->list));
   } else {
-    drop->ask_portal = TRUE;
-    later(drop);
+    drop->passed = TRUE;
+    retrieve_when_ready(drop);
   }
 }
 
@@ -394,46 +450,49 @@ static gboolean is_portal(GdkAtom target) {
          target == gdk_atom_intern_static_string(kPortalFilesTarget);
 }
 
-// Fogata: the drop itself, inside the Flatpak.
+// Fogata: the drop itself, inside the Flatpak: all its data asked for here, while the
+// drag context's offer is its own.
 static gboolean on_drag_drop(GtkWidget *widget, GdkDragContext *context, gint x, gint y,
                              guint time, gpointer user_data) {
   if (current_drop != nullptr) {
-    // A drop still waited for is given up, finishing nothing: on Wayland its drag context
-    // is this drop's.
-    end_drop(FALSE, FALSE, nullptr, nullptr, nullptr, 0);
+    give_up(context);
   }
+  // The drag is over (GTK says it has left first; this makes sure of it): the next one to
+  // enter is another.
+  drag_inside = FALSE;
   const GdkAtom target = gtk_drag_dest_find_target(widget, context, nullptr);
   if (target == GDK_NONE) {
     // As GTK_DEST_DEFAULT_DROP does: a reply alone finishes no drop.
     gtk_drag_finish(context, FALSE, FALSE, time);
     return TRUE;
   }
-  current_drop = g_new0(Drop, 1);
-  current_drop->serial = ++drop_serial;
-  current_drop->generation = drag_generation;
-  // The drag is over (GTK says it has left first; this makes sure of it): the next one to
-  // enter is another.
-  drag_inside = FALSE;
-  current_drop->widget = GTK_WIDGET(g_object_ref(widget));
-  current_drop->context = GDK_DRAG_CONTEXT(g_object_ref(context));
-  current_drop->channel = static_cast<FlMethodChannel *>(user_data);
-  current_drop->x = x;
-  current_drop->y = y;
-  current_drop->time = time;
-  current_drop->portal = is_portal(target) ? target : GDK_NONE;
-  current_drop->deadline =
-      g_timeout_add(kBeforePortalMs, on_deadline, GUINT_TO_POINTER(current_drop->serial));
+  Drop *drop = g_new0(Drop, 1);
+  current_drop = drop;
+  drop->serial = ++drop_serial;
+  drop->generation = drag_generation;
+  drop->widget = GTK_WIDGET(g_object_ref(widget));
+  drop->context = GDK_DRAG_CONTEXT(g_object_ref(context));
+  drop->channel = static_cast<FlMethodChannel *>(user_data);
+  drop->x = x;
+  drop->y = y;
+  drop->time = time;
+  drop->portal = is_portal(target) ? target : GDK_NONE;
+  drop->deadline = g_timeout_add(kBeforePortalMs, on_deadline, GUINT_TO_POINTER(drop->serial));
   const GdkAtom list = gdk_atom_intern_static_string("text/uri-list");
-  if (current_drop->portal == GDK_NONE) {
-    current_drop->awaiting = target;
+  if (drop->portal == GDK_NONE) {
+    drop->plain = target;
+    drop->want_plain = TRUE;
     gtk_drag_get_data(widget, context, target, time);
-  } else if (g_list_find(gdk_drag_context_list_targets(context),
-                         GDK_ATOM_TO_POINTER(list)) != nullptr) {
-    current_drop->awaiting = list;
+  } else if (g_list_find(gdk_drag_context_list_targets(context), GDK_ATOM_TO_POINTER(list)) !=
+             nullptr) {
+    // Both at once, on this drop's own offer; the key is kept until the list has passed.
+    drop->want_list = TRUE;
+    drop->want_key = TRUE;
     gtk_drag_get_data(widget, context, list, time);
+    gtk_drag_get_data(widget, context, drop->portal, time);
   } else {
-    // No list to judge: the Dart part refuses it (and says so).
-    check(current_drop);
+    // No list to judge: the Dart part refuses it (and says so); the key is not asked for.
+    check(drop);
   }
   return TRUE;
 }
@@ -457,28 +516,42 @@ void on_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context,
             : nullptr;
   if (sandboxed) {
     Drop *drop = current_drop;
-    if (drop == nullptr || drop->awaiting != target ||
-        (time != GDK_CURRENT_TIME && drop->time != GDK_CURRENT_TIME && drop->time != time)) {
-      // Not what the drop going asked for: a late answer to one given up.
+    // A reply owed to a drop given up: one with no data (on Wayland, a cancelled read), or
+    // of another time than the drop going's (on X11). On Wayland a reply with data always
+    // comes before the next drag's enter is handled, so it is never one of these.
+    const gboolean other_time = time != GDK_CURRENT_TIME && drop != nullptr &&
+                                drop->time != GDK_CURRENT_TIME && drop->time != time;
+    if ((!given || other_time || drop == nullptr) && owed_reply(target)) {
       return;
     }
-    drop->awaiting = GDK_NONE;
-    if (drop->portal == GDK_NONE) {
+    if (drop == nullptr || drop->ending || other_time) {
+      return;
+    }
+    const GdkAtom list = gdk_atom_intern_static_string("text/uri-list");
+    if (drop->want_plain && target == drop->plain) {
       // Fogata: as GTK_DEST_DEFAULT_DROP takes it outside the Flatpak: a list of files,
       // and nothing when the source gave no data.
+      drop->want_plain = FALSE;
       g_autofree gchar *name = gdk_atom_name(target);
-      const gboolean list = given && target == gdk_atom_intern_static_string("text/uri-list");
-      end_later(drop, given, list ? data : nullptr, g_intern_string(name), nullptr, 0);
-    } else if (!given) {
-      // No data, which is also what GDK gives a read cancelled by another drag: once its
-      // events are handled, this drop is given up if one came.
-      end_later(drop, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop->list));
-    } else if (is_portal(target)) {
-      retrieve(drop, g_strstrip(data));
-    } else {
+      const gboolean files = given && target == list;
+      end_later(drop, given, files ? data : nullptr, g_intern_string(name), nullptr, 0);
+    } else if (drop->want_list && target == list) {
+      drop->want_list = FALSE;
+      if (!given) {
+        end_later(drop, FALSE, nullptr, "text/uri-list", "unreached", 1);
+        return;
+      }
       // The list first, judged by the Dart part before the portal is asked.
       drop->list = static_cast<gchar *>(g_steal_pointer(&data));
       check(drop);
+    } else if (drop->want_key && target == drop->portal) {
+      drop->want_key = FALSE;
+      if (given) {
+        drop->key = g_strdup(g_strstrip(data));
+      } else {
+        drop->no_key = TRUE;
+      }
+      retrieve_when_ready(drop);
     }
     return;
   }
@@ -492,17 +565,21 @@ void on_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context,
   send_drop(channel, data, x, y, name, nullptr, 0);
 }
 
+// Fogata: inside the Flatpak, every event of the window's display goes through here first:
+// a drag that enters starts a new generation (see Drop) before GTK hands its enter to the
+// widgets. Then to GTK, as gtk_init's own handler does.
+static void on_event(GdkEvent *event, gpointer user_data) {
+  if (event->type == GDK_DRAG_ENTER) {
+    drag_entered(event->dnd.context);
+  }
+  gtk_main_do_event(event);
+}
+
 void on_drag_motion(GtkWidget *widget, GdkDragContext *drag_context,
                     gint x, gint y, guint time, gpointer user_data) {
-  // Fogata: inside the Flatpak, a drag that enters the window starts a new generation (see
-  // Drop), and a drop still going is given up, finishing nothing: GDK has given its drag
-  // context to the new drag.
+  // Fogata: a second guard, should a drag's enter not have come through on_event.
   if (sandboxed && !drag_inside) {
-    drag_inside = TRUE;
-    drag_generation++;
-    if (current_drop != nullptr) {
-      end_drop(FALSE, FALSE, nullptr, nullptr, nullptr, 0);
-    }
+    drag_entered(drag_context);
   }
 
   if (ignoreNext) {
@@ -677,6 +754,11 @@ void desktop_drop_plugin_register_with_registrar(FlPluginRegistrar *registrar) {
     // Wayland it takes GDK's drop context over all the same.
     gtk_drag_dest_set_track_motion(GTK_WIDGET(fl_view), TRUE);
     g_bus_get(G_BUS_TYPE_SESSION, nullptr, on_session_bus, nullptr);
+    owed = g_hash_table_new(g_direct_hash, g_direct_equal);
+    // Every drag's enter, seen before GTK hands it on (see on_event). gtk_init installs
+    // gtk_main_do_event as the handler, which on_event calls in turn; nothing else in this
+    // application, nor Flutter's GTK embedding, installs one.
+    gdk_event_handler_set(on_event, nullptr, nullptr);
   }
   g_signal_connect(fl_view, "focus-in-event",
                    G_CALLBACK(on_focus_in_event), nullptr);

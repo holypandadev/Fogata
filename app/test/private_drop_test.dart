@@ -1249,6 +1249,10 @@ void main() {
         // Where no drop target takes it, nothing is asked of the portal.
         expect(await check('${Uri.file(plain)}\r\n', at: [-50.0, -50.0]), -2);
         expect(await check(null, at: [-50.0, -50.0]), -2);
+        // A judge that fails judges nothing: the portal is not asked.
+        DesktopDrop.instance.portalDropCheck = (_) async =>
+            throw StateError('no judgement');
+        expect(await check('${Uri.file(plain)}\r\n'), -1);
         // No judge, no portal: the plugin is told to leave it.
         DesktopDrop.instance.portalDropCheck = null;
         expect(await check('${Uri.file(plain)}\r\n'), -1);

@@ -271,8 +271,10 @@ portal holds is what the list named rests on the source building both from one l
 does; a transfer of another number of files is not taken, though exported by then. Once
 asked, the portal's answer is taken (or judged) whenever it comes within 20 seconds, even
 when another drag came meanwhile; files it gives later stay exported, untaken, with that
-notice. On Wayland a new drag that enters the window takes over GDK's one drop context: a
-drop still going is then given up, nothing done for it on the new drag's offer. The files arrive as the document portal's paths
+notice. Everything the drop needs from its source (its list and the portal's key) is asked for
+at the drop itself, as on Wayland a new drag that enters the window takes over GDK's one
+drop context at once; a drop still going is then given up, said could not be reached, and
+nothing is done for it on the new drag's offer. The files arrive as the document portal's paths
 (`/run/user/<id>/doc/<id>/<name>`, which leads to `/run/flatpak/doc/<id>/<name>` in the
 sandbox), or by their own path in the downloads folder. A document portal's path says nothing of where the file
 is: so a file in the portal's folder is judged by the place the Documents portal gives for
