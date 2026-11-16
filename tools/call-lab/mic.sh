@@ -89,6 +89,32 @@
 #            stretches with noise suppression on than with it off, from the entry on (a
 #            processing that libwebrtc left off until the microphone was muted and
 #            unmuted let it through)
+#   unmute   a turns its microphone off and on as the call's button does, off for each of
+#            UNMUTE_OFFS seconds in turn (default "2 10 60") and on for UNMUTE_ON (10)
+#            after each, once its processing had UNMUTE_SETTLE seconds (10) on the room
+#            alone; b listens, its microphone off. a's microphone has a room's noise
+#            throughout, at UNMUTE_NOISE_DB dBFS RMS (-52: a fan, its hum and a hiss), and a
+#            few words (UNMUTE_WORDS_DB, -28) 0.5, 3.5 and 6.5 s after each unmute, all
+#            made with ffmpeg's filters (unmute-sound.sh; ffmpeg is needed);
+#            UNMUTE_MIC_VOLUME sets its virtual microphone's volume (a percentage),
+#            UNMUTE_WORDS_AT the words' moments in ms ("500 3500 6500"). UNMUTE_FAR=words or
+#            tone: b talks meanwhile (the same words every 3 s, or a steady tone of 220 and
+#            660 Hz), its microphone on; UNMUTE_ROOM=1: what a plays goes back into a's
+#            microphone 30 ms later, as from speakers (without it, as with a headset);
+#            UNMUTE_ECHO=1 is both, with words.
+#            What b plays and what a's microphone hears are recorded throughout. Measured,
+#            not judged (unmute.py): how loud b played the first 100, 300, 1000 and 2500 ms
+#            after the sound resumed, against the same windows 3 s and 6 s later, and one
+#            clip of each unmute, 2 s before to 4 s after. UNMUTE_TRIALS sets a's WebRTC
+#            field trials (FOGATA_WEBRTC_FIELD_TRIALS, debug builds), and UNMUTE_NS=1 has a
+#            enter with noise suppression on.
+#            unmute:headset and unmute:speakers are judged (unmute_check.py): b holds a tone
+#            (UNMUTE_FAR=tone), a turns its microphone off for 2, 10 and 30 s and on for 16 s
+#            after each, with words 0.5, 3.5, 6.5, 9.5 and 12.5 s after each unmute; without
+#            and with a room's echo. With a headset, a's words and the room's noise must go
+#            out as they do later in the call (a new echo canceller held the microphone down
+#            until it had heard 6 s of b without echo, then let go at once); with speakers,
+#            b's tone must not go back to it at an unmute
 #   restart  a and b talk and hear each other; the session's sound server is stopped and
 #            started again (restart:<how>, RESTART_HOW): pulse, PipeWire's PulseAudio service
 #            alone; all, the three daemons, as `systemctl --user restart pipewire
@@ -99,7 +125,7 @@
 #            empty, none). Within 20 s of that each copy must record from its own microphone
 #            again (recordings.log), hear the other (its voice's packets and level) and list
 #            its devices; one away over 5 s must be told gone and back
-# Usage: tools/call-lab/mic.sh <check>...   (default: all of them; quit with QUIT_AFTER=0,
+# Usage: tools/call-lab/mic.sh <check>...   (default: all of them but unmute; quit with QUIT_AFTER=0,
 #        300 and 1500, restart as pulse, all, down20 and gone). Build first as for
 #        measure.sh. Prints PASS or FAIL for each and the run folders; exits non-zero when
 #        one failed.
@@ -113,7 +139,11 @@ if [ "${1:-}" = --inside ]; then
   # application's sound must not take them (see lab_tones).
   [ "$CHECK" = echo ] && export LAB_VOICE_BINARY=$(basename "$BUNDLE") LAB_TURNS=1
   [ "$CHECK" = noise ] && export LAB_FAN=a
+  [ "$CHECK" = unmute ] && export LAB_NO_TONE="a b"
   lab_start 2
+  # A room's noise and a few words into a's microphone, and what b plays and a's
+  # microphone hears recorded throughout (mic.sh unmute).
+  [ "$CHECK" = unmute ] && lab_unmute_sound
   # A room's echo into each copy's microphone (ECHO_ROOM=0 for none).
   [ "$CHECK" = echo ] && [ "${ECHO_ROOM:-1}" = 1 ] && lab_room_echo 2
   # How the sound server moves the sound along, once a second (ECHO_TIMING=0 for none).
@@ -157,6 +187,17 @@ if [ "${1:-}" = --inside ]; then
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=noise FOGATA_TEST_NOISE_SECONDS="${NOISE_SECONDS:-6}" \
         FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}"
       lab_copy b 2 off FOGATA_TEST_MIC_CASE=noise
+      ;;
+    unmute)
+      steps=(FOGATA_TEST_UNMUTE_OFFS="${UNMUTE_OFFS:-2 10 60}" FOGATA_TEST_UNMUTE_ON="${UNMUTE_ON:-10}"
+        FOGATA_TEST_UNMUTE_SETTLE="${UNMUTE_SETTLE:-10}")
+      tried=()
+      [ -n "${UNMUTE_TRIALS:-}" ] && tried+=(FOGATA_WEBRTC_FIELD_TRIALS="$UNMUTE_TRIALS")
+      [ "${UNMUTE_NS:-}" = 1 ] && tried+=(FOGATA_TEST_UNMUTE_NS=1)
+      lab_copy a 2 1 FOGATA_TEST_MIC_CASE=unmute "${steps[@]}" FOGATA_WEBRTC_LOG="${WEBRTC_LOG:-info}" "${tried[@]}"
+      bmic=off
+      { [ "${UNMUTE_ECHO:-}" = 1 ] || [ -n "${UNMUTE_FAR:-}" ]; } && bmic=1
+      lab_copy b 2 "$bmic" FOGATA_TEST_MIC_CASE=unmute "${steps[@]}"
       ;;
     quit)
       lab_copy a 2 1 FOGATA_TEST_MIC_CASE=quit FOGATA_TEST_QUIT_AFTER="${QUIT_AFTER:-0}"
@@ -235,6 +276,10 @@ if [ "${1:-}" = --inside ]; then
         echo "ended with status $? at $(now)" > "$RUN/quit.txt"
       fi
       ;;
+    unmute)
+      lab_wait "a b" 1800
+      lab_unmute_stop
+      ;;
     *) lab_wait "a b" 900 ;;
   esac
   sleep 1
@@ -254,6 +299,16 @@ for check in "${checks[@]}"; do
     case "$name" in
       quit) export QUIT_AFTER=${check#*:} ;;
       restart) export RESTART_HOW=${check#*:} ;;
+      unmute)
+        # The judged forms: b holds a tone, a's words 0.5 to 12.5 s after each unmute.
+        export UNMUTE_JUDGE=${check#*:} UNMUTE_FAR=tone UNMUTE_OFFS="2 10 30" UNMUTE_ON=16 \
+          UNMUTE_WORDS_AT="500 3500 6500 9500 12500" UNMUTE_ECHO=
+        case "$UNMUTE_JUDGE" in
+          headset) export UNMUTE_ROOM= ;;
+          speakers) export UNMUTE_ROOM=1 ;;
+          *) echo "unknown check $check" >&2; exit 2 ;;
+        esac
+        ;;
     esac
   fi
   # A debug build runs from the Dart kernel beside it; a profile or release one has none.
@@ -269,11 +324,22 @@ for check in "${checks[@]}"; do
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
   [ "${LAB_FIXED_QUANTUM:-1}" = 0 ] && echo "LAB_FIXED_QUANTUM=0" >> "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
+  [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_ROOM=${UNMUTE_ROOM:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
+  [ "$name" = unmute ] && echo "${UNMUTE_OFFS:-2 10 60}" > "$RUN/offs.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} ECHO_STALL=${ECHO_STALL:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1
   CALL_LAB_ALSA=$alsa "$HERE/session.sh" "$RUN/session" "$0" --inside "$name"
-  python3 -I "$HERE/mic_check.py" "$RUN" "$name" || failed=1
+  if [ "$name" = unmute ]; then
+    if [ -n "${UNMUTE_JUDGE:-}" ] && [ "$check" != unmute ]; then
+      python3 -I "$HERE/unmute.py" "$RUN" "$UNMUTE_JUDGE" > "$RUN/unmute-measured.txt" 2>&1
+      python3 -I "$HERE/unmute_check.py" "$RUN" "$UNMUTE_JUDGE" || failed=1
+    else
+      python3 -I "$HERE/unmute.py" "$RUN" today || failed=1
+    fi
+  else
+    python3 -I "$HERE/mic_check.py" "$RUN" "$name" || failed=1
+  fi
   echo "  $RUN"
 done
 exit $failed

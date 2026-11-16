@@ -62,7 +62,7 @@
 // screen watched by all the others, at the quality FOGATA_TEST_SCREEN_QUALITY names if set
 // (<lines>, 540 too, or source, maybe with @<fps>); see _measureCall. FOGATA_TEST_MIC_CASE
 // checks instead one thing of the microphone (muted, switch, unplug, late, alone, broken,
-// quit, devices, noise)
+// quit, devices, noise, unmute)
 // or of the call (rejoin, echo, restart);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
@@ -502,6 +502,8 @@ Future<void> _call(WidgetTester tester) async {
   if (_env['FOGATA_TEST_MIC_CASE'] == 'noise' && _role == 'a') {
     state.prefs.noiseSuppression = true;
   }
+  // The unmute check, with noise suppression on (mic.sh, UNMUTE_NS=1).
+  if (_env['FOGATA_TEST_UNMUTE_NS'] == '1') state.prefs.noiseSuppression = true;
   final devices = await navigator.mediaDevices.enumerateDevices();
   _log(
     'devices: ${devices.map((d) => '${d.kind}:${d.label} (${d.deviceId})').join(' | ')}',
@@ -525,7 +527,8 @@ Future<void> _call(WidgetTester tester) async {
     // copy shares.
     if (_env['FOGATA_TEST_MEASURE'] != null ||
         _env['FOGATA_TEST_MIC_CASE'] == 'echo' ||
-        _env['FOGATA_TEST_MIC_CASE'] == 'noise') {
+        _env['FOGATA_TEST_MIC_CASE'] == 'noise' ||
+        _env['FOGATA_TEST_MIC_CASE'] == 'unmute') {
       state.prefs.audioOutput = pick('audiooutput', 'FogataQuietOut');
     }
     // Were the microphone opened anyway, it would hear only silence.
@@ -4324,6 +4327,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 /// - rejoin: see [_rejoin].
 /// - echo: see [_echo].
 /// - noise: see [_noise].
+/// - unmute: see [_unmute].
 /// - restart: see [_soundRestart].
 Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
   final call = state.callState.call!;
@@ -4429,6 +4433,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       await _echo(tester, state);
     case 'noise':
       await _noise(tester, state);
+    case 'unmute':
+      await _unmute(tester, state);
     case 'restart':
       await _soundRestart(tester, state);
     default:
@@ -4866,6 +4872,55 @@ Future<void> _noise(WidgetTester tester, AppState state) async {
     logging.cancel();
   }
   await _say(state, 'noise done');
+}
+
+/// tools/call-lab/mic.sh unmute. Copy a entered with its microphone on, a room's noise in
+/// it (from mic.sh), and turns the microphone off and on as the call's button does
+/// (AppState.setMic): off for each of FOGATA_TEST_UNMUTE_OFFS seconds in turn ("2 10 60"
+/// when left out), and on for FOGATA_TEST_UNMUTE_ON seconds (10) after each, once the
+/// processing had FOGATA_TEST_UNMUTE_SETTLE seconds (10) on the noise alone. It marks
+/// `mark-a-mute-<n>` and `mark-a-unmute-<n>` as it presses, from 1; mic.sh plays a few
+/// words into the microphone 0.5, 3.5 and 6.5 s after each unmute and records what copy
+/// b plays throughout, which unmute.py measures and unmute_check.py judges. Copy b
+/// listens, its microphone off, or (UNMUTE_FAR) on with mic.sh's tone or words in it.
+Future<void> _unmute(WidgetTester tester, AppState state) async {
+  if (_copies != 2) throw StateError('the unmute check takes two copies');
+  final offs = (_env['FOGATA_TEST_UNMUTE_OFFS'] ?? '2 10 60')
+      .split(' ')
+      .where((s) => s.isNotEmpty)
+      .map(int.parse)
+      .toList();
+  final on = int.tryParse(_env['FOGATA_TEST_UNMUTE_ON'] ?? '') ?? 10;
+  final settle = int.tryParse(_env['FOGATA_TEST_UNMUTE_SETTLE'] ?? '') ?? 10;
+  if (_role != 'a') {
+    final total =
+        settle + offs.fold<int>(0, (a, b) => a + b) + offs.length * on;
+    await _hear(tester, state, ['unmute done'], seconds: total + 300);
+    return;
+  }
+  final call = state.callState.call!;
+  if (!call.mic) throw StateError('the unmute check needs the microphone on');
+  await _until(
+    tester,
+    'connected',
+    () => call.peers.values.any((p) => p.connected),
+    seconds: 120,
+  );
+  await _wait(tester, Duration(seconds: settle));
+  _mark('settled');
+  for (var n = 1; n <= offs.length; n++) {
+    _mark('mute-$n');
+    await state.setMic(false);
+    if (call.mic) throw StateError('the microphone did not turn off');
+    await _wait(tester, Duration(seconds: offs[n - 1]));
+    _mark('unmute-$n');
+    await state.setMic(true);
+    if (!call.mic) throw StateError('the microphone did not turn on');
+    _mark('unmuted-$n');
+    await _wait(tester, Duration(seconds: on));
+  }
+  _mark('end');
+  await _say(state, 'unmute done');
 }
 
 /// mic_check.py judges them: neither copy may play its own pitch, and b must play a's

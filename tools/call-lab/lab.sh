@@ -88,7 +88,8 @@ lab_unplug() { # role
 # tone alone (tone.py turns), every player starting on the same 16 s of the clock; each
 # copy's slot and steady tone are written to $RUN/turns.txt for mic_check.py.
 # LAB_FAN=<role> (mic.sh noise): that copy's microphone has a fan's noise (tone.py fan), no
-# tone.
+# tone. LAB_NO_TONE="<role>..." (mic.sh unmute): those copies' microphones get nothing from
+# here; the check plays its own sound into them.
 LAB_TURN_STEADY=(1265 1650)
 
 lab_tones() { # copies
@@ -99,6 +100,7 @@ lab_tones() { # copies
   [ -n "$turns" ] && : > "$RUN/turns.txt"
   for i in $(seq 0 $(($1 - 1))); do
     r=${ROLES[$i]}
+    [[ " ${LAB_NO_TONE:-} " == *" $r "* ]] && continue
     if [ -n "$turns" ]; then
       python3 -I "$LAB_DIR/tone.py" "$RUN/tone-$r.wav" turns "$i" "${LAB_TURN_STEADY[$i]}"
       echo "$r slot=$i steady=${LAB_TURN_STEADY[$i]}" >> "$RUN/turns.txt"
@@ -537,6 +539,87 @@ lab_phase_recorder() { # marking role, "roles recorded"
     done
   ) &
   echo $! > "$RUN/phases.pid"
+}
+
+# mic.sh unmute: a room's noise into copy a's microphone without a break (ffmpeg in real
+# time, unmute-sound.sh, into pacat through a pipe), a few words 0.5, 3.5 and 6.5 s after
+# each `mark-a-unmute-<n>` (paplay; the moments each started go to words.log), and what b
+# plays and what a's microphone hears recorded throughout (48 kHz, mono, 16 bits:
+# played-b.raw, mic-a.raw, each with the moment it started in .start), for unmute.py.
+# UNMUTE_MIC_VOLUME sets a's virtual microphone's volume (a percentage); UNMUTE_WORDS_AT the
+# moments of the words after each unmute, in ms. UNMUTE_ECHO=1: b talks (the same words
+# every 3 s) and what a plays goes back into a's microphone 30 ms later, as from speakers.
+lab_unmute_sound() {
+  "$LAB_DIR/unmute-sound.sh" "$RUN/sound" >> "$RUN/lab.log" 2>&1 ||
+    { echo "unmute-sound.sh failed" >> "$RUN/lab.log"; return 1; }
+  [ -n "${UNMUTE_MIC_VOLUME:-}" ] && pactl set-source-volume laba_mic "${UNMUTE_MIC_VOLUME}%"
+  mkfifo "$RUN/room.fifo"
+  pacat --device=laba_test --raw --format=s16le --rate=48000 --channels=1 --latency-msec=40 \
+    < "$RUN/room.fifo" > /dev/null 2>&1 &
+  echo $! > "$RUN/room-pacat.pid"
+  "$RUN/sound/room.sh" > "$RUN/room.fifo" 2>> "$RUN/lab.log" &
+  echo $! > "$RUN/room-ffmpeg.pid"
+  local name device
+  for name in played-b mic-a; do
+    device=labb_quiet.monitor
+    [ "$name" = mic-a ] && device=laba_test.monitor
+    date +%s.%N > "$RUN/$name.start"
+    parec --device="$device" --format=s16le --rate=48000 --channels=1 --raw \
+      --latency-msec=20 > "$RUN/$name.raw" 2> /dev/null &
+    echo $! > "$RUN/rec-$name.pid"
+  done
+  (
+    n=1
+    while true; do
+      at=$(cat "$M/mark-a-unmute-$n" 2> /dev/null)
+      if [ -n "$at" ]; then
+        for after in ${UNMUTE_WORDS_AT:-500 3500 6500}; do
+          python3 -I -c "import time; time.sleep(max(0, ($at + $after) / 1000 - time.time()))"
+          paplay --device=laba_test "$RUN/sound/words.wav" 2> /dev/null &
+          echo "$n $after $(date +%s%3N)" >> "$RUN/words.log"
+        done
+        n=$((n + 1))
+      fi
+      sleep 0.05
+    done
+  ) &
+  echo $! > "$RUN/words.pid"
+  local far=${UNMUTE_FAR:-} room=${UNMUTE_ROOM:-}
+  [ "${UNMUTE_ECHO:-}" = 1 ] && { far=${far:-words}; room=1; }
+  if [ "$room" = 1 ]; then
+    pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
+      source_dont_move=true sink_dont_move=true > /dev/null
+  fi
+  if [ "$far" = tone ]; then
+    # A steady tone with harmonics (220 Hz, -26 dBFS RMS), as someone holding a note.
+    ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=220:duration=10" \
+      -f lavfi -i "sine=frequency=660:duration=10" -filter_complex \
+      "[0][1]amix=inputs=2,volume=-20dB" -ar 48000 -ac 1 -sample_fmt s16 "$RUN/sound/far.wav"
+  fi
+  if [ -n "$far" ]; then
+    (
+      while true; do
+        if [ "$far" = tone ]; then
+          paplay --device=labb_test "$RUN/sound/far.wav" 2> /dev/null
+        else
+          paplay --device=labb_test "$RUN/sound/words.wav" 2> /dev/null &
+          sleep 3
+        fi
+      done
+    ) &
+    echo $! > "$RUN/words-b.pid"
+  fi
+}
+
+lab_unmute_stop() {
+  local f
+  for f in words words-b; do
+    [ -e "$RUN/$f.pid" ] && lab_kill "$(cat "$RUN/$f.pid")" bash
+  done
+  for f in room-ffmpeg:ffmpeg room-pacat:pacat rec-played-b:parec rec-mic-a:parec; do
+    [ -e "$RUN/${f%%:*}.pid" ] && lab_kill "$(cat "$RUN/${f%%:*}.pid")" "${f#*:}"
+  done
+  rm -f "$RUN/room.fifo"
 }
 
 lab_stop() {
