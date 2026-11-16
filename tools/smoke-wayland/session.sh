@@ -2,8 +2,9 @@
 # Runs a command in a Wayland desktop of its own, built the way a KDE Plasma session is but
 # where nothing reaches the computer's own screen, sound, devices or desktop session. An
 # unprivileged user, mount and PID namespace (as tools/call-lab/session.sh):
-# - replaces /dev with a folder holding only null, zero, full, random, urandom and tty: no
-#   sound, video or GPU device at all (rendering is Mesa's, in software);
+# - replaces /dev with a folder holding only null, zero, full, random, urandom and tty (and
+#   fuse with SMOKE_FUSE=1): no sound, video or GPU device at all (rendering is Mesa's, in
+#   software);
 # - hides the user's runtime folder (their Wayland, PipeWire, PulseAudio and session bus
 #   sockets), the system bus, the system's PulseAudio folders and the X sockets' folder, and
 #   gives the session a home folder of its own (its KDE settings and portal permissions);
@@ -73,6 +74,11 @@ mount -t tmpfs -o mode=755 none /dev || fail "cannot replace /dev"
 for node in null zero full random urandom tty; do
   touch "/dev/$node" && mount --bind "$HOSTDEV/$node" "/dev/$node" || fail "cannot give /dev/$node"
 done
+# SMOKE_FUSE=1 gives /dev/fuse too, which the document portal mounts its folder with (the
+# FileTransfer portal hands dragged files to a Flatpak through it); it reaches no device.
+if [ "${SMOKE_FUSE:-0}" = 1 ]; then
+  touch /dev/fuse && mount --bind "$HOSTDEV/fuse" /dev/fuse || fail "cannot give /dev/fuse"
+fi
 mkdir -p /dev/shm /dev/pts
 mount -t tmpfs -o mode=1777 none /dev/shm || fail "cannot make /dev/shm"
 ln -s /proc/self/fd /dev/fd

@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+# Drags files onto Fogata running as a Flatpak, by a real drag on KDE Plasma Wayland, and
+# says what it took. In a session of session.sh (KWin on a virtual output, its own session
+# bus, the desktop and document portals, /dev/fuse for the latter), each copy given (a
+# Flatpak of `flutter build linux --debug -t integration_test/drop_portal_test.dart`, made
+# by tools/beta/flatpak.sh --unsigned --test-bundle, with the application's own permissions:
+# of the files, the downloads folder alone) runs in turn, and a GTK window outside the
+# sandbox (drag_source.c, which offers what a GTK file manager offers: the list of files
+# and the FileTransfer portal's targets, or with --uri-only the list alone) is dragged onto
+# it with KWin's fake input (fake_pointer.c), one drop after the other:
+#    1 ~/Downloads/report.pdf          (the folder the Flatpak sees)
+#    2 ~/Documents/plan.pdf            (one it does not)
+#    3 ~/.ssh/id_ed25519
+#    4 ~/Documents/.env                (a hidden name)
+#    5 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
+#    6 ~/Documents/plan.pdf            from a source that offers the list alone
+#    7 ~/Downloads/report.pdf          from a source that offers the list alone
+#    8 the document portal's path drop 3 brought, named by a source that offers the
+#      list alone, as a page could name a file the portal gave Fogata before (when
+#      drop 3 brought one)
+#    9 ~/Documents/plan.pdf and ~/.ssh/id_ed25519 together
+# The copy's drop zone writes, for each drop, the paths the drop plugin handed over, the
+# files it took (with the folder shown) and what it said (drop_portal_test.dart); the drag
+# source's log says which target the copy asked for. <out>/summary.txt has one line a drop.
+#
+# Usage: tools/smoke-wayland/drop.sh <out> <copy>...
+#   <copy>  <name>=<Fogata.flatpak>; a copy named "before" is judged against what the
+#           application did before it took the FileTransfer portal, any other against what it
+#           does now
+# Needs what session.sh needs, flatpak with the org.freedesktop.Platform 26.08 runtime, the
+# document portal (xdg-document-portal, 1.19 or later for GetHostPaths), /dev/fuse, a C
+# compiler, GTK 3's headers, wayland-scanner and plasma-wayland-protocols' fake-input.xml.
+# Exits 0 when every drop did what it should, 1 when one did not, 3 when it cannot run here.
+set -uo pipefail
+APP_ID=dev.holypanda.fogata
+here=$(cd "$(dirname "$0")" && pwd)
+
+# A KWin script, run once in the session's KWin (as still.sh's).
+kwin() {
+  python3 -I -c '
+import os, sys, time, dbus
+path = os.path.join(sys.argv[1], "kwin.js")
+with open(path, "w") as f:
+    f.write(sys.argv[2])
+bus = dbus.SessionBus()
+n = bus.get_object("org.kde.KWin", "/Scripting").loadScript(
+    path, dbus_interface="org.kde.kwin.Scripting")
+script = bus.get_object("org.kde.KWin", "/Scripting/Script%d" % n)
+script.run(dbus_interface="org.kde.kwin.Script")
+time.sleep(0.2)
+script.stop(dbus_interface="org.kde.kwin.Script")' "$DROP_OUT" "$1"
+}
+
+# The drag source on the left, the copy on the right, apart.
+place() {
+  kwin 'for (const w of workspace.windowList()) {
+  if (!w.normalWindow) continue;
+  if (w.caption.indexOf("drag source") >= 0) {
+    w.frameGeometry = {x: 20, y: 20, width: 400, height: 300};
+  } else {
+    w.frameGeometry = {x: 520, y: 20, width: 1000, height: 760};
+  }
+}'
+}
+
+if [[ ${DROP_INSIDE:-} == 1 ]]; then
+  out=$DROP_OUT
+  tools=$out/tools
+  failed=0
+  : > "$out/summary.txt"
+  say() { echo "$*" | tee -a "$out/summary.txt"; }
+
+  # The document portal, started as a Flatpak starts it, and what it offers.
+  gdbus call --session --dest org.freedesktop.portal.Documents \
+    --object-path /org/freedesktop/portal/documents \
+    --method org.freedesktop.portal.Documents.GetMountPoint > "$out/portal.txt" 2>&1
+  gdbus call --session --dest org.freedesktop.portal.Documents \
+    --object-path /org/freedesktop/portal/documents \
+    --method org.freedesktop.DBus.Properties.Get org.freedesktop.portal.Documents version \
+    >> "$out/portal.txt" 2>&1
+  grep -q "doc" "$out/portal.txt" || { cat "$out/portal.txt" >&2; echo "no document portal" >&2; exit 3; }
+  say "document portal: $(tr '\n' ' ' < "$out/portal.txt")"
+
+  # drag <copy folder> <n> [--uri-only] <file>...: one drop, until the copy wrote it down.
+  drag() {
+    local res=$1 n=$2
+    shift 2
+    "$tools/drag_source" "$@" > "$res/source-$n.log" 2>&1 &
+    local source=$!
+    for _ in $(seq 100); do
+      grep -q shown "$res/source-$n.log" 2> /dev/null && break
+      sleep 0.1
+    done
+    sleep 1
+    place
+    sleep 1
+    : > "$res/drop-$n-go"
+    "$tools/fake_pointer" to 220 170 wait 400 press wait 300 \
+      glide 220 170 1000 400 40 25 wait 600 glide 1000 400 1010 410 5 60 wait 500 \
+      release wait 500 >> "$res/pointer.log" 2>&1 || echo "drop $n: the pointer failed" >> "$res/pointer.log"
+    for _ in $(seq 400); do
+      [[ -s $res/drop-$n.txt ]] && grep -q '^end' "$res/drop-$n.txt" && break
+      sleep 0.1
+    done
+    kill "$source" 2> /dev/null
+    wait "$source" 2> /dev/null
+  }
+
+  # judge <copy folder> <n> <what> <taken> <folder> <told>: what drop n should have done:
+  # how many files the room took, the folder the first is shown in ("-": none), and how
+  # many notices it gave.
+  judge() {
+    local res=$1 n=$2 what=$3 taken=$4 folder=$5 told=$6
+    local file=$res/drop-$n.txt
+    local got_taken got_told got_folder raw asked
+    got_taken=$(grep -c '^waiting ' "$file" 2> /dev/null)
+    got_told=$(grep -c '^toast ' "$file" 2> /dev/null)
+    got_folder=$(grep -m1 '^waiting ' "$file" 2> /dev/null | cut -f2)
+    raw=$(grep '^raw ' "$file" 2> /dev/null | cut -c5- | tr '\n' ' ')
+    asked=$(grep -o 'asked for [^:]*' "$res/source-$n.log" 2> /dev/null | cut -c11- | tr '\n' ' ')
+    local verdict=ok
+    if [[ ${got_taken:-0} != "$taken" || ${got_told:-0} != "$told" ||
+      ($folder != - && $got_folder != "$folder") ]]; then
+      verdict=WRONG
+      failed=1
+    fi
+    say "$(basename "$res") $n $what: $verdict: took ${got_taken:-0} (folder ${got_folder:--}), told ${got_told:-0}; asked for: ${asked:-nothing}; handed over: ${raw:-nothing}"
+  }
+
+  for copy in $DROP_COPIES; do
+    name=${copy%%=*}
+    bundle=${copy#*=}
+    res=$out/$name
+    rm -rf "$res"
+    mkdir -p "$res"
+    flatpak install --user --noninteractive -y --reinstall --bundle "$bundle" > "$res/install.log" 2>&1 ||
+      { cat "$res/install.log" >&2; exit 1; }
+    flatpak run --user --filesystem="$res" --env=FOGATA_TEST_OUT="$res" \
+      --env=LP_NUM_THREADS=2 "$APP_ID" > "$res/app.log" 2>&1 &
+    app=$!
+    for _ in $(seq 900); do
+      [[ -e $res/drop-ready ]] && break
+      kill -0 "$app" 2> /dev/null || break
+      sleep 0.2
+    done
+    if [[ ! -e $res/drop-ready ]]; then
+      say "$name: the copy never got ready (see $res/app.log)"
+      tail -n 40 "$res/app.log" >&2
+      failed=1
+      continue
+    fi
+    place
+    h=$HOME
+    drag "$res" 1 "$h/Downloads/report.pdf"
+    drag "$res" 2 "$h/Documents/plan.pdf"
+    drag "$res" 3 "$h/.ssh/id_ed25519"
+    drag "$res" 4 "$h/Documents/.env"
+    drag "$res" 5 "$h/Documents/innocent.jpg"
+    drag "$res" 6 --uri-only "$h/Documents/plan.pdf"
+    drag "$res" 7 --uri-only "$h/Downloads/report.pdf"
+    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-3.txt" 2> /dev/null | cut -c5-)
+    if [[ -n $earlier ]]; then
+      drag "$res" 8 --uri-only "$earlier"
+    else
+      # No drag: the copy writes down that nothing came.
+      : > "$res/drop-8-go"
+      for _ in $(seq 400); do
+        grep -qs '^end' "$res/drop-8.txt" && break
+        sleep 0.1
+      done
+    fi
+    drag "$res" 9 "$h/Documents/plan.pdf" "$h/.ssh/id_ed25519"
+    : > "$res/drop-end"
+    for _ in $(seq 100); do
+      kill -0 "$app" 2> /dev/null || break
+      sleep 0.2
+    done
+    kill "$app" 2> /dev/null
+    wait "$app" 2> /dev/null
+    flatpak kill "$APP_ID" 2> /dev/null
+
+    if [[ $name == before ]]; then
+      # Before the portal: the list of files always comes first, and the Flatpak opens
+      # only what is in the downloads folder.
+      judge "$res" 1 downloads 1 "$h/Downloads" 0
+      judge "$res" 2 documents 0 - 0
+      judge "$res" 3 ssh 0 - 1
+      judge "$res" 4 hidden 0 - 1
+      judge "$res" 5 link-to-ssh 0 - 0
+      judge "$res" 6 documents-list-only 0 - 0
+      judge "$res" 7 downloads-list-only 1 "$h/Downloads" 0
+      judge "$res" 9 documents-and-ssh 0 - 1
+    else
+      judge "$res" 1 downloads 1 "$h/Downloads" 0
+      judge "$res" 2 documents 1 "$h/Documents" 0
+      judge "$res" 3 ssh 0 - 1
+      judge "$res" 4 hidden 0 - 1
+      judge "$res" 5 link-to-ssh 0 - 1
+      judge "$res" 6 documents-list-only 0 - 0
+      judge "$res" 7 downloads-list-only 1 "$h/Downloads" 0
+      if [[ -n $earlier ]]; then
+        judge "$res" 8 earlier-document 0 - 1
+      else
+        say "$name 8 earlier-document: WRONG: drop 3 brought no document portal path"
+        failed=1
+      fi
+      judge "$res" 9 documents-and-ssh 1 "$h/Documents" 1
+    fi
+  done
+  exit $failed
+fi
+
+# Outside: the helpers built, the person's files made, then the session.
+[[ $# -ge 2 ]] || { echo "usage: $0 <out> <name>=<Fogata.flatpak>..." >&2; exit 2; }
+out=$1
+shift
+mkdir -p "$out"
+out=$(cd "$out" && pwd)
+missing=()
+for tool in flatpak cc pkg-config wayland-scanner gdbus; do
+  command -v "$tool" > /dev/null || missing+=("$tool")
+done
+protocol=/usr/share/plasma-wayland-protocols/fake-input.xml
+[[ -e $protocol ]] || missing+=("$protocol")
+[[ -c /dev/fuse ]] || missing+=(/dev/fuse)
+pkg-config --exists gtk+-3.0 wayland-client || missing+=("GTK 3's or Wayland's headers")
+if [[ ${#missing[@]} -gt 0 ]]; then
+  echo "drop: missing ${missing[*]}" >&2
+  exit 3
+fi
+tools=$out/tools
+mkdir -p "$tools"
+# shellcheck disable=SC2046
+cc -O1 -Wall -o "$tools/drag_source" "$here/drag_source.c" $(pkg-config --cflags --libs gtk+-3.0) ||
+  exit 1
+wayland-scanner client-header "$protocol" "$tools/fake-input-client-protocol.h" &&
+  wayland-scanner private-code "$protocol" "$tools/fake-input-protocol.c" || exit 1
+# shellcheck disable=SC2046
+cc -O1 -Wall -I"$tools" -o "$tools/fake_pointer" "$here/fake_pointer.c" "$tools/fake-input-protocol.c" \
+  $(pkg-config --cflags --libs wayland-client) || exit 1
+
+# The person's files, in the session's home folder (session.sh's <folder>/home).
+home=$out/session/home
+mkdir -p "$home/Downloads" "$home/Documents" "$home/.ssh" "$home/.config"
+# shellcheck disable=SC2016 # the file says $HOME itself
+printf 'XDG_DOWNLOAD_DIR="$HOME/Downloads"\nXDG_DOCUMENTS_DIR="$HOME/Documents"\n' \
+  > "$home/.config/user-dirs.dirs"
+echo report > "$home/Downloads/report.pdf"
+echo plan > "$home/Documents/plan.pdf"
+echo key > "$home/.ssh/id_ed25519"
+echo SECRET=1 > "$home/Documents/.env"
+ln -sfn "$home/.ssh/id_ed25519" "$home/Documents/innocent.jpg"
+
+copies=()
+for copy in "$@"; do
+  [[ $copy == *=* && -f ${copy#*=} ]] || { echo "drop: no Flatpak in $copy" >&2; exit 2; }
+  copies+=("${copy%%=*}=$(cd "$(dirname "${copy#*=}")" && pwd)/$(basename "${copy#*=}")")
+done
+# Qt's KDE theme crashes KWin 6.6 at its start in a home folder with no Plasma settings
+# (Ubuntu 26.04, Qt's handleThemeChanged): the generic one draws nothing a drag needs.
+QT_QPA_PLATFORMTHEME=${QT_QPA_PLATFORMTHEME:-generic} \
+SMOKE_FUSE=1 SMOKE_SESSION_CHECK=0 SMOKE_NO_PERMISSION_CHECKS=1 "$here/session.sh" "$out/session" \
+  env DROP_INSIDE=1 DROP_OUT="$out" DROP_COPIES="${copies[*]}" "$here/drop.sh"
+status=$?
+case $status in
+  0) echo "drop: passed ($out/summary.txt)" ;;
+  3) echo "drop: SKIPPED: this computer cannot run it (see above)" ;;
+  *) echo "drop: FAILED ($out/summary.txt)" ;;
+esac
+exit $status
