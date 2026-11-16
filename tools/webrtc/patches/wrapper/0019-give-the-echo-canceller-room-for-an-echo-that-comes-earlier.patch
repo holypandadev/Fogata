@@ -1,0 +1,80 @@
+Give the echo canceller room for an echo that comes earlier
+
+When the sound server misses its deadlines (PipeWire on a busy computer) it can leave out
+some of what an application played or recorded around the missed cycles, and the echo then
+reaches the microphone earlier, in samples, than the echo canceller's alignment. AEC3
+places the echo 2 ms (delay_headroom_samples 32 at 16 kHz) after the start of its linear
+filter, so an echo even a few ms earlier was out of the filter's reach, and the other
+person's voice went back to them for a whole turn until the delay estimator found the echo
+again, a second or more later, 2 to 8 blocks shorter. An echo that comes later (silence
+played on an underflow) stays inside the filter.
+
+The processing now asks AEC3 for 256 samples (4 blocks, 16 ms) of headroom and makes the
+refined and coarse filters 4 blocks longer (17 blocks), so that they reach as far after the
+echo as before; the same for the multichannel configuration.
+
+Measured in the call lab (tools/call-lab/mic.sh echo, ECHO_STALL stopping the session's
+PipeWire now and then, the echo's move timed in the samples each copy wrote and read):
+- moves of the echo up to 16 ms earlier were followed by a turn let through 30 times in
+  68 before, 2 in 66 after; larger moves 39 in 132 before, 24 in 131 after;
+- with PipeWire's quantum left free (256 samples there, as on a desktop) and stalls of
+  20 and 40 ms: 42 turns let through in 228 before, 15 in 231 after;
+- with the quantum fixed at 480 and stalls of 40 to 300 ms, where the moves are mostly
+  20 to 60 ms: 13 in 103 before, 16 in 102 after (no change);
+- without stalls: none in 94, the echo check's figures as before (the other's voice sent
+  on 74 dB under one's own at the median, 76 dB in a call's first turn), and every other
+  microphone check of the lab passes.
+
+diff --git a/src/rtc_audio_processing_impl.cc b/src/rtc_audio_processing_impl.cc
+index 39cf151..969e606 100644
+--- a/src/rtc_audio_processing_impl.cc
++++ b/src/rtc_audio_processing_impl.cc
+@@ -1,6 +1,7 @@
+ #include "rtc_audio_processing_impl.h"
+ 
+ #include "api/audio/builtin_audio_processing_builder.h"
++#include "api/audio/echo_canceller3_config.h"
+ #include "api/environment/environment_factory.h"
+ #include "modules/audio_processing/audio_buffer.h"
+ #include "modules/audio_processing/ns/ns_common.h"
+@@ -9,6 +10,29 @@
+ 
+ namespace libwebrtc {
+ 
++namespace {
++
++// Fogata: room for an echo that comes earlier than the one the echo canceller has
++// found. When the sound server misses its deadlines (PipeWire, a busy computer) it can
++// leave out some of what was played or recorded, and the echo then reaches the
++// microphone up to tens of milliseconds earlier than before. With WebRTC's default
++// headroom (32 samples at 16 kHz: 2 ms) the linear filter cannot reach such an echo, and
++// a whole turn of the other's voice went back to them until the delay estimator found the
++// echo again, a second or more later. 256 samples (4 blocks, 16 ms) cover the moves
++// measured on an idle computer (5 to 11 ms); the filters are 4 blocks longer so that they
++// still reach as far after the echo as before.
++constexpr size_t kDelayHeadroomSamples = 256;
++constexpr size_t kExtraFilterBlocks = 4;
++
++webrtc::EchoCanceller3Config WithEarlierEchoRoom(webrtc::EchoCanceller3Config config) {
++  config.delay.delay_headroom_samples = kDelayHeadroomSamples;
++  config.filter.refined.length_blocks += kExtraFilterBlocks;
++  config.filter.coarse.length_blocks += kExtraFilterBlocks;
++  return config;
++}
++
++}  // namespace
++
+ class CustomProcessingAdapter : public webrtc::CustomProcessing {
+  public:
+   CustomProcessingAdapter() = default;
+@@ -84,6 +108,10 @@ RTCAudioProcessingImpl::RTCAudioProcessingImpl(const webrtc::Environment& env) {
+       render_pre_processor_);
+ 
+   apm_ = webrtc::BuiltinAudioProcessingBuilder()
++             .SetEchoCancellerConfig(
++                 WithEarlierEchoRoom(webrtc::EchoCanceller3Config()),
++                 WithEarlierEchoRoom(
++                     webrtc::EchoCanceller3Config::CreateDefaultMultichannelConfig()))
+              .SetCapturePostProcessing(std::move(capture_post_processor))
+              .SetRenderPreProcessing(std::move(render_pre_processor))
+              .Build(env);

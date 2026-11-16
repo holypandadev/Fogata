@@ -466,6 +466,23 @@ fixed in Fogata's libwebrtc:
   options, never what the processing did); with 0013 a custom source's options no longer
   touch the processing at all.
 
+## An echo that comes earlier (Linux, Windows)
+
+Now and then a whole turn of the other person's voice (about a second) went back to them
+in the middle of a call. Measured in the call lab (`tools/call-lab/mic.sh echo` with
+`ECHO_STALL`, which stops the lab's PipeWire now and then, and the echo timed in the
+samples each copy wrote for playout and read from its microphone): when the sound server
+misses its deadlines it leaves out some of what was played or recorded, and the echo
+reaches the microphone earlier than the echo canceller has it. AEC3 keeps 2 ms of room for
+that (`delay_headroom_samples`, 32 at 16 kHz): an echo even a few ms earlier was out of
+its linear filter's reach until its delay estimator found it again, a second or more
+later. `tools/webrtc/patches/wrapper/0019` gives it 256 samples (16 ms) and filters 4
+blocks longer. Moves of up to 16 ms were then followed by a turn let through 2 times in
+66 (30 in 68 before); with PipeWire's quantum free, as on a desktop, and stalls of 20 and
+40 ms, 15 turns in 231 were let through (42 in 228 before). Larger moves (a stall of a
+tenth of a second or more) still can. macOS's echo cancelling is Apple's voice processing
+and its WebRTC does not take the wrapper's patches.
+
 ## Sound of a shared screen (macOS)
 
 macOS's WebRTC hands what its audio module records to every channel of sound that sends,

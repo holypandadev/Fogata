@@ -85,7 +85,7 @@ wrapper's tests of the size check, of the microphone's channels, of the voice en
 muted state, of the echo controller made anew, of the arrays it hands across and of the
 shared screen encoder, and writes into `<work>/dist`:
 
-    fogata-libwebrtc.m156.8078.6/libwebrtc-linux-x64-release.zip   (+ .sha256)
+    fogata-libwebrtc.m156.8078.7/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
 laid out like webrtc-sdk's archives (`linux-x64-release/{lib,include,LICENSE,NOTICE.md}`).
 `NOTICE.md` holds the licence of WebRTC and of every library built into it, as WebRTC's
@@ -264,7 +264,17 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     the last frame again; one failed encode is a dropped frame, three in a row give every
     connection an encoder of its own;
 18. the test of WebRTC's patch 0009 (`test/echo_restart.test.cc`), with the audio state,
-    a mock audio device and a mock audio processing built in.
+    a mock audio device and a mock audio processing built in;
+19. the echo canceller (AEC3) has room for an echo that comes earlier than the one it
+    found: 256 samples of delay headroom (4 blocks, 16 ms; WebRTC's default is 32, 2 ms)
+    and linear filters 4 blocks longer (17), so that they reach as far after the echo as
+    before, in its mono and multichannel configurations. A sound server that misses its
+    deadlines (PipeWire on a busy computer) leaves out some of what was played or
+    recorded, and the echo then comes earlier; one only a few milliseconds earlier was
+    out of the filter's reach until the delay estimator found it again, a second or more
+    later, and a turn of the other person's voice went back to them. Measured in the
+    call lab (`mic.sh echo` with `ECHO_STALL`, PipeWire's quantum left free): see
+    `app/third_party/flutter_webrtc/FOGATA.md`.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of
