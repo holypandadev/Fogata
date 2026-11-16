@@ -19,13 +19,21 @@ index 2b2bfb3..285a4a1 100644
  
         # Built in again: the library shows only its own API.
         "src/internal/vp8_size_gate.cc",
-@@ -415,6 +416,9 @@ if (rtc_include_tests) {
+@@ -393,6 +394,8 @@ if (rtc_include_tests) {
+       suppressed_configs = [ "//build/config/clang:unsafe_buffers" ]
+       cflags = [ "-Wno-deprecated-declarations" ]
+     }
++    # AEC3's headers ask whether the audio processing dumps its data.
++    configs += [ "../modules/audio_processing:apm_debug_dump" ]
+ 
+      deps = [
+       ":libwebrtc",
+@@ -415,6 +418,8 @@ if (rtc_include_tests) {
        "../modules/audio_device:mock_audio_device",
        "../modules/audio_processing:mocks",
        "../call:mock_call_interfaces",
 +      "../modules/audio_processing/aec3",
 +      "../api/audio:builtin_audio_processing_builder",
-+      "../api/environment:environment_factory",
        "../test:run_loop",
        "../api:fec_controller_api",
        "../api:field_trials_view",
@@ -51,9 +59,9 @@ index 0000000..fbcfbaa
 +#include "api/audio/builtin_audio_processing_builder.h"
 +#include "api/audio/echo_canceller3_config.h"
 +#include "api/audio/echo_control.h"
-+#include "api/environment/environment_factory.h"
 +#include "modules/audio_processing/aec3/echo_canceller3.h"
 +#include "modules/audio_processing/audio_buffer.h"
++#include "test/create_test_environment.h"
 +#include "test/gtest.h"
 +
 +namespace {
@@ -103,7 +111,7 @@ index 0000000..fbcfbaa
 +  auto apm = webrtc::BuiltinAudioProcessingBuilder()
 +                 .SetEchoControlFactory(std::make_unique<CountingFactory>(
 +                     restarts, &made, restarted))
-+                 .Build(webrtc::CreateEnvironment());
++                 .Build(webrtc::CreateTestEnvironment());
 +  webrtc::AudioProcessing::Config config;
 +  config.echo_canceller.enabled = true;
 +  apm->ApplyConfig(config);
@@ -143,7 +151,7 @@ index 0000000..fbcfbaa
 +  config.delay.delay_headroom_samples = 512;
 +  config.filter.refined.length_blocks += 8;
 +  config.filter.coarse.length_blocks += 8;
-+  auto env = webrtc::CreateEnvironment();
++  auto env = webrtc::CreateTestEnvironment();
 +  auto aec = std::make_unique<webrtc::EchoCanceller3>(env, config, std::nullopt,
 +                                                      nullptr, kRate, 1, 1);
 +  webrtc::AudioBuffer render(kRate, 1, kRate, 1, kRate, 1);
