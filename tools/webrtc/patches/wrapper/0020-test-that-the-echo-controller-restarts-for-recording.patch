@@ -1,6 +1,6 @@
 Test that the echo controller restarts for recording and keeps what it knows of the room
 
-WebRTC's audio processing and AEC3 with its patches 0010 and 0011: an echo controller that
+WebRTC's audio processing and AEC3 with its patch 0010: an echo controller that
 can restart for recording is kept (RestartEchoController creates none) and one that cannot
 is made anew; AEC3 with a headset (7 s of the other side's sound, only the room's noise at
 the microphone) lets the first 0.5 s after RestartForRecording through within 3 dB, and a
@@ -43,7 +43,7 @@ index 0000000..fbcfbaa
 --- /dev/null
 +++ b/test/echo_room.test.cc
 @@ -0,0 +1,158 @@
-+// WebRTC's audio processing and AEC3 with Fogata's patches 0010 and 0011
++// WebRTC's audio processing and AEC3 with Fogata's patch 0010
 +// (tools/webrtc/patches/webrtc): recording starting again realigns the echo
 +// controller instead of making it anew, and AEC3 keeps what it knows of the
 +// room. Built in again: the library shows only its own API.

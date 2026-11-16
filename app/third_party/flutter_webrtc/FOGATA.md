@@ -481,11 +481,11 @@ later. A lost cycle is about 10 ms at a quantum of 480 or 512 and 21 ms at 1024.
 longer, so that they reach as far after the echo as before; the initial-state filters,
 used for the first 2.5 s of the other side's sound after every reset (a call's start, a
 microphone on again, a delay found again, a stall), keep WebRTC's 12 blocks, which with
-the echo 8 blocks in reach 4 blocks past it (about 11.5 in stock AEC3).
-`patches/webrtc/0011` keeps that headroom after a reset too (AEC3 aligned from the
-device's delay with 2 blocks whatever its configuration) and has legacy transparent mode
-judge a filter sane from where the headroom puts the echo. The figures below were measured
-before 0011. Measured with no patch, 16, 32 and 48 ms of room (turns let through):
+the echo 8 blocks in reach 4 blocks past it (about 11.5 in stock AEC3). After a reset
+AEC3 still aligns from the device's delay with 2 blocks of room until it finds the delay;
+keeping the 8 there too, and having legacy transparent mode judge a filter sane from where
+the room puts the echo, were tried and made a call's start worse (the next section).
+Measured with no patch, 16, 32 and 48 ms of room (turns let through):
 
 | | none | 16 ms | 32 ms | 48 ms |
 |---|---|---|---|---|
@@ -507,8 +507,7 @@ the echo is cancelled by WebRTC's own AEC3 too, not by Apple's voice processing:
 application bypasses it (`bypassVoiceProcessing`, `lib/main.dart`), and with WebRTC's
 noise suppression asked off its options rule the platform path out. That AEC3 is made by
 WebRTC-SDK's `RTCDefaultAudioProcessingModule` (`AudioManager.m`) with stock settings: the
-wrapper's patch 0019 does not reach it, so its headroom stays at 2 ms; patch 0011 leaves
-stock settings as they were. Whether a Mac's audio engine moves the echo as PipeWire does
+wrapper's patch 0019 does not reach it, so its headroom stays at 2 ms. Whether a Mac's audio engine moves the echo as PipeWire does
 has not been measured.
 
 ## A microphone turned on again while the other side talks (Linux, Windows, macOS)
@@ -536,17 +535,30 @@ Linux only).
 | speakers: noise in the first 0.5 s, against later | -8 dB | -2 dB |
 | speakers: the other's tone sent back between the first words (median) | -59 dBFS | -61 dBFS |
 
-With the other side talking in words, now and then, the unmute changed little before and
-after. The first call in a process is unchanged: its AEC3 knows nothing of the room, and
-with a headset its first seconds hold the noise down by about 10 dB as before. Every later
-call keeps the AEC3 of the one before (one audio processing for the process), realigned:
-on a headset again it starts untouched; on speakers after a call on a headset its
-transparent mode is kept until the first delay found after the restart, which resets it
-(an echo path found), so the other side's first words may come back for as long as that
-takes (not measured). The echo
-check with both patches let 0 of 98 turns through without stalls, 2 of 131 with the
-quantum free and stalls of 20 and 40 ms, and 2 of 97 at 480 with stalls of 40 and 80 ms;
-every call's first turn stayed cancelled.
+As a new AEC3, the restarted one processes nothing before fresh played sound arrives;
+without that, a call's start with speakers sent the other side's voice back for seconds.
+With speakers and the other side talking (10 runs each, medians with the range; "heard":
+how long their voice came back to them above -50 dBFS):
+
+| speakers, the other side talking | 0009 (anew) | 0010 |
+|---|---|---|
+| a call's start: loudest sent back | -56 dBFS (-81 to -46) | -49 dBFS (-74 to -29) |
+| a call's start: heard | 0 s (0 to 2.5) | 0.9 s (0 to 6) |
+| an unmute (20): heard | 0.5 s (0.3 to 3.2) | 0.4 s (0 to 2.7) |
+| a headset taken off while muted: loudest | -31 dBFS (-50 to -19) | -14 dBFS (-20 to -12) |
+| a headset taken off while muted: heard | 0.3 s (0 to 2.6) | 6.4 s (2.3 to 14.5) |
+
+The last two rows are the cost: the transparent mode kept says the room has no echo, and
+after a headset is taken off for speakers while the microphone is off the other side hears
+themselves for some seconds after the unmute, until AEC3 finds the echo. A new AEC3 let
+less through for a shorter time, but held the words down after every unmute on a headset.
+Forcing an echo path change at the first delay found after the restart, keeping wrapper
+patch 0019's headroom after a reset, and judging the transparent mode's sane filter from
+that headroom were each tried: none made that case shorter beyond the runs' scatter, and
+each made a call's start worse (patch 0010's header). The first call in a process is
+unchanged: its AEC3 knows nothing of the room, and with a headset its first seconds hold
+the noise down by about 10 dB as before. Every later call keeps the AEC3 of the one before
+(one audio processing for the process), realigned.
 
 ## Sound of a shared screen (macOS)
 

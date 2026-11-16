@@ -218,16 +218,13 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    the microphone down while the other side talked, until its transparent mode had seen
    6 s of their sound without echo: after every unmute the first words went out weaker
    and the room's noise came back as a step. Another echo controller is still made anew.
-   Restarted, AEC3 processes nothing before fresh played sound arrives (as a new one),
-   and the first delay it finds after the restart resets its echo remover with its
-   transparent mode (an echo path found: a headset changed for speakers meanwhile).
-11. `0011-keep-the-echo-canceller-headroom-after-resets`: AEC3's alignment from the audio
-   device's delay after a reset leaves the configured delay headroom (it had 2 blocks
-   whatever the configuration), and its legacy transparent mode's test of a sane filter
-   counts from the headroom (a filter whose direct path lies within 5 blocks past it):
-   with wrapper patch 0019's 8 blocks of headroom, the echo after every reset sat 2 blocks
-   in while the echo canceller assumed 8, and a filter never looked sane. Stock AEC3's
-   headroom (under one block) behaves as before.
+   Restarted, AEC3 processes nothing before fresh played sound arrives (as a new one;
+   without it a call's start sent the other side's voice back for seconds). The cost: a
+   headset taken off for speakers while the microphone was off keeps the transparent mode,
+   and the other side hears themselves for about 6 s after the unmute (0.3 s with 0009).
+   The patch's header gives the figures, and what was tried and left out: forcing an echo
+   path change at the first delay found, the configured headroom after a reset, and a
+   transparent mode's sane filter counted from that headroom, each worse at a call's start.
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -295,8 +292,10 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     AEC3 uses for its first 2.5 s of the other side's sound after every reset (a call's
     start, a microphone on again, a delay found again, a stall), stay at WebRTC's 12
     blocks: lengthened too, they converged more slowly; with the echo 8 blocks in they
-    reach 4 blocks past it (about 11.5 in stock AEC3). WebRTC patch 0011 keeps the
-    headroom after a reset too.
+    reach 4 blocks past it (about 11.5 in stock AEC3). After a reset AEC3 still aligns
+    from the audio device's delay with 2 blocks of headroom until it finds the delay
+    (keeping the configured headroom there made a call's start worse: WebRTC patch 0010's
+    header);
     A sound server that misses its deadlines (PipeWire on a busy computer) leaves out a
     cycle or more (10 to 21 ms each) of what was played or recorded, and the echo then
     comes earlier; one only a few milliseconds earlier was out of the filter's reach until
@@ -304,7 +303,7 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     person's voice went back to them. 16, 32 and 48 ms were measured in the call lab
     (`mic.sh echo` with `ECHO_STALL`): the patch's header and
     `app/third_party/flutter_webrtc/FOGATA.md` give the figures;
-20. the tests of WebRTC's patches 0010 and 0011 (`test/echo_room.test.cc`): an echo
+20. the tests of WebRTC's patch 0010 (`test/echo_room.test.cc`): an echo
     controller that can restart for recording is kept and one that cannot is made anew,
     and AEC3 with a headset (7 s of the other side's sound, no echo) lets the first 0.5 s
     after a restart through untouched, where a new AEC3 holds them down.

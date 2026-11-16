@@ -20,30 +20,43 @@ all the alignment the stale state of 0009 was about; but whether there is an ech
 all (transparent mode) is the room's, not the alignment's, and is kept
 (EchoPathVariability::recording_restarted, AecState::HandleEchoPathChange). As a new
 AEC3, the restarted one processes nothing before fresh played sound arrives
-(render_properly_started_). The first delay it finds after the restart means an echo path,
-whether or not it moves the alignment: its echo remover is then reset as at a new delay,
-transparent mode included, so that a headset changed for speakers while the microphone was
-off leaves transparent mode as soon as the echo is found (with a headset, no delay is
-found and it stays). Another echo controller still is made anew.
+(render_properly_started_). Another echo controller still is made anew.
 
 AudioProcessingImpl calls it with both its locks held (EchoCanceller3 checks its race
 checkers). The request still comes after the audio device's StartRecording returns, so
 that a recording that fails to start never restarts it (wrapper patch 0018's test); the
 capture thread may process a frame or two before it, which the restart then realigns.
 
-Every call after the first in a process keeps the AEC3 of the one before, realigned: on a
-headset again it starts untouched; on speakers after a call on a headset it keeps the
-transparent mode until that first delay is found.
+Every call after the first in a process keeps the AEC3 of the one before, realigned.
 
-Measured in the call lab before those two last changes (mic.sh unmute, the other side
-holding a tone, three runs of three
-unmutes each; with wrapper patch 0019): with a headset the first word after an unmute went
-out at 0 dB against the later ones (-8 dB on average before, -17 at worst) and the room's
-noise in the first 0.5 s at 0 dB (-12 before); with speakers the noise at -2 dB (-8 before)
-and the other's tone sent back between the first words at -61 dBFS at the median (-59
-before). The echo check let 0 of 98 turns through without stalls, 2 of 131 with PipeWire's
-quantum free and stalls of 20 and 40 ms (5 of 132 before), 2 of 97 at 480 with stalls of
-40 and 80 ms (7 of 131 before); every call's first turn stayed cancelled.
+Measured in the call lab with wrapper patch 0019 (mic.sh unmute; 10 runs of each case
+unless said, as medians with the range; "heard" is how long the other side's voice came
+back to them above -50 dBFS):
+- with a headset and the other side holding a tone (unmute:headset, 3 runs of three
+  unmutes): the first word after an unmute went out at 0 dB against the later ones (-8 dB
+  on average before, -17 at worst) and the room's noise in the first 0.5 s at 0 dB (-12
+  before);
+- a call's start with speakers, the other side talking: their voice came back at -49 dBFS
+  at its loudest (-74 to -29) and was heard 0.9 s (0 to 6); with 0009, -56 dBFS (-81 to
+  -46) and 0 s (0 to 2.5). Without render_properly_started_ the restarted AEC3 began from
+  stale played sound: -36 dBFS (-70 to -25), heard 5.5 s (0 to 8.8);
+- unmutes with speakers (20): heard 0.4 s (0 to 2.7), as with 0009 (0.5 s);
+- the cost: a headset taken off for speakers while the microphone was off. The transparent
+  mode kept says there is no echo, and the other side heard themselves after the unmute at
+  -14 dBFS at the loudest (-20 to -12) for 6.4 s (2.3 to 14.5), where a new AEC3 let
+  -31 dBFS (-50 to -19) through for 0.3 s (0 to 2.6). It happens only when the room
+  changes while the microphone is off.
+
+Tried and left out, each measured against the above in the same series:
+- forcing an echo path change at the first delay found after the restart (to leave the
+  transparent mode as soon as an echo is found): a call's start came back at -40 dBFS and
+  was heard 3.5 s (6 runs), and the headset taken off was no shorter (5.3 s);
+- the delay headroom of wrapper patch 0019 after a reset (AEC3 aligns from the audio
+  device's delay with 2 blocks whatever its configuration): a call's start at -36 dBFS,
+  heard 5.2 s (6 runs);
+- legacy transparent mode taking a filter as sane within 5 blocks past that headroom rather
+  than within 5 blocks: a call's start heard 2.2 s (0 to 6.2), and the headset taken off
+  no shorter (5.5 s).
 
 diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
 index 9b28e82..cd90465 100644
@@ -64,22 +77,90 @@ index 9b28e82..cd90465 100644
    virtual ~EchoControl() {}
  };
  
-diff --git a/modules/audio_processing/aec3/echo_canceller3.h b/modules/audio_processing/aec3/echo_canceller3.h
-index e12ee0a..42465ad 100644
---- a/modules/audio_processing/aec3/echo_canceller3.h
-+++ b/modules/audio_processing/aec3/echo_canceller3.h
-@@ -133,6 +133,9 @@ class EchoCanceller3 : public EchoControl {
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+index 0ee49f0..cf50821 100644
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -148,7 +148,9 @@ void AecState::HandleEchoPathChange(
+     strong_not_saturated_render_blocks_ = 0;
+     blocks_with_active_render_ = 0;
+     initial_state_.Reset();
+-    if (transparent_state_) {
++    // Fogata: recording starting again keeps the transparent mode: whether there
++    // is an echo path is the room's, not the alignment's.
++    if (transparent_state_ && !echo_path_variability.recording_restarted) {
+       transparent_state_->Reset();
+     }
+     erle_estimator_.Reset(true);
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index c3eaa3c..db2982e 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -63,11 +63,14 @@ class BlockProcessorImpl final : public BlockProcessor {
+   void SetAudioBufferDelay(int delay_ms) override;
+   void SetCaptureOutputUsage(bool capture_output_used) override;
  
-   bool ActiveProcessing() const override;
- 
-+  // Fogata: see EchoControl::RestartForRecording.
-+  bool RestartForRecording() override;
++  void RestartForRecording() override;
 +
-   // Signals whether an external detector has detected echo leakage from the
-   // echo canceller.
-   // Note that in the case echo leakage has been flagged, it should be unflagged
+  private:
+   static std::atomic<int> instance_count_;
+   std::unique_ptr<ApmDataDumper> data_dumper_;
+   const EchoCanceller3Config config_;
+   bool capture_properly_started_ = false;
++  bool recording_restarted_ = false;
+   bool render_properly_started_ = false;
+   const size_t sample_rate_hz_;
+   std::unique_ptr<RenderDelayBuffer> render_buffer_;
+@@ -144,6 +147,18 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+   }
+   render_event_ = RenderDelayBuffer::BufferingEvent::kNone;
+ 
++  // Fogata: the first recorded block after recording started again resets the
++  // echo remover as a delay change does, keeping its transparent mode.
++  if (recording_restarted_) {
++    recording_restarted_ = false;
++    echo_path_variability.delay_change =
++        EchoPathVariability::DelayAdjustment::kBufferFlush;
++    echo_path_variability.recording_restarted = true;
++    RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
++                     << capture_call_counter_
++                     << ", render buffer aligned anew";
++  }
++
+   // Update the render buffers with any newly arrived render blocks and prepare
+   // the render buffers for reading the render data corresponding to the current
+   // capture block.
+@@ -230,6 +245,14 @@ void BlockProcessorImpl::SetAudioBufferDelay(int delay_ms) {
+   render_buffer_->SetAudioBufferDelay(delay_ms);
+ }
+ 
++void BlockProcessorImpl::RestartForRecording() {
++  // As a new block processor: nothing processed before fresh played sound arrives,
++  // then aligned again from the first recorded block.
++  render_properly_started_ = false;
++  capture_properly_started_ = false;
++  recording_restarted_ = true;
++}
++
+ void BlockProcessorImpl::SetCaptureOutputUsage(bool capture_output_used) {
+   echo_remover_->SetCaptureOutputUsage(capture_output_used);
+ }
+diff --git a/modules/audio_processing/aec3/block_processor.h b/modules/audio_processing/aec3/block_processor.h
+index 52b8794..c364bca 100644
+--- a/modules/audio_processing/aec3/block_processor.h
++++ b/modules/audio_processing/aec3/block_processor.h
+@@ -80,6 +80,9 @@ class BlockProcessor {
+   // resulting output is anyway not used, for instance when the endpoint is
+   // muted.
+   virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
++
++  // Fogata: recording starts again; see EchoCanceller3::RestartForRecording.
++  virtual void RestartForRecording() {}
+ };
+ 
+ }  // namespace webrtc
 diff --git a/modules/audio_processing/aec3/echo_canceller3.cc b/modules/audio_processing/aec3/echo_canceller3.cc
-index 76a556f..ff090d2 100644
+index 76a556f..aa22e0e 100644
 --- a/modules/audio_processing/aec3/echo_canceller3.cc
 +++ b/modules/audio_processing/aec3/echo_canceller3.cc
 @@ -947,6 +947,26 @@ void EchoCanceller3::SetCaptureOutputUsage(bool capture_output_used) {
@@ -109,92 +190,20 @@ index 76a556f..ff090d2 100644
  bool EchoCanceller3::ActiveProcessing() const {
    return true;
  }
-diff --git a/modules/audio_processing/aec3/block_processor.h b/modules/audio_processing/aec3/block_processor.h
-index 52b8794..c364bca 100644
---- a/modules/audio_processing/aec3/block_processor.h
-+++ b/modules/audio_processing/aec3/block_processor.h
-@@ -80,6 +80,9 @@ class BlockProcessor {
-   // resulting output is anyway not used, for instance when the endpoint is
-   // muted.
-   virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
+diff --git a/modules/audio_processing/aec3/echo_canceller3.h b/modules/audio_processing/aec3/echo_canceller3.h
+index e12ee0a..42465ad 100644
+--- a/modules/audio_processing/aec3/echo_canceller3.h
++++ b/modules/audio_processing/aec3/echo_canceller3.h
+@@ -133,6 +133,9 @@ class EchoCanceller3 : public EchoControl {
+ 
+   bool ActiveProcessing() const override;
+ 
++  // Fogata: see EchoControl::RestartForRecording.
++  bool RestartForRecording() override;
 +
-+  // Fogata: recording starts again; see EchoCanceller3::RestartForRecording.
-+  virtual void RestartForRecording() {}
- };
- 
- }  // namespace webrtc
-diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
-index c3eaa3c..d2cc8a0 100644
---- a/modules/audio_processing/aec3/block_processor.cc
-+++ b/modules/audio_processing/aec3/block_processor.cc
-@@ -63,11 +63,15 @@ class BlockProcessorImpl final : public BlockProcessor {
-   void SetAudioBufferDelay(int delay_ms) override;
-   void SetCaptureOutputUsage(bool capture_output_used) override;
- 
-+  void RestartForRecording() override;
-+
-  private:
-   static std::atomic<int> instance_count_;
-   std::unique_ptr<ApmDataDumper> data_dumper_;
-   const EchoCanceller3Config config_;
-   bool capture_properly_started_ = false;
-+  bool recording_restarted_ = false;
-+  bool delay_since_restart_pending_ = false;
-   bool render_properly_started_ = false;
-   const size_t sample_rate_hz_;
-   std::unique_ptr<RenderDelayBuffer> render_buffer_;
-@@ -144,6 +148,18 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
-   }
-   render_event_ = RenderDelayBuffer::BufferingEvent::kNone;
- 
-+  // Fogata: the first recorded block after recording started again resets the
-+  // echo remover as a delay change does, keeping its transparent mode.
-+  if (recording_restarted_) {
-+    recording_restarted_ = false;
-+    echo_path_variability.delay_change =
-+        EchoPathVariability::DelayAdjustment::kBufferFlush;
-+    echo_path_variability.recording_restarted = true;
-+    RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
-+                     << capture_call_counter_
-+                     << ", render buffer aligned anew";
-+  }
-+
-   // Update the render buffers with any newly arrived render blocks and prepare
-   // the render buffers for reading the render data corresponding to the current
-   // capture block.
-@@ -179,6 +195,16 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
-         echo_path_variability.delay_change =
-             EchoPathVariability::DelayAdjustment::kNewDetectedDelay;
-       }
-+      // Fogata: the first delay found after recording started again means an echo
-+      // path, whether or not it moved the alignment: the echo remover resets as at
-+      // a delay change, transparent mode included (kept through the restart for a
-+      // room without echo, where no delay is found).
-+      if (delay_since_restart_pending_ &&
-+          !echo_path_variability.recording_restarted) {
-+        delay_since_restart_pending_ = false;
-+        echo_path_variability.delay_change =
-+            EchoPathVariability::DelayAdjustment::kNewDetectedDelay;
-+      }
-     }
- 
-     echo_path_variability.clock_drift = delay_controller_->HasClockdrift();
-@@ -230,6 +256,15 @@ void BlockProcessorImpl::SetAudioBufferDelay(int delay_ms) {
-   render_buffer_->SetAudioBufferDelay(delay_ms);
- }
- 
-+void BlockProcessorImpl::RestartForRecording() {
-+  // As a new block processor: nothing processed before fresh played sound arrives,
-+  // then aligned again from the first recorded block.
-+  render_properly_started_ = false;
-+  capture_properly_started_ = false;
-+  recording_restarted_ = true;
-+  delay_since_restart_pending_ = true;
-+}
-+
- void BlockProcessorImpl::SetCaptureOutputUsage(bool capture_output_used) {
-   echo_remover_->SetCaptureOutputUsage(capture_output_used);
- }
+   // Signals whether an external detector has detected echo leakage from the
+   // echo canceller.
+   // Note that in the case echo leakage has been flagged, it should be unflagged
 diff --git a/modules/audio_processing/aec3/echo_path_variability.h b/modules/audio_processing/aec3/echo_path_variability.h
 index 45b33c2..a9d46c6 100644
 --- a/modules/audio_processing/aec3/echo_path_variability.h
@@ -209,21 +218,6 @@ index 45b33c2..a9d46c6 100644
  };
  
  }  // namespace webrtc
-diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
-index 0ee49f0..cf50821 100644
---- a/modules/audio_processing/aec3/aec_state.cc
-+++ b/modules/audio_processing/aec3/aec_state.cc
-@@ -148,7 +148,9 @@ void AecState::HandleEchoPathChange(
-     strong_not_saturated_render_blocks_ = 0;
-     blocks_with_active_render_ = 0;
-     initial_state_.Reset();
--    if (transparent_state_) {
-+    // Fogata: recording starting again keeps the transparent mode: whether there
-+    // is an echo path is the room's, not the alignment's.
-+    if (transparent_state_ && !echo_path_variability.recording_restarted) {
-       transparent_state_->Reset();
-     }
-     erle_estimator_.Reset(true);
 diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
 index d2ea94c..038242c 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
