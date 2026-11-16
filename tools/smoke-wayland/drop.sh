@@ -15,13 +15,17 @@
 #    5 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
 #    6 ~/Documents/plan.pdf            from a source that offers the list alone
 #    7 ~/Downloads/report.pdf          from a source that offers the list alone
-#    8 the document portal's path drop 3 brought, named by a source that offers the
+#    8 the document portal's path drop 5 brought, named by a source that offers the
 #      list alone, as a page could name a file the portal gave Fogata before (when
-#      drop 3 brought one)
+#      drop 5 brought one)
 #    9 ~/Documents/plan.pdf and ~/.ssh/id_ed25519 together
+#   10 ~/Documents/nowhere.pdf, which is not there, from a source that offers the list
+#      alone: the copy must say what it says of drop 6
 # The copy's drop zone writes, for each drop, the paths the drop plugin handed over, the
 # files it took (with the folder shown) and what it said (drop_portal_test.dart); the drag
-# source's log says which target the copy asked for. <out>/summary.txt has one line a drop.
+# source's log says which targets the copy asked for, and `flatpak documents` which files
+# the portal has given the copy after each drop (a refused file the portal was asked for
+# stays given). <out>/summary.txt has one line a drop.
 #
 # Usage: tools/smoke-wayland/drop.sh <out> <copy>...
 #   <copy>  <name>=<Fogata.flatpak>; a copy named "before" is judged against what the
@@ -104,27 +108,45 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     done
     kill "$source" 2> /dev/null
     wait "$source" 2> /dev/null
+    # Where the files the portal holds for the copy now really are (each file a drop
+    # exported to it).
+    flatpak documents --columns=origin "$APP_ID" > "$res/documents-$n.txt" 2>&1
   }
 
-  # judge <copy folder> <n> <what> <taken> <folder> <told>: what drop n should have done:
-  # how many files the room took, the folder the first is shown in ("-": none), and how
-  # many notices it gave.
+  # exported <copy folder> <n> <what> <name> yes|no: whether a document of the file named
+  # (its real path's end) is given to the copy after drop n.
+  exported() {
+    local res=$1 n=$2 what=$3 name=$4 want=$5 got=no
+    grep -q -- "$name\$" "$res/documents-$n.txt" 2> /dev/null && got=yes
+    local verdict=ok
+    if [[ $got != "$want" ]]; then
+      verdict=WRONG
+      failed=1
+    fi
+    say "$(basename "$res") $n $what: $verdict: a document of $name given to the copy: $got"
+  }
+
+  # judge <copy folder> <n> <what> <taken> <folder> <told> [<notice>]: what drop n should
+  # have done: how many files the room took, the folder the first is shown in ("-": none),
+  # how many notices it gave, and words the notice has (English's).
   judge() {
-    local res=$1 n=$2 what=$3 taken=$4 folder=$5 told=$6
+    local res=$1 n=$2 what=$3 taken=$4 folder=$5 told=$6 notice=${7:-}
     local file=$res/drop-$n.txt
-    local got_taken got_told got_folder raw asked
+    local got_taken got_told got_folder got_notice raw asked
     got_taken=$(grep -c '^waiting ' "$file" 2> /dev/null)
     got_told=$(grep -c '^toast ' "$file" 2> /dev/null)
     got_folder=$(grep -m1 '^waiting ' "$file" 2> /dev/null | cut -f2)
+    got_notice=$(grep '^toast ' "$file" 2> /dev/null | cut -c7- | tr '\n' ' ')
     raw=$(grep '^raw ' "$file" 2> /dev/null | cut -c5- | tr '\n' ' ')
     asked=$(grep -o 'asked for [^:]*' "$res/source-$n.log" 2> /dev/null | cut -c11- | tr '\n' ' ')
     local verdict=ok
     if [[ ${got_taken:-0} != "$taken" || ${got_told:-0} != "$told" ||
-      ($folder != - && $got_folder != "$folder") ]]; then
+      ($folder != - && $got_folder != "$folder") ||
+      (-n $notice && $got_notice != *"$notice"*) ]]; then
       verdict=WRONG
       failed=1
     fi
-    say "$(basename "$res") $n $what: $verdict: took ${got_taken:-0} (folder ${got_folder:--}), told ${got_told:-0}; asked for: ${asked:-nothing}; handed over: ${raw:-nothing}"
+    say "$(basename "$res") $n $what: $verdict: took ${got_taken:-0} (folder ${got_folder:--}), told ${got_told:-0}${got_notice:+ ($got_notice)}; asked for: ${asked:-nothing}; handed over: ${raw:-nothing}"
   }
 
   for copy in $DROP_COPIES; do
@@ -158,7 +180,7 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     drag "$res" 5 "$h/Documents/innocent.jpg"
     drag "$res" 6 --uri-only "$h/Documents/plan.pdf"
     drag "$res" 7 --uri-only "$h/Downloads/report.pdf"
-    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-3.txt" 2> /dev/null | cut -c5-)
+    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-5.txt" 2> /dev/null | cut -c5-)
     if [[ -n $earlier ]]; then
       drag "$res" 8 --uri-only "$earlier"
     else
@@ -170,6 +192,7 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       done
     fi
     drag "$res" 9 "$h/Documents/plan.pdf" "$h/.ssh/id_ed25519"
+    drag "$res" 10 --uri-only "$h/Documents/nowhere.pdf"
     : > "$res/drop-end"
     for _ in $(seq 100); do
       kill -0 "$app" 2> /dev/null || break
@@ -190,21 +213,36 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       judge "$res" 6 documents-list-only 0 - 0
       judge "$res" 7 downloads-list-only 1 "$h/Downloads" 0
       judge "$res" 9 documents-and-ssh 0 - 1
+      judge "$res" 10 nowhere-list-only 0 - 0
     else
+      private="hidden or private" unreached="could not be reached"
+      declined="Drag the others again"
       judge "$res" 1 downloads 1 "$h/Downloads" 0
       judge "$res" 2 documents 1 "$h/Documents" 0
-      judge "$res" 3 ssh 0 - 1
-      judge "$res" 4 hidden 0 - 1
-      judge "$res" 5 link-to-ssh 0 - 1
-      judge "$res" 6 documents-list-only 0 - 0
+      exported "$res" 2 documents plan.pdf yes
+      # The key named by the list beside the portal's target: the drop is declined before
+      # the portal is asked, so no document of it is given to the copy.
+      judge "$res" 3 ssh 0 - 1 "$declined"
+      exported "$res" 3 ssh .ssh/id_ed25519 no
+      judge "$res" 4 hidden 0 - 1 "$declined"
+      exported "$res" 4 hidden Documents/.env no
+      # A link in a plain folder is only found once the portal has given its file: the
+      # document stays given to the copy, which cannot give it back.
+      judge "$res" 5 link-to-ssh 0 - 1 "$private"
+      exported "$res" 5 link-to-ssh .ssh/id_ed25519 yes
+      judge "$res" 6 documents-list-only 0 - 1 "$unreached"
       judge "$res" 7 downloads-list-only 1 "$h/Downloads" 0
       if [[ -n $earlier ]]; then
-        judge "$res" 8 earlier-document 0 - 1
+        judge "$res" 8 earlier-document 0 - 1 "$private"
       else
-        say "$name 8 earlier-document: WRONG: drop 3 brought no document portal path"
+        say "$name 8 earlier-document: WRONG: drop 5 brought no document portal path"
         failed=1
       fi
-      judge "$res" 9 documents-and-ssh 1 "$h/Documents" 1
+      # One refused file declines the whole drop.
+      judge "$res" 9 documents-and-ssh 0 - 1 "$declined"
+      # The same notice for a file that is nowhere: the notice tells nothing of what the
+      # person has outside the sandbox.
+      judge "$res" 10 nowhere-list-only 0 - 1 "$unreached"
     fi
   done
   exit $failed

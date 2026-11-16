@@ -68,9 +68,20 @@ Future<void> _drops(WidgetTester tester, String out) async {
   final state = AppState('$out/data');
   state.roomState.roomGroup = 'group';
   final handed = <List<String>>[];
+  final refusals = <String>[];
   DesktopDrop.instance.addRawDropEventListener((event) {
     if (event is DropDoneEvent) {
       handed.add([for (final f in event.files) f.path]);
+      // Why the plugin took nothing from the portal, where it says so (a copy whose plugin
+      // never does has no such field).
+      try {
+        final refusal = (event as dynamic).portalRefusal;
+        if (refusal != null) {
+          refusals.add('refused $refusal ${(event as dynamic).portalCount}');
+        }
+      } on NoSuchMethodError {
+        // The plugin before the portal.
+      }
     }
   });
   await tester.pumpWidget(
@@ -97,6 +108,7 @@ Future<void> _drops(WidgetTester tester, String out) async {
     }
     state.roomState.outgoing.clear();
     state.toasts.list.clear();
+    refusals.clear();
     final handedBefore = handed.length;
     final until = DateTime.now().add(const Duration(seconds: 20));
     while (handed.length == handedBefore && DateTime.now().isBefore(until)) {
@@ -108,6 +120,7 @@ Future<void> _drops(WidgetTester tester, String out) async {
       if (handed.length == handedBefore) 'raw none',
       for (final drop in handed.skip(handedBefore))
         if (drop.isEmpty) 'raw (no file)' else for (final p in drop) 'raw $p',
+      ...refusals,
       for (final f in state.roomState.outgoingHere)
         'waiting ${f.path}\t${f.folder}',
       for (final t in state.toasts.list) 'toast ${t.text}',
