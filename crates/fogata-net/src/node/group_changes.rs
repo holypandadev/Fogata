@@ -12,6 +12,7 @@ use libp2p::{
     swarm::dial_opts::{DialOpts, PeerCondition},
 };
 
+use super::judging::Job;
 use super::members::bytes;
 use super::{Node, ON_ITS_WAY_AT_MOST, Pending, RecordSent, SEARCH_HARD, now_ms};
 use crate::{NodeEvent, Path};
@@ -420,8 +421,11 @@ impl Node {
     }
 
     /// A removal of this device `peer` showed, judged: `log` is the group's log with it,
-    /// taken whole when nothing came meanwhile (the member that shows it does so once);
-    /// otherwise its `entries` are taken as any batch, and the rest come again later.
+    /// taken whole when nothing came meanwhile. Otherwise (this device wrote a new key, a
+    /// member synced) its `entries` are judged again on the log as it is now: the peer that
+    /// showed them was told they were taken and does not show them again, and the bounded
+    /// path would take only a few of them, leaving this device a member for good. Only when
+    /// too many jobs wait are they taken as any batch.
     pub(super) fn removal_judged(
         &mut self,
         peer: PeerId,
@@ -432,9 +436,16 @@ impl Node {
         let Some(slot) = self.groups.get_mut(&group) else {
             return;
         };
-        match slot.ctx.take_judged(log) {
-            Some(new) => self.after_group_change(group, new, Some(peer)),
-            None => self.take_pushed(peer, group, &entries),
+        if let Some(new) = slot.ctx.take_judged(log) {
+            self.after_group_change(group, new, Some(peer));
+            return;
+        }
+        // None once this device is no member any more, or holds the removal already.
+        let Some(trial) = slot.ctx.removal_trial(&entries) else {
+            return;
+        };
+        if !self.judging.add(peer, group, Job::Removal(trial)) {
+            self.take_pushed(peer, group, &entries);
         }
     }
 }

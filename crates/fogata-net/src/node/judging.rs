@@ -18,7 +18,10 @@
 //!   from a member ([`fogata_state::GroupLog::insert_some`]), so they merge with whatever
 //!   it took meanwhile. A removal or a joining device's log is taken whole, the judged copy
 //!   in place of the log, when nothing came meanwhile that the copy lacks
-//!   ([`crate::group::GroupContext::take_judged`]); otherwise through the bounded path.
+//!   ([`crate::group::GroupContext::take_judged`]). Otherwise a removal is judged again on
+//!   the log as it is then (it is shown once, and the bounded path would take only a few
+//!   of its entries); a joining device's log is asked for again while it still joins, and
+//!   taken through the bounded path once it is in.
 //! - [`MAX_JUDGING`] jobs run at once and [`MAX_WAITING`] wait, a few of each peer; a job
 //!   past them is refused, as an offer past the sender's budget is, and comes again later.
 //!   An offer or a removal again from the same peer for the same group replaces the one
@@ -412,6 +415,21 @@ mod tests {
     /// judged away from its loop, and taken once it is.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_removal_costly_to_judge_is_taken_while_the_node_goes_on_answering() {
+        removal_costly_to_judge(false).await;
+    }
+
+    /// The same, with an entry this device writes while the removal is judged (a heartbeat
+    /// that finds the key old, as one does on a busy computer, where judging takes longer):
+    /// the judged copy lacks it and cannot be taken in place of the log, and the peer that
+    /// showed the removal does not show it again, yet it is taken all the same.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_removal_costly_to_judge_is_taken_though_the_log_changed_meanwhile() {
+        removal_costly_to_judge(true).await;
+    }
+
+    /// See the two tests above: with `meanwhile`, the node writes an entry of its own right
+    /// after the removal is shown, before its verdict can come back.
+    async fn removal_costly_to_judge(meanwhile: bool) {
         const ANSWERS_WITHIN: Duration = Duration::from_millis(250);
         let ana = DeviceIdentity::generate().unwrap();
         let leo = Arc::new(DeviceIdentity::generate().unwrap());
@@ -477,11 +495,24 @@ mod tests {
             entries: shown.into_iter().map(Into::into).collect(),
         };
         let started = Instant::now();
-        let answer = inspect(&node, move |n| n.on_request(PeerId::random(), push)).await;
+        let (answer, written) = inspect(&node, move |n| {
+            let answer = n.on_request(PeerId::random(), push);
+            let before = n.groups[&group].ctx.log().len();
+            if meanwhile {
+                n.member_heartbeat();
+            }
+            (answer, n.groups[&group].ctx.log().len() - before)
+        })
+        .await;
         let mut slowest = started.elapsed();
         assert!(
             matches!(answer, fogata_proto::MemberResponse::Ack),
             "{answer:?}"
+        );
+        assert_eq!(
+            written > 0,
+            meanwhile,
+            "{written} entries written meanwhile"
         );
         let deadline = Instant::now() + Duration::from_secs(60) + 20 * judging;
         loop {
