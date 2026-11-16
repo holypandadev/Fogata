@@ -5116,8 +5116,17 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
     () => peer.speaking,
     seconds: 120,
   );
+  // FOGATA_TEST_RESTART_MUTED=1 (a): its microphone off as the server goes, and turned on
+  // while it is away; once it is back, a must record as asked.
+  final mutedAway = _role == 'a' && _env['FOGATA_TEST_RESTART_MUTED'] == '1';
+  if (mutedAway) await state.setMic(false);
   _mark('restart-ready');
   await _rig(tester, 'sound-stopped', seconds: 300);
+  if (mutedAway) {
+    await _wait(tester, const Duration(seconds: 3));
+    await state.setMic(true);
+    _log('restart: microphone turned on while the server is away');
+  }
   // What it said, as toasts go after a few seconds: looked at every time round.
   final said = <String>{};
   void look() => said.addAll(state.toasts.list.map((t) => t.text));

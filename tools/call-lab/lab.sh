@@ -551,10 +551,10 @@ lab_phase_recorder() { # marking role, "roles recorded"
 # (`mark-a-connected`). UNMUTE_ECHO=1: b talks (the same words every 3 s) and what a plays
 # goes back into a's microphone 30 ms later, as from speakers; UNMUTE_ROOM_AFTER=<n>: only
 # from a's n-th mute on (`mark-a-mute-<n>`), as a headset taken off while muted.
-# UNMUTE_ROOM_MOVE=<n>: the same with a device event the sound server tells of: another
-# output (made before the copies start) whose sound goes back into a's microphone, and
-# a's playback moved there at its n-th mute. When b talks, its microphone is recorded
-# too (mic-b.raw).
+# UNMUTE_UNPLUG=<n>: the same with a device event the sound server tells of, as a
+# headset unplugged: a's output goes away at its n-th mute, and what a plays falls to the
+# default output, whose sound goes back into a's microphone. When b talks, its microphone
+# is recorded too (mic-b.raw).
 lab_unmute_sound() {
   "$LAB_DIR/unmute-sound.sh" "$RUN/sound" >> "$RUN/lab.log" 2>&1 ||
     { echo "unmute-sound.sh failed" >> "$RUN/lab.log"; return 1; }
@@ -617,19 +617,15 @@ lab_unmute_sound() {
     pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
       source_dont_move=true sink_dont_move=true > /dev/null
   fi
-  if [ -n "${UNMUTE_ROOM_MOVE:-}" ]; then
-    # Not named as a's devices are (FOGATA_TEST_DEVICES), so the copy never picks it.
-    pactl load-module module-null-sink sink_name=laba_speakers \
-      sink_properties=device.description=LabSpeakersA > /dev/null
-    pactl load-module module-loopback source=laba_speakers.monitor sink=laba_test latency_msec=30 \
+  if [ -n "${UNMUTE_UNPLUG:-}" ]; then
+    # Moving a's playback by hand would not do: the application keeps its sounds on the
+    # output it chose (the plugin's OutputKeeper). Its output going away does.
+    pactl load-module module-loopback source=lab_default.monitor sink=laba_test latency_msec=30 \
       source_dont_move=true sink_dont_move=true > /dev/null
     (
-      until [ -e "$M/mark-a-mute-$UNMUTE_ROOM_MOVE" ]; do sleep 0.05; done
-      quiet=$(pactl list short sinks | awk '$2 == "laba_quiet" {print $1}')
-      for input in $(pactl list short sink-inputs | awk -v s="$quiet" '$2 == s {print $1}'); do
-        pactl move-sink-input "$input" laba_speakers
-      done
-      echo "a's playback moved to the speakers at $(date +%s%3N)" >> "$RUN/lab.log"
+      until [ -e "$M/mark-a-mute-$UNMUTE_UNPLUG" ]; do sleep 0.05; done
+      pactl unload-module "$(pactl list short modules | awk '/sink_name=laba_quiet( |$)/ {print $1}')"
+      echo "a's output taken away at $(date +%s%3N)" >> "$RUN/lab.log"
     ) &
     echo $! > "$RUN/room-move.pid"
   fi
