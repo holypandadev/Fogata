@@ -340,9 +340,24 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   watcher, so that someone turning their watching on and off again and again does not have
   every other connection told each time. The application cannot know a person's upload,
   and this does not guess it: a slower one is left to each connection's bandwidth estimate
-  and the screen's steps. In one lab trial, with the sharer's upload shaped to 12 Mbit/s on
-  the loopback and five watchers at the limits before this budget, the total fell to 1 to
-  2.5 Mbit/s and four of the five watchers stayed at 0 to 1 frame a second for 100 s.
+  and the screen's steps. Measured in the call lab with an upload limited as a home
+  connection's is (`LAB_UPLOAD` in `tools/call-lab/measure.sh`: only what the sharer sends
+  goes through the rate, behind a 100 ms queue), a moving 1080p screen degrades together for
+  everyone rather than freezing anyone: three watchers stay at 1080 lines and 25 to 30
+  frames a second at 12 Mbit/s and above (20 where the computer's processor held the encoder
+  back) and 15 to 20 at 8; five stay at 720 or 540 lines and 15 to 30 frames a second down
+  to 8 Mbit/s, the limit applied from the start or after a minute alike, and with 1 % loss
+  and 40 ms round trips at 8. At 4 Mbit/s, a third of what the streams ask for, a watcher
+  dips under 5 frames a second for a few seconds now and then as the size is tried again;
+  with five, in three runs of four no watcher stayed under 5 frames a second for more than
+  14 s at a time, and in one three of them spent 33 to 61 s of the first 80 under it (35 s
+  at once at most), as the connections' estimates of the one upload start uneven and the
+  smaller size's shared encoder follows its lowest. Each connection's voice and control take
+  about 170 kbit/s whatever the rate, and the QUIC and TURN framing an eighth to a quarter
+  on top of what WebRTC sends. An earlier trial that limited the whole loopback instead,
+  where every packet between two copies passes three times and every copy's voice and
+  feedback too, left two of five watchers at 2 frames a second for three minutes at "12
+  Mbit/s": that was the limit counting the traffic three times over, not the call.
   The processor lowers the screen for everyone, a level at a time: the rate halves first
   (60, 30, 15 frames a second, a level that sends the same as the one above being passed
   over), then 720 lines at 15, then 540 at 15, 10 and 5; it goes down when WebRTC says an

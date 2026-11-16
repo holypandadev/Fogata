@@ -371,6 +371,33 @@ lab_copy() {
   echo $! > "$RUN/$role.pid"
 }
 
+# The ports copy $1 listens on for other devices (QUIC and TCP, on every address; not mDNS's
+# 5353), comma separated, to $RUN/upload-ports once found, for measure.sh's LAB_UPLOAD: what
+# leaves from them is what the copy sends to the others. Its node listens on one port for
+# both (fogata-net's node.rs), and its TURN endpoint on 127.0.0.1 only. Waits up to 120 s.
+lab_upload_ports() { # role
+  local p udp tcp ports
+  p=$(cat "$RUN/$1.pid")
+  # The ports a socket of that process holds on every address ($1: ss's options).
+  wildcard() {
+    ss -H"$1"np 2> /dev/null | awk -v pid="pid=$p," '
+      index($0, pid) { n = split($4, a, ":"); port = a[n]
+        if ($4 ~ /^(0\.0\.0\.0|\*|\[::\]):/ && port != 5353) print port }' | sort -u
+  }
+  for _ in $(seq 240); do
+    udp=$(wildcard ul) tcp=$(wildcard tl)
+    ports=$(comm -12 <(echo "$udp") <(echo "$tcp") | grep . | paste -sd,)
+    if [ -n "$ports" ]; then
+      echo "$ports" > "$RUN/upload-ports"
+      echo "copy $1's ports: udp $(echo $udp) tcp $(echo $tcp); upload from $ports" >> "$RUN/lab.log"
+      return 0
+    fi
+    sleep 0.5
+  done
+  echo "copy $1 listens on no port of its own (LAB_UPLOAD)" | tee -a "$RUN/lab.log" >&2
+  return 1
+}
+
 # Waits until each of the roles wrote its result (or its process ended); at most $2 s. One
 # that failed ends the wait at once: the others would only wait for it to the end.
 lab_wait() { # "a b c" seconds

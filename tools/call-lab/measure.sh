@@ -26,6 +26,18 @@
 # MEASURE_ENV=FOGATA_TEST_SCREEN_QUALITY=720 (or 540, 1080, source, with @60 for 60 frames
 # a second) the quality copy a shares at.
 #
+# The copies share the computer's loopback and nothing limits them. LAB_UPLOAD=<Mbit/s>
+# gives copy a (the one sharing its screen) a home connection's upload instead: what it sends
+# the others from its own ports goes through that rate and a queue of LAB_UPLOAD_QUEUE ms
+# (default 100), and nothing else does (upload.sh says how and why). LAB_UPLOAD_AFTER=<s>
+# applies it only that long after copy a starts measuring (a connection that gets worse),
+# LAB_UPLOAD_LOSS=<percent> loses that share of what goes up, and LAB_UPLOAD_DELAY=<ms>
+# delays what comes back to copy a. It needs root (sudo without a password, as on GitHub's
+# computers) and leaves the loopback as it was at the end. Every 2 s upload.log has the
+# bytes that went up and were dropped there, and the loopback's own count; each copy's
+# measure lines then say what each watcher received and the sender's estimate of each
+# connection (watchers.py sums them up watcher by watcher).
+#
 # Usage: tools/call-lab/measure.sh <copies> <idle|voice|camera|screen> [seconds, default 60]
 # Build first: (cd app && flutter build linux --debug -t integration_test/call_test.dart)
 # Environment: BUNDLE (another build), CALL_LAB_RUNS (where run folders go, default
@@ -84,6 +96,8 @@ if [ "${1:-}" = --inside ]; then
     [ -n "${MEASURE_ENV:-}" ] && read -r -a more <<< "$MEASURE_ENV" && extra+=("${more[@]}")
     lab_copy "$r" "$N" "$mic" "${extra[@]}"
   done
+  # Copy a's own ports, for the upload (LAB_UPLOAD, below) to take what it sends.
+  [ -n "${LAB_UPLOAD:-}" ] && lab_upload_ports a &
   lab_moving || { lab_stop; exit 1; }
   # The highest memory each copy has held so far and the computer's load, every 5 s.
   (
@@ -143,6 +157,30 @@ for _ in $(seq 300); do
   [ "$(cut -d. -f1 /proc/loadavg)" -lt "${LOAD_MAX:-6}" ] && break
   sleep 2
 done
-echo "copies $N, $MODE, $SECS s, $(git -C "$REPO" describe --always --dirty), nice $(nice), ${MEASURE_ENV:-}, moving ${LAB_MOVING:-off}, display ${SCREEN:-1600x900}, started $(date -Is), load $(cut -d' ' -f1-3 /proc/loadavg)" > "$RUN/settings.txt"
+echo "copies $N, $MODE, $SECS s, $(git -C "$REPO" describe --always --dirty), nice $(nice), ${MEASURE_ENV:-}, moving ${LAB_MOVING:-off}, display ${SCREEN:-1600x900}, upload ${LAB_UPLOAD:-free}${LAB_UPLOAD:+ Mbit/s after ${LAB_UPLOAD_AFTER:-0} s, queue ${LAB_UPLOAD_QUEUE:-100} ms, loss ${LAB_UPLOAD_LOSS:-0} %, delay ${LAB_UPLOAD_DELAY:-0} ms}, started $(date -Is), load $(cut -d' ' -f1-3 /proc/loadavg)" > "$RUN/settings.txt"
+# The upload (upload.sh, as root through sudo, outside the session: its namespace cannot
+# change the computer's network), once copy a's ports are known, and every 2 s what went up
+# and what the loopback carried in all, to upload.log.
+shaper=""
+if [ -n "${LAB_UPLOAD:-}" ]; then
+  [[ $LAB_UPLOAD =~ ^[0-9]+$ ]] || { echo "LAB_UPLOAD is a whole number of Mbit/s" >&2; exit 2; }
+  sudo -n "$HERE/upload.sh" off || { echo "LAB_UPLOAD needs sudo without a password" >&2; exit 1; }
+  (
+    for _ in $(seq 1200); do [ -s "$RUN/upload-ports" ] && break; sleep 0.5; done
+    [ -s "$RUN/upload-ports" ] || exit 0
+    if [ -n "${LAB_UPLOAD_AFTER:-}" ]; then
+      # That long after copy a starts measuring (call_test.dart's mark "measuring").
+      for _ in $(seq 3000); do [ -e "$RUN/meet/mark-a-measuring" ] && break; sleep 0.5; done
+      sleep "$LAB_UPLOAD_AFTER"
+    fi
+    sudo -n "$HERE/upload.sh" on "$(cat "$RUN/upload-ports")" $((LAB_UPLOAD * 1000)) \
+      "${LAB_UPLOAD_QUEUE:-100}" "${LAB_UPLOAD_LOSS:-0}" "${LAB_UPLOAD_DELAY:-0}" >> "$RUN/upload.log" 2>&1
+  ) &
+  shaper=$!
+fi
+( while true; do "$HERE/upload.sh" show >> "$RUN/upload.log" 2>&1; sleep 2; done ) &
+uploads=$!
 "$HERE/session.sh" "$RUN/session" "$0" --inside "$N" "$MODE" "$SECS"
+kill $shaper $uploads 2> /dev/null
+[ -n "${LAB_UPLOAD:-}" ] && sudo -n "$HERE/upload.sh" off
 echo "$RUN"

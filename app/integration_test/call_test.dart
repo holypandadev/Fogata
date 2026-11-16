@@ -3860,9 +3860,17 @@ Future<Map<String, Object?>> _measureStats(CallPeer peer) async {
       .map((r) => r.values['selectedCandidatePairId'])
       .whereType<String>()
       .firstOrNull;
+  // What the other side said it received of what goes out (`remote-inbound-rtp`, under
+  // `remote.`), by the channel of the stream it is about.
+  final mids = {
+    for (final r in reports)
+      if (r.type == 'outbound-rtp') r.id: '${r.values['mid']}',
+  };
   for (final report in reports) {
     final v = report.values;
-    final channel = switch ('${v['mid']}') {
+    final channel = switch (report.type == 'remote-inbound-rtp'
+        ? mids[v['localId']]
+        : '${v['mid']}') {
       '0' => 'voice',
       '1' => 'camera',
       '2' => 'screen',
@@ -3871,6 +3879,7 @@ Future<Map<String, Object?>> _measureStats(CallPeer peer) async {
     final prefix = switch (report.type) {
       'inbound-rtp' when channel != null => 'in.$channel.',
       'outbound-rtp' when channel != null => 'out.$channel.',
+      'remote-inbound-rtp' when channel != null => 'remote.$channel.',
       'candidate-pair'
           when report.id == selected ||
               (selected == null && v['nominated'] == true) =>
@@ -3982,6 +3991,9 @@ Future<void> _measureCall(
   final threads = _threadTicks();
   var at = DateTime.now();
   final start = at;
+  // For whatever runs the copies to change the network from here (measure.sh's
+  // LAB_UPLOAD_AFTER).
+  _mark('measuring');
   final processor = <double>[], memory = <double>[];
   var stalls = 0, freezes = 0.0, lost = 0.0, received = 0.0;
   final swap = await _OutputSwap.from(state, start);
@@ -4015,6 +4027,17 @@ Future<void> _measureCall(
         'concealed': _json(delta('in.voice.concealedSamples')),
         'samples': _json(delta('in.voice.totalSamplesReceived')),
         'voiceOut': _json(delta('out.voice.packetsSent')),
+        // The sender's estimate of what the connection can carry now, in kbit/s.
+        'bwe': _json(d(v['path.availableOutgoingBitrate']) / 1000),
+        // All it sent on the path (RTP with its headers, padding, RTCP), and its voice
+        // with the voice's RTP headers, in kbit/s: what is neither is padding or control.
+        'pathOutKbps': _json(delta('path.bytesSent') * 8 / took / 1000),
+        'voiceOutKbps': _json(
+          (delta('out.voice.bytesSent') + delta('out.voice.headerBytesSent')) *
+              8 /
+              took /
+              1000,
+        ),
       };
       for (final (channel, sends) in [
         ('camera', peer?.cam ?? false),
@@ -4031,6 +4054,11 @@ Future<void> _measureCall(
         record['${channel}Height'] = v['in.$channel.frameHeight'];
         record['${channel}Lost'] = _json(delta('in.$channel.packetsLost'));
         record['${channel}In'] = _json(delta('in.$channel.packetsReceived'));
+        record['${channel}InKbps'] = _json(
+          delta('in.$channel.bytesReceived') * 8 / took / 1000,
+        );
+        // Key frames this side asked for (PLI).
+        record['${channel}Pli'] = _json(delta('in.$channel.pliCount'));
         record['${channel}OutFps'] = _json(
           delta('out.$channel.framesEncoded') / took,
         );
@@ -4051,6 +4079,21 @@ Future<void> _measureCall(
           delta('out.$channel.keyFramesEncoded'),
         );
         record['${channel}OutPli'] = _json(delta('out.$channel.pliCount'));
+        // What was sent again (NACK), and the share of what went out that the other side
+        // says it lost, with the round trip it measured.
+        record['${channel}OutResentKbps'] = _json(
+          delta('out.$channel.retransmittedBytesSent') * 8 / took / 1000,
+        );
+        record['${channel}OutNack'] = _json(delta('out.$channel.nackCount'));
+        record['${channel}OutHeaderKbps'] = _json(
+          delta('out.$channel.headerBytesSent') * 8 / took / 1000,
+        );
+        record['${channel}OutLost'] = _json(
+          d(v['remote.$channel.fractionLost']) * 100,
+        );
+        record['${channel}OutRtt'] = _json(
+          d(v['remote.$channel.roundTripTime']) * 1000,
+        );
         final stalled = sends && !(frames > 0);
         record['${channel}Stall'] = stalled;
         if (stalled) stalls++;
@@ -4069,7 +4112,7 @@ Future<void> _measureCall(
       ..clear()
       ..addAll(now);
     out.writeAsStringSync(
-      '${jsonEncode({'t': _json(at.difference(start).inMilliseconds / 1000), 'role': _role, 'copies': _copies, 'took': _json(took), 'cpu': _json(share), 'rss': _json(rss), if (swap != null) 'output': swap.now, 'peers': peers})}\n',
+      '${jsonEncode({'t': _json(at.difference(start).inMilliseconds / 1000), 'role': _role, 'me': call.me.substring(0, 8), 'copies': _copies, 'took': _json(took), 'cpu': _json(share), 'rss': _json(rss), if (swap != null) 'output': swap.now, 'peers': peers})}\n',
       mode: FileMode.append,
     );
   }
