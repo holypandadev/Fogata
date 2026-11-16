@@ -21,10 +21,14 @@
 #      alone: the copy must say what it says of drop 10
 #   13 ~/Documents/plan.pdf and then ~/Downloads/report.pdf from another window, two
 #      drags in a row: the second is taken as itself
-#   14 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
-#   15 the document portal's path drop 14 brought, named by a source that offers the
+#   14 ~/.ssh/id_ed25519 from a source that offers the portal's targets alone, no list
+#   15 ~/Documents/plan.pdf from a source slow to give its list, and while the copy waits
+#      for it, ~/.ssh/id_ed25519 dragged from another window: the second drag must not be
+#      taken under the first's judgement
+#   16 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
+#   17 the document portal's path drop 16 brought, named by a source that offers the
 #      list alone, as a page could name a file the portal gave Fogata before (when
-#      drop 14 brought one)
+#      drop 16 brought one)
 # The copy's drop zone writes, for each drop, the paths the drop plugin handed over, the
 # files it took (with the folder shown) and what it said (drop_portal_test.dart); the drag
 # source's log says which targets the copy asked for, and `flatpak documents` which files
@@ -114,18 +118,30 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     done
     kill "$source" 2> /dev/null
     wait "$source" 2> /dev/null
-    # Where the files the portal holds for the copy now really are (each file a drop
-    # exported to it).
-    flatpak documents --columns=origin "$APP_ID" > "$res/documents-$n.txt" 2>&1
+    documents "$res" "$n"
   }
 
-  # drag_twice <copy folder> <n> <first file> <second file>: two drags in a row, from two
-  # windows, each released on the copy, the second as soon as the first is.
+  # The documents the portal holds for the copy after drop n: where their files really are
+  # (each file a drop exported to it), and whether flatpak could say.
+  documents() {
+    flatpak documents --columns=origin "$APP_ID" > "$1/documents-$2.txt" 2>&1
+    echo $? > "$1/documents-$2.status"
+  }
+
+  # drag_twice <copy folder> <n> <first source's arguments> -- <second's>: two drags in a
+  # row, from two windows, each released on the copy, the second as soon as the first is.
   drag_twice() {
     local res=$1 n=$2
-    "$tools/drag_source" "$3" > "$res/source-$n.log" 2>&1 &
+    shift 2
+    local firsts=()
+    while [[ $# -gt 0 && $1 != -- ]]; do
+      firsts+=("$1")
+      shift
+    done
+    shift
+    "$tools/drag_source" "${firsts[@]}" > "$res/source-$n.log" 2>&1 &
     local first=$!
-    "$tools/drag_source" --second "$4" > "$res/source-$n-second.log" 2>&1 &
+    "$tools/drag_source" --second "$@" > "$res/source-$n-second.log" 2>&1 &
     local second=$!
     for _ in $(seq 100); do
       grep -qs shown "$res/source-$n.log" && grep -qs shown "$res/source-$n-second.log" && break
@@ -145,7 +161,13 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     done
     kill "$first" "$second" 2> /dev/null
     wait "$first" "$second" 2> /dev/null
-    flatpak documents --columns=origin "$APP_ID" > "$res/documents-$n.txt" 2>&1
+    documents "$res" "$n"
+  }
+
+  # A drop the copy did not write down, or wrote down as nothing come, proves nothing.
+  came() {
+    local file=$1/drop-$2.txt
+    [[ -s $file ]] && grep -q '^end' "$file" && ! grep -q '^raw none' "$file"
   }
 
   # took <copy folder> <n> <what> <name>: drop n took the file called <name> and said
@@ -153,19 +175,21 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
   took() {
     local res=$1 n=$2 what=$3 name=$4
     local file=$res/drop-$n.txt verdict=ok
-    if ! grep -q "^waiting .*/$name"$'\t' "$file" 2> /dev/null || grep -q '^toast ' "$file"; then
+    if ! came "$res" "$n" || ! grep -q "^waiting .*/$name"$'\t' "$file" ||
+      grep -q '^toast ' "$file"; then
       verdict=WRONG
       failed=1
     fi
     say "$(basename "$res") $n $what: $verdict: took $(grep '^waiting ' "$file" 2> /dev/null | cut -f1 | cut -c9- | tr '\n' ' '); told $(grep -c '^toast ' "$file" 2> /dev/null)"
   }
 
-
   # exported <copy folder> <n> <what> <name> yes|no: whether a document of the file named
-  # (its real path's end) is given to the copy after drop n.
+  # (its real path's end) is given to the copy after drop n, by `flatpak documents`, which
+  # must have answered.
   exported() {
     local res=$1 n=$2 what=$3 name=$4 want=$5 got=no
     grep -q -- "$name\$" "$res/documents-$n.txt" 2> /dev/null && got=yes
+    [[ $(cat "$res/documents-$n.status" 2> /dev/null) == 0 ]] || got="unknown (flatpak documents failed)"
     local verdict=ok
     if [[ $got != "$want" ]]; then
       verdict=WRONG
@@ -174,9 +198,21 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     say "$(basename "$res") $n $what: $verdict: a document of $name given to the copy: $got"
   }
 
+  # unasked <copy folder> <n> <what>: neither source of drop n was asked for the portal's
+  # target (the portal was not asked for its files).
+  unasked() {
+    local res=$1 n=$2 what=$3 verdict=ok
+    if grep -qs 'asked for application/vnd.portal' "$res/source-$n.log" "$res/source-$n-second.log"; then
+      verdict=WRONG
+      failed=1
+    fi
+    say "$(basename "$res") $n $what: $verdict: the portal's target asked for: $([[ $verdict == ok ]] && echo no || echo yes)"
+  }
+
   # judge <copy folder> <n> <what> <taken> <folder> <told> [<notice>]: what drop n should
   # have done: how many files the room took, the folder the first is shown in ("-": none),
-  # how many notices it gave, and words the notice has (English's).
+  # how many notices it gave, and words the notice has (English's). A drop that did not
+  # come is wrong; with <told> "none", it is what should be (the copy took no drop at all).
   judge() {
     local res=$1 n=$2 what=$3 taken=$4 folder=$5 told=$6 notice=${7:-}
     local file=$res/drop-$n.txt
@@ -186,9 +222,15 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     got_folder=$(grep -m1 '^waiting ' "$file" 2> /dev/null | cut -f2)
     got_notice=$(grep '^toast ' "$file" 2> /dev/null | cut -c7- | tr '\n' ' ')
     raw=$(grep '^raw ' "$file" 2> /dev/null | cut -c5- | tr '\n' ' ')
-    asked=$(grep -o 'asked for [^:]*' "$res/source-$n.log" 2> /dev/null | cut -c11- | tr '\n' ' ')
+    asked=$(cat "$res/source-$n.log" "$res/source-$n-second.log" 2> /dev/null |
+      grep -o 'asked for [^:,]*' | cut -c11- | tr '\n' ' ')
     local verdict=ok
-    if [[ ${got_taken:-0} != "$taken" || ${got_told:-0} != "$told" ||
+    if [[ $told == none ]]; then
+      if [[ ! -s $file ]] || ! grep -q '^raw none' "$file" || [[ ${got_told:-0} != 0 ]]; then
+        verdict=WRONG
+        failed=1
+      fi
+    elif ! came "$res" "$n" || [[ ${got_taken:-0} != "$taken" || ${got_told:-0} != "$told" ||
       ($folder != - && $got_folder != "$folder") ||
       (-n $notice && $got_notice != *"$notice"*) ]]; then
       verdict=WRONG
@@ -234,16 +276,18 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     drag "$res" 10 --uri-only "$h/Documents/plan.pdf"
     drag "$res" 11 --uri-only "$h/Downloads/report.pdf"
     drag "$res" 12 --uri-only "$h/Documents/nowhere.pdf"
-    drag_twice "$res" 13 "$h/Documents/plan.pdf" "$h/Downloads/report.pdf"
-    drag "$res" 14 "$h/Documents/innocent.jpg"
-    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-14.txt" 2> /dev/null | cut -c5-)
+    drag_twice "$res" 13 "$h/Documents/plan.pdf" -- "$h/Downloads/report.pdf"
+    drag "$res" 14 --portal-only "$key"
+    drag_twice "$res" 15 --slow "$h/Documents/plan.pdf" -- "$key"
+    drag "$res" 16 "$h/Documents/innocent.jpg"
+    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-16.txt" 2> /dev/null | cut -c5-)
     if [[ -n $earlier ]]; then
-      drag "$res" 15 --uri-only "$earlier"
+      drag "$res" 17 --uri-only "$earlier"
     else
       # No drag: the copy writes down that nothing came.
-      : > "$res/drop-15-go"
+      : > "$res/drop-17-go"
       for _ in $(seq 400); do
-        grep -qs '^end' "$res/drop-15.txt" && break
+        grep -qs '^end' "$res/drop-17.txt" && break
         sleep 0.1
       done
     fi
@@ -269,7 +313,10 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       judge "$res" 11 downloads-list-only 1 "$h/Downloads" 0
       judge "$res" 12 nowhere-list-only 0 - 0
       took "$res" 13 two-in-a-row report.pdf
-      judge "$res" 14 link-to-ssh 0 - 0
+      # No list: nothing it takes.
+      judge "$res" 14 portal-only - - none
+      say "before 15 slow-then-key: (not judged) $(grep -v '^seen' "$res/drop-15.txt" 2> /dev/null | tr '\n' ' ')"
+      judge "$res" 16 link-to-ssh 0 - 0
     else
       private="hidden or private" unreached="could not be reached"
       declined="Drag the others again"
@@ -279,17 +326,21 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       # The key named by the list beside the portal's target: the drop is declined before
       # the portal is asked, so no document of it is given to the copy.
       judge "$res" 3 ssh 0 - 1 "$declined"
+      unasked "$res" 3 ssh
       exported "$res" 3 ssh .ssh/id_ed25519 no
       judge "$res" 4 hidden 0 - 1 "$declined"
+      unasked "$res" 4 hidden
       exported "$res" 4 hidden Documents/.env no
       # A list whose entries are no plain file of this computer is not judged, and the
       # portal is not asked.
       for n in 5 6 7 8; do
         judge "$res" $n key-written-otherwise 0 - 1 "$unreached"
+        unasked "$res" $n key-written-otherwise
         exported "$res" $n key-written-otherwise .ssh/id_ed25519 no
       done
       # One refused file declines the whole drop.
       judge "$res" 9 documents-and-ssh 0 - 1 "$declined"
+      unasked "$res" 9 documents-and-ssh
       exported "$res" 9 documents-and-ssh .ssh/id_ed25519 no
       judge "$res" 10 documents-list-only 0 - 1 "$unreached"
       judge "$res" 11 downloads-list-only 1 "$h/Downloads" 0
@@ -297,14 +348,22 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       # person has outside the sandbox.
       judge "$res" 12 nowhere-list-only 0 - 1 "$unreached"
       took "$res" 13 two-in-a-row report.pdf
+      # No list to judge: the portal is never asked.
+      judge "$res" 14 portal-only 0 - 1 "$unreached"
+      unasked "$res" 14 portal-only
+      exported "$res" 14 portal-only .ssh/id_ed25519 no
+      # The first drop is given up for the second, which is judged as itself: declined.
+      judge "$res" 15 slow-then-key 0 - 1 "$declined"
+      unasked "$res" 15 slow-then-key
+      exported "$res" 15 slow-then-key .ssh/id_ed25519 no
       # A link in a plain folder is only found once the portal has given its file: the
       # document stays given to the copy, which cannot give it back.
-      judge "$res" 14 link-to-ssh 0 - 1 "$private"
-      exported "$res" 14 link-to-ssh .ssh/id_ed25519 yes
+      judge "$res" 16 link-to-ssh 0 - 1 "$private"
+      exported "$res" 16 link-to-ssh .ssh/id_ed25519 yes
       if [[ -n $earlier ]]; then
-        judge "$res" 15 earlier-document 0 - 1 "$private"
+        judge "$res" 17 earlier-document 0 - 1 "$private"
       else
-        say "$name 15 earlier-document: WRONG: drop 14 brought no document portal path"
+        say "$name 17 earlier-document: WRONG: drop 16 brought no document portal path"
         failed=1
       fi
     fi

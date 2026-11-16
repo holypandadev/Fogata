@@ -3,16 +3,19 @@
 // portal's targets, through which GTK hands the files to a sandboxed application by itself.
 // With --uri-only it offers the list alone, as a source that knows nothing of the portal;
 // with --raw its arguments are the list's entries as they are (any URI, as a web page can
-// write them); with --second its window is another one (drop.sh's two drags in a row).
+// write them); with --second its window is another one (drop.sh's two drags in a row);
+// with --portal-only it offers the portal's targets alone, no list; with --slow it gives its
+// list three seconds after it is asked (a second drag can come meanwhile).
 // It says on stderr which targets each drag offered, which one the other side asked for, and
 // how the drag ended. tools/smoke-wayland/drop.sh drags from it.
 //
-//     drag_source [--uri-only] [--raw] [--second] <file or URI>...
+//     drag_source [--uri-only | --portal-only] [--raw] [--second] [--slow] <file or URI>...
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <string.h>
 
 static gchar **uris;
+static gboolean slow = FALSE;
 
 static void on_begin(GtkWidget *widget, GdkDragContext *context, gpointer data) {
   GString *offered = g_string_new(NULL);
@@ -28,6 +31,10 @@ static void on_begin(GtkWidget *widget, GdkDragContext *context, gpointer data) 
 static void on_get(GtkWidget *widget, GdkDragContext *context, GtkSelectionData *selection,
                    guint info, guint time, gpointer data) {
   gchar *name = gdk_atom_name(gtk_selection_data_get_target(selection));
+  if (slow && strcmp(name, "text/uri-list") == 0) {
+    fprintf(stderr, "drag source: asked for %s, waiting\n", name);
+    g_usleep(3 * G_USEC_PER_SEC);
+  }
   gboolean given = gtk_selection_data_set_uris(selection, uris);
   fprintf(stderr, "drag source: asked for %s: %s\n", name, given ? "given" : "NOT given");
   g_free(name);
@@ -49,7 +56,7 @@ static void on_map(GtkWidget *widget, gpointer data) {
 
 int main(int argc, char **argv) {
   gtk_init(&argc, &argv);
-  gboolean uri_only = FALSE, raw = FALSE, second = FALSE;
+  gboolean uri_only = FALSE, portal_only = FALSE, raw = FALSE, second = FALSE;
   GPtrArray *list = g_ptr_array_new();
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--uri-only") == 0) {
@@ -58,6 +65,14 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[i], "--raw") == 0) {
       raw = TRUE;
+      continue;
+    }
+    if (strcmp(argv[i], "--portal-only") == 0) {
+      portal_only = TRUE;
+      continue;
+    }
+    if (strcmp(argv[i], "--slow") == 0) {
+      slow = TRUE;
       continue;
     }
     if (strcmp(argv[i], "--second") == 0) {
@@ -72,7 +87,8 @@ int main(int argc, char **argv) {
     g_ptr_array_add(list, uri);
   }
   if (list->len == 0) {
-    fprintf(stderr, "usage: drag_source [--uri-only] [--raw] [--second] <file>...\n");
+    fprintf(stderr, "usage: drag_source [--uri-only | --portal-only] [--raw] [--second] "
+                    "[--slow] <file>...\n");
     return 2;
   }
   g_ptr_array_add(list, NULL);
@@ -91,6 +107,10 @@ int main(int argc, char **argv) {
   if (uri_only) {
     GtkTargetEntry list_only[] = {{(gchar *)"text/uri-list", 0, 0}};
     gtk_drag_source_set(box, GDK_BUTTON1_MASK, list_only, 1, GDK_ACTION_COPY);
+  } else if (portal_only) {
+    GtkTargetEntry portal[] = {{(gchar *)"application/vnd.portal.filetransfer", 0, 0},
+                               {(gchar *)"application/vnd.portal.files", 0, 0}};
+    gtk_drag_source_set(box, GDK_BUTTON1_MASK, portal, 2, GDK_ACTION_COPY);
   } else {
     gtk_drag_source_set(box, GDK_BUTTON1_MASK, NULL, 0, GDK_ACTION_COPY);
     gtk_drag_source_add_uri_targets(box);
