@@ -26,6 +26,19 @@ class DesktopDrop {
   /// portal's target is taken.
   Future<int> Function(List<String> paths)? portalDropCheck;
 
+  /// Fogata: the drop targets that take drops now, each saying whether it holds a point of
+  /// the window (see [holds]).
+  final _holders = <bool Function(Offset location)>{};
+
+  /// Fogata: whether a drop target that takes drops now holds [location]: inside the
+  /// Flatpak the FileTransfer portal is asked only for a drop something takes.
+  bool holds(Offset location) => _holders.any((holder) => holder(location));
+
+  void addHolder(bool Function(Offset location) holder) => _holders.add(holder);
+
+  void removeHolder(bool Function(Offset location) holder) =>
+      _holders.remove(holder);
+
   var _inited = false;
 
   Offset? _offset;
@@ -182,17 +195,27 @@ class DesktopDrop {
         );
         break;
       case "checkPortalDrop":
-        // Fogata: inside the Flatpak, how many of the files a drop's list names the
-        // application refuses, before the plugin asks the FileTransfer portal for them
-        // (which gives this application each file for good): the portal is asked only
-        // when that is 0. With no judge, or a judge that fails, the answer is -1.
+        // Fogata: inside the Flatpak, before the plugin asks the FileTransfer portal for a
+        // drop's files (which gives this application each of them for good): -2 when no
+        // drop target takes a drop where it is, -1 when its list cannot be judged
+        // (portalListPaths) or there is no judge or it fails, else how many files the
+        // application refuses (portalDropCheck); the portal is asked only for 0. A source
+        // that offers no list (null) is judged by where the drop is alone.
+        final args = call.arguments as List;
+        final point = (args[0] as List).cast<double>();
+        if (!holds(Offset(point[0], point[1]))) return -2;
         final check = portalDropCheck;
         if (check == null) return -1;
+        final text = args[1] as String?;
+        if (text == null) return 0;
+        final entries = portalListPaths(text, (args[2] as List).cast<String>());
+        if (entries == null) return -1;
         try {
-          return await check(
-            linuxDropPaths(
-                'text/uri-list', (call.arguments as List)[0] as String),
-          );
+          var refused = 0;
+          for (final entry in entries) {
+            if (await check(entry) > 0) refused++;
+          }
+          return refused;
         } catch (error) {
           debugPrint('desktop_drop: no judgement of the drop: $error');
           return -1;
@@ -269,4 +292,33 @@ List<String> linuxDropPaths(String? target, String text) {
     }
   }
   return paths;
+}
+
+/// Fogata: each entry of a drop's list of files ([text], a `text/uri-list`) as both readings
+/// name it ([linuxDropPaths]'s path, then GIO's), to be judged
+/// before the FileTransfer portal is asked for the drop, or null when it cannot be judged
+/// and the portal must not be asked. The source hands the portal the files its own GIO
+/// reads in that list, which takes as a file more than [linuxDropPaths] does (a `file:`
+/// entry with a query, a fragment or any host; another scheme that gvfs mounts). So every
+/// entry (each line but empty ones and comments) must be a file of this computer by
+/// [linuxDropPaths], there must be one at least, and [read], the paths GIO reads there
+/// (by the plugin, one per entry, "" where GIO reads none), must be one each and
+/// absolute: an entry is refused when either reading is.
+List<List<String>>? portalListPaths(String text, List<String> read) {
+  final named = <String>[];
+  for (final raw in const LineSplitter().convert(text)) {
+    final line = raw.replaceFirst(RegExp(r'\x00+$'), '').trim();
+    if (line.isEmpty || line.startsWith('#')) continue;
+    final paths = linuxDropPaths('text/uri-list', line);
+    if (paths.length != 1) return null;
+    named.add(paths.single);
+  }
+  if (named.isEmpty ||
+      read.length != named.length ||
+      read.any((path) => !path.startsWith('/') || path.contains('\x00'))) {
+    return null;
+  }
+  return [
+    for (var i = 0; i < named.length; i++) [named[i], read[i]],
+  ];
 }

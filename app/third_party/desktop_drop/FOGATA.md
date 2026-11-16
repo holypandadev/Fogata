@@ -35,30 +35,46 @@ Changed, each place marked `Fogata:` in the code:
   exports each one to it, to read, for good: the application can neither give a document
   back nor delete it), before anything is judged, and GTK hands every file a drag names to
   the portal by itself, a page's drag that names `~/.ssh/id_ed25519` among them. So inside
-  the Flatpak the plugin takes such a drop by hand (`drag-drop`, `gtk_drag_get_data`,
-  `gtk_drag_finish`; not `GTK_DEST_DEFAULT_DROP`): when the source also offers the list of
-  files, it reads the list first and asks the Dart part how many of its files are refused
-  by their names (`checkPortalDrop`, answered by `DesktopDrop.portalDropCheck`, which the
-  application sets: the rules stay there); only when none is does it ask for the portal's
-  target and the portal for the files. Otherwise the portal is never asked, nothing is
-  exported, and the drop is handed on as `declined` with that number (`portalRefusal` and
-  `portalCount` on `DropDoneEvent` and `DropDoneDetails`, files empty); with no
-  `portalDropCheck`, no such drop is taken. A source that offers only the portal's target
-  is asked as before. `RetrieveFiles` is asynchronous, two seconds at most, while the drop
-  is still going (the drag is finished once it answers), since a source may end its
-  transfer once the drop is finished; 0.9.0 also asks the portal in its plugin, before it
-  finishes the drag. The files are handed on as a `text/uri-list` of the paths the portal
-  gave: the document portal's (`/run/user/<id>/doc/<id>/<name>`), or the file's own where
-  the sandbox sees it already (the downloads folder). A key that is empty or not UTF-8, a
-  portal that gives nothing or no answer in time, is handed on as `unreached`, with the
-  number of files the list named (1 when it was not read). A source that offers only the
-  list of files is read as before. Outside the Flatpak the targets and the drop are those
-  of 0.8.0: the list first, then the portal's, which GTK adds where a portal runs and which
-  drop nothing, taken by `GTK_DEST_DEFAULT_ALL`.
+  the Flatpak the plugin takes every drop by hand (`drag-drop`, `gtk_drag_get_data`,
+  `gtk_drag_finish`; not `GTK_DEST_DEFAULT_DROP`). For a drop that offers the portal's
+  target it asks the Dart part first (`checkPortalDrop`) where the drop is and, when the
+  source also offers the list of files, the list's text and the paths the plugin's GIO
+  reads in it (the source's own GIO builds the transfer from the same list, and reads as
+  files entries the Dart part does not: a query, a fragment, another host). The Dart part
+  answers -2 when no drop target that takes drops holds the point (`DesktopDrop.holds`),
+  -1 when the list cannot be judged (`portalListPaths`: every entry must be a file of this
+  computer by `linuxDropPaths`, at least one, with one absolute path of GIO's for each) or
+  there is no judge or it fails, else how many entries `DesktopDrop.portalDropCheck`, which
+  the application sets (the rules stay there), refuses by either reading. Only 0 asks for
+  the portal's target and the portal for the files. Otherwise the portal is never asked,
+  nothing is exported, and the drop is handed on as `declined` with that number, or
+  `unreached` for -1 (`portalRefusal` and `portalCount` on `DropDoneEvent` and
+  `DropDoneDetails`, files empty), or not at all for -2. A source that offers no list is
+  judged by where the drop is alone. Before the portal is asked the drop may take five
+  seconds (a list that never comes, a Dart part that never answers: `unreached`); once it
+  is asked (asynchronously), its answer is taken, or judged, whenever it comes within 20
+  seconds, since a source may end its transfer once the drop is finished (0.9.0 also asks
+  the portal in its plugin, before it finishes the drag). A portal that answers later has
+  still exported the files, which are then not taken, and the person is told they could not
+  be reached. The files are handed on as a `text/uri-list` of the paths the portal gave:
+  the document portal's (`/run/user/<id>/doc/<id>/<name>`), or the file's own where the
+  sandbox sees it already (the downloads folder). A key that is empty or not UTF-8, no
+  session bus (got once, without holding up the window), a portal that gives nothing, is
+  handed on as `unreached`, with the number of files the list named (1 when it was not
+  read). One drop at a time: a new one ends the one before (without finishing it when it is
+  the same drag context, as Wayland keeps one a seat), data is taken only when it is what
+  the drop going asked for at the time of its own `drag-drop`, and a window destroyed
+  meanwhile ends it. What is reported back to the source does not depend on whether the
+  files could be taken (a page could learn from it whether a file it named is there): a
+  drop that offered the portal's target is always reported taken. A drop of no target the
+  plugin takes is finished as refused. A source that offers only the list of files is read
+  as before. Outside the Flatpak the targets and the drop are those of 0.8.0: the list first,
+  then the portal's, which GTK adds where a portal runs and which drop nothing, taken by
+  `GTK_DEST_DEFAULT_ALL`.
 - A document portal's path says nothing of where the file really is. So the plugin also
   answers `documentHostPaths` (`lib/src/channel.dart`), asking the Documents portal where
   the documents with the ids given really are (`GetHostPaths`, version 5 of its interface,
-  which xdg-desktop-portal's changelog lists under 1.19.0; two seconds at most) and giving
+  which xdg-desktop-portal's changelog lists under 1.19.0; five seconds at most) and giving
   each path as its bytes; an id the portal does not answer for (not given to this
   application) is left out, and when the portal cannot be asked, is older or gives no
   answer in time, the call fails. The application asks once for a drop's files and judges

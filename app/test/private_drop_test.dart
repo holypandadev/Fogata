@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:desktop_drop/desktop_drop.dart'
-    show DesktopDrop, linuxDropPaths;
+    show DesktopDrop, linuxDropPaths, portalListPaths;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -707,6 +707,69 @@ void main() {
     );
   });
 
+  group('a list judged before the portal is asked', () {
+    const key = '/home/leo/.ssh/id_ed25519';
+    test('every entry must be a plain file of this computer, read alike', () {
+      expect(
+        portalListPaths(
+          '# a comment\r\nfile:///home/leo/a.pdf\r\n\r\nfile:///home/leo/.ssh/id_ed25519\r\n',
+          ['/home/leo/a.pdf', key],
+        ),
+        [
+          ['/home/leo/a.pdf', '/home/leo/a.pdf'],
+          [key, key],
+        ],
+      );
+      // What the source's GIO reads as the key, though this side's reading leaves it
+      // out: a query, a fragment, a host, another scheme a gvfs mount turns into a path.
+      for (final (line, read) in [
+        ('file:///home/leo/.ssh/id_ed25519#x', key),
+        ('file:///home/leo/.ssh/id_ed25519?x', key),
+        ('file://evil/home/leo/.ssh/id_ed25519', key),
+        ('file://localhost.localdomain/home/leo/.ssh/id_ed25519', key),
+        (
+          'sftp://server/home/leo/.ssh/id_ed25519',
+          '/run/user/1000/gvfs/sftp:host=server/x',
+        ),
+        ('smb://server/share/id_ed25519', ''),
+        ('https://example.com/a.png', ''),
+        ('/home/leo/.ssh/id_ed25519', ''),
+      ]) {
+        expect(
+          portalListPaths('file:///home/leo/a.pdf\r\n$line\r\n', [
+            '/home/leo/a.pdf',
+            read,
+          ]),
+          isNull,
+          reason: line,
+        );
+      }
+      // No file at all, or only lines that are none.
+      for (final text in [
+        '',
+        '\r\n',
+        '# only a comment\r\n',
+        'https://example.com/a\r\n',
+      ]) {
+        expect(portalListPaths(text, const []), isNull, reason: text);
+      }
+      // GIO's reading must have one absolute path for each entry.
+      for (final read in [
+        <String>[],
+        ['/home/leo/a.pdf', '/home/leo/b.pdf'],
+        [''],
+        ['home/leo/a.pdf'],
+        ['/home/leo/a\x00.pdf'],
+      ]) {
+        expect(
+          portalListPaths('file:///home/leo/a.pdf\r\n', read),
+          isNull,
+          reason: '$read',
+        );
+      }
+    });
+  });
+
   group('what browsers drop on Linux', () {
     // The payloads browsers hand over on X11 and on Wayland when a page starts
     // a drag that names files, as GTK gives them to the drop plugin: the target and its
@@ -1080,6 +1143,14 @@ void main() {
           await refused(tester, 'unreached', 3);
           expect(waiting(state), isEmpty);
           expect(told(state), [l10n.outgoingUnreachableLeftOut(3)]);
+          // A drop that named no file it refuses is never called hidden or private.
+          state.toasts.list.clear();
+          await refused(tester, 'declined', 0);
+          await refused(tester, 'unreached', 0);
+          expect(told(state), [
+            l10n.outgoingUnreachableLeftOut(1),
+            l10n.outgoingUnreachableLeftOut(1),
+          ]);
         },
         skip: !Platform.isLinux,
       );
@@ -1087,13 +1158,26 @@ void main() {
       testWidgets('the plugin learns how many files of a drop\'s list are refused before it asks the '
           'portal', (tester) async {
         await pump(tester);
-        Future<Object?> check(String list) async {
+        // The plugin's question: where the drop is, its list (null: the source offers
+        // none) and the paths GIO reads in it.
+        Future<Object?> check(
+          String? list, {
+          List<String>? read,
+          List<double> at = const [10.0, 20.0],
+        }) async {
           final reply = await tester.runAsync(() async {
             final done = Completer<ByteData?>();
             await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
               'desktop_drop',
               const StandardMethodCodec().encodeMethodCall(
-                MethodCall('checkPortalDrop', [list]),
+                MethodCall('checkPortalDrop', [
+                  at,
+                  list,
+                  read ??
+                      (list == null
+                          ? <String>[]
+                          : linuxDropPaths('text/uri-list', list)),
+                ]),
               ),
               done.complete,
             );
@@ -1105,15 +1189,48 @@ void main() {
         expect(
           await check(
             '${Uri.file(secret)}\r\n${Uri.file(plain)}\r\n'
-            'file:///home/leo/Documents/.env\r\nhttps://example.com/a.png\r\n',
+            'file:///home/leo/Documents/.env\r\n',
           ),
           2,
         );
         expect(await check('${Uri.file(plain)}\r\n'), 0);
+        // A line that is no file of this computer: not judged, the portal not asked.
+        expect(
+          await check(
+            '${Uri.file(plain)}\r\nhttps://example.com/a.png\r\n',
+            read: [plain, ''],
+          ),
+          -1,
+        );
+        // What GIO reads is judged too: a list that reads one way here and another there.
+        expect(
+          await check(
+            '${Uri.file(plain)}\r\n',
+            read: ['/home/leo/.ssh/id_ed25519'],
+          ),
+          1,
+        );
+        // A source that offers no list: only where the drop is counts.
+        expect(await check(null), 0);
+        // Where no drop target takes it, nothing is asked of the portal.
+        expect(await check('${Uri.file(plain)}\r\n', at: [-50.0, -50.0]), -2);
+        expect(await check(null, at: [-50.0, -50.0]), -2);
         // No judge, no portal: the plugin is told to leave it.
         DesktopDrop.instance.portalDropCheck = null;
         expect(await check('${Uri.file(plain)}\r\n'), -1);
       }, skip: Platform.isWindows);
+
+      testWidgets(
+        'a private file listed twice is one file left out, as before',
+        (tester) async {
+          inFlatpak = false;
+          final state = await pump(tester);
+          await drop(tester, [secret, secret, plain]);
+          expect(waiting(state), [plain]);
+          expect(told(state), [l10n.outgoingPrivateLeftOut(1)]);
+        },
+        skip: !Platform.isLinux,
+      );
     });
   });
 }

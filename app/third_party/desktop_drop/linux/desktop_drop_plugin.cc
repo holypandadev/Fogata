@@ -27,13 +27,31 @@ static const gchar kPortalFilesTarget[] = "application/vnd.portal.files";
 // Fogata: whether this runs inside a Flatpak (where /.flatpak-info is), found once.
 static gboolean sandboxed = FALSE;
 
-// Fogata: how long the FileTransfer portal is waited for: the drop is answered meanwhile.
-static const gint kPortalWaitMs = 2000;
+// Fogata: how long a drop inside the Flatpak may take before the FileTransfer portal is
+// asked (its list read and judged by the Dart part), how long the portal is waited for once
+// asked (its answer is then taken, or judged, whenever it comes within that), and how long
+// the Documents portal is waited for. The drop is answered meanwhile.
+static const guint kBeforePortalMs = 5000;
+static const gint kPortalWaitMs = 20000;
+static const gint kHostPathsWaitMs = 5000;
+
+// Fogata: the session bus, got once without holding up the window (inside the Flatpak
+// only); null until then, or when there is none.
+static GDBusConnection *session_bus = nullptr;
+
+static void on_session_bus(GObject *source, GAsyncResult *result, gpointer user_data) {
+  g_autoptr(GError) error = nullptr;
+  session_bus = g_bus_get_finish(result, &error);
+  if (session_bus == nullptr) {
+    g_warning("desktop_drop: no session bus: %s", error->message);
+  }
+}
 
 // Fogata: hands a drop to the Dart part: its text (a text/uri-list), where it was dropped,
-// what the text was given as, and inside the Flatpak, when the portal's files could not be
+// what the text was given as, and inside the Flatpak, when the portal's files were not
 // taken, why ("declined": the list named a file the Dart part refuses, so the portal was
-// not asked; "unreached": the portal gave nothing in time) and of how many files.
+// not asked; "unreached": no file could be taken, the portal was not asked or gave
+// nothing) and of how many files.
 static void send_drop(FlMethodChannel *channel, const gchar *text, gint x, gint y,
                       const gchar *target, const gchar *status, gint64 count) {
   double point[] = {double(x), double(y)};
@@ -51,12 +69,16 @@ static void send_drop(FlMethodChannel *channel, const gchar *text, gint x, gint 
                                   nullptr, nullptr, nullptr);
 }
 
-// Fogata: a drop inside the Flatpak whose source offers the portal's target, from its
-// "drag-drop" to gtk_drag_finish, which waits for the Dart part and the portal. A file of
-// the portal's transfer is exported to this application for good when its files are
-// retrieved (it cannot give a document back), so when the source also offers the list of
-// files, the list is read first and judged by the Dart part (checkPortalDrop, names
-// only: the rules are there), and the portal is asked only when every file passes.
+// Fogata: a drop inside the Flatpak, taken by hand from its "drag-drop" to gtk_drag_finish
+// (outside it GTK_DEST_DEFAULT_ALL takes drops as published). A file of the FileTransfer
+// portal's transfer is exported to this application for good when its files are retrieved
+// (it can neither give a document back nor delete it), so when the source also offers the
+// list of files, the list is read first and judged by the Dart part (checkPortalDrop:
+// every line a file of this computer, by its name, as GIO reads it too, where a drop
+// target that takes it is), and the portal is asked only when it says so. One drop at a
+// time: a new one ends the one before. Data is taken only when it is what the drop going
+// asked for, at the time of its own "drag-drop" (GTK hands each request's time back), so
+// that a late answer to a drop given up is never taken as the next drop's.
 typedef struct {
   guint serial;
   GtkWidget *widget;        // a reference
@@ -64,30 +86,35 @@ typedef struct {
   FlMethodChannel *channel;
   gint x, y;
   guint time;
-  GdkAtom portal;  // the portal's target the source offers
-  gchar *list;     // the list's text, once read
-} PortalDrop;
+  GdkAtom portal;    // the portal's target the source offers, or GDK_NONE
+  GdkAtom awaiting;  // what was asked for and has not come, or GDK_NONE
+  gchar *list;       // the list's text, once read
+  guint deadline;    // the timeout before the portal is asked, 0 once gone
+} Drop;
 
-static void portal_drop_free(PortalDrop *drop) {
+static void drop_free(Drop *drop) {
+  if (drop->deadline != 0) {
+    g_source_remove(drop->deadline);
+  }
   g_object_unref(drop->widget);
   g_object_unref(drop->context);
   g_free(drop->list);
   g_free(drop);
 }
-G_DEFINE_AUTOPTR_CLEANUP_FUNC(PortalDrop, portal_drop_free)
+G_DEFINE_AUTOPTR_CLEANUP_FUNC(Drop, drop_free)
 
-static PortalDrop *portal_drop = nullptr;
-static guint portal_serial = 0;
+static Drop *current_drop = nullptr;
+static guint drop_serial = 0;
 
 // The drop [serial] names, if it is still the one going.
-static PortalDrop *current_drop(gpointer serial) {
-  return portal_drop != nullptr && portal_drop->serial == GPOINTER_TO_UINT(serial)
-             ? portal_drop
+static Drop *drop_of(gpointer serial) {
+  return current_drop != nullptr && current_drop->serial == GPOINTER_TO_UINT(serial)
+             ? current_drop
              : nullptr;
 }
 
 // How many files of this computer the drop's list named, or 1 when it was not read.
-static gint64 files_named(const PortalDrop *drop) {
+static gint64 files_named(const Drop *drop) {
   if (drop->list == nullptr) {
     return 1;
   }
@@ -101,33 +128,58 @@ static gint64 files_named(const PortalDrop *drop) {
   return files > 0 ? files : 1;
 }
 
-// Ends the drop going: finished as taken when [text] holds its files, else refused, with
-// [status] and [count] for the Dart part.
-static void end_portal_drop(const gchar *text, const gchar *status, gint64 count) {
-  g_autoptr(PortalDrop) drop = portal_drop;
-  portal_drop = nullptr;
-  gtk_drag_finish(drop->context, text != nullptr, FALSE, drop->time);
-  if (text != nullptr || status != nullptr) {
-    send_drop(drop->channel, text != nullptr ? text : "", drop->x, drop->y,
-              "text/uri-list", status, count);
+// Ends the drop going. [finish]: the drag is finished (not when a new drop on the same
+// context replaces it: that would end the new one's offer). What is reported back to the
+// source does not depend on whether the files could be taken (a page could learn from it
+// whether a file it named is there): a drop that offered the portal's target is reported
+// taken, any other as GTK reports it, by whether its data came. [text] (or [status]) is
+// handed to the Dart part; neither, nothing is.
+static void end_drop(gboolean finish, gboolean success, const gchar *text,
+                     const gchar *target, const gchar *status, gint64 count) {
+  g_autoptr(Drop) drop = current_drop;
+  current_drop = nullptr;
+  if (finish) {
+    gtk_drag_finish(drop->context, drop->portal != GDK_NONE ? TRUE : success, FALSE,
+                    drop->time);
   }
+  if (text != nullptr || status != nullptr) {
+    send_drop(drop->channel, text != nullptr ? text : "", drop->x, drop->y, target,
+              status, count);
+  }
+}
+
+// Asks the source for [target], for the drop going.
+static void request(Drop *drop, GdkAtom target) {
+  drop->awaiting = target;
+  gtk_drag_get_data(drop->widget, drop->context, target, drop->time);
+}
+
+// The drop took too long before the portal was asked (a list that never came, a Dart part
+// that never answered): nothing was exported.
+static gboolean on_deadline(gpointer serial) {
+  Drop *drop = drop_of(serial);
+  if (drop != nullptr) {
+    drop->deadline = 0;
+    end_drop(TRUE, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop));
+  }
+  return G_SOURCE_REMOVE;
 }
 
 // The portal's answer: its files, handed on as the list of files they are (the document
 // portal's paths, or the file's own where the sandbox sees it already). These paths do not
 // say where a file really is: the Dart part asks the Documents portal that
-// (documentHostPaths) before it takes one. A portal that gives nothing in time says so.
+// (documentHostPaths) before it takes one. A portal that gives nothing says so.
 static void on_retrieved(GObject *source, GAsyncResult *result, gpointer serial) {
   g_autoptr(GError) error = nullptr;
   g_autoptr(GVariant) reply =
       g_dbus_connection_call_finish(G_DBUS_CONNECTION(source), result, &error);
-  PortalDrop *drop = current_drop(serial);
+  Drop *drop = drop_of(serial);
   if (drop == nullptr) {
     return;
   }
   if (reply == nullptr) {
     g_warning("desktop_drop: the portal gave no files: %s", error->message);
-    end_portal_drop(nullptr, "unreached", files_named(drop));
+    end_drop(TRUE, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop));
     return;
   }
   g_auto(GStrv) paths = nullptr;
@@ -141,29 +193,28 @@ static void on_retrieved(GObject *source, GAsyncResult *result, gpointer serial)
     }
   }
   if (list->len == 0) {
-    end_portal_drop(nullptr, "unreached", files_named(drop));
+    end_drop(TRUE, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop));
     return;
   }
-  end_portal_drop(list->str, nullptr, 0);
+  end_drop(TRUE, TRUE, list->str, "text/uri-list", nullptr, 0);
 }
 
 // Asks the FileTransfer portal for the files under [key], the source's data, while the
-// drop is still going: a source may end its transfer once the drop is finished.
-static void retrieve(PortalDrop *drop, const gchar *key) {
-  // The portal is asked only with text a D-Bus string can be.
-  if (*key == '\0' || !g_utf8_validate(key, -1, nullptr)) {
-    end_portal_drop(nullptr, "unreached", files_named(drop));
-    return;
+// drop is still going: a source may end its transfer once the drop is finished. From here
+// the drop waits for the portal's answer alone, which is then taken (or judged) whenever it
+// comes within kPortalWaitMs: what the portal exported is not left untaken.
+static void retrieve(Drop *drop, const gchar *key) {
+  if (drop->deadline != 0) {
+    g_source_remove(drop->deadline);
+    drop->deadline = 0;
   }
-  g_autoptr(GError) error = nullptr;
-  g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-  if (bus == nullptr) {
-    g_warning("desktop_drop: no session bus: %s", error->message);
-    end_portal_drop(nullptr, "unreached", files_named(drop));
+  // The portal is asked only with text a D-Bus string can be.
+  if (*key == '\0' || !g_utf8_validate(key, -1, nullptr) || session_bus == nullptr) {
+    end_drop(TRUE, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop));
     return;
   }
   g_dbus_connection_call(
-      bus, "org.freedesktop.portal.Documents", "/org/freedesktop/portal/documents",
+      session_bus, "org.freedesktop.portal.Documents", "/org/freedesktop/portal/documents",
       "org.freedesktop.portal.FileTransfer", "RetrieveFiles",
       g_variant_new("(s@a{sv})", key,
                     g_variant_new_array(G_VARIANT_TYPE("{sv}"), nullptr, 0)),
@@ -171,13 +222,15 @@ static void retrieve(PortalDrop *drop, const gchar *key) {
       GUINT_TO_POINTER(drop->serial));
 }
 
-// The Dart part's judgement of the list: how many of its files it refuses. Any other
-// answer, or none, refuses the drop too: the portal is asked only when it says 0.
+// The Dart part's judgement of the drop: how many files of its list it refuses (then the
+// portal is not asked), 0 to ask the portal, -1 when it could not judge the list (a line
+// that is no file of this computer, none at all, no judge), -2 when no drop target takes a
+// drop there. Any other answer, or none, is taken as -1.
 static void on_checked(GObject *source, GAsyncResult *result, gpointer serial) {
   g_autoptr(GError) error = nullptr;
   g_autoptr(FlMethodResponse) response =
       fl_method_channel_invoke_method_finish(FL_METHOD_CHANNEL(source), result, &error);
-  PortalDrop *drop = current_drop(serial);
+  Drop *drop = drop_of(serial);
   if (drop == nullptr) {
     return;
   }
@@ -188,11 +241,41 @@ static void on_checked(GObject *source, GAsyncResult *result, gpointer serial) {
       refused = fl_value_get_int(value);
     }
   }
-  if (refused != 0) {
-    end_portal_drop(nullptr, "declined", refused > 0 ? refused : 0);
-    return;
+  if (refused == -2) {
+    end_drop(TRUE, FALSE, nullptr, nullptr, nullptr, 0);
+  } else if (refused > 0) {
+    end_drop(TRUE, FALSE, nullptr, "text/uri-list", "declined", refused);
+  } else if (refused != 0) {
+    end_drop(TRUE, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop));
+  } else {
+    request(drop, drop->portal);
   }
-  gtk_drag_get_data(drop->widget, drop->context, drop->portal, drop->time);
+}
+
+// Asks the Dart part about the drop going: where it is, its list's text (null when the
+// source offers none) and the paths GIO reads in that list, as the source's GIO does when
+// it hands the files to the portal ("" for an entry GIO gives no local path).
+static void check(Drop *drop) {
+  g_autoptr(FlValue) args = fl_value_new_list();
+  double point[] = {double(drop->x), double(drop->y)};
+  fl_value_append_take(args, fl_value_new_float_list(point, 2));
+  g_autoptr(FlValue) read = fl_value_new_list();
+  if (drop->list != nullptr) {
+    fl_value_append_take(args, fl_value_new_string(drop->list));
+    g_auto(GStrv) uris = g_uri_list_extract_uris(drop->list);
+    for (gchar **uri = uris; uri != nullptr && *uri != nullptr; uri++) {
+      g_autoptr(GFile) file = g_file_new_for_uri(*uri);
+      g_autofree gchar *path = g_file_get_path(file);
+      const gboolean text =
+          path != nullptr && g_utf8_validate(path, -1, nullptr);
+      fl_value_append_take(read, fl_value_new_string(text ? path : ""));
+    }
+  } else {
+    fl_value_append_take(args, fl_value_new_null());
+  }
+  fl_value_append(args, read);
+  fl_method_channel_invoke_method(drop->channel, "checkPortalDrop", args, nullptr,
+                                  on_checked, GUINT_TO_POINTER(drop->serial));
 }
 
 static gboolean is_portal(GdkAtom target) {
@@ -200,37 +283,51 @@ static gboolean is_portal(GdkAtom target) {
          target == gdk_atom_intern_static_string(kPortalFilesTarget);
 }
 
-// Fogata: the drop itself, inside the Flatpak (outside it, GTK_DEST_DEFAULT_DROP takes it
-// as published). A drop that offers no portal's target is taken as GTK would.
+// Fogata: the drop itself, inside the Flatpak.
 static gboolean on_drag_drop(GtkWidget *widget, GdkDragContext *context, gint x, gint y,
                              guint time, gpointer user_data) {
+  if (current_drop != nullptr) {
+    // A drop still waited for is given up: its source has moved on. On the same context
+    // (Wayland keeps one a seat) finishing it would end the new drop's offer.
+    end_drop(current_drop->context != context, FALSE, nullptr, nullptr, nullptr, 0);
+  }
   const GdkAtom target = gtk_drag_dest_find_target(widget, context, nullptr);
   if (target == GDK_NONE) {
-    return FALSE;
-  }
-  if (!is_portal(target)) {
-    gtk_drag_get_data(widget, context, target, time);
+    // As GTK_DEST_DEFAULT_DROP does: a reply alone finishes no drop.
+    gtk_drag_finish(context, FALSE, FALSE, time);
     return TRUE;
   }
-  if (portal_drop != nullptr) {
-    // A drop still waited for is given up: its source has moved on.
-    end_portal_drop(nullptr, nullptr, 0);
+  current_drop = g_new0(Drop, 1);
+  current_drop->serial = ++drop_serial;
+  current_drop->widget = GTK_WIDGET(g_object_ref(widget));
+  current_drop->context = GDK_DRAG_CONTEXT(g_object_ref(context));
+  current_drop->channel = static_cast<FlMethodChannel *>(user_data);
+  current_drop->x = x;
+  current_drop->y = y;
+  current_drop->time = time;
+  current_drop->portal = is_portal(target) ? target : GDK_NONE;
+  if (current_drop->portal == GDK_NONE) {
+    request(current_drop, target);
+    return TRUE;
   }
-  portal_drop = g_new0(PortalDrop, 1);
-  portal_drop->serial = ++portal_serial;
-  portal_drop->widget = GTK_WIDGET(g_object_ref(widget));
-  portal_drop->context = GDK_DRAG_CONTEXT(g_object_ref(context));
-  portal_drop->channel = static_cast<FlMethodChannel *>(user_data);
-  portal_drop->x = x;
-  portal_drop->y = y;
-  portal_drop->time = time;
-  portal_drop->portal = target;
+  current_drop->deadline =
+      g_timeout_add(kBeforePortalMs, on_deadline, GUINT_TO_POINTER(current_drop->serial));
   const GdkAtom list = gdk_atom_intern_static_string("text/uri-list");
-  const gboolean offers_list =
-      g_list_find(gdk_drag_context_list_targets(context), GDK_ATOM_TO_POINTER(list)) !=
-      nullptr;
-  gtk_drag_get_data(widget, context, offers_list ? list : target, time);
+  if (g_list_find(gdk_drag_context_list_targets(context), GDK_ATOM_TO_POINTER(list)) !=
+      nullptr) {
+    request(current_drop, list);
+  } else {
+    // No list to judge: the Dart part is asked only where the drop is.
+    check(current_drop);
+  }
   return TRUE;
+}
+
+// Fogata: a window destroyed in the middle of a drop ends it.
+static void on_view_destroy(GtkWidget *widget, gpointer user_data) {
+  if (current_drop != nullptr && current_drop->widget == widget) {
+    end_drop(TRUE, FALSE, nullptr, nullptr, nullptr, 0);
+  }
 }
 
 void on_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context,
@@ -244,32 +341,26 @@ void on_drag_data_received(GtkWidget *widget, GdkDragContext *drag_context,
                         gtk_selection_data_get_length(sdata))
             : nullptr;
   if (sandboxed) {
-    PortalDrop *drop = portal_drop != nullptr && portal_drop->context == drag_context
-                           ? portal_drop
-                           : nullptr;
-    if (drop == nullptr) {
-      // Fogata: taken as GTK_DEST_DEFAULT_DROP takes it outside the Flatpak: a list of
-      // files, and nothing when the source gave no data.
-      if (given && target == gdk_atom_intern_static_string("text/uri-list")) {
-        g_autofree gchar *name = gdk_atom_name(target);
-        send_drop(channel, data, x, y, name, nullptr, 0);
-      }
-      gtk_drag_finish(drag_context, given, FALSE, time);
+    Drop *drop = current_drop;
+    if (drop == nullptr || drop->time != time || drop->awaiting != target) {
+      // Not what the drop going asked for: a late answer to one given up.
       return;
     }
-    if (!given) {
-      end_portal_drop(nullptr, "unreached", files_named(drop));
-    } else if (!is_portal(target) && drop->list == nullptr) {
-      // The list first, judged by the Dart part before the portal is asked.
-      drop->list = static_cast<gchar *>(g_steal_pointer(&data));
-      g_autoptr(FlValue) args = fl_value_new_list();
-      fl_value_append_take(args, fl_value_new_string(drop->list));
-      fl_method_channel_invoke_method(channel, "checkPortalDrop", args, nullptr, on_checked,
-                                      GUINT_TO_POINTER(drop->serial));
+    drop->awaiting = GDK_NONE;
+    if (drop->portal == GDK_NONE) {
+      // Fogata: as GTK_DEST_DEFAULT_DROP takes it outside the Flatpak: a list of files,
+      // and nothing when the source gave no data.
+      g_autofree gchar *name = gdk_atom_name(target);
+      const gboolean list = given && target == gdk_atom_intern_static_string("text/uri-list");
+      end_drop(TRUE, given, list ? data : nullptr, name, nullptr, 0);
+    } else if (!given) {
+      end_drop(TRUE, FALSE, nullptr, "text/uri-list", "unreached", files_named(drop));
     } else if (is_portal(target)) {
       retrieve(drop, g_strstrip(data));
     } else {
-      end_portal_drop(nullptr, "unreached", files_named(drop));
+      // The list first, judged by the Dart part before the portal is asked.
+      drop->list = static_cast<gchar *>(g_steal_pointer(&data));
+      check(drop);
     }
     return;
   }
@@ -352,11 +443,9 @@ static void desktop_drop_plugin_handle_method_call(
                                    nullptr);
       return;
     }
-    g_autoptr(GError) error = nullptr;
-    g_autoptr(GDBusConnection) bus = g_bus_get_sync(G_BUS_TYPE_SESSION, nullptr, &error);
-    if (bus == nullptr) {
-      g_warning("desktop_drop: no session bus: %s", error->message);
-      fl_method_call_respond_error(method_call, "portal", error->message, nullptr, nullptr);
+    if (session_bus == nullptr) {
+      fl_method_call_respond_error(method_call, "portal", "no session bus", nullptr,
+                                   nullptr);
       return;
     }
     GVariantBuilder ids;
@@ -368,11 +457,10 @@ static void desktop_drop_plugin_handle_method_call(
       }
     }
     g_dbus_connection_call(
-        bus, "org.freedesktop.portal.Documents", "/org/freedesktop/portal/documents",
+        session_bus, "org.freedesktop.portal.Documents", "/org/freedesktop/portal/documents",
         "org.freedesktop.portal.Documents", "GetHostPaths", g_variant_new("(as)", &ids),
-        G_VARIANT_TYPE("(a{say})"), G_DBUS_CALL_FLAGS_NONE, kPortalWaitMs, nullptr,
-        on_host_paths,
-        g_object_ref(method_call));
+        G_VARIANT_TYPE("(a{say})"), G_DBUS_CALL_FLAGS_NONE, kHostPathsWaitMs, nullptr,
+        on_host_paths, g_object_ref(method_call));
     return;
   }
   fl_method_call_respond_not_implemented(method_call, nullptr);
@@ -453,6 +541,8 @@ void desktop_drop_plugin_register_with_registrar(FlPluginRegistrar *registrar) {
                    G_CALLBACK(on_drag_leave), channel);
   if (sandboxed) {
     g_signal_connect(GTK_WIDGET(fl_view), "drag-drop", G_CALLBACK(on_drag_drop), channel);
+    g_signal_connect(GTK_WIDGET(fl_view), "destroy", G_CALLBACK(on_view_destroy), nullptr);
+    g_bus_get(G_BUS_TYPE_SESSION, nullptr, on_session_bus, nullptr);
   }
   g_signal_connect(fl_view, "focus-in-event",
                    G_CALLBACK(on_focus_in_event), nullptr);

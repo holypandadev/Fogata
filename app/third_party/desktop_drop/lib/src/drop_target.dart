@@ -104,6 +104,8 @@ class _DropTargetState extends State<DropTarget> {
     DesktopDrop.instance.init();
     if (widget.enable) {
       DesktopDrop.instance.addRawDropEventListener(_onDropEvent);
+      // Fogata: the point of a drop it takes (DesktopDrop.holds).
+      DesktopDrop.instance.addHolder(_holds);
     }
   }
 
@@ -112,8 +114,10 @@ class _DropTargetState extends State<DropTarget> {
     super.didUpdateWidget(oldWidget);
     if (widget.enable && !oldWidget.enable) {
       DesktopDrop.instance.addRawDropEventListener(_onDropEvent);
+      DesktopDrop.instance.addHolder(_holds);
     } else if (!widget.enable && oldWidget.enable) {
       DesktopDrop.instance.removeRawDropEventListener(_onDropEvent);
+      DesktopDrop.instance.removeHolder(_holds);
       if (_status != _DragTargetStatus.idle) {
         _updateStatus(
           _DragTargetStatus.idle,
@@ -220,8 +224,19 @@ class _DropTargetState extends State<DropTarget> {
   void dispose() {
     if (widget.enable) {
       DesktopDrop.instance.removeRawDropEventListener(_onDropEvent);
+      DesktopDrop.instance.removeHolder(_holds);
     }
     super.dispose();
+  }
+
+  /// Fogata: whether this target holds [location], a point of a drop (DesktopDrop.holds).
+  bool _holds(Offset location) {
+    if (!mounted) return false;
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null || !renderBox.hasSize) return false;
+    final position =
+        renderBox.globalToLocal(_scaleHoverPoint(context, location));
+    return renderBox.paintBounds.contains(position);
   }
 
   @override

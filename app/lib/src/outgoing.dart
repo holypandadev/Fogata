@@ -151,26 +151,30 @@ class _DropZoneState extends State<DropZone> {
     // The chat may have changed meanwhile.
     if (!mounted || to.at() != at) return;
     if (judged.private.isNotEmpty) {
-      widget.state.say(to.leftOut(judged.private.length), error: true);
+      widget.state.say(to.leftOut(judged.private.toSet().length), error: true);
     }
     if (judged.unknown.isNotEmpty) {
-      widget.state.say(to.unknownLeftOut(judged.unknown.length), error: true);
+      widget.state.say(
+        to.unknownLeftOut(judged.unknown.toSet().length),
+        error: true,
+      );
     }
     if (unreachable.isNotEmpty) {
-      widget.state.say(to.unreachable(unreachable.length), error: true);
+      widget.state.say(to.unreachable(unreachable.toSet().length), error: true);
     }
     if (chosen.isNotEmpty) await to.add(chosen, judged.real);
   }
 
   /// A drop whose files the drop plugin did not take from the FileTransfer portal (inside
-  /// the Flatpak): said, and nothing added.
+  /// the Flatpak): said, and nothing added. Only a drop that names files it refuses is
+  /// called declined; any other (none named, none judged) could not be reached.
   void _refused(DropDoneDetails details) {
-    final n = details.portalCount < 1 ? 1 : details.portalCount;
+    final n = details.portalCount;
     final to = _to;
     widget.state.say(
-      details.portalRefusal == LinuxPortalRefusal.declined
+      details.portalRefusal == LinuxPortalRefusal.declined && n > 0
           ? to.declined(n)
-          : to.unreachable(n),
+          : to.unreachable(n > 0 ? n : 1),
       error: true,
     );
   }
