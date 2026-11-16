@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 
 import '../photo.dart';
+import '../private_places.dart' show realPlace;
 import '../rust/api/app.dart' as api;
 import '../rust/api/types.dart';
 import '../safe_image.dart';
@@ -52,7 +53,8 @@ class SeenFile {
 }
 
 /// A file dropped on a room or picked for it, waiting to be sent, and the folder it is
-/// in (links followed), shown beside it.
+/// in (links followed; inside the Flatpak, for a file of the document portal, the folder
+/// the portal says it really is in), shown beside it.
 class OutgoingFile {
   OutgoingFile(this.path, this.name, this.size, {this.folder = ''});
   final String path;
@@ -90,7 +92,10 @@ Future<(List<OutgoingFile>, int)> readOutgoing(Iterable<String> paths) async {
         .split(Platform.isWindows ? RegExp(r'[\\/]') : RegExp('/'))
         .last;
     try {
-      final real = File(await File(path).resolveSymbolicLinks());
+      final linked = await File(path).resolveSymbolicLinks();
+      // The document portal's path names a folder of its own for each file
+      // (`/run/user/<id>/doc/<id>`), which tells the person nothing.
+      final real = File(await realPlace(linked) ?? linked);
       files.add(
         OutgoingFile(
           path,

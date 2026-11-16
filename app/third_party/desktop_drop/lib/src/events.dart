@@ -27,10 +27,10 @@ class DropUpdateEvent extends DropEvent {
 class DropDoneEvent extends DropEvent {
   final List<DropItem> files;
 
-  /// Fogata: the text of a Linux drop as the plugin received it, a `text/uri-list` (one
+  /// Fogata: the text of a Linux drop as the plugin handed it on, a `text/uri-list` (one
   /// URI per line), whatever lines of it name no file of this computer: [files] has only
-  /// those that do. This copy does not take the FileTransfer portal's target, so it is
-  /// never a portal's transfer key (see FOGATA.md).
+  /// those that do. It is never a portal's transfer key: inside the Flatpak the plugin
+  /// hands on the files the FileTransfer portal gave as such a list (see FOGATA.md).
   ///
   /// Is `null` on platforms where raw text isn't exposed (Windows,
   /// macOS, or when the platform channel doesn't provide it).

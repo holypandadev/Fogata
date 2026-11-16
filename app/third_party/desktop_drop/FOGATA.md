@@ -21,22 +21,36 @@ Changed, each place marked `Fogata:` in the code:
 - `linux/desktop_drop_plugin.cc` hands its message's list and values over with
   `g_autoptr` and `fl_value_append_take`, so they are freed once sent: as published the list
   was never freed (0.8.4 frees the list, not the values in it).
-- 0.8.1's FileTransfer portal (`application/vnd.portal.filetransfer`, through the dbus
-  package, MPL-2.0) is left out: `lib/src/channel.dart` has no `performOperation_portal`,
-  `pubspec.yaml` no dbus, and the plugin takes the portal's target from no drag. GTK 3 adds
-  the portal's targets to the list of files' own where a portal runs, on any desktop; a drag
-  that offers only those is shown as something that can be dropped, and its drop, which
-  is not a `text/uri-list`, gives nothing, as in this copy of 0.8.0. A file dropped through
-  the portal arrives as a path of the document portal (`/run/user/<id>/doc/<id>/<name>`), whatever
-  the place it was dragged from: the application's check of private places
-  (`app/lib/src/private_places.dart`) would let through a file dragged from `~/.ssh` or a
-  browser's profile, as GTK hands every file of a drag to the portal by itself. Taking the
-  portal needs that check to judge each file by its real place first (the Documents
-  portal's `GetHostPaths`), inside the Flatpak only, and then tried on a real desktop.
+- 0.8.1's FileTransfer portal (`application/vnd.portal.filetransfer`) is taken in
+  `linux/desktop_drop_plugin.cc` itself, through GIO, not in the Dart part through the dbus
+  package (MPL-2.0), which this copy does not depend on (`lib/src/channel.dart` has no
+  `performOperation_portal`, `pubspec.yaml` no dbus), and inside the Flatpak only (where
+  `/.flatpak-info` is). There the sandbox sees none of the computer's files but the
+  downloads folder, so the list of files of a drag from a file manager names paths it
+  cannot open. The portal's targets (`application/vnd.portal.filetransfer`, and the older
+  `application/vnd.portal.files` GTK 3 also offers) come before the list of files: GTK takes
+  the first target of the drop's list the source offers, and GTK and KDE applications offer
+  the portal's beside the list. The plugin asks the portal for the files (`RetrieveFiles`,
+  at most five seconds) while the drop is still going, as 0.9.0 does, since a source may end
+  its transfer once the drop is finished, and hands them on as a `text/uri-list` of the
+  paths the portal gave: the document portal's (`/run/user/<id>/doc/<id>/<name>`), or the
+  file's own where the sandbox sees it already (the downloads folder). A key that is empty
+  or not UTF-8, or a portal that gives nothing, drops nothing. A source that offers only the
+  list of files is read as before. Outside the Flatpak the targets are those of 0.8.0: the
+  list first, then the portal's, which GTK adds where a portal runs and which drop nothing.
+- A document portal's path says nothing of where the file really is: GTK hands every file
+  of a drag to the portal by itself, a page's drag that names `~/.ssh/id_ed25519` among
+  them, and it arrives as `/run/user/<id>/doc/<id>/id_ed25519`. So the plugin also answers
+  `documentHostPaths` (`lib/src/channel.dart`), asking the Documents portal where the
+  documents with the ids given really are (`GetHostPaths`, version 5 of its interface,
+  xdg-desktop-portal 1.19 and later) and giving each path as its bytes; an id the portal
+  does not answer for, or every id when it cannot be asked or is older, is left out. The
+  application judges each such file by that place (`app/lib/src/private_places.dart`,
+  `realPlace`), and one whose place cannot be learnt is not added.
 - `lib/src/channel.dart`'s `performOperation_linux` is Fogata's (above); it hands on the
   text of a Linux drop as `rawText`, as published (the application does not read it), and
   `lib/src/events.dart` and `lib/src/drop_target.dart` say so of `rawText`, which here is
-  never a portal's transfer key.
+  never a portal's transfer key: the plugin hands on the portal's files as a list.
 - `pubspec.yaml` no longer says `resolution: workspace`, which only fits the plugin's own
   repository.
 
@@ -60,8 +74,8 @@ Reviewed against desktop_drop 0.9.2 (2026-11-15): the fork stays on 0.8.4.
   channel written again. Its Linux code takes files only from a `text/uri-list`, as
   `file:` entries of this computer (or the portal's), which is what Fogata's change above
   does; a query in an entry is read there as part of the name.
-- Its fixes: the portal transfer kept alive until its files are found (Linux; the portal
-  is left out here, above), mouse events let through to native views outside a drag (macOS;
+- Its fixes: the portal transfer kept alive until its files are found (Linux; done here in
+  the plugin, above), mouse events let through to native views outside a drag (macOS;
   Fogata embeds no native view), drops on the web. 0.9.1 (a crash at start on Windows,
   from tasks of 0.9.0's own native bridge) and 0.9.2 (Android's Gradle) fix 0.9.0's code
   only.

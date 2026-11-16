@@ -70,6 +70,19 @@ class DesktopDrop {
     return result;
   }
 
+  /// Fogata: where the document portal's files with these [ids] really are, as the
+  /// Documents portal says (`GetHostPaths`), each path as the bytes of its name. Linux only.
+  /// An id the portal does not answer for is left out: one this application was not given,
+  /// and every id when the portal cannot be asked or is too old to say (before version 5 of
+  /// its interface).
+  Future<Map<String, Uint8List>> documentHostPaths(List<String> ids) async {
+    final answer = await _channel.invokeMapMethod<String, Uint8List>(
+      'documentHostPaths',
+      ids,
+    );
+    return answer ?? const {};
+  }
+
   Future<void> _handleMethodChannel(MethodCall call) async {
     switch (call.method) {
       case "entered":

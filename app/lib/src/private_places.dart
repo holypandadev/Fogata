@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 
+import 'package:desktop_drop/desktop_drop.dart' show DesktopDrop;
 import 'package:flutter/foundation.dart';
 
 import 'host.dart';
@@ -193,8 +194,10 @@ String? _accountHome() {
 
 /// Those of [paths] that are hidden or in a private place ([isPrivatePlace]), looking at
 /// where each really is as well as at how it was named: a link in a plain folder can point
-/// into `.ssh`. [homes] are the user's folders ([homeFolders]) unless a test gives them.
-/// Read without holding up the window.
+/// into `.ssh`, and inside the Flatpak a file of the document portal is judged by the place
+/// the portal says it is in ([realPlace]), one whose place cannot be learnt as private.
+/// [homes] are the user's folders ([homeFolders]) unless a test gives them. Read without
+/// holding up the window.
 ///
 /// A hard link to a private file, made in a plain folder, is not found: nothing tells it
 /// from the file itself. Making one takes the user's own rights over that folder, and so
@@ -209,10 +212,18 @@ Future<List<String>> privatePaths(
   for (final path in paths) {
     bool privateHere(String path) =>
         homesNow.any((home) => isPrivatePlace(path, system: host, home: home));
-    var private = privateHere(path);
+    Future<bool> privateThere(String path) async {
+      final real = await realPlace(path);
+      // A document is judged by its real place alone, which ends in its own name: Flatpak
+      // shows the portal's folder at `/run/flatpak/doc`, which is no private place.
+      return real == null || privateHere(real);
+    }
+
+    var private = await privateThere(path);
     if (!private) {
       try {
-        private = privateHere(await File(path).resolveSymbolicLinks());
+        final linked = await File(path).resolveSymbolicLinks();
+        if (linked != path) private = await privateThere(linked);
       } on Exception {
         // Gone, unreadable or no path: it will not be added either.
       }
@@ -220,4 +231,92 @@ Future<List<String>> privatePaths(
     if (private) found.add(path);
   }
   return found;
+}
+
+/// Whether this runs inside a Flatpak, where files can come through the document portal;
+/// the tests set it.
+@visibleForTesting
+bool inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
+
+/// Asks the document portal where its files with these ids really are (the drop plugin's
+/// `documentHostPaths`); the tests put their own in its place.
+@visibleForTesting
+Future<Map<String, Uint8List>> Function(List<String> ids) documentHostPaths =
+    DesktopDrop.instance.documentHostPaths;
+
+/// How many of [parts] name the document portal's folder as a sandboxed application sees
+/// it: `/run/user/<uid>/doc`, or `/run/flatpak/doc`, where Flatpak mounts it and to which
+/// the first leads; 0 when they do not begin with it.
+int _portalFolder(List<String> parts) {
+  if (parts.length >= 4 &&
+      parts[0] == 'run' &&
+      parts[1] == 'user' &&
+      parts[3] == 'doc') {
+    return 4;
+  }
+  if (parts.length >= 3 &&
+      parts[0] == 'run' &&
+      parts[1] == 'flatpak' &&
+      parts[2] == 'doc') {
+    return 3;
+  }
+  return 0;
+}
+
+/// Whether [path], with `.` and `..` worked out, is in the document portal's folder as a
+/// sandboxed application sees it (`/run/user/<id>/doc` or `/run/flatpak/doc`), or is that
+/// folder.
+bool inDocumentPortal(String path) => _portalFolder(_parts(path, false)) > 0;
+
+/// The id and name of the document portal's file at [path], exactly as the portal names
+/// one to a sandboxed application: `/run/user/<uid>/doc/<id>/<name>`, or
+/// `/run/flatpak/doc/<id>/<name>` where that leads, with no `.` or `..` on the way. Null for
+/// any other path, one in the portal's folder among them (deeper in an exported folder, its
+/// listing by application, a name climbing out of it).
+({String id, String name})? portalDocument(String path) {
+  if (!path.startsWith('/') || path.contains('\x00')) return null;
+  final parts = [
+    for (final part in path.split('/'))
+      if (part.isNotEmpty) part,
+  ];
+  final folder = _portalFolder(parts);
+  if (folder == 0 ||
+      parts.length != folder + 2 ||
+      parts.any((part) => part == '.' || part == '..') ||
+      (folder == 4 && !RegExp(r'^[0-9]+$').hasMatch(parts[2])) ||
+      parts[folder] == 'by-app') {
+    return null;
+  }
+  return (id: parts[folder], name: parts[folder + 1]);
+}
+
+/// Where the file at [path] really is, as far as this application can know it: inside the
+/// Flatpak, for a path in the document portal's folder ([inDocumentPortal]), the path the
+/// Documents portal gives for its id ([documentHostPaths]), never one a drag's data named;
+/// any other path is its own place. Null when that cannot be learnt, and the file must then
+/// be taken as private: a path in the portal's folder that is not exactly one of its files
+/// ([portalDocument]), an id the portal does not answer for (not given to this application,
+/// or a portal too old to say), or an answer that is not an absolute path ending in the
+/// file's own name, or is in the portal's folder itself.
+Future<String?> realPlace(String path) async {
+  if (!inFlatpak || !inDocumentPortal(path)) return path;
+  final document = portalDocument(path);
+  if (document == null) return null;
+  final Map<String, Uint8List> places;
+  try {
+    places = await documentHostPaths([document.id]);
+  } on Exception catch (error) {
+    debugPrint('the document portal says no real place: $error');
+    return null;
+  }
+  final bytes = places[document.id];
+  if (bytes == null) return null;
+  final real = utf8.decode(bytes, allowMalformed: true);
+  if (!real.startsWith('/') ||
+      real.contains('\x00') ||
+      inDocumentPortal(real) ||
+      _parts(real, false).lastOrNull != document.name) {
+    return null;
+  }
+  return real;
 }

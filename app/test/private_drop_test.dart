@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
-import 'package:desktop_drop/desktop_drop.dart' show linuxDropPaths;
+import 'package:desktop_drop/desktop_drop.dart'
+    show DesktopDrop, linuxDropPaths;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -301,6 +303,227 @@ void main() {
     });
   }, skip: Platform.isWindows);
 
+  group('inside the Flatpak, the document portal\'s files', () {
+    // The real places the fake portal knows, by id, as this application was given them.
+    late Map<String, String> places;
+    late List<List<String>> asked;
+    const home = ['/home/leo'];
+    setUp(() {
+      inFlatpak = true;
+      asked = [];
+      places = {
+        'a1b2c3d4': '/home/leo/Documents/plan.pdf',
+        'ssh00001': '/home/leo/.ssh/id_ed25519',
+        'profile1': '/home/leo/.mozilla/firefox/x.default/logins.json',
+        'dotenv01': '/home/leo/Projects/.env',
+        'etc00001': '/etc/shadow',
+        'other001': '/home/leo/Documents/other.pdf',
+        'relative': 'Documents/plan.pdf',
+        'portal01': '/run/user/1000/doc/a1b2c3d4/plan.pdf',
+        'dotdot01': '/home/leo/Documents/../.ssh/plan.pdf',
+      };
+      documentHostPaths = (ids) async {
+        asked.add(ids);
+        return {
+          for (final id in ids)
+            if (places[id] case final place?)
+              id: Uint8List.fromList(utf8.encode(place)),
+        };
+      };
+    });
+    tearDown(() {
+      inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
+      documentHostPaths = DesktopDrop.instance.documentHostPaths;
+    });
+
+    Future<List<String>> privateOf(List<String> paths) =>
+        privatePaths(paths, homes: home);
+
+    test('are judged by where the portal says they are', () async {
+      const plan = '/run/user/1000/doc/a1b2c3d4/plan.pdf';
+      const key = '/run/user/1000/doc/ssh00001/id_ed25519';
+      const logins = '/run/user/1000/doc/profile1/logins.json';
+      const env = '/run/user/1000/doc/dotenv01/.env';
+      const shadow = '/run/user/1000/doc/etc00001/shadow';
+      expect(await privateOf([plan, key, logins, env, shadow]), [
+        key,
+        logins,
+        env,
+        shadow,
+      ]);
+      expect(await realPlace(plan), '/home/leo/Documents/plan.pdf');
+      // Only the id is asked, never a place: the drag's data names none.
+      expect(asked.first, ['a1b2c3d4']);
+      // Where Flatpak mounts the portal's folder, to which /run/user/<uid>/doc leads: the
+      // place a document is found at once its links are followed.
+      expect(
+        await realPlace('/run/flatpak/doc/a1b2c3d4/plan.pdf'),
+        '/home/leo/Documents/plan.pdf',
+      );
+      expect(
+        await privateOf([
+          '/run/flatpak/doc/a1b2c3d4/plan.pdf',
+          '/run/flatpak/doc/ssh00001/id_ed25519',
+        ]),
+        ['/run/flatpak/doc/ssh00001/id_ed25519'],
+      );
+    });
+
+    test('one whose real place cannot be learnt is never added', () async {
+      // Not given to this application, or no longer there.
+      expect(
+        await privateOf(['/run/user/1000/doc/unknown1/plan.pdf']),
+        hasLength(1),
+      );
+      // A portal older than GetHostPaths answers nothing at all, or an error.
+      places = {};
+      expect(
+        await privateOf(['/run/user/1000/doc/a1b2c3d4/plan.pdf']),
+        hasLength(1),
+      );
+      for (final failure in <Exception>[
+        MissingPluginException('no documentHostPaths'),
+        PlatformException(code: 'org.freedesktop.DBus.Error.UnknownMethod'),
+      ]) {
+        documentHostPaths = (_) async => throw failure;
+        expect(
+          await privateOf(['/run/user/1000/doc/a1b2c3d4/plan.pdf']),
+          hasLength(1),
+        );
+      }
+    });
+
+    test('an answer that does not fit the file is not believed', () async {
+      for (final path in [
+        // The portal's file is another name than the real one.
+        '/run/user/1000/doc/other001/plan.pdf',
+        // Not an absolute path, or one in the portal's folder again.
+        '/run/user/1000/doc/relative/plan.pdf',
+        '/run/user/1000/doc/portal01/plan.pdf',
+      ]) {
+        expect(await realPlace(path), isNull, reason: path);
+        expect(await privateOf([path]), [path], reason: path);
+      }
+      // `..` in the answer is worked out before it is judged: it leads into `.ssh`.
+      expect(
+        await privateOf(['/run/user/1000/doc/dotdot01/plan.pdf']),
+        hasLength(1),
+      );
+    });
+
+    test(
+      'a path in the portal\'s folder that is not exactly one of its files is '
+      'never added, and its id never asked',
+      () async {
+        for (final path in [
+          // Deeper, in an exported folder: the portal knows only the folder's place.
+          '/run/user/1000/doc/a1b2c3d4/Photos/lake.jpg',
+          // Dots on the way, which could lead to another document than the id named.
+          '/run/user/1000/doc/ssh00001/../a1b2c3d4/plan.pdf',
+          '/run/user/1000/doc/./a1b2c3d4/plan.pdf',
+          '/run/user/1000/doc/a1b2c3d4/./plan.pdf',
+          '/home/leo/Downloads/../../../run/user/1000/doc/a1b2c3d4/plan.pdf',
+          '/run/user/1000/other/../doc/a1b2c3d4/plan.pdf',
+          // The listing by application, which a sandbox does not see.
+          '/run/user/1000/doc/by-app/a1b2c3d4/plan.pdf',
+          '/run/user/1000/doc/by-app/dev.holypanda.fogata',
+          // The folder itself, and a document's own folder.
+          '/run/user/1000/doc',
+          '/run/user/1000/doc/a1b2c3d4',
+          '/run/user/me/doc/a1b2c3d4/plan.pdf',
+          '/run/flatpak/doc/a1b2c3d4/Photos/lake.jpg',
+          '/run/flatpak/doc/by-app/dev.holypanda.fogata',
+          '/run/flatpak/doc/../doc/a1b2c3d4/plan.pdf',
+          '/run/flatpak/doc',
+        ]) {
+          expect(inDocumentPortal(path), isTrue, reason: path);
+          expect(await realPlace(path), isNull, reason: path);
+          expect(await privateOf([path]), [path], reason: path);
+        }
+        expect(asked, isEmpty);
+      },
+    );
+
+    test('the portal\'s files are told exactly', () {
+      expect(portalDocument('/run/user/1000/doc/a1b2c3d4/plan.pdf'), (
+        id: 'a1b2c3d4',
+        name: 'plan.pdf',
+      ));
+      // Doubled slashes name the same file.
+      expect(portalDocument('//run/user/1000//doc/a1b2c3d4/plan.pdf'), (
+        id: 'a1b2c3d4',
+        name: 'plan.pdf',
+      ));
+      expect(portalDocument('/run/flatpak/doc/a1b2c3d4/plan.pdf'), (
+        id: 'a1b2c3d4',
+        name: 'plan.pdf',
+      ));
+      for (final path in [
+        'run/user/1000/doc/a1b2c3d4/plan.pdf',
+        '/run/flatpak/doc/a1b2c3d4/plan.pdf/x',
+        '/run/flatpak/plan.pdf',
+        '/run/user/1000/doc/a1b2c3d4/plan.pdf/x',
+        '/run/user/1000/doc/a1b2c3d4/..',
+        '/run/user/1000/doc/a1b2c3d4/plan\x00.pdf',
+        '/home/leo/run/user/1000/doc/a1b2c3d4/plan.pdf',
+      ]) {
+        expect(portalDocument(path), isNull, reason: path);
+      }
+      for (final path in [
+        '/run/flatpak/docs/a1b2c3d4/plan.pdf',
+        '/run/flatpak/app/plan.pdf',
+        '/home/leo/Documents/plan.pdf',
+        '/run/user/1000/plan.pdf',
+        '/run/user',
+      ]) {
+        expect(inDocumentPortal(path), isFalse, reason: path);
+      }
+    });
+
+    test(
+      'any other file is judged as before, without asking the portal',
+      () async {
+        // The downloads folder, which the Flatpak sees itself: the portal hands its files
+        // over by their own path.
+        expect(
+          await realPlace('/home/leo/Downloads/report.pdf'),
+          '/home/leo/Downloads/report.pdf',
+        );
+        expect(
+          await privateOf([
+            '/home/leo/Downloads/report.pdf',
+            '/home/leo/Downloads/.hidden.pdf',
+            '/run/flatpak/app/plan.pdf',
+          ]),
+          ['/home/leo/Downloads/.hidden.pdf', '/run/flatpak/app/plan.pdf'],
+        );
+        expect(asked, isEmpty);
+      },
+    );
+
+    test('a name that is not UTF-8 is still judged by its dots', () async {
+      documentHostPaths = (ids) async => {
+        ids.single: Uint8List.fromList([
+          ...utf8.encode('/home/leo/'),
+          0xff,
+          ...utf8.encode('/.ssh/plan.pdf'),
+        ]),
+      };
+      expect(
+        await privateOf(['/run/user/1000/doc/a1b2c3d4/plan.pdf']),
+        hasLength(1),
+      );
+    });
+
+    test('outside the Flatpak nothing is asked, as before', () async {
+      inFlatpak = false;
+      const plan = '/run/user/1000/doc/ssh00001/id_ed25519';
+      expect(await realPlace(plan), plan);
+      expect(await privateOf([plan]), isEmpty);
+      expect(asked, isEmpty);
+    });
+  });
+
   group('what browsers drop on Linux', () {
     // The payloads browsers hand over on X11 and on Wayland when a page starts
     // a drag that names files, as GTK gives them to the drop plugin: the target and its
@@ -539,6 +762,34 @@ void main() {
       await drop(tester, [secret, plain]);
       await drop(tester, [other]);
       expect(waiting(state), [plain, other]);
+    }, skip: !Platform.isLinux);
+
+    testWidgets('inside the Flatpak, a file of the document portal that is really in .ssh is '
+        'left out, whatever the drop named', (tester) async {
+      inFlatpak = true;
+      addTearDown(() {
+        inFlatpak = Platform.isLinux && File('/.flatpak-info').existsSync();
+        documentHostPaths = DesktopDrop.instance.documentHostPaths;
+      });
+      documentHostPaths = (ids) async => {
+        if (ids.single == 'ssh00001')
+          'ssh00001': Uint8List.fromList(
+            utf8.encode('/home/leo/.ssh/id_ed25519'),
+          ),
+      };
+      final state = await pump(tester);
+      // As a page could name a file the portal gave this application before, or as the
+      // portal hands it over: either way it is judged by where the portal says it is.
+      await dropText(
+        tester,
+        'file:///run/user/1000/doc/ssh00001/id_ed25519\r\n'
+        'file:///run/user/1000/doc/unknown1/notes.txt\r\n',
+      );
+      expect(waiting(state), isEmpty);
+      expect(
+        state.toasts.list.map((t) => t.text),
+        contains(contains('2 hidden or private files')),
+      );
     }, skip: !Platform.isLinux);
 
     testWidgets('a drop is dropped if the room changed meanwhile', (

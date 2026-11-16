@@ -230,9 +230,9 @@ microphone when muted, their camera when it is on) and a wider tile per shared s
 controls turn the microphone, camera and screen on and off, pick a screen or window to
 share, open the device choices, hide or show the chat and leave. Files picked with the
 chat's clip or dropped anywhere on the room (`desktop_drop` 0.8.4, our copy in
-`app/third_party/desktop_drop`, without 0.8.1's FileTransfer portal, which the check of
-private places below would first have to see through, and the MPL `dbus` package it needs;
-0.9 needs a `cross_file` that `file_selector` does not take yet) wait above
+`app/third_party/desktop_drop`, with 0.8.1's FileTransfer portal asked by the plugin itself
+inside the Flatpak, not through the MPL `dbus` package, see below; 0.9 needs a `cross_file`
+that `file_selector` does not take yet) wait above
 the message box, each with its size and the folder it is in, a small picture for images and
 a button to take it out; only files of this computer go: on Linux a drop is taken only as a
 list of files (`text/uri-list`, its `file:` entries), never as text that reads as a path, and
@@ -249,10 +249,23 @@ can do. Names are read as the system reads them: `..` worked out, without their 
 and Windows (the long s and the Kelvin sign as s and k), Windows' trailing dots and spaces
 and its short names (`APPDAT~1`), and where each really is, links followed. The user's
 Library is looked for under the account's own folder as well as under `HOME`, which macOS's
-App Sandbox points at the application's container. Inside a Flatpak, files dropped from
-outside the sandbox arrive as the document portal's paths (`/run/user/<id>/doc/...`), and
-it is the portal that decides what the application may read: only what the person dragged
-is exported. A file waiting or being sent is not added again; files that fail wait again without
+App Sandbox points at the application's container. The Flatpak sees no more of the
+computer than its downloads folder, so a drag's list of files names paths it cannot open
+anywhere else; there the FileTransfer portal's targets come first, which GTK and KDE
+applications offer beside the list: the plugin asks the portal for the files while the drop
+goes on, and they arrive as the document portal's paths (`/run/user/<id>/doc/<id>/<name>`,
+which leads to `/run/flatpak/doc/<id>/<name>` in the sandbox), or by their own path in the
+downloads folder. A document portal's path says nothing of where
+the file is, and GTK hands to the portal any file a drag names, a page's drag too: so a file
+in the portal's folder is judged by the place the Documents portal gives for its id
+(`GetHostPaths`, xdg-desktop-portal 1.19 and later), never by anything the drag carried, and
+the tray shows that place's folder. One whose place cannot be learnt is left out with the
+same notice: a portal too old to say, an id not given to Fogata, a path in the portal's
+folder that is not exactly `<id>/<name>` (under either name of the folder), an answer that is not an absolute path ending in
+the file's name. A source that offers only the list still hands over paths the Flatpak
+cannot open outside the downloads folder, and those are left out without a word, as files
+that are not there. Outside the Flatpak the list comes first, and nothing is asked of the
+portal. A file waiting or being sent is not added again; files that fail wait again without
 changing the tab, and a send stops when the room is left. Files picked with the file picker do not ask. Send (or Enter) shares them with the message
 typed, if any, which goes first, and Esc takes them all out. Folders are left out, and
 said so. A file that follows its sender's message by a few seconds shows under it. A right
