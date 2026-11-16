@@ -1,11 +1,13 @@
 // A window that drags the files named on its command line, offering what a GTK file manager
 // offers: the list of files (`text/uri-list`) and, where the FileTransfer portal runs, the
 // portal's targets, through which GTK hands the files to a sandboxed application by itself.
-// With --uri-only it offers the list alone, as a source that knows nothing of the portal.
+// With --uri-only it offers the list alone, as a source that knows nothing of the portal;
+// with --raw its arguments are the list's entries as they are (any URI, as a web page can
+// write them); with --second its window is another one (drop.sh's two drags in a row).
 // It says on stderr which targets each drag offered, which one the other side asked for, and
 // how the drag ended. tools/smoke-wayland/drop.sh drags from it.
 //
-//     drag_source [--uri-only] <file>...
+//     drag_source [--uri-only] [--raw] [--second] <file or URI>...
 #include <gtk/gtk.h>
 #include <stdio.h>
 #include <string.h>
@@ -47,14 +49,22 @@ static void on_map(GtkWidget *widget, gpointer data) {
 
 int main(int argc, char **argv) {
   gtk_init(&argc, &argv);
-  gboolean uri_only = FALSE;
+  gboolean uri_only = FALSE, raw = FALSE, second = FALSE;
   GPtrArray *list = g_ptr_array_new();
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--uri-only") == 0) {
       uri_only = TRUE;
       continue;
     }
-    gchar *uri = g_filename_to_uri(argv[i], NULL, NULL);
+    if (strcmp(argv[i], "--raw") == 0) {
+      raw = TRUE;
+      continue;
+    }
+    if (strcmp(argv[i], "--second") == 0) {
+      second = TRUE;
+      continue;
+    }
+    gchar *uri = raw ? g_strdup(argv[i]) : g_filename_to_uri(argv[i], NULL, NULL);
     if (uri == NULL) {
       fprintf(stderr, "drag source: %s is no absolute path\n", argv[i]);
       return 2;
@@ -62,14 +72,15 @@ int main(int argc, char **argv) {
     g_ptr_array_add(list, uri);
   }
   if (list->len == 0) {
-    fprintf(stderr, "usage: drag_source [--uri-only] <file>...\n");
+    fprintf(stderr, "usage: drag_source [--uri-only] [--raw] [--second] <file>...\n");
     return 2;
   }
   g_ptr_array_add(list, NULL);
   uris = (gchar **)g_ptr_array_free(list, FALSE);
 
   GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-  gtk_window_set_title(GTK_WINDOW(window), "Fogata drag source");
+  gtk_window_set_title(GTK_WINDOW(window),
+                       second ? "Fogata drag source two" : "Fogata drag source");
   gtk_window_set_default_size(GTK_WINDOW(window), 300, 200);
   g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
   g_signal_connect(window, "map", G_CALLBACK(on_map), NULL);

@@ -7,20 +7,24 @@
 # of the files, the downloads folder alone) runs in turn, and a GTK window outside the
 # sandbox (drag_source.c, which offers what a GTK file manager offers: the list of files
 # and the FileTransfer portal's targets, or with --uri-only the list alone) is dragged onto
-# it with KWin's fake input (fake_pointer.c), one drop after the other:
 #    1 ~/Downloads/report.pdf          (the folder the Flatpak sees)
 #    2 ~/Documents/plan.pdf            (one it does not)
 #    3 ~/.ssh/id_ed25519
 #    4 ~/Documents/.env                (a hidden name)
-#    5 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
-#    6 ~/Documents/plan.pdf            from a source that offers the list alone
-#    7 ~/Downloads/report.pdf          from a source that offers the list alone
-#    8 the document portal's path drop 5 brought, named by a source that offers the
-#      list alone, as a page could name a file the portal gave Fogata before (when
-#      drop 5 brought one)
+#  5-8 the key named as a web page can write it, which the source's GIO still reads as
+#      the key: with a fragment, with a query, with another host, with
+#      `localhost.localdomain`
 #    9 ~/Documents/plan.pdf and ~/.ssh/id_ed25519 together
-#   10 ~/Documents/nowhere.pdf, which is not there, from a source that offers the list
-#      alone: the copy must say what it says of drop 6
+#   10 ~/Documents/plan.pdf            from a source that offers the list alone
+#   11 ~/Downloads/report.pdf          from a source that offers the list alone
+#   12 ~/Documents/nowhere.pdf, which is not there, from a source that offers the list
+#      alone: the copy must say what it says of drop 10
+#   13 ~/Documents/plan.pdf and then ~/Downloads/report.pdf from another window, two
+#      drags in a row: the second is taken as itself
+#   14 ~/Documents/innocent.jpg        (a link to ~/.ssh/id_ed25519)
+#   15 the document portal's path drop 14 brought, named by a source that offers the
+#      list alone, as a page could name a file the portal gave Fogata before (when
+#      drop 14 brought one)
 # The copy's drop zone writes, for each drop, the paths the drop plugin handed over, the
 # files it took (with the folder shown) and what it said (drop_portal_test.dart); the drag
 # source's log says which targets the copy asked for, and `flatpak documents` which files
@@ -55,11 +59,13 @@ time.sleep(0.2)
 script.stop(dbus_interface="org.kde.kwin.Script")' "$DROP_OUT" "$1"
 }
 
-# The drag source on the left, the copy on the right, apart.
+# The drag sources on the left (the second under the first), the copy on the right, apart.
 place() {
   kwin 'for (const w of workspace.windowList()) {
   if (!w.normalWindow) continue;
-  if (w.caption.indexOf("drag source") >= 0) {
+  if (w.caption.indexOf("drag source two") >= 0) {
+    w.frameGeometry = {x: 20, y: 420, width: 400, height: 300};
+  } else if (w.caption.indexOf("drag source") >= 0) {
     w.frameGeometry = {x: 20, y: 20, width: 400, height: 300};
   } else {
     w.frameGeometry = {x: 520, y: 20, width: 1000, height: 760};
@@ -112,6 +118,48 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     # exported to it).
     flatpak documents --columns=origin "$APP_ID" > "$res/documents-$n.txt" 2>&1
   }
+
+  # drag_twice <copy folder> <n> <first file> <second file>: two drags in a row, from two
+  # windows, each released on the copy, the second as soon as the first is.
+  drag_twice() {
+    local res=$1 n=$2
+    "$tools/drag_source" "$3" > "$res/source-$n.log" 2>&1 &
+    local first=$!
+    "$tools/drag_source" --second "$4" > "$res/source-$n-second.log" 2>&1 &
+    local second=$!
+    for _ in $(seq 100); do
+      grep -qs shown "$res/source-$n.log" && grep -qs shown "$res/source-$n-second.log" && break
+      sleep 0.1
+    done
+    sleep 1
+    place
+    sleep 1
+    : > "$res/drop-$n-go"
+    "$tools/fake_pointer" to 220 170 wait 400 press wait 300 \
+      glide 220 170 1000 400 30 20 wait 300 release wait 100 \
+      to 220 570 wait 200 press wait 200 glide 220 570 1000 420 20 15 wait 300 release \
+      wait 500 >> "$res/pointer.log" 2>&1 || echo "drop $n: the pointer failed" >> "$res/pointer.log"
+    for _ in $(seq 400); do
+      [[ -s $res/drop-$n.txt ]] && grep -q '^end' "$res/drop-$n.txt" && break
+      sleep 0.1
+    done
+    kill "$first" "$second" 2> /dev/null
+    wait "$first" "$second" 2> /dev/null
+    flatpak documents --columns=origin "$APP_ID" > "$res/documents-$n.txt" 2>&1
+  }
+
+  # took <copy folder> <n> <what> <name>: drop n took the file called <name> and said
+  # nothing (two drags in a row: the first may be taken too, or given up for the second).
+  took() {
+    local res=$1 n=$2 what=$3 name=$4
+    local file=$res/drop-$n.txt verdict=ok
+    if ! grep -q "^waiting .*/$name"$'\t' "$file" 2> /dev/null || grep -q '^toast ' "$file"; then
+      verdict=WRONG
+      failed=1
+    fi
+    say "$(basename "$res") $n $what: $verdict: took $(grep '^waiting ' "$file" 2> /dev/null | cut -f1 | cut -c9- | tr '\n' ' '); told $(grep -c '^toast ' "$file" 2> /dev/null)"
+  }
+
 
   # exported <copy folder> <n> <what> <name> yes|no: whether a document of the file named
   # (its real path's end) is given to the copy after drop n.
@@ -173,26 +221,32 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
     fi
     place
     h=$HOME
+    key=$h/.ssh/id_ed25519
     drag "$res" 1 "$h/Downloads/report.pdf"
     drag "$res" 2 "$h/Documents/plan.pdf"
-    drag "$res" 3 "$h/.ssh/id_ed25519"
+    drag "$res" 3 "$key"
     drag "$res" 4 "$h/Documents/.env"
-    drag "$res" 5 "$h/Documents/innocent.jpg"
-    drag "$res" 6 --uri-only "$h/Documents/plan.pdf"
-    drag "$res" 7 --uri-only "$h/Downloads/report.pdf"
-    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-5.txt" 2> /dev/null | cut -c5-)
+    drag "$res" 5 --raw "file://$key#x"
+    drag "$res" 6 --raw "file://$key?x"
+    drag "$res" 7 --raw "file://evil$key"
+    drag "$res" 8 --raw "file://localhost.localdomain$key"
+    drag "$res" 9 "$h/Documents/plan.pdf" "$key"
+    drag "$res" 10 --uri-only "$h/Documents/plan.pdf"
+    drag "$res" 11 --uri-only "$h/Downloads/report.pdf"
+    drag "$res" 12 --uri-only "$h/Documents/nowhere.pdf"
+    drag_twice "$res" 13 "$h/Documents/plan.pdf" "$h/Downloads/report.pdf"
+    drag "$res" 14 "$h/Documents/innocent.jpg"
+    earlier=$(grep -m1 '^raw /run/user/' "$res/drop-14.txt" 2> /dev/null | cut -c5-)
     if [[ -n $earlier ]]; then
-      drag "$res" 8 --uri-only "$earlier"
+      drag "$res" 15 --uri-only "$earlier"
     else
       # No drag: the copy writes down that nothing came.
-      : > "$res/drop-8-go"
+      : > "$res/drop-15-go"
       for _ in $(seq 400); do
-        grep -qs '^end' "$res/drop-8.txt" && break
+        grep -qs '^end' "$res/drop-15.txt" && break
         sleep 0.1
       done
     fi
-    drag "$res" 9 "$h/Documents/plan.pdf" "$h/.ssh/id_ed25519"
-    drag "$res" 10 --uri-only "$h/Documents/nowhere.pdf"
     : > "$res/drop-end"
     for _ in $(seq 100); do
       kill -0 "$app" 2> /dev/null || break
@@ -209,11 +263,13 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       judge "$res" 2 documents 0 - 0
       judge "$res" 3 ssh 0 - 1
       judge "$res" 4 hidden 0 - 1
-      judge "$res" 5 link-to-ssh 0 - 0
-      judge "$res" 6 documents-list-only 0 - 0
-      judge "$res" 7 downloads-list-only 1 "$h/Downloads" 0
+      for n in 5 6 7 8; do judge "$res" $n key-written-otherwise 0 - 0; done
       judge "$res" 9 documents-and-ssh 0 - 1
-      judge "$res" 10 nowhere-list-only 0 - 0
+      judge "$res" 10 documents-list-only 0 - 0
+      judge "$res" 11 downloads-list-only 1 "$h/Downloads" 0
+      judge "$res" 12 nowhere-list-only 0 - 0
+      took "$res" 13 two-in-a-row report.pdf
+      judge "$res" 14 link-to-ssh 0 - 0
     else
       private="hidden or private" unreached="could not be reached"
       declined="Drag the others again"
@@ -226,23 +282,31 @@ if [[ ${DROP_INSIDE:-} == 1 ]]; then
       exported "$res" 3 ssh .ssh/id_ed25519 no
       judge "$res" 4 hidden 0 - 1 "$declined"
       exported "$res" 4 hidden Documents/.env no
-      # A link in a plain folder is only found once the portal has given its file: the
-      # document stays given to the copy, which cannot give it back.
-      judge "$res" 5 link-to-ssh 0 - 1 "$private"
-      exported "$res" 5 link-to-ssh .ssh/id_ed25519 yes
-      judge "$res" 6 documents-list-only 0 - 1 "$unreached"
-      judge "$res" 7 downloads-list-only 1 "$h/Downloads" 0
-      if [[ -n $earlier ]]; then
-        judge "$res" 8 earlier-document 0 - 1 "$private"
-      else
-        say "$name 8 earlier-document: WRONG: drop 5 brought no document portal path"
-        failed=1
-      fi
+      # A list whose entries are no plain file of this computer is not judged, and the
+      # portal is not asked.
+      for n in 5 6 7 8; do
+        judge "$res" $n key-written-otherwise 0 - 1 "$unreached"
+        exported "$res" $n key-written-otherwise .ssh/id_ed25519 no
+      done
       # One refused file declines the whole drop.
       judge "$res" 9 documents-and-ssh 0 - 1 "$declined"
+      exported "$res" 9 documents-and-ssh .ssh/id_ed25519 no
+      judge "$res" 10 documents-list-only 0 - 1 "$unreached"
+      judge "$res" 11 downloads-list-only 1 "$h/Downloads" 0
       # The same notice for a file that is nowhere: the notice tells nothing of what the
       # person has outside the sandbox.
-      judge "$res" 10 nowhere-list-only 0 - 1 "$unreached"
+      judge "$res" 12 nowhere-list-only 0 - 1 "$unreached"
+      took "$res" 13 two-in-a-row report.pdf
+      # A link in a plain folder is only found once the portal has given its file: the
+      # document stays given to the copy, which cannot give it back.
+      judge "$res" 14 link-to-ssh 0 - 1 "$private"
+      exported "$res" 14 link-to-ssh .ssh/id_ed25519 yes
+      if [[ -n $earlier ]]; then
+        judge "$res" 15 earlier-document 0 - 1 "$private"
+      else
+        say "$name 15 earlier-document: WRONG: drop 14 brought no document portal path"
+        failed=1
+      fi
     fi
   done
   exit $failed
