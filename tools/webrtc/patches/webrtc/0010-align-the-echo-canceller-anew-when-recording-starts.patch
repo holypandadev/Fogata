@@ -45,7 +45,16 @@ back to them above -50 dBFS):
   mode kept says there is no echo, and the other side heard themselves after the unmute at
   -14 dBFS at the loudest (-20 to -12) for 6.4 s (2.3 to 14.5), where a new AEC3 let
   -31 dBFS (-50 to -19) through for 0.3 s (0 to 2.6). It happens only when the room
-  changes while the microphone is off.
+  changes while the microphone is off;
+- with speakers (unmute:speakers, 3 runs) the other's tone did not go back to them at an
+  unmute;
+- the echo check (mic.sh echo): no turn of 78 let through without stalls; 1 of 103 with
+  PipeWire's quantum free and stalls of 20 and 40 ms; 8 of 164 in 6 runs at 480 with
+  stalls of 40 and 80 ms (4 of 158 without render_properly_started_, 7 of 131 with wrapper
+  patch 0019 alone, within the runs' scatter); a call's first turn 71 dB under one's own
+  voice at the median (37 at the least);
+- the other side talking over one's words (4 runs, against 3 with 0009) cut as much of
+  them, at a call's start, right after an unmute and later.
 
 Tried and left out, each measured against the above in the same series:
 - forcing an echo path change at the first delay found after the restart (to leave the

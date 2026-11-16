@@ -558,7 +558,11 @@ that headroom were each tried: none made that case shorter beyond the runs' scat
 each made a call's start worse (patch 0010's header). The first call in a process is
 unchanged: its AEC3 knows nothing of the room, and with a headset its first seconds hold
 the noise down by about 10 dB as before. Every later call keeps the AEC3 of the one before
-(one audio processing for the process), realigned.
+(one audio processing for the process), realigned. The echo check with both patches let
+no turn of 78 through without stalls, 1 of 103 with the quantum free and stalls of 20 and
+40 ms, and 8 of 164 at 480 with stalls of 40 and 80 ms (4 of 158 without the wait for fresh
+played sound, 7 of 131 with patch 0019 alone: within the runs' scatter); the other side
+talking over one's words cut as much of them as with 0009.
 
 ## Sound of a shared screen (macOS)
 
