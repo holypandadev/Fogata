@@ -82,7 +82,7 @@ diff --git a/modules/audio_processing/aec3/echo_canceller3.cc b/modules/audio_pr
 index 76a556f..ff090d2 100644
 --- a/modules/audio_processing/aec3/echo_canceller3.cc
 +++ b/modules/audio_processing/aec3/echo_canceller3.cc
-@@ -947,6 +947,23 @@ void EchoCanceller3::SetCaptureOutputUsage(bool capture_output_used) {
+@@ -947,6 +947,26 @@ void EchoCanceller3::SetCaptureOutputUsage(bool capture_output_used) {
    block_processor_->SetCaptureOutputUsage(capture_output_used);
  }
  
@@ -97,9 +97,12 @@ index 76a556f..ff090d2 100644
 +// capture locks held, so that neither side runs meanwhile.
 +bool EchoCanceller3::RestartForRecording() {
 +  RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
-+  RTC_DCHECK_RUNS_SERIALIZED(&render_race_checker_);
-+  render_transfer_queue_.Clear();
-+  block_processor_->RestartForRecording();
++  // A scope of its own: each check declares a local of the same name.
++  {
++    RTC_DCHECK_RUNS_SERIALIZED(&render_race_checker_);
++    render_transfer_queue_.Clear();
++    block_processor_->RestartForRecording();
++  }
 +  return true;
 +}
 +

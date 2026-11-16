@@ -502,11 +502,16 @@ stalls but a call's first turn went out less cancelled (57 dB at the median, onc
 18 dB): the longer filters converge more slowly. As patched, later turns are as before
 (72 dB at the median, 73 without) and WebRTC's audio threads use the same processor time
 (2.88 % of a core with it and without). 48 ms let turns through even without stalls.
-Moves larger than the room (a stall of a tenth of a second or more) still can. macOS's
-echo cancelling is Apple's voice processing and its WebRTC does not take the wrapper's
-patches.
+Moves larger than the room (a stall of a tenth of a second or more) still can. On macOS
+the echo is cancelled by WebRTC's own AEC3 too, not by Apple's voice processing: the
+application bypasses it (`bypassVoiceProcessing`, `lib/main.dart`), and with WebRTC's
+noise suppression asked off its options rule the platform path out. That AEC3 is made by
+WebRTC-SDK's `RTCDefaultAudioProcessingModule` (`AudioManager.m`) with stock settings: the
+wrapper's patch 0019 does not reach it, so its headroom stays at 2 ms; patch 0011 leaves
+stock settings as they were. Whether a Mac's audio engine moves the echo as PipeWire does
+has not been measured.
 
-## A microphone turned on again while the other side talks (Linux, Windows)
+## A microphone turned on again while the other side talks (Linux, Windows, macOS)
 
 Turning the microphone off has the voice channel only receive, which stops the audio
 device's recording; turning it on starts it again, and patch 0009 made AEC3 anew there, as
@@ -519,7 +524,10 @@ unmutes each): the first words after an unmute went out 8 dB weaker on average (
 worst) and the room's noise 12 dB lower, for 3 to 6 s, and then came back at once.
 `tools/webrtc/patches/webrtc/0010` keeps the transparent mode when recording starts again:
 AEC3 still drops what it aligned of the played sound with the recorded one (what 0009 was
-for), but not what it knows of the room.
+for), but not what it knows of the room. The WebRTC patches go into macOS's framework too,
+and there muting also makes the voice channel only receive and AEC3 does the cancelling,
+so 0009 made it anew at every unmute on a Mac as well and 0010 applies there (measured on
+Linux only).
 
 | unmute, the other side holding a tone | before | after |
 |---|---|---|
