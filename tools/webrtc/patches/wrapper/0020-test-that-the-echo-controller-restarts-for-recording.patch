@@ -117,7 +117,7 @@ index 0000000..fbcfbaa
 +  apm->ApplyConfig(config);
 +  apm->Initialize();
 +  const int before = made;
-+  apm->RestartEchoController();
++  apm->RestartEchoControllerForRecording();
 +  return made - before;
 +}
 +

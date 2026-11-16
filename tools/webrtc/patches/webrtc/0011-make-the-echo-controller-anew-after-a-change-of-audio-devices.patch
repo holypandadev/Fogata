@@ -28,7 +28,7 @@ the device list (wrapper patch 0021); the macOS engine device marks its own (app
 0008).
 
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
-index 23219a0..b757324 100644
+index 23219a0..0a5e515 100644
 --- a/api/audio/audio_device.h
 +++ b/api/audio/audio_device.h
 @@ -11,6 +11,7 @@
@@ -39,9 +39,9 @@ index 23219a0..b757324 100644
  #include <cstdint>
  #include <optional>
  
-@@ -206,6 +207,21 @@ class AudioDeviceObserver {
-   virtual void OnDevicesUpdated() {}
- };
+@@ -22,6 +23,21 @@ namespace webrtc {
+ class AudioDeviceModuleForTest;
+ class AudioDeviceObserver;
  
 +// Fogata: how many changes of audio devices were seen in the process: a device
 +// chosen, one plugged in or out, the default or a device's port changed, a stream
@@ -58,9 +58,9 @@ index 23219a0..b757324 100644
 +  AudioDevicesChangedCount().fetch_add(1, std::memory_order_relaxed);
 +}
 +
- }  // namespace webrtc
- 
- #endif  // API_AUDIO_AUDIO_DEVICE_H_
+ class AudioDeviceModule : public RefCountInterface {
+  public:
+   enum AudioLayer {
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
 index 7edf7d9..8ec9e28 100644
 --- a/audio/audio_state.cc
