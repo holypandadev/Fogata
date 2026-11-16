@@ -191,7 +191,11 @@ therefore treats DHT nodes as strangers:
   other peer that sent or answered a Fogata request (member or friend protocol) is only
   *heard*: its connections stay open as long, but it is not wanted, since anyone can send a
   request, even one that is refused. That includes a device on the LAN, found over mDNS or
-  coming in from there, and a candidate once connected, until it proves itself.
+  coming in from there, and a candidate once connected, until it proves itself. A QUIC
+  connection closed for being idle is closed for the other end too, which hears it at once
+  (libp2p drops such a connection without closing it, and the handles the datagram registry
+  keeps would leave it open, answering keep-alives, until the other end gave up:
+  vendor/libp2p-quic/FOGATA.md, change 6).
 - **QUIC for strangers.** Once a QUIC connection to a public address has succeeded in the
   last 2 minutes (so UDP gets through), strangers are dialled at their QUIC addresses only.
   About half of the DHT nodes are known only by TCP addresses (other nodes list just the

@@ -99,6 +99,21 @@ QUIC in 4.2 and the bounds of incoming connections in 3.2, says why):
    `a_dial_waiting_before_room_lingers_goes_when_it_comes_back`,
    `dials_to_the_devices_own_networks_take_turns`; the network lab's `media-silent` and
    `lan-first-contact`.
+6. A connection the swarm lets go of is closed. libp2p-swarm calls the muxer's `poll_close`
+   only when a behaviour closes a connection; one it closes for being idle, after an error,
+   or when the swarm itself goes, it drops. Upstream, dropping the muxer drops the last
+   handle of the QUIC connection and quinn closes it, but the handles change 1 keeps
+   (`src/datagram.rs`: the registry and the task that reads datagrams) kept such a
+   connection open: the other end heard nothing, its keep-alives were answered, and it
+   went only when the other end gave up (measured on the internet, a few seconds later for
+   most, by DHT nodes that close their own idle connections; between two Fogata devices
+   that both let go of it, never while both answer). `src/connection.rs`: a `Connection`
+   dropped without `poll_close` closes the QUIC connection as `poll_close` does
+   (application close code 0, sent to the other end at once), unless it is closed already,
+   so that one that ended keeps the reason it ended with; the datagram reader sees it
+   closed and the registry lets go of it then. `src/datagram.rs`: `holds`, for the test.
+   Test: `a_connection_dropped_without_poll_close_is_closed_once`; fogata-net's
+   `tests/idle_close.rs`.
 
 To move to a new upstream version: download it, apply these changes again, keep this list
 true, and run `tools/vendor_diff.py libp2p-quic` to see that nothing else differs.

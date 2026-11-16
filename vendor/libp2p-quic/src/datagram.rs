@@ -147,6 +147,15 @@ pub(crate) fn register(peer: PeerId, connection: quinn::Connection) {
     });
 }
 
+/// Whether the registry holds a connection to `peer`, open or not.
+#[cfg(test)]
+pub(crate) fn holds(peer: &PeerId) -> bool {
+    registry()
+        .lock()
+        .map(|r| r.links.contains_key(peer))
+        .unwrap_or(false)
+}
+
 /// Passes a received datagram to the application, or drops it: from a peer it does not take,
 /// past the peer's share, or when the queue is full. The one sender kept in the registry is
 /// used, never a copy: each copy would bring a free place of its own in the queue.
