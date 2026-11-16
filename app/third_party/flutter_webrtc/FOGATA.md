@@ -478,9 +478,14 @@ that (`delay_headroom_samples`, 32 at 16 kHz): an echo even a few ms earlier was
 its linear filter's reach until its delay estimator found it again, a second or more
 later. A lost cycle is about 10 ms at a quantum of 480 or 512 and 21 ms at 1024.
 `tools/webrtc/patches/wrapper/0019` gives it 512 samples (32 ms) and filters 8 blocks
-longer, so that they reach as far after the echo as before; those of a call's first
-second keep WebRTC's 12 blocks. Measured with no patch, 16, 32 and 48 ms of room (turns
-let through):
+longer, so that they reach as far after the echo as before; the initial-state filters,
+used for the first 2.5 s of the other side's sound after every reset (a call's start, a
+microphone on again, a delay found again, a stall), keep WebRTC's 12 blocks, which with
+the echo 8 blocks in reach 4 blocks past it (about 11.5 in stock AEC3).
+`patches/webrtc/0011` keeps that headroom after a reset too (AEC3 aligned from the
+device's delay with 2 blocks whatever its configuration) and has legacy transparent mode
+judge a filter sane from where the headroom puts the echo. The figures below were measured
+before 0011. Measured with no patch, 16, 32 and 48 ms of room (turns let through):
 
 | | none | 16 ms | 32 ms | 48 ms |
 |---|---|---|---|---|
@@ -492,7 +497,7 @@ let through):
 | no stalls | 0 of 363 | 2 of 193 | 0 of 189 | 4 of 98 |
 | a call's first turn, median under one's own voice | 76 dB | 75 dB | 76 dB | 60 dB |
 
-With the first second's filters 8 blocks longer as well, 32 ms helped as much against the
+With the initial-state filters 8 blocks longer as well, 32 ms helped as much against the
 stalls but a call's first turn went out less cancelled (57 dB at the median, once only
 18 dB): the longer filters converge more slowly. As patched, later turns are as before
 (72 dB at the median, 73 without) and WebRTC's audio threads use the same processor time
@@ -524,8 +529,13 @@ for), but not what it knows of the room.
 | speakers: the other's tone sent back between the first words (median) | -59 dBFS | -61 dBFS |
 
 With the other side talking in words, now and then, the unmute changed little before and
-after. A call's start is unchanged: a new call's AEC3 knows nothing of the room either, and
-with a headset its first seconds hold the noise down by about 10 dB as before. The echo
+after. The first call in a process is unchanged: its AEC3 knows nothing of the room, and
+with a headset its first seconds hold the noise down by about 10 dB as before. Every later
+call keeps the AEC3 of the one before (one audio processing for the process), realigned:
+on a headset again it starts untouched; on speakers after a call on a headset its
+transparent mode is kept until the first delay found after the restart, which resets it
+(an echo path found), so the other side's first words may come back for as long as that
+takes (not measured). The echo
 check with both patches let 0 of 98 turns through without stalls, 2 of 131 with the
 quantum free and stalls of 20 and 40 ms, and 2 of 97 at 480 with stalls of 40 and 80 ms;
 every call's first turn stayed cancelled.

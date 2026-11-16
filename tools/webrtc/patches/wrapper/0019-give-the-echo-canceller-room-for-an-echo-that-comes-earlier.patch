@@ -12,10 +12,14 @@ filter.
 
 The processing now asks AEC3 for 512 samples (8 blocks, 32 ms) of headroom and makes the
 refined and coarse filters 8 blocks longer (21), so that they reach as far after the echo as
-before; the same for the multichannel configuration. The filters of a call's first second
-keep WebRTC's 12 blocks: lengthened too, they converged more slowly and a call's first turn
-went out less cancelled (57 dB under one's own voice at the median instead of 76, once only
-18 dB).
+before; the same for the multichannel configuration. The initial-state filters, used for
+the first 2.5 s of the other side's sound after every reset (a call's start, a microphone on
+again, a delay found again, a stall), keep WebRTC's 12 blocks, which with the echo 8 blocks
+in reach 4 blocks past it (about 11.5 in stock AEC3): lengthened too, they converged more
+slowly and a call's first turn went out less cancelled (57 dB under one's own voice at the
+median instead of 76, once only 18 dB). AEC3 kept only 2 blocks of headroom after a reset
+until it found the delay again; WebRTC patch 0011 keeps the configured headroom there, and
+the figures below were measured before it.
 
 Measured in the call lab (tools/call-lab/mic.sh echo, ECHO_STALL stopping the session's
 PipeWire now and then, the echo's move timed in the samples each copy wrote and read),

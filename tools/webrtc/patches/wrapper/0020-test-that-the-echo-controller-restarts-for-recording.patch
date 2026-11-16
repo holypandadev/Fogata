@@ -1,0 +1,195 @@
+Test that the echo controller restarts for recording and keeps what it knows of the room
+
+WebRTC's audio processing and AEC3 with its patches 0010 and 0011: an echo controller that
+can restart for recording is kept (RestartEchoController creates none) and one that cannot
+is made anew; AEC3 with a headset (7 s of the other side's sound, only the room's noise at
+the microphone) lets the first 0.5 s after RestartForRecording through within 3 dB, and a
+new AEC3 at the same point holds them at least 6 dB lower, so the test tells the two
+apart. Built in again: the library shows only its own API.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 2b2bfb3..285a4a1 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -378,6 +378,7 @@ if (rtc_include_tests) {
+        "test/stats_callback.test.cc",
+        "test/shared_encoder.test.cc",
+        "test/echo_restart.test.cc",
++       "test/echo_room.test.cc",
+ 
+        # Built in again: the library shows only its own API.
+        "src/internal/vp8_size_gate.cc",
+@@ -415,6 +416,9 @@ if (rtc_include_tests) {
+       "../modules/audio_device:mock_audio_device",
+       "../modules/audio_processing:mocks",
+       "../call:mock_call_interfaces",
++      "../modules/audio_processing/aec3",
++      "../api/audio:builtin_audio_processing_builder",
++      "../api/environment:environment_factory",
+       "../test:run_loop",
+       "../api:fec_controller_api",
+       "../api:field_trials_view",
+diff --git a/test/echo_room.test.cc b/test/echo_room.test.cc
+new file mode 100644
+index 0000000..fbcfbaa
+--- /dev/null
++++ b/test/echo_room.test.cc
+@@ -0,0 +1,158 @@
++// WebRTC's audio processing and AEC3 with Fogata's patches 0010 and 0011
++// (tools/webrtc/patches/webrtc): recording starting again realigns the echo
++// controller instead of making it anew, and AEC3 keeps what it knows of the
++// room. Built in again: the library shows only its own API.
++
++#include <cmath>
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <random>
++#include <vector>
++
++#include "api/audio/audio_processing.h"
++#include "api/audio/builtin_audio_processing_builder.h"
++#include "api/audio/echo_canceller3_config.h"
++#include "api/audio/echo_control.h"
++#include "api/environment/environment_factory.h"
++#include "modules/audio_processing/aec3/echo_canceller3.h"
++#include "modules/audio_processing/audio_buffer.h"
++#include "test/gtest.h"
++
++namespace {
++
++// An echo controller that counts and answers RestartForRecording as told.
++class CountingEchoControl : public webrtc::EchoControl {
++ public:
++  CountingEchoControl(bool restarts, int* restarted)
++      : restarts_(restarts), restarted_(restarted) {}
++  void AnalyzeRender(webrtc::AudioBuffer*) override {}
++  void AnalyzeCapture(webrtc::AudioBuffer*) override {}
++  void ProcessCapture(webrtc::AudioBuffer*, bool) override {}
++  void ProcessCapture(webrtc::AudioBuffer*, webrtc::AudioBuffer*,
++                      bool) override {}
++  Metrics GetMetrics() const override { return Metrics(); }
++  void SetAudioBufferDelay(int) override {}
++  bool ActiveProcessing() const override { return true; }
++  bool RestartForRecording() override {
++    ++*restarted_;
++    return restarts_;
++  }
++
++ private:
++  const bool restarts_;
++  int* const restarted_;
++};
++
++class CountingFactory : public webrtc::EchoControlFactory {
++ public:
++  CountingFactory(bool restarts, int* made, int* restarted)
++      : restarts_(restarts), made_(made), restarted_(restarted) {}
++  using webrtc::EchoControlFactory::Create;
++  std::unique_ptr<webrtc::EchoControl> Create(const webrtc::Environment&,
++                                              int, int, int) override {
++    ++*made_;
++    return std::make_unique<CountingEchoControl>(restarts_, restarted_);
++  }
++
++ private:
++  const bool restarts_;
++  int* const made_;
++  int* const restarted_;
++};
++
++int MadeAfterRestart(bool restarts, int* restarted) {
++  int made = 0;
++  auto apm = webrtc::BuiltinAudioProcessingBuilder()
++                 .SetEchoControlFactory(std::make_unique<CountingFactory>(
++                     restarts, &made, restarted))
++                 .Build(webrtc::CreateEnvironment());
++  webrtc::AudioProcessing::Config config;
++  config.echo_canceller.enabled = true;
++  apm->ApplyConfig(config);
++  apm->Initialize();
++  const int before = made;
++  apm->RestartEchoController();
++  return made - before;
++}
++
++}  // namespace
++
++// An echo controller that can restart for recording is kept; one that cannot
++// is made anew, as patch 0009 did for every one.
++TEST(EchoRoom, AnEchoControllerThatRestartsIsKept) {
++  int restarted = 0;
++  EXPECT_EQ(MadeAfterRestart(true, &restarted), 0);
++  EXPECT_EQ(restarted, 1);
++}
++
++TEST(EchoRoom, AnEchoControllerThatCannotRestartIsMadeAnew) {
++  int restarted = 0;
++  EXPECT_EQ(MadeAfterRestart(false, &restarted), 1);
++  EXPECT_EQ(restarted, 1);
++}
++
++namespace {
++
++constexpr int kRate = 16000;
++constexpr size_t kFrame = kRate / 100;
++
++// A headset: the other side's sound plays, the microphone hears only the room's
++// noise. Returns the capture output's level against its input's, in dB, over
++// the first `measure` frames after `seconds` of the other side's sound and then
++// either a restart for recording (kept) or a new AEC3 (as patch 0009 did).
++float HeadsetOutputAfter(int seconds, bool restart, int measure) {
++  webrtc::EchoCanceller3Config config;
++  config.delay.delay_headroom_samples = 512;
++  config.filter.refined.length_blocks += 8;
++  config.filter.coarse.length_blocks += 8;
++  auto env = webrtc::CreateEnvironment();
++  auto aec = std::make_unique<webrtc::EchoCanceller3>(env, config, std::nullopt,
++                                                      nullptr, kRate, 1, 1);
++  webrtc::AudioBuffer render(kRate, 1, kRate, 1, kRate, 1);
++  webrtc::AudioBuffer capture(kRate, 1, kRate, 1, kRate, 1);
++  std::mt19937 random(7);
++  std::normal_distribution<float> loud(0.f, 6000.f);
++  std::normal_distribution<float> quiet(0.f, 300.f);
++  double in = 0, out = 0;
++  const int frames = seconds * 100;
++  for (int f = 0; f < frames + measure; ++f) {
++    if (f == frames) {
++      if (restart) {
++        aec->RestartForRecording();
++      } else {
++        aec = std::make_unique<webrtc::EchoCanceller3>(env, config, std::nullopt,
++                                                       nullptr, kRate, 1, 1);
++      }
++    }
++    for (size_t i = 0; i < kFrame; ++i) {
++      render.channels()[0][i] = loud(random);
++      capture.channels()[0][i] = quiet(random);
++    }
++    aec->AnalyzeRender(&render);
++    aec->AnalyzeCapture(&capture);
++    double frame_in = 0;
++    for (size_t i = 0; i < kFrame; ++i)
++      frame_in += capture.channels()[0][i] * capture.channels()[0][i];
++    aec->ProcessCapture(&capture, false);
++    if (f >= frames) {
++      in += frame_in;
++      for (size_t i = 0; i < kFrame; ++i)
++        out += capture.channels()[0][i] * capture.channels()[0][i];
++    }
++  }
++  return 10.f * std::log10((out + 1e-9) / (in + 1e-9));
++}
++
++}  // namespace
++
++// With a headset and 7 s of the other side's sound before the microphone comes
++// back, the first 0.5 s after it go out untouched: AEC3 kept its transparent
++// mode. A new AEC3 held them down, which this test must tell apart.
++TEST(EchoRoom, AHeadsetIsNotHeldDownAfterARestart) {
++  const float kept = HeadsetOutputAfter(7, true, 50);
++  const float anew = HeadsetOutputAfter(7, false, 50);
++  EXPECT_GT(kept, -3.f) << "kept " << kept << " dB, made anew " << anew << " dB";
++  EXPECT_LT(anew, kept - 6.f) << "kept " << kept << " dB, made anew " << anew
++                              << " dB";
++}
