@@ -4892,6 +4892,9 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
       .toList();
   final on = int.tryParse(_env['FOGATA_TEST_UNMUTE_ON'] ?? '') ?? 10;
   final settle = int.tryParse(_env['FOGATA_TEST_UNMUTE_SETTLE'] ?? '') ?? 10;
+  // Instead of this mute and unmute, a leaves the room and enters it again: a
+  // second call in the same process.
+  final rejoin = int.tryParse(_env['FOGATA_TEST_UNMUTE_REJOIN'] ?? '');
   if (_role != 'a') {
     final total =
         settle + offs.fold<int>(0, (a, b) => a + b) + offs.length * on;
@@ -4911,12 +4914,37 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
   _mark('settled');
   for (var n = 1; n <= offs.length; n++) {
     _mark('mute-$n');
+    if (n == rejoin) {
+      final group = state.callState.call!.group;
+      await state.leaveRoom();
+      await _wait(tester, Duration(seconds: offs[n - 1]));
+      _mark('unmute-$n');
+      await state.openRoom(group);
+      await _until(
+        tester,
+        'connected again',
+        () =>
+            state.callState.call?.peers.values.any((p) => p.connected) ??
+            false,
+        seconds: 120,
+      );
+      if (!state.callState.call!.mic) {
+        throw StateError('the microphone is off in the room entered again');
+      }
+      _mark('unmuted-$n');
+      await _wait(tester, Duration(seconds: on));
+      continue;
+    }
     await state.setMic(false);
-    if (call.mic) throw StateError('the microphone did not turn off');
+    if (state.callState.call!.mic) {
+      throw StateError('the microphone did not turn off');
+    }
     await _wait(tester, Duration(seconds: offs[n - 1]));
     _mark('unmute-$n');
     await state.setMic(true);
-    if (!call.mic) throw StateError('the microphone did not turn on');
+    if (!state.callState.call!.mic) {
+      throw StateError('the microphone did not turn on');
+    }
     _mark('unmuted-$n');
     await _wait(tester, Duration(seconds: on));
   }

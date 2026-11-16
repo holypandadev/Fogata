@@ -550,8 +550,11 @@ lab_phase_recorder() { # marking role, "roles recorded"
 # moments of the words after each unmute, in ms; UNMUTE_WORDS_START after a saw b connected
 # (`mark-a-connected`). UNMUTE_ECHO=1: b talks (the same words every 3 s) and what a plays
 # goes back into a's microphone 30 ms later, as from speakers; UNMUTE_ROOM_AFTER=<n>: only
-# from a's n-th mute on (`mark-a-mute-<n>`), as a headset taken off while muted. When b
-# talks, its microphone is recorded too (mic-b.raw).
+# from a's n-th mute on (`mark-a-mute-<n>`), as a headset taken off while muted.
+# UNMUTE_ROOM_MOVE=<n>: the same with a device event the sound server tells of: another
+# output (made before the copies start) whose sound goes back into a's microphone, and
+# a's playback moved there at its n-th mute. When b talks, its microphone is recorded
+# too (mic-b.raw).
 lab_unmute_sound() {
   "$LAB_DIR/unmute-sound.sh" "$RUN/sound" >> "$RUN/lab.log" 2>&1 ||
     { echo "unmute-sound.sh failed" >> "$RUN/lab.log"; return 1; }
@@ -614,6 +617,22 @@ lab_unmute_sound() {
     pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
       source_dont_move=true sink_dont_move=true > /dev/null
   fi
+  if [ -n "${UNMUTE_ROOM_MOVE:-}" ]; then
+    # Not named as a's devices are (FOGATA_TEST_DEVICES), so the copy never picks it.
+    pactl load-module module-null-sink sink_name=laba_speakers \
+      sink_properties=device.description=LabSpeakersA > /dev/null
+    pactl load-module module-loopback source=laba_speakers.monitor sink=laba_test latency_msec=30 \
+      source_dont_move=true sink_dont_move=true > /dev/null
+    (
+      until [ -e "$M/mark-a-mute-$UNMUTE_ROOM_MOVE" ]; do sleep 0.05; done
+      quiet=$(pactl list short sinks | awk '$2 == "laba_quiet" {print $1}')
+      for input in $(pactl list short sink-inputs | awk -v s="$quiet" '$2 == s {print $1}'); do
+        pactl move-sink-input "$input" laba_speakers
+      done
+      echo "a's playback moved to the speakers at $(date +%s%3N)" >> "$RUN/lab.log"
+    ) &
+    echo $! > "$RUN/room-move.pid"
+  fi
   if [ "$far" = tone ]; then
     # A steady tone with harmonics (220 Hz, -26 dBFS RMS), as someone holding a note.
     ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=220:duration=10" \
@@ -637,7 +656,7 @@ lab_unmute_sound() {
 
 lab_unmute_stop() {
   local f
-  for f in words words-b room-after; do
+  for f in words words-b room-after room-move; do
     [ -e "$RUN/$f.pid" ] && lab_kill "$(cat "$RUN/$f.pid")" bash
   done
   for f in room-ffmpeg:ffmpeg room-pacat:pacat rec-played-b:parec rec-mic-a:parec rec-mic-b:parec; do

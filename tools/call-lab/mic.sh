@@ -104,7 +104,11 @@
 #            UNMUTE_ECHO=1 is both, with words. UNMUTE_ROOM_AFTER=<n> starts that echo
 #            only as a mutes for the n-th time, as a headset taken off while muted;
 #            UNMUTE_WORDS_START has a's words also at those moments (ms) after it saw b
-#            connected, as a call starts. When b talks, its microphone is recorded too.
+#            connected, as a call starts. UNMUTE_ROOM_MOVE=<n>: a's playback moved at its
+#            n-th mute to another output whose sound goes back into its microphone (a
+#            device event the sound server tells of); UNMUTE_REJOIN=<n>: a leaves the room
+#            and enters it again instead of its n-th mute and unmute (a second call in the
+#            same process). When b talks, its microphone is recorded too.
 #            What b plays and what a's microphone hears are recorded throughout. Measured,
 #            not judged (unmute.py): how loud b played the first 100, 300, 1000 and 2500 ms
 #            after the sound resumed, against the same windows 3 s and 6 s later, and one
@@ -193,7 +197,7 @@ if [ "${1:-}" = --inside ]; then
       ;;
     unmute)
       steps=(FOGATA_TEST_UNMUTE_OFFS="${UNMUTE_OFFS:-2 10 60}" FOGATA_TEST_UNMUTE_ON="${UNMUTE_ON:-10}"
-        FOGATA_TEST_UNMUTE_SETTLE="${UNMUTE_SETTLE:-10}")
+        FOGATA_TEST_UNMUTE_SETTLE="${UNMUTE_SETTLE:-10}" FOGATA_TEST_UNMUTE_REJOIN="${UNMUTE_REJOIN:-}")
       tried=()
       [ -n "${UNMUTE_TRIALS:-}" ] && tried+=(FOGATA_WEBRTC_FIELD_TRIALS="$UNMUTE_TRIALS")
       [ "${UNMUTE_NS:-}" = 1 ] && tried+=(FOGATA_TEST_UNMUTE_NS=1)
@@ -327,7 +331,7 @@ for check in "${checks[@]}"; do
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
   [ "${LAB_FIXED_QUANTUM:-1}" = 0 ] && echo "LAB_FIXED_QUANTUM=0" >> "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
-  [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_ROOM=${UNMUTE_ROOM:-} UNMUTE_ROOM_AFTER=${UNMUTE_ROOM_AFTER:-} UNMUTE_WORDS_START=${UNMUTE_WORDS_START:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
+  [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_ROOM=${UNMUTE_ROOM:-} UNMUTE_ROOM_AFTER=${UNMUTE_ROOM_AFTER:-} UNMUTE_ROOM_MOVE=${UNMUTE_ROOM_MOVE:-} UNMUTE_REJOIN=${UNMUTE_REJOIN:-} UNMUTE_WORDS_START=${UNMUTE_WORDS_START:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   [ "$name" = unmute ] && echo "${UNMUTE_OFFS:-2 10 60}" > "$RUN/offs.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} ECHO_STALL=${ECHO_STALL:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   alsa=""
