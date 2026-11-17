@@ -4900,7 +4900,16 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
   if (_role != 'a') {
     final total =
         settle + offs.fold<int>(0, (a, b) => a + b) + offs.length * on;
-    await _hear(tester, state, ['unmute done'], seconds: total + 300);
+    // From a alone: in a call of three the other listener says nothing.
+    await _until(
+      tester,
+      'heard from ${_names['a']}: unmute done',
+      () => _said(
+        state,
+        ['unmute done'],
+      ).keys.any((other) => other.name == _names['a']),
+      seconds: total + 300,
+    );
     return;
   }
   final call = state.callState.call!;

@@ -97,9 +97,10 @@
 #            few words (UNMUTE_WORDS_DB, -28) 0.5, 3.5 and 6.5 s after each unmute, all
 #            made with ffmpeg's filters (unmute-sound.sh; ffmpeg is needed);
 #            UNMUTE_MIC_VOLUME sets its virtual microphone's volume (a percentage),
-#            UNMUTE_WORDS_AT the words' moments in ms ("500 3500 6500"). UNMUTE_FAR=words or
-#            tone: b talks meanwhile (the same words every 3 s, or a steady tone of 220 and
-#            660 Hz), its microphone on; UNMUTE_ROOM=1: what a plays goes back into a's
+#            UNMUTE_WORDS_AT the words' moments in ms ("500 3500 6500"). UNMUTE_FAR=words,
+#            speech or tone: b talks meanwhile (the same words every 3 s; speech-like noise
+#            2.1 s of every 3 s that never repeats, tone.py speech; or a steady tone of 220
+#            and 660 Hz), its microphone on; UNMUTE_ROOM=1: what a plays goes back into a's
 #            microphone 30 ms later, as from speakers (without it, as with a headset);
 #            UNMUTE_ECHO=1 is both, with words. UNMUTE_ROOM_AFTER=<n> starts that echo
 #            only as a mutes for the n-th time, as a headset taken off while muted;

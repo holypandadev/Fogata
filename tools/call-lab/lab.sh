@@ -629,6 +629,10 @@ lab_unmute_sound() {
     ) &
     echo $! > "$RUN/room-move.pid"
   fi
+  if [ "$far" = speech ]; then
+    # Speech-like noise that never repeats (tone.py speech), rather than the same words.
+    python3 -I "$LAB_DIR/tone.py" "$RUN/sound/far.wav" speech 30
+  fi
   if [ "$far" = tone ]; then
     # A steady tone with harmonics (220 Hz, -26 dBFS RMS), as someone holding a note.
     ffmpeg -hide_banner -loglevel error -f lavfi -i "sine=frequency=220:duration=10" \
@@ -638,7 +642,7 @@ lab_unmute_sound() {
   if [ -n "$far" ]; then
     (
       while true; do
-        if [ "$far" = tone ]; then
+        if [ "$far" = tone ] || [ "$far" = speech ]; then
           paplay --device=labb_test "$RUN/sound/far.wav" 2> /dev/null
         else
           paplay --device=labb_test "$RUN/sound/words.wav" 2> /dev/null &

@@ -6,6 +6,7 @@ Usage: tone.py <file.wav> [hertz, default 440] [seconds, default 10]
        tone.py <file.wav> screen
        tone.py <file.wav> fan
        tone.py <file.wav> turns <slot 0|1> <steady hertz>
+       tone.py <file.wav> speech [seconds, default 30]
        tone.py wait
        tone.py room <loopback module of slot 0> <loopback module of slot 1>
 
@@ -18,6 +19,11 @@ echo of such a sound at once; one of a pure tone it may never place). Then each 
 steady tone alone for 4 s, slot 0 from 8 s, slot 1 from 12 s, which mic_check.py tells as
 each copy sends it (WebRTC's noise suppressor, which the application turns off, pushes one
 down now and then; an echo canceller removes one the other plays back to it).
+
+speech: one voice talking 2.1 s of every 3 s (mic.sh unmute with UNMUTE_FAR=speech), the
+same noise as the turns' with the same loudness rising and falling 4 times a second, at
+-28 dBFS RMS while it talks; every phrase is noise of its own, so that nothing in it repeats
+(the unmute check's words repeat every 3 s, and their pitch every few milliseconds).
 
 screen: another application's sound for a shared screen to take (lab_apps_tone): noise
 from 5.3 to 6.5 kHz, above the voices, steady in level, 60 s. Its echo in a room, unlike a
@@ -53,6 +59,7 @@ TALK = 1.5
 TURNS = (((0.0, TALK), (4.0, TALK)), ((2.0, TALK), (6.0, TALK)))
 STEADY = ((8.0, 4.0), (12.0, 3.9))
 VOICE_RMS = 0.08
+SPEECH_RMS = 0.04
 STEADY_AMPLITUDE = 0.1
 FADE = 0.02
 # Each copy's loop is on while the other talks or holds its tone, and for the call's
@@ -129,6 +136,20 @@ def turns(slot, steady):
     return out
 
 
+def speech(seconds):
+    """Phrases of 2.1 s every 3 s, each its own noise, at SPEECH_RMS while talking."""
+    out = [0.0] * int(seconds * RATE)
+    talk = 2.1
+    for number in range(int(seconds // 3)):
+        sound = noise(talk, seed=1000 + number)
+        for i, x in enumerate(sound):
+            into = i / RATE
+            fade = min(1.0, into / FADE, (talk - into) / FADE)
+            envelope = 0.6 + 0.4 * math.cos(2 * math.pi * 4 * into)
+            out[int(3 * number * RATE) + i] = fade * SPEECH_RMS * envelope * x / 0.6
+    return out
+
+
 def loop_on(slot, at):
     """Whether the loop of the copy in `slot` is on at `at` seconds into a period: while the
     other copy talks, and ECHO_AFTER after."""
@@ -201,6 +222,8 @@ elif len(sys.argv) > 2 and sys.argv[2] == "screen":
     write(sys.argv[1], screen())
 elif len(sys.argv) > 2 and sys.argv[2] == "fan":
     write(sys.argv[1], fan())
+elif len(sys.argv) > 2 and sys.argv[2] == "speech":
+    write(sys.argv[1], speech(float(sys.argv[3]) if len(sys.argv) > 3 else 30.0))
 elif len(sys.argv) > 2 and sys.argv[2] == "turns":
     write(sys.argv[1], turns(int(sys.argv[3]), float(sys.argv[4])))
 else:
