@@ -9178,7 +9178,7 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
 index 89d537f6a6..265a230e31 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
 +++ b/modules/audio_processing/audio_processing_impl.cc
-@@ -615,6 +615,11 @@ void AudioProcessingImpl::InitializeLocked(const ProcessingConfig& config) {
+@@ -633,6 +633,11 @@ void AudioProcessingImpl::InitializeLocked(const ProcessingConfig& config) {
  
    formats_.api_format = config;
  
@@ -9190,7 +9190,7 @@ index 89d537f6a6..265a230e31 100644
    // Choose maximum rate to use for the split filtering.
    RTC_DCHECK(config_.pipeline.maximum_internal_processing_rate == 48000 ||
               config_.pipeline.maximum_internal_processing_rate == 32000);
-@@ -792,6 +797,11 @@ size_t AudioProcessingImpl::num_output_channels() const {
+@@ -816,6 +821,11 @@ size_t AudioProcessingImpl::num_output_channels() const {
    return formats_.api_format.output_stream().num_channels();
  }
  
