@@ -556,21 +556,46 @@ longer is not known. With speech-like noise that repeats only every 30 s there i
 difference. The synthesised voice's call start, within the runs' scatter in an earlier
 session of 8 runs each (p 0.06 and 0.22), was the longer filters' cost given above.
 
+## A mute silences every sender at once (Linux, Windows, macOS)
+
+Closing the microphone's track (`trackDispose`, `flutter_webrtc.cc` and
+`FlutterWebRTCPlugin.m`) only lets go of it: every sender holding it goes on sending the
+microphone. A mute therefore silences the senders first, as it is asked, before any
+connection's own step:
+
+- Linux and Windows: the track is disabled (`mediaStreamTrackSetEnable`), and every
+  sender holding it mutes its stream (`AudioRtpSender::OnChanged`, `SetAudioSend` with the
+  track disabled, `WebRtcVoiceSendChannel::MuteStream`), which here only tells the audio
+  processing that its output is unused (`tools/webrtc/patches/webrtc/0008`).
+- macOS: the track is taken off every sender (`rtpSenderReplaceTrack` with none), as the
+  call always did. Disabling it would have WebRTC-SDK's `MuteStream` (its rule replaces
+  0008's, `tools/webrtc/patches/apple/0001`) call the audio module's `SetMicrophoneMute`,
+  which with voice processing on mutes Apple's voice processing input (a mode the
+  plugin's own documentation, `lib/src/helper.dart`'s `setMicrophoneMuteMode`, says plays
+  the platform's mute sound; not measured here), a way the call never took; a sender
+  with no track skips it. The
+  microphone's track is never disabled on macOS while a sender holds it.
+
 ## A microphone turned on again while the other side talks (Linux, Windows, macOS)
 
-Turning the microphone off has the voice channel only receive, which stops the audio
-device's recording; turning it on starts it again, and patch 0009 made AEC3 anew there, as
-at a call's start. A new AEC3 does not know whether the room has an echo. With a headset
-there is none, and AEC3 lets the microphone through untouched while the other side talks
-only once its transparent mode has seen 6 s of their sound without echo; until then its
-suppressor takes the microphone for echo whenever their sound plays. Measured in the call
-lab (`tools/call-lab/mic.sh unmute`, the other side holding a tone, three runs of three
-unmutes each): the first words after an unmute went out 8 dB weaker on average (17 dB at
-worst) and the room's noise 12 dB lower, for 3 to 6 s, and then came back at once.
+Turning the microphone off stops the voice channel's send stream (its encoding stopped,
+or the channel made to only receive, see `docs/architecture/4-voice-and-video.md`), which
+stops the audio device's recording once no other channel of sound sends: on Linux, while
+a shared screen's sound goes out, recording goes on from the silent input, and from the
+microphone for the moment (about 3 s) the silent input takes to be chosen. Turning it
+on starts it again, and patch 0009 made
+AEC3 anew there, as at a call's start. A new AEC3 does not know whether the room has an
+echo. With a headset there is none, and AEC3 lets the microphone through untouched while
+the other side talks only once its transparent mode has seen 6 s of their sound without
+echo; until then its suppressor takes the microphone for echo whenever their sound
+plays. Measured in the call lab (`tools/call-lab/mic.sh unmute`, the other side holding
+a tone, three runs of three unmutes each): the first words after an unmute went out 8 dB
+weaker on average (17 dB at worst) and the room's noise 12 dB lower, for 3 to 6 s, and
+then came back at once.
 `tools/webrtc/patches/webrtc/0010` keeps the transparent mode when recording starts again:
 AEC3 still drops what it aligned of the played sound with the recorded one (what 0009 was
 for), but not what it knows of the room. The WebRTC patches go into macOS's framework too,
-and there muting also makes the voice channel only receive and AEC3 does the cancelling,
+and there muting also stops the voice channel's send stream and AEC3 does the cancelling,
 so 0009 made it anew at every unmute on a Mac as well and 0010 applies there (measured on
 Linux only).
 

@@ -4313,7 +4313,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 /// One check of the microphone, run with tools/call-lab/mic.sh, which watches what each
 /// copy records from the sound server and plays the part of the person who unplugs it:
 ///
-/// - muted: copy b enters muted, stays so 20 s, unmutes for 10 s and mutes again for
+/// - muted: copy b enters muted, stays so 20 s, unmutes for 20 s and mutes again for
 ///   15 s (mic.sh: b records nothing until it unmutes, and nothing a moment after it
 ///   mutes); copy a hears it only while unmuted.
 /// - switch: copy a changes its input to the silent one and back while b listens (mic.sh:
@@ -4339,19 +4339,99 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
         await _wait(tester, const Duration(seconds: 20));
         _mark('unmute');
         await state.setMic(true);
-        await _wait(tester, const Duration(seconds: 10));
+        // On long enough for an unmute that is agreed (see a's part).
+        await _wait(tester, const Duration(seconds: 20));
         _mark('mute');
         await state.setMic(false);
         await _wait(tester, const Duration(seconds: 15));
         _mark('end');
         await _say(state, 'mic done');
       } else {
+        // a hears b only while b's microphone is on: b's voice packets arrive (its
+        // microphone is a quiet one: what Opus sends of silence, every 400 ms at least)
+        // after the unmute, and stop after the mute and stay stopped. b enters muted,
+        // so its connection was made with the voice channel only receiving and its
+        // unmute goes the agreed way (an offer and answer); an unmute with nothing to
+        // agree is what the unmute checks (mic.sh unmute) cover.
+        final _Other other = (id: call.peers.keys.single, name: _names['b']!);
+        final peer = _peer(state, other);
+        Future<int> packets() async {
+          var n = 0;
+          for (final r
+              in await peer.connection?.getStats() ?? const <StatsReport>[]) {
+            if (r.type == 'inbound-rtp' && '${r.values['mid']}' == '0') {
+              n += (r.values['packetsReceived'] as num? ?? 0).toInt();
+            }
+          }
+          return n;
+        }
+
+        // Counted over 2 s windows, one after the other. A window over which the
+        // connection was made anew, or its counter went back, says nothing and is not
+        // taken.
+        // On: 3 packets or more in one window (silence alone gives about 5), within 18 s:
+        // b stays on 20 s, less a margin. b's unmute is agreed, three signals (update,
+        // offer, answer, or offer and answer), and on GitHub's runners one signal once
+        // took 2.6 s and the sound came up to 0.85 s late: about 9 s at worst, with room.
+        // Off, over 6 windows (b stays off 15 s): a quiet one (at most 1) among the first
+        // 3, and every window after it as quiet, one stray packet allowed in all of them.
+        // b's mute needs no signal: its voice channel was agreed to send at the unmute and
+        // the connection is up, so its encoding stops in b's own step at once; 6 s leave
+        // room for a busy step on a slow runner. A voice that keeps going out, or stops
+        // and goes out again, fails it.
+        Future<int?> window() async {
+          final on = peer.connection;
+          final before = await packets();
+          await _wait(tester, const Duration(seconds: 2));
+          final after = await packets();
+          if (peer.connection != on || after < before) return null;
+          return after - before;
+        }
+
+        Future<void> judge(
+          String what,
+          int windows,
+          bool Function(int) ok,
+        ) async {
+          final seen = <int?>[];
+          for (var i = 0; i < windows; i++) {
+            final n = await window();
+            seen.add(n);
+            if (n != null && ok(n)) {
+              _log('voice from b, $what: ${seen.join(', ')} packets per 2 s');
+              return;
+            }
+          }
+          throw StateError(
+            'b $what, a got ${seen.join(', ')} voice packets from it per 2 s',
+          );
+        }
+
+        await _until(tester, 'b unmuted', () => peer.mic, seconds: 60);
+        await judge('unmuted', 9, (n) => n >= 3);
+        await _until(tester, 'b muted', () => !peer.mic, seconds: 30);
+        final off = <int?>[];
+        int? quiet;
+        for (var i = 0; i < 6; i++) {
+          final n = await window();
+          off.add(n);
+          if (quiet == null && n != null && n <= 1) quiet = i;
+        }
+        _log('voice from b, muted: ${off.join(', ')} packets per 2 s');
+        final after = quiet == null
+            ? null
+            : off.skip(quiet + 1).nonNulls.fold(0, (a, n) => a + n);
+        if (quiet == null || quiet >= 3 || after! > 1) {
+          throw StateError(
+            'b muted, a got ${off.join(', ')} voice packets from it per 2 s',
+          );
+        }
         await _hear(tester, state, ['mic done'], seconds: 180);
       }
     case 'late' || 'alone':
       // Copy a's microphone opens only after b connected (FOGATA_TEST_MIC_LATE), or a was
       // alone in the call before b came (alone): b hears it without anyone muting and
-      // unmuting, which agrees on the connection again and opens the microphone anew.
+      // unmuting, which opens the microphone anew.
       if (_role == 'a') {
         await _hear(tester, state, ['heard'], seconds: 120);
       } else {

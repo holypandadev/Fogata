@@ -164,6 +164,10 @@ ScreenEncoderReading? screenEncoder(List<StatsReport> reports) {
 /// sends arrives, who sends pictures larger than any participant would, and who is
 /// talking.
 extension _Measuring on Call {
+  /// How long the microphone check waits for a connection's voice step after a change
+  /// of the microphone before it judges the connection all the same.
+  static const _voiceStepWithin = Duration(seconds: 10);
+
   /// What tells the others how this device's own network is: its name, or null while it
   /// cannot be told apart from the connections. Older versions ignore it.
   Map<String, dynamic> get _net => {'t': 'net', 'l': quality.network?.name};
@@ -248,8 +252,14 @@ extension _Measuring on Call {
         _followScreenOut(peer, connection, reports);
         _awaitPicture(peer, connection);
       }
-      // What the microphone gives and sends, on a connection agreed to send voice.
-      if (mic && await _sendsVoice(connection)) {
+      // What the microphone gives and sends, on a connection agreed to send voice whose
+      // voice channel follows the microphone's last change already (its encoding on),
+      // or, failing that, 10 s after the change: one whose step keeps failing is judged
+      // all the same, so that the person is told rather than nothing.
+      if (mic &&
+          (peer._voiceDone == _micAsked ||
+              DateTime.now().difference(_micAskedAt) > _voiceStepWithin) &&
+          await _sendsVoice(connection)) {
         voiceSending = true;
         for (final r in reports) {
           final v = r.values;

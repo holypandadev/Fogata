@@ -1366,23 +1366,29 @@ extension _Fitting on Call {
     );
   }
 
+  /// One at a time for a participant: another asked meanwhile would take over what the
+  /// first waits for.
   Future<void> _pauseVoiceIn(CallPeer peer) async {
+    if (peer._pausingVoice) return;
+    peer._pausingVoice = true;
     try {
       await _agreeVoiceIn(peer, paused: true);
     } finally {
       // Never left out, even if the first agreement failed.
-      await _agreeVoiceIn(peer, paused: false);
+      try {
+        await _agreeVoiceIn(peer, paused: false);
+      } finally {
+        peer._pausingVoice = false;
+      }
     }
   }
 
-  /// Takes their voice or not, and agrees on it with them.
+  /// Takes their voice or not, and agrees on it with them: waits, 5 s at most, for the
+  /// description that carries it whenever the direction asked changed for it, on either
+  /// side (this side's offer answered, or their offer this side answers).
   Future<void> _agreeVoiceIn(CallPeer peer, {required bool paused}) async {
-    peer._voicePaused = paused;
-    final transceivers = await _channels(peer.connection);
-    if (transceivers.isEmpty || peers[peer.id] != peer || _closed) return;
-    final agreed = peer._agreed = Completer<void>();
-    await transceivers[_audio].setDirection(_voiceDirection(peer));
-    await _renegotiate(peer);
-    await agreed.future.timeout(const Duration(seconds: 5), onTimeout: () {});
+    if (peers[peer.id] != peer || _closed) return;
+    final agreed = await _setVoicePaused(peer, paused);
+    await agreed?.future.timeout(const Duration(seconds: 5), onTimeout: () {});
   }
 }

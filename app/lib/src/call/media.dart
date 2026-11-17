@@ -156,13 +156,14 @@ Future<MediaStream> openMicStream(String? input) =>
 /// Whether the microphone, on, reads anything. Where the system refuses it (Windows'
 /// privacy switch off) or its device cannot start, WebRTC opens nothing and says nothing:
 /// the call shows the microphone on and sends no voice at all. Judged only while some
-/// connection has agreed to send voice (its channel's current direction sends: a microphone
-/// just turned on waits for the new description, which may take a resend), from what the
-/// device gives (the seconds of sound read, the `media-source`'s `totalSamplesDuration`)
-/// and what goes out (each such connection's voice packets; silence still goes out now and
-/// then, Opus DTX): [after] with neither growing, from one reading to the next, reads
-/// nothing. So a device that stops later (another input chosen that cannot be opened) is
-/// caught too. Told once until the microphone is turned off and on again ([reset]).
+/// connection has agreed to send voice (its channel's current direction sends: one whose
+/// voice channel only received while muted waits for the new description at an unmute,
+/// which may take a resend), from what the device gives (the seconds of sound read, the
+/// `media-source`'s `totalSamplesDuration`) and what goes out (each such connection's
+/// voice packets; silence still goes out now and then, Opus DTX): [after] with neither
+/// growing, from one reading to the next, reads nothing. So a device that stops later
+/// (another input chosen that cannot be opened) is caught too. Told once until the
+/// microphone is turned off and on again ([reset]).
 @visibleForTesting
 class MicCheck {
   static const after = Duration(seconds: 8);
@@ -361,6 +362,9 @@ extension _LocalMedia on Call {
     if (micOpensAfter > Duration.zero) {
       await Future<void>.delayed(micOpensAfter);
     }
+    // Nothing is opened for a call that ended, or a microphone turned off, meanwhile: one
+    // opened then would be let go of after the voice engine, maybe (see [_stop]).
+    if (_closed || !mic) return;
     final MediaStream stream;
     try {
       stream = await _getMic();
@@ -499,12 +503,27 @@ extension _LocalMedia on Call {
     _capturedAt = fps;
     localScreen.srcObject = stream;
     stream.getVideoTracks().firstOrNull?.onEnded = () => stopSharing();
+    await _swapCapture(old);
+  });
+
+  /// Puts the shared screen captured anew ([_screenStream] now) in place of [old] on
+  /// every sender, its picture and its sound, and only then lets go of [old]: a watcher
+  /// whose turn is busy still gets the sound meanwhile. A track replaced changes no
+  /// direction and needs nothing agreed, and every step that gives a sender its track
+  /// ([_voiceTo]) gives the one there is now, so this, outside a participant's turn,
+  /// cannot undo theirs.
+  Future<void> _swapCapture(MediaStream old) async {
     for (final peer in peers.values.toList()) {
-      await _resendTo(peer, _screen);
+      try {
+        await _resendTo(peer, _screen);
+        await _resendTo(peer, _screenSound);
+      } catch (e) {
+        _trace('screen to ${peer.id}: $e');
+      }
     }
     await _soundChannel();
     await Call._free(old);
-  });
+  }
 
   /// Tells a screen captured through the system's dialog (Wayland) how many frames a
   /// second to let through; nothing elsewhere.
@@ -541,11 +560,16 @@ extension _LocalMedia on Call {
 
   /// Whether [connection] has agreed to send voice: its channel's current direction (as
   /// last negotiated) sends. Not known counts as not.
-  Future<bool> _sendsVoice(RTCPeerConnection connection) async {
+  Future<bool> _sendsVoice(RTCPeerConnection connection) =>
+      _agreedSends(connection, _audio);
+
+  /// Whether [channel] of [connection] is agreed to send ([_sendsVoice]): only then can
+  /// WebRTC run a send stream of it, and record for it.
+  Future<bool> _agreedSends(RTCPeerConnection connection, int channel) async {
     try {
       final channels = await _channels(connection);
-      if (channels.isEmpty) return false;
-      final direction = await channels[_audio].getCurrentDirection();
+      if (channels.length <= channel) return false;
+      final direction = await channels[channel].getCurrentDirection();
       return direction == TransceiverDirection.SendRecv ||
           direction == TransceiverDirection.SendOnly;
     } catch (_) {

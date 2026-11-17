@@ -45,8 +45,9 @@ not silent, and not at all when less than 0.15 s of them is left before the firs
 word: only when the sound came within 0.1 s. The note says when it came. The words,
 the later gaps and the echo controllers made judge every unmute.
 A sound that reaches b more than LATE after the unmute fails it by that name: the unmute
-took that long (its offer and answer between the two, or the microphone's start), which
-is not the echo canceller's doing, and what a said before it came is not judged.
+took that long (the microphone's start, or an offer and answer between the two where
+the voice channel only received while muted), which is not the echo canceller's doing,
+and what a said before it came is not judged.
 An echo controller made between a mute and the end of the next unmute's words fails it
 too, whatever the levels, from a's WebRTC log (a.out): one made with none made anew on
 purpose, and one made anew on purpose in a run that changes no device (settings.txt:
@@ -161,8 +162,8 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
         problems.append(
             f"unmute {n}: a's sound reached b "
             + ("more than 15 s" if came is None else f"{came:.2f} s")
-            + f" after the unmute (at most {LATE:.0f}): the unmute took that long, its offer "
-            "and answer or the microphone's start; what a said before is not judged"
+            + f" after the unmute (at most {LATE:.0f}): the unmute took that long, the "
+            "microphone's start or an offer and answer; what a said before is not judged"
         )
     if rw < HEARD:
         problems.append(f"unmute {n}: b heard a's last word at {rw:.0f} dBFS: a not heard")

@@ -229,13 +229,73 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
 - **Fixed channels** per connection, in this order: voice, camera, screen, the screen's
   sound. Turning the camera or screen on or off swaps the channel's track (`replaceTrack`).
   A `state` message tells the others what is on, for the muted icon and the tiles.
-- **The microphone is open only while it is on.** WebRTC records from the default
-  microphone whenever a voice channel may send, even with no track to send, so a muted
-  device's voice channel only receives, and its microphone track is closed. Muting or
-  unmuting agrees the channels again on the same connection; only the device that made
-  the first offer offers again (the other asks it with an `update` message), so two offers
-  never cross. (Pausing the channel with `active: false` would avoid the new agreement,
-  but flutter_webrtc's desktop code drops changes to encodings.)
+- **The microphone is open only while it is on**, and its track is closed while muted.
+  WebRTC records whenever a send stream of sound runs, with a track or not: a voice
+  channel's whose encoding is on, or the screen's sound channel's. That one sends only
+  while the screen's sound goes out in the call's own channels: on Linux with the
+  microphone off too, recording then from the silent input; on Windows only with the
+  microphone on; on macOS never (its sound goes on connections of its own).
+- **A mute** first silences every sender, as it is asked, whatever each connection is
+  busy with: on Linux and Windows it disables the microphone's track (WebRTC mutes a
+  sender's stream when its track is disabled); on macOS it takes the track off every
+  sender, as the call always did there, since disabling it would have WebRTC-SDK's audio
+  module mute Apple's voice processing input instead (flutter_webrtc's FOGATA.md, "A mute
+  silences every sender at once"). The state message and every participant's step
+  go out at once too, without waiting for a microphone still opening, which lets go of
+  what it opens once it finds the microphone off. The microphone is then closed or
+  opened, changes one after the other; an unmute answers its caller once the microphone
+  is open.
+- **Each participant's two channels of sound** are brought to what the microphone and
+  the share ask by one step, in that participant's turn with its signals and apart from
+  the others, reading what is there each time. It runs whenever anything it reads
+  changes: the microphone, its stream (opened or closed, late at a call's start
+  included), the share, its sound, its capture, the silent input, the connection coming
+  up, the screen the participant watches, their voice taken or not, and every description
+  agreed (offered or answered). Each of these is changed only through a setter that runs
+  the step again, and a test reads the sources for any other assignment.
+- **With the microphone off**, a channel of sound with nothing to send that is agreed to
+  send on a connection that has been up has the encoding of its send stream stopped
+  (`active: false`, `RTCRtpSender.setParameters`, read back after: macOS's plugin answers
+  yes whatever WebRTC did), whatever the connection's state now: WebRTC stops the
+  stream, and once none runs it stops recording, the same stop as for a channel that no
+  longer sends. A voice channel so stopped keeps its direction, and unmuting turns its
+  encoding on again: the voice goes out at once, with no signal to wait for. Any other
+  voice channel (a connection never up yet, one made while muted, one the other side no
+  longer takes the voice on, or one whose encoding would not stop) only receives while
+  muted, its encoding left as it is: WebRTC prepares the microphone whenever a channel
+  comes to send (`WebRtcVoiceSendChannel::SetSend` calls `InitRecording`), which on macOS
+  opens it, and lets go of that only once a stream starts and stops. Its next unmute
+  agrees the channels again on the same connection (only the device that made the first
+  offer offers again, the other asks it with an `update` message, so two offers never
+  cross).
+- **With the microphone on**, the step turns a voice encoding on only once the
+  microphone's track is there to send; a send stream WebRTC makes while the microphone
+  still opens starts with its encoding on, as WebRTC makes every stream, and goes without
+  a track until it is there. A channel's direction is set, and agreed again, only where it
+  differs from the one this device last asked for on that connection, which the call
+  keeps with the connection (the plugin tells a channel's direction only on macOS); every
+  direction is set in one place, which keeps it. An encoding that is not taken, the
+  voice's or the screen sound's, is tried again 1, 3 and 7 s later. The voice's still
+  not taken, the connection is made anew: where this device offers, it offers a new one
+  at once; where the other side offers, this side closes its end and asks for a new offer
+  (`again`) every few seconds for 30 s. The other side takes that only once its own end
+  is no longer up and was made more than 15 s before; how soon WebRTC finds its end no
+  longer up is WebRTC's own, and at the latest that end fails after 30 s with nothing
+  received, after which the other side offers anew within 2 to 6 s by itself: about 45 s
+  at worst in all, with neither voice nor pictures between the two meanwhile. That is
+  done three times at most for a participant in a call; after that the connection is
+  left as it is, with a line in the call's log, and nobody is told: in a call of two the
+  microphone check may then say the microphone reads nothing, which is not what
+  happened.
+- **The microphone check** judges a connection once its voice channel follows the last
+  change of the microphone with its encoding on and the live track, or 10 s after the
+  change all the same, so that a connection whose voice cannot start is told rather than
+  nothing. When the shared screen is captured anew, the new capture's sound reaches
+  every sender before the old capture is let go of. Muting while the screen's sound goes
+  out on Linux, that sound is neither stopped nor agreed again while the silent input is
+  chosen. Older copies, which still mute by agreeing again, work with this in both
+  directions: their offers are answered as before, and a channel kept sending answers as
+  one that sends.
 - **Video goes in VP8**, the same software codec on every system: each description is
   reordered to put VP8 first before it is set and sent (macOS refuses
   `setCodecPreferences`). Between Linux and macOS, H.264 (in hardware on macOS) sent too

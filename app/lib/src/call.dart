@@ -32,6 +32,15 @@ const _screen = 2;
 /// The sound of a shared screen, sent with it to those who watch it.
 const _screenSound = 3;
 
+/// The waits before the voice's encoding, not taken, is tried again
+/// ([Call._startLater]); changed by tests.
+@visibleForTesting
+List<Duration> voiceStartAgainAfter = const [
+  Duration(seconds: 1),
+  Duration(seconds: 2),
+  Duration(seconds: 4),
+];
+
 /// Where capturing the screen brings the other applications' sound with it.
 bool get _displaySound => onLinux || onWindows;
 
@@ -176,7 +185,7 @@ class Call extends ChangeNotifier {
   Call({
     required this.group,
     required this.me,
-    this.mic = true,
+    bool mic = true,
     this.camera = false,
     this.input,
     this.output,
@@ -186,7 +195,8 @@ class Call extends ChangeNotifier {
     this.screenGainOf = _unchanged,
     this.screenQuality = const ScreenQuality(),
     this.nameOf = _someone,
-  }) : quality = CallQuality(me: me);
+  }) : _micOn = mic,
+       quality = CallQuality(me: me);
 
   static double _unchanged(String id) => 1;
   static String _someone(String id) => l10n.appSomeone;
@@ -201,8 +211,141 @@ class Call extends ChangeNotifier {
   /// The same for the sound of each participant's shared screen.
   final double Function(String id) screenGainOf;
 
+  // ----- What each participant's channels of sound follow -----
+  //
+  // The step that brings a participant's voice and screen sound channels to what they
+  // should be ([_voiceTo]) reads these, and each of them is changed only through its
+  // setter, which has that step run again for every participant ([_soundChanged]):
+  // test/call_mute_test.dart reads the sources for any other assignment. What is a
+  // participant's own (their connection coming up, the screen they watch, their voice
+  // taken or not) has its own setter in the same way ([_comeUp], [_setWatches],
+  // [_setVoicePaused]), and every description agreed with them runs the step too.
+
+  /// The microphone is on.
+  bool get mic => _micOn;
+  set mic(bool on) {
+    if (on == _micOn) return;
+    _micOn = on;
+    _soundChanged();
+  }
+
+  bool _micOn;
+
+  /// This device's shared screen.
+  bool get sharing => _sharingNow;
+  set sharing(bool on) {
+    if (on == _sharingNow) return;
+    _sharingNow = on;
+    _soundChanged();
+  }
+
+  bool _sharingNow = false;
+
   /// A shared screen goes with the other applications' sound, where it can be captured.
-  bool shareSound = true;
+  bool get shareSound => _shareSoundNow;
+  set shareSound(bool on) {
+    if (on == _shareSoundNow) return;
+    _shareSoundNow = on;
+    _soundChanged();
+  }
+
+  bool _shareSoundNow = true;
+
+  /// The microphone's stream, open while it is on.
+  MediaStream? get _micStream => _micStreamNow;
+  set _micStream(MediaStream? stream) {
+    if (stream == _micStreamNow) return;
+    _micStreamNow = stream;
+    // No connection follows a track that is not the live one any more.
+    for (final peer in peers.values) {
+      peer._voiceDone = null;
+    }
+    _soundChanged();
+  }
+
+  MediaStream? _micStreamNow;
+
+  /// The shared screen's capture, with its sound where it has some.
+  MediaStream? get _screenStream => _screenStreamNow;
+  set _screenStream(MediaStream? stream) {
+    if (stream == _screenStreamNow) return;
+    _screenStreamNow = stream;
+    _soundChanged();
+  }
+
+  MediaStream? _screenStreamNow;
+
+  /// WebRTC records from the silent input, not the microphone.
+  bool get _silent => _silentNow;
+  set _silent(bool on) {
+    if (on == _silentNow) return;
+    _silentNow = on;
+    _soundChanged();
+  }
+
+  bool _silentNow = false;
+
+  /// A mute asked while the screen's sound goes out on Linux: the silent input is about
+  /// to be chosen for it ([setMic]), until the mute's change of the microphone is done.
+  bool get _silenceComing => _silenceComingNow;
+  set _silenceComing(bool on) {
+    if (on == _silenceComingNow) return;
+    _silenceComingNow = on;
+    _soundChanged();
+  }
+
+  bool _silenceComingNow = false;
+
+  /// One shared capture is being replaced by another ([shareScreen]): the share goes on,
+  /// and the screen's sound channel keeps its track and direction until the new capture
+  /// is in place, so that the moment in between agrees nothing; its encoding still
+  /// follows the microphone ([_voiceTo]).
+  bool get _replacing => _replacingNow;
+  set _replacing(bool on) {
+    if (on == _replacingNow) return;
+    _replacingNow = on;
+    _soundChanged();
+  }
+
+  bool _replacingNow = false;
+
+  /// One of the above changed: every participant's step runs again.
+  void _soundChanged() {
+    if (_closed) return;
+    for (final peer in peers.values.toList()) {
+      _queueVoice(peer);
+    }
+  }
+
+  /// Their connection came up: WebRTC may record for it from now on.
+  void _comeUp(CallPeer peer) {
+    if (peer._upOnceNow) return;
+    peer._upOnceNow = true;
+    _queueVoice(peer);
+  }
+
+  /// The participant whose shared screen [peer] watches: this device's screen sound goes
+  /// to them only while they watch it.
+  void _setWatches(CallPeer peer, String? id) {
+    if (id == peer._watchesNow) return;
+    peer._watchesNow = id;
+    _queueVoice(peer);
+  }
+
+  /// Takes [peer]'s voice or not ([_flushLateVoice]): set in their turn, and their step
+  /// run there at once, so that no other step takes the change first. Returns what
+  /// completes once a description made after the change is agreed ([CallPeer._agreed],
+  /// made just before it: an agreement described before it never completes it), or
+  /// null when the step started no agreement for it.
+  Future<Completer<void>?> _setVoicePaused(CallPeer peer, bool paused) async {
+    Completer<void>? agreed;
+    await peer._inTurn(() async {
+      final made = peer._agreed = Completer<void>();
+      peer._voicePausedNow = paused;
+      if (await _voiceTo(peer)) agreed = made;
+    });
+    return agreed;
+  }
 
   /// How large and how smooth this device's shared screen goes out.
   ScreenQuality screenQuality;
@@ -218,9 +361,7 @@ class Call extends ChangeNotifier {
 
   final String group;
   final String me;
-  bool mic;
   bool camera;
-  bool sharing = false;
 
   /// The participant whose shared screen this device watches. Until someone watches a
   /// screen, it is not sent to them, and its sound is not played here.
@@ -311,9 +452,7 @@ class Call extends ChangeNotifier {
   /// microphone in use going away and coming back.
   void Function(String notice)? onNotice;
 
-  MediaStream? _micStream;
   MediaStream? _cameraStream;
-  MediaStream? _screenStream;
 
   /// The screen or window shared, when it was picked from Fogata's own list (not the
   /// system's dialog), and the frame rate it is captured at.
@@ -532,6 +671,27 @@ class Call extends ChangeNotifier {
   Future<void> stop() => _stopping ??= _stop();
   Future<void>? _stopping;
 
+  /// Takes [peer]'s connection for one that came up, for tests.
+  @visibleForTesting
+  void comeUpForTests(CallPeer peer) {
+    peer.connected = true;
+    _comeUp(peer);
+  }
+
+  /// Opens the microphone as [start] does once the call's connection to the media bridge
+  /// is there, for tests (start itself needs the core).
+  @visibleForTesting
+  Future<void> openMicForTests() => _openMic();
+
+  /// The shared screen captured anew as [stream], as [setScreenQuality] does it, for
+  /// tests.
+  @visibleForTesting
+  Future<void> swapCaptureForTests(MediaStream stream) {
+    final old = _screenStream!;
+    _screenStream = stream;
+    return _swapCapture(old);
+  }
+
   /// This device's own streams and the voice engine, for tests of [stop].
   @visibleForTesting
   void holdForTests({
@@ -656,13 +816,13 @@ class Call extends ChangeNotifier {
 
   /// The sound sent with this device's shared screen. WebRTC opens its input for any
   /// channel of sound that sends, whatever it sends, so with the microphone off the
-  /// screen's sound only goes while that input is the silent one.
-  MediaStreamTrack? get _soundTrack => shareSound && (mic || _silent)
+  /// screen's sound only goes while that input is the silent one, or is being made so for
+  /// a mute ([_silenceComing]): the sound goes on through the mute, not stopped and
+  /// agreed again for the moment in between.
+  MediaStreamTrack? get _soundTrack =>
+      shareSound && (mic || _silent || _silenceComing)
       ? _screenStream?.getAudioTracks().firstOrNull
       : null;
-
-  /// WebRTC records from the silent input, not the microphone.
-  bool _silent = false;
 
   /// The changes of input between the silent one and the microphone, one after the other
   /// ([_inputTurn]).
@@ -770,6 +930,7 @@ class Call extends ChangeNotifier {
       shareSound &&
       !mic &&
       !_silent &&
+      !_silenceComing &&
       _screenStream?.getAudioTracks().isNotEmpty == true;
 
   /// Whether this device's shared screen can take the other applications' sound. Where
@@ -817,7 +978,8 @@ class Call extends ChangeNotifier {
   }
 
   /// The screen's sound channel only sends while there is sound to send, so it never
-  /// opens the microphone on its own; each change is agreed again with every participant.
+  /// opens the microphone on its own: its track, encoding and direction are given in each
+  /// participant's turn with the voice's ([_voiceTo]).
   Future<void> _soundChannel() async {
     if (_soundConnections) {
       final want = sharing && shareSound && !_closed;
@@ -842,18 +1004,9 @@ class Call extends ChangeNotifier {
       }
     }
     await _quietInput();
-    final changed = _soundInChannel != _soundSending;
-    _soundSending = _soundInChannel;
     await _eachPeer('screen sound', (peer) async {
+      _queueVoice(peer);
       await _soundTo(peer);
-      final transceivers = await _channels(peer.connection);
-      if (transceivers.length <= _screenSound) return;
-      final channel = transceivers[_screenSound];
-      await channel.sender.replaceTrack(_track(_screenSound, peer));
-      if (changed) {
-        await channel.setDirection(_soundDirection);
-        await _renegotiate(peer);
-      }
     });
     _sendState();
     notifyListeners();
@@ -877,9 +1030,6 @@ class Call extends ChangeNotifier {
       }
     }
   }
-
-  /// The direction the screen's sound channels were last given.
-  bool _soundSending = false;
 
   TransceiverDirection get _soundDirection => _soundInChannel
       ? TransceiverDirection.SendRecv
@@ -1030,43 +1180,511 @@ class Call extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// The microphone is open only while it is on. Muted, the voice channel only receives,
-  /// so WebRTC stops recording and the system shows the microphone unused; WebRTC records
-  /// from the default microphone whenever a voice channel may send, even with nothing to
-  /// send. Each change is agreed again with every participant.
-  Future<void> setMic(bool on) async {
+  /// The microphone is open only while it is on, and WebRTC records while any send stream
+  /// of sound runs, with a track or not: a voice channel's whose encoding is on, or the
+  /// screen's sound channel's. That one sends only while the screen's sound goes out in
+  /// the call's own channels ([_soundInChannel]): on Linux with the microphone off too,
+  /// recording then from the silent input ([_quietInput]); on Windows only with the
+  /// microphone on; on macOS never (its sound goes on connections of its own).
+  ///
+  /// A mute first disables the microphone's track, as it is asked: every sender holding
+  /// it sends silence at once (WebRTC's AudioRtpSender mutes its stream as its track is
+  /// disabled), whatever each connection is busy with. Then the microphone is closed or
+  /// opened: changes one after the other, a change not started yet when a later one is
+  /// asked being left to the later one. The future completes there, the state signal
+  /// sent and listeners told. Each participant's voice channel is then brought to what
+  /// [mic] asks in that participant's own turn ([_voiceTo]), apart from the others, so
+  /// one whose turn is busy holds up neither them nor the caller.
+  ///
+  /// A mute waits for nothing: the state signal and every participant's step go out at
+  /// once, before the microphone is closed, and the future completes then. An open still
+  /// going on (the system asking first, say) finds the microphone off when it ends and
+  /// lets go of what it opened ([_openMic]).
+  Future<void> setMic(bool on) {
     mic = on;
     _micCheck.reset();
-    if (on) {
-      if (_micStream == null) await _openMic();
-      await _loudInput();
+    _micAskedAt = DateTime.now();
+    _silenceComing = !on && _wantSilence;
+    final asked = ++_micAsked;
+    if (!on) {
+      _silenceSenders();
+      _micToPeers();
+    }
+    final turn = _micTurn.then((_) => _micDevice(asked));
+    _micTurn = turn.catchError((Object e) => _trace('microphone: $e'));
+    return on ? _micTurn : Future.value();
+  }
+
+  /// Silences every voice sender at once, as a mute is asked, whatever each connection
+  /// is busy with. On Linux and Windows the microphone's track is disabled: every sender
+  /// holding it then sends silence (AudioRtpSender mutes its stream), and the engine
+  /// only tells its audio processing (tools/webrtc/patches/webrtc/0008). On macOS that
+  /// would have WebRTC-SDK's audio module mute its input (MuteStream calls
+  /// SetMicrophoneMute, voice processing's own mute), a way the call never took: the
+  /// track is taken off every sender instead, as a step does (replaceTrack(null), which
+  /// needs nothing agreed). A step that gives a sender its track computes it and asks
+  /// for it at once, so one asked before this was asked before this, and one after it
+  /// finds the microphone off: none can put the track back.
+  void _silenceSenders() {
+    if (_closed) return;
+    if (onMacOS) {
+      for (final peer in peers.values.toList()) {
+        unawaited(
+          _resendTo(
+            peer,
+            _audio,
+          ).catchError((Object e) => _trace('voice to ${peer.id}: $e')),
+        );
+      }
+      return;
+    }
+    for (final track in _micStream?.getAudioTracks() ?? <MediaStreamTrack>[]) {
+      try {
+        track.enabled = false;
+      } catch (e) {
+        _trace('microphone track: $e');
+      }
+    }
+  }
+
+  /// Takes [peer]'s voice for a moment as late voice does, for tests ([_pauseVoiceIn]).
+  @visibleForTesting
+  Future<void> pauseVoiceInForTests(CallPeer peer) => _pauseVoiceIn(peer);
+
+  /// When the microphone was last asked to change ([setMic]).
+  DateTime _micAskedAt = DateTime(0);
+
+  /// Tells everyone the microphone's state and has every participant's channels brought
+  /// to it.
+  void _micToPeers() {
+    if (_closed) return;
+    _sendState();
+    notifyListeners();
+    for (final peer in peers.values.toList()) {
+      _queueVoice(peer);
+    }
+  }
+
+  /// The changes of the microphone asked so far, and the last one's turn to open or close
+  /// it ([setMic]).
+  int _micAsked = 0;
+  Future<void> _micTurn = Future.value();
+
+  /// Opens or closes the microphone for change [asked], unless a later change was asked
+  /// before it started or the call ended; then has every participant's voice channel
+  /// brought to it. A step that fails is noted and the next ones still go: whatever the
+  /// device does, the connections follow [mic].
+  Future<void> _micDevice(int asked) async {
+    if (_closed || asked != _micAsked) return;
+    Future<void> step(String what, Future<void> Function() run) async {
+      if (_closed) return;
+      try {
+        await run();
+      } catch (e) {
+        _trace('microphone, $what: $e');
+      }
+    }
+
+    if (mic) {
+      if (_micStream == null) await step('opening', _openMic);
+      // Disabled by a mute left to this change before it closed the microphone.
+      await step('enabling', () async {
+        for (final track
+            in _micStream?.getAudioTracks() ?? <MediaStreamTrack>[]) {
+          if (!track.enabled) track.enabled = true;
+        }
+      });
+      await step('input', _loudInput);
+      _micToPeers();
     } else {
       // To the silent input first, if the screen's sound keeps going out, so the
       // microphone is not held open by it.
-      await _quietInput();
-      await _closeMic();
+      final silence = _silenceComing;
+      await step('silent input', _quietInput);
+      // An unmute asked meanwhile keeps the microphone open: its own change comes next.
+      if (asked != _micAsked) return;
+      _silenceComing = false;
+      await step('closing', _closeMic);
+      // The mute went out already ([setMic]); again only where the screen's sound waited
+      // for the silent input, which may not have been made.
+      if (silence) _micToPeers();
     }
-    await _eachPeer('microphone', (peer) async {
-      final transceivers = await _channels(peer.connection);
-      if (transceivers.isEmpty) return;
-      await transceivers[_audio].sender.replaceTrack(_track(_audio, peer));
-      await transceivers[_audio].setDirection(_voiceDirection(peer));
-      if (transceivers.length > _screenSound) {
-        await transceivers[_screenSound].sender.replaceTrack(
-          _track(_screenSound, peer),
-        );
-        await transceivers[_screenSound].setDirection(_soundDirection);
-      }
-      _soundSending = _soundInChannel;
-      await _renegotiate(peer);
-    });
-    _sendState();
-    notifyListeners();
   }
 
-  TransceiverDirection _voiceDirection(CallPeer peer) => peer._voicePaused
-      ? (mic ? TransceiverDirection.SendOnly : TransceiverDirection.Inactive)
-      : (mic ? TransceiverDirection.SendRecv : TransceiverDirection.RecvOnly);
+  /// Has [_voiceTo] run in [peer]'s turn, once however many ask before it starts: it reads
+  /// everything again when it runs.
+  void _queueVoice(CallPeer peer) {
+    if (peer._voiceDue) return;
+    peer._voiceDue = true;
+    unawaited(
+      peer
+          ._inTurn(() async {
+            peer._voiceDue = false;
+            await _voiceTo(peer);
+          })
+          .catchError((Object e) => _trace('voice to ${peer.id}: $e')),
+    );
+  }
+
+  /// The microphone's changes asked so far, and every participant's turn after them,
+  /// done, for tests.
+  @visibleForTesting
+  Future<void> voiceSettledForTests() async {
+    await _micTurn;
+    await Future.wait([
+      for (final peer in peers.values.toList())
+        peer._inTurn(() async {}).catchError((Object _) {}),
+    ]);
+  }
+
+  /// Brings [peer]'s two channels of sound, the voice and the shared screen's sound, to
+  /// what [mic] and the share ask, from what is there now: run in [peer]'s turn after
+  /// each change of the microphone or of the screen's sound, after each description
+  /// agreed with them (offered or answered), and when their connection comes up. Each
+  /// channel gets its track, its encoding on where it has something to send and stopped
+  /// where it has not, and its direction ([_voiceWanted], [_soundDirection]), which is
+  /// set, and agreed, only where it differs from the one this device last asked for
+  /// ([_askedOn]). Returns whether a new agreement was started. A failure (the
+  /// connection closed meanwhile) is noted, and whatever runs it goes on.
+  Future<bool> _voiceTo(CallPeer peer) async {
+    try {
+      return await _voiceToNow(peer);
+    } catch (e) {
+      _trace('voice to ${peer.id}: $e');
+      return false;
+    }
+  }
+
+  Future<bool> _voiceToNow(CallPeer peer) async {
+    final connection = peer.connection;
+    // Read again after every wait: the call may end, they may leave, or their
+    // connection be made anew meanwhile.
+    bool gone() =>
+        _closed || peers[peer.id] != peer || peer.connection != connection;
+    if (connection == null || gone()) return false;
+    // The change of the microphone this run brings the channel to (see [_voiceDone]).
+    final asked = _micAsked;
+    final transceivers = await _channels(connection);
+    if (transceivers.isEmpty || gone()) return false;
+    final track = _track(_audio, peer);
+    await transceivers[_audio].sender.replaceTrack(track);
+    // On with the microphone's track there to send; until it is (still opening), the
+    // encoding stays as [_voiceWanted] leaves it, so nothing records for nothing.
+    var voiceOn = false;
+    if (mic && track != null) {
+      voiceOn = await _encode(connection, _audio, true) == true;
+      if (!voiceOn && !gone()) _startLater(peer, connection, _audio);
+    }
+    final voice = await _voiceWanted(peer, connection);
+    if (transceivers.length > _screenSound && _replacing && !gone()) {
+      // A capture being replaced: its track and direction stay as they are, so that
+      // nothing is agreed for the change; its encoding follows the microphone as
+      // outside it, on only while the screen's sound could go out (with the microphone
+      // on, or through the silent input on Linux).
+      if (shareSound && (mic || _silent || _silenceComing)) {
+        if (await _encode(connection, _screenSound, true) == false && !gone()) {
+          _startLater(peer, connection, _screenSound);
+        }
+      } else if (peer._upOnce && await _agreedSends(connection, _screenSound)) {
+        await _encode(connection, _screenSound, false);
+      }
+    }
+    if (transceivers.length > _screenSound && !_replacing && !gone()) {
+      await transceivers[_screenSound].sender.replaceTrack(
+        _track(_screenSound, peer),
+      );
+      // Sending, the screen's sound goes with its encoding on. Not sending, a send
+      // stream of it that is still agreed (until its new direction is) records nothing.
+      if (_soundInChannel) {
+        if (await _encode(connection, _screenSound, true) == false && !gone()) {
+          _startLater(peer, connection, _screenSound);
+        }
+      } else if (peer._upOnce && await _agreedSends(connection, _screenSound)) {
+        await _encode(connection, _screenSound, false);
+      }
+    }
+    if (gone()) return false;
+    var agree = false;
+    if (_askedOn(connection, _audio) != voice) {
+      await _ask(connection, transceivers, _audio, voice);
+      agree = true;
+    }
+    if (transceivers.length > _screenSound &&
+        !_replacing &&
+        _askedOn(connection, _screenSound) != _soundDirection) {
+      await _ask(connection, transceivers, _screenSound, _soundDirection);
+      agree = true;
+    }
+    if (gone()) return false;
+    if (agree) await _renegotiate(peer);
+    // Followed: with the microphone on, its encoding on with the live track (see
+    // [Call._measure]); not one left by a mute and unmute meanwhile.
+    if (!gone() &&
+        asked == _micAsked &&
+        (!mic || (voiceOn && track == _track(_audio, peer)))) {
+      peer._voiceDone = asked;
+    }
+    return agree;
+  }
+
+  /// The direction this device last asked for on each channel of a connection, by the
+  /// channel's place, kept with the connection itself so that it goes with it: set when
+  /// the connection's offer makes the channels, and through [_ask], the only place that
+  /// sets a channel's direction (test/call_mute_test.dart reads the sources for any
+  /// other). The plugin tells a channel's direction only on macOS (Linux's and Windows'
+  /// have no `rtpTransceiverGetDirection`).
+  final _asked = Expando<Map<int, TransceiverDirection>>();
+
+  TransceiverDirection? _askedOn(RTCPeerConnection connection, int channel) =>
+      _asked[connection]?[channel];
+
+  /// Asks for [direction] on [channel] of [connection] ([transceivers], its channels in
+  /// order), and keeps it ([_askedOn]).
+  Future<void> _ask(
+    RTCPeerConnection connection,
+    List<RTCRtpTransceiver> transceivers,
+    int channel,
+    TransceiverDirection direction,
+  ) async {
+    await transceivers[channel].setDirection(direction);
+    (_asked[connection] ??= {})[channel] = direction;
+  }
+
+  /// Takes [direction] as asked already on [channel] of [connection], for tests of a
+  /// connection made by them.
+  @visibleForTesting
+  void askedForTests(
+    RTCPeerConnection connection,
+    int channel,
+    TransceiverDirection direction,
+  ) => (_asked[connection] ??= {})[channel] = direction;
+
+  /// The direction [peer]'s voice channel on [connection] is to be asked for. It sends
+  /// while the microphone is on. With the microphone off, where the channel is agreed to
+  /// send on a connection that has been up, whatever its state now, the encoding of its
+  /// send stream is stopped first: WebRTC stops the stream, and with the last one it
+  /// stops recording, the same stop as for a channel that no longer sends (the one its
+  /// echo canceller keeps the room through, tools/webrtc/patches/webrtc/0010), and an
+  /// unmute only turns it on again. It then keeps sending where its encoding is stopped.
+  /// Anywhere else it only receives, and its encoding is left as it is: WebRTC prepares
+  /// the microphone whenever a channel comes to send (SetSend false to true, which on
+  /// macOS opens it), and lets go of that only once a stream starts and stops; a stream
+  /// made with its encoding on starts, and the step after the agreement stops it, while
+  /// one made off would leave the microphone prepared.
+  Future<TransceiverDirection> _voiceWanted(
+    CallPeer peer,
+    RTCPeerConnection connection,
+  ) async {
+    var stopped = false;
+    if (!mic &&
+        peer._upOnce &&
+        peer.connection == connection &&
+        await _sendsVoice(connection)) {
+      stopped = await _encode(connection, _audio, false) == true;
+    }
+    // [mic] as it is after the wait: turned on meanwhile, the channel sends.
+    final sends = mic || stopped;
+    return peer._voicePaused
+        ? (sends
+              ? TransceiverDirection.SendOnly
+              : TransceiverDirection.Inactive)
+        : (sends
+              ? TransceiverDirection.SendRecv
+              : TransceiverDirection.RecvOnly);
+  }
+
+  /// The encoding of [channel] (the voice, or the screen's sound) was not taken: tried
+  /// again 1, 3 and 7 s later, in [peer]'s turn, while it still has something to send
+  /// and [connection] is still theirs. The voice's still not taken, the connection is
+  /// made anew ([_connectAnew]); the screen's sound's is left as it is (traced). Once for
+  /// a channel of a connection at a time.
+  void _startLater(CallPeer peer, RTCPeerConnection connection, int channel) {
+    if (peer._starting[channel] == connection) return;
+    peer._starting[channel] = connection;
+    final what = channel == _audio ? 'voice' : 'screen sound';
+    _trace('$what to ${peer.id.substring(0, 8)} not started: trying again');
+    bool wanted() => channel == _audio
+        ? mic && _track(_audio, peer) != null
+        : _soundInChannel ||
+              (_replacing && shareSound && (mic || _silent || _silenceComing));
+    unawaited(() async {
+      try {
+        for (final wait in voiceStartAgainAfter) {
+          await Future<void>.delayed(wait);
+          var done = true;
+          await peer._inTurn(() async {
+            if (_closed ||
+                !wanted() ||
+                peers[peer.id] != peer ||
+                peer.connection != connection) {
+              return;
+            }
+            done = await _encode(connection, channel, true) != false;
+            _trace(
+              '$what to ${peer.id.substring(0, 8)} '
+              '${done ? 'started' : 'not started'} after '
+              '${wait.inMilliseconds} ms more',
+            );
+            // Started: the step marks the voice followed ([_voiceDone]).
+            if (done) _queueVoice(peer);
+          });
+          if (done) return;
+        }
+        if (channel == _audio) {
+          await peer._inTurn(() => _connectAnew(peer, connection));
+        } else {
+          _trace(
+            '$what to ${peer.id.substring(0, 8)} not started: left as it is',
+          );
+        }
+      } catch (e) {
+        _trace('$what to ${peer.id}: $e');
+      } finally {
+        if (peer._starting[channel] == connection) {
+          peer._starting.remove(channel);
+        }
+      }
+    }());
+  }
+
+  /// Makes [peer]'s connection anew, the voice's encoding not taken, while the microphone
+  /// is on, [connection] still theirs and the call going on. Where this side offers, it
+  /// offers a new connection at once, as after a failure. Where the other side offers,
+  /// this one is closed and the other side asked for a new offer ([_askAgain]).
+  Future<void> _connectAnew(CallPeer peer, RTCPeerConnection connection) async {
+    if (_closed ||
+        !mic ||
+        peers[peer.id] != peer ||
+        peer._keptOut ||
+        peer.connection != connection) {
+      return;
+    }
+    // A few times in a call: an encoding refused on every new connection would have it
+    // made again and again, with nothing between the two meanwhile. Left as it is then,
+    // with only this line in the log: nobody is told, and in a call of two the
+    // microphone check may say the microphone reads nothing ([_measure]), which is not
+    // what happened.
+    if (peer._voiceAnew >= maxVoiceAnew) {
+      _trace('voice to ${peer.id.substring(0, 8)} not started: left as it is');
+      return;
+    }
+    peer._voiceAnew++;
+    _trace('voice to ${peer.id.substring(0, 8)} not started: connecting anew');
+    if (me.compareTo(peer.id) < 0) {
+      // Counted as opening: the voice engine waits for it if the call ends meanwhile.
+      await _whileOpening(() async {
+        if (!_closed) await _offer(peer);
+      });
+      return;
+    }
+    await peer._close();
+    unawaited(_askAgain(peer));
+  }
+
+  /// Asks [peer], who offers, for a new offer (`again`) until one comes, this side's
+  /// connection with them closed: they take it only once their own connection is no
+  /// longer up and was made more than [connectWithin] ago (the `again` case of
+  /// [_handle]). How soon WebRTC on their side finds a connection whose other end
+  /// closed no longer up, the code here does not decide; at the latest it fails, 30 s
+  /// with nothing received (kDeadConnectionReceiveTimeout), and they offer anew 2 to 6 s
+  /// after that by themselves ([_retry]). Asked every 2 s over the first 10 s, then
+  /// every 5 s up to 30 s, then once more by [_retry]. Outside their turn: the offer is
+  /// taken in it.
+  Future<void> _askAgain(CallPeer peer) async {
+    for (final wait in _againEvery) {
+      await Future<void>.delayed(wait);
+      if (_closed ||
+          peers[peer.id] != peer ||
+          peer._keptOut ||
+          peer.connection != null) {
+        return;
+      }
+      _signal(peer.id, {'t': 'again'});
+    }
+    // Still no offer: tried again as any connection that failed.
+    if (!_closed && peers[peer.id] == peer && peer.connection == null) {
+      _retry(peer);
+    }
+  }
+
+  /// How many times in a call a participant's connection is made anew for a voice
+  /// encoding not taken ([_connectAnew]).
+  static const maxVoiceAnew = 3;
+
+  static const _againEvery = [
+    Duration(seconds: 1),
+    Duration(seconds: 2),
+    Duration(seconds: 2),
+    Duration(seconds: 2),
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 5),
+    Duration(seconds: 5),
+    Duration(seconds: 5),
+  ];
+
+  /// Starts or stops the encoding of [channel] (the voice or the screen's sound) on
+  /// [connection] ([RTCRtpEncoding.active]) with nothing to agree. Returns whether the
+  /// encoding is so, as read back from the sender afterwards: macOS's plugin answers yes
+  /// whatever WebRTC did; null when the channel cannot be read at all (the connection
+  /// closed). With no send stream, WebRTC's sender (pc/rtp_sender.cc) answers the
+  /// parameters it keeps for the next one: one encoding until its first stream, none
+  /// after it; one set then is applied to the next stream (ApplyInitParameters_w), so a
+  /// stream can be made with its encoding off, and [_voiceTo], run once it is agreed,
+  /// turns it on. A channel with none has nothing to set, and nothing records.
+  Future<bool?> _encode(
+    RTCPeerConnection connection,
+    int channel,
+    bool on,
+  ) async {
+    final what =
+        '${channel == _audio ? 'voice' : 'screen sound'} '
+        '${on ? 'on' : 'off'}';
+    try {
+      Future<RTCRtpSender?> sender() async {
+        final channels = await _channels(connection);
+        return channels.length > channel ? channels[channel].sender : null;
+      }
+
+      bool so(RTCRtpSender s) =>
+          (s.parameters.encodings ?? const <RTCRtpEncoding>[]).every(
+            (e) => e.active == on,
+          );
+
+      final RTCRtpSender? before;
+      try {
+        before = await sender();
+      } catch (e) {
+        _trace('$what: $e');
+        return null;
+      }
+      if (before == null) return null;
+      if (so(before)) return true;
+      final parameters = before.parameters;
+      // Only what is set here goes back (see [_tune]): the encoding's other values as
+      // read (a bitrate of 0, say) would change it, or be refused.
+      parameters.encodings = [
+        RTCRtpEncoding(
+          active: on,
+          numTemporalLayers: null,
+          scaleResolutionDownBy: null,
+          priority: parameters.encodings!.first.priority,
+        ),
+      ];
+      parameters.degradationPreference = null;
+      if (!await before.setParameters(parameters)) {
+        _trace('$what: refused');
+        return false;
+      }
+      final after = await sender();
+      if (after != null && so(after)) return true;
+      _trace('$what: not taken');
+      return false;
+    } catch (e) {
+      _trace('$what: $e');
+      return false;
+    }
+  }
 
   Future<void> setCamera(bool on) async {
     final was = camera;
@@ -1160,61 +1778,71 @@ class Call extends ChangeNotifier {
 
   Future<void> shareScreen(DesktopCapturerSource? source) =>
       _whileOpening(() async {
-        await stopSharing(resend: false);
-        await _askWayland();
-        MediaStream? stream;
-        // The encoder does not keep to a lower rate by itself, so the screen is captured
-        // at the rate chosen. Without a source (no list to pick from) the system's own
-        // dialog or the library's default rate decides.
-        final fps = source != null ? screenQuality.fps : (_wayland ? 60 : 30);
+        // Another capture in place of the one shared: not a share that stops.
+        _replacing = sharing;
         try {
-          stream = await navigator.mediaDevices.getDisplayMedia(
-            _capture(source, fps),
-          );
-        } catch (e) {
-          // Closing the system's dialog is a choice, not a failure.
-          if (!'$e'.contains('cancelled')) {
-            _trace('screen: $e');
-            _report(l10n.callScreenFailed(_system));
-          }
+          await _shareScreen(source);
+        } finally {
+          _replacing = false;
         }
-        // The call ended while the system's dialog was open, or another share began.
-        if (stream != null && (_closed || _screenStream != null)) {
-          await _free(stream);
-          return;
-        }
-        if (_closed) return;
-        sharing = stream != null;
-        if (stream != null) {
-          _screenStream = stream;
-          _source = source;
-          _capturedAt = fps;
-          localScreen.srcObject = stream;
-          stream.getVideoTracks().firstOrNull?.onEnded = () => stopSharing();
-          if (source == null) await _portalRate(screenQuality.fps);
-          await _screenSized();
-          // Asked only when that is the question: a share with sound, or of a window,
-          // has its answer.
-          final sound = stream.getAudioTracks().isNotEmpty;
-          final window = source?.type == SourceType.Window;
-          final server = onLinux && !sound && !window
-              ? await _screenSoundServer()
-              : null;
-          soundNeedsPipeWire =
-              _screenStream == stream &&
-              needsPipeWire(
-                linux: onLinux,
-                sound: sound,
-                window: window,
-                server: server,
-              );
-        }
-        if (sharing) await _askSharedEncode();
-        await _resetFits();
-        await _resend(_screen);
-        await _soundChannel();
-        if (sharing) onSound?.call(UiSound.shareStart);
       });
+
+  Future<void> _shareScreen(DesktopCapturerSource? source) async {
+    await stopSharing(resend: false);
+    await _askWayland();
+    MediaStream? stream;
+    // The encoder does not keep to a lower rate by itself, so the screen is captured
+    // at the rate chosen. Without a source (no list to pick from) the system's own
+    // dialog or the library's default rate decides.
+    final fps = source != null ? screenQuality.fps : (_wayland ? 60 : 30);
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia(
+        _capture(source, fps),
+      );
+    } catch (e) {
+      // Closing the system's dialog is a choice, not a failure.
+      if (!'$e'.contains('cancelled')) {
+        _trace('screen: $e');
+        _report(l10n.callScreenFailed(_system));
+      }
+    }
+    // The call ended while the system's dialog was open, or another share began.
+    if (stream != null && (_closed || _screenStream != null)) {
+      await _free(stream);
+      return;
+    }
+    if (_closed) return;
+    sharing = stream != null;
+    if (stream != null) {
+      _screenStream = stream;
+      _source = source;
+      _capturedAt = fps;
+      localScreen.srcObject = stream;
+      stream.getVideoTracks().firstOrNull?.onEnded = () => stopSharing();
+      if (source == null) await _portalRate(screenQuality.fps);
+      await _screenSized();
+      // Asked only when that is the question: a share with sound, or of a window,
+      // has its answer.
+      final sound = stream.getAudioTracks().isNotEmpty;
+      final window = source?.type == SourceType.Window;
+      final server = onLinux && !sound && !window
+          ? await _screenSoundServer()
+          : null;
+      soundNeedsPipeWire =
+          _screenStream == stream &&
+          needsPipeWire(
+            linux: onLinux,
+            sound: sound,
+            window: window,
+            server: server,
+          );
+    }
+    if (sharing) await _askSharedEncode();
+    await _resetFits();
+    await _resend(_screen);
+    await _soundChannel();
+    if (sharing) onSound?.call(UiSound.shareStart);
+  }
 
   /// Asks the plugin, once, whether the connections that send the shared screen share
   /// one encoder of it (`fogataSharedScreenEncode`: libwebrtc's shared screen encode, on
@@ -1728,9 +2356,12 @@ class Call extends ChangeNotifier {
       failed = state == RTCPeerConnectionState.RTCPeerConnectionStateFailed;
       final up =
           state == RTCPeerConnectionState.RTCPeerConnectionStateConnected;
+      if (up) _comeUp(peer);
       if (up && !peer.connected) {
         _signal(peer.id, _state);
         _signal(peer.id, _net);
+        // Its voice channel as the microphone asks, now that WebRTC may record for it.
+        _queueVoice(peer);
       }
       if (up) {
         wasUp = true;

@@ -221,7 +221,7 @@ void main() {
         final (call, peer, connection) = sharing();
         final screen = connection.channels[2]._sender;
         connection.stats = [_screenOut(0)];
-        peer.watches = me;
+        peer.watchesForTests = me;
         Future<void> reading() async {
           await call.measureNow();
           await pumpEventQueue();
@@ -256,7 +256,7 @@ void main() {
       // Her encoder had made 40 pictures when she last watched.
       connection.stats = [_screenOut(40)];
       await call.measureNow();
-      peer.watches = me;
+      peer.watchesForTests = me;
       await call.measureNow();
       connection.stats = [_screenOut(41)];
       for (var i = 0; i < 4; i++) {
@@ -266,9 +266,9 @@ void main() {
       expect(refreshed(), isEmpty);
       // Watching again after she stopped, to whom nothing goes out this time: asked
       // again, from the start.
-      peer.watches = null;
+      peer.watchesForTests = null;
       await call.measureNow();
-      peer.watches = me;
+      peer.watchesForTests = me;
       for (var i = 0; i < 2; i++) {
         await call.measureNow();
         await pumpEventQueue();

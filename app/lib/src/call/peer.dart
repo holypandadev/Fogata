@@ -24,8 +24,13 @@ class CallPeer {
   bool sound = false;
 
   /// The participant whose shared screen this one watches; a screen goes only to those
-  /// who watch it.
-  String? watches;
+  /// who watch it. Set through [Call._setWatches].
+  String? get watches => _watchesNow;
+  String? _watchesNow;
+
+  /// Sets [watches] without the call knowing, for tests of a participant alone.
+  @visibleForTesting
+  set watchesForTests(String? id) => _watchesNow = id;
 
   /// Their voice is heard now.
   bool speaking = false;
@@ -156,8 +161,51 @@ class CallPeer {
 
   /// Their voice is not taken for a moment, to drop what was held up (see
   /// [Call._flushLateVoice]); [_agreed] completes when a description is agreed.
-  bool _voicePaused = false;
+  bool get _voicePaused => _voicePausedNow;
+
+  /// Their voice is being dropped for a moment ([Call._pauseVoiceIn]), one at a time.
+  bool _pausingVoice = false;
+  bool _voicePausedNow = false;
   Completer<void>? _agreed;
+
+  /// [Call._voiceTo] waits in their turn and has not started yet.
+  bool _voiceDue = false;
+
+  /// [connection] has been up: WebRTC prepared the microphone for it if its voice channel
+  /// was agreed to send, and does not again. Set through [Call._comeUp].
+  bool get _upOnce => _upOnceNow;
+  bool _upOnceNow = false;
+
+  /// The connection whose encoding of each channel of sound is being tried again
+  /// ([Call._startLater]).
+  final _starting = <int, RTCPeerConnection>{};
+
+  /// Times their connection was made anew in this call for a voice encoding not taken
+  /// ([Call._connectAnew]): for the participant, not one connection, so never reset.
+  int _voiceAnew = 0;
+
+  /// Takes [connection] for one that is up, and has been, for tests.
+  @visibleForTesting
+  void upForTests() {
+    connected = true;
+    _upOnceNow = true;
+  }
+
+  /// The change of the microphone [Call._voiceTo] last brought [connection]'s voice
+  /// channel to; null for none yet on it. The microphone check judges a connection only
+  /// once its voice channel follows the change there is ([Call._micAsked]).
+  int? _voiceDone;
+
+  /// Runs [step] in their turn, as a signal from them is handled, for tests.
+  @visibleForTesting
+  Future<void> inTurnForTests(Future<void> Function() step) => _inTurn(step);
+
+  /// Takes [connection] for one agreed once, its candidates gathered, for tests.
+  @visibleForTesting
+  void describedForTests() {
+    _described = true;
+    if (!_gathered.isCompleted) _gathered.complete();
+  }
 
   /// The sound of this device's shared screen to them, and of theirs to this device, when
   /// it goes on a connection of its own.
@@ -220,6 +268,9 @@ class CallPeer {
     _candidates = 0;
     _offering = false;
     _again = false;
+    _voiceDone = null;
+    _upOnceNow = false;
+    _starting.clear();
     _early.clear();
     connected = false;
     if (c != null) await closeConnection(c);

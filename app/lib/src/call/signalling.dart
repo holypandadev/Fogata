@@ -167,10 +167,14 @@ extension _Signalling on Call {
         );
         peer._offering = false;
         await _described(peer);
-        if (peer._again) {
-          peer._again = false;
+        // A change waiting for this answer goes with the offer [_voiceTo] makes, if it
+        // makes one: an offer has everything asked so far.
+        final again = peer._again;
+        peer._again = false;
+        final more = await _voiceTo(peer);
+        if (again && !more) {
           await _renegotiate(peer);
-        } else {
+        } else if (!more) {
           peer._agreed?.complete();
           peer._agreed = null;
         }
@@ -205,7 +209,7 @@ extension _Signalling on Call {
         _showBack(peer);
         final watch = message['watch'];
         final watched = peer.watches;
-        peer.watches = watch is String && watch.isNotEmpty ? watch : null;
+        _setWatches(peer, watch is String && watch.isNotEmpty ? watch : null);
         if (sharing && (watched == me) != (peer.watches == me)) {
           // Someone starts or stops watching this device's screen.
           onSound?.call(
@@ -403,19 +407,20 @@ extension _Signalling on Call {
     final connection = await _connect(peer);
     peer._offering = true;
     final number = ++peer._offerNumber;
+    final voice = await _voiceWanted(peer, connection);
     for (final channel in [_audio, _camera, _screen, _screenSound]) {
+      final direction = switch (channel) {
+        _audio => voice,
+        _screenSound => _soundDirection,
+        _ => TransceiverDirection.SendRecv,
+      };
       await connection.addTransceiver(
         kind: channel == _audio || channel == _screenSound
             ? RTCRtpMediaType.RTCRtpMediaTypeAudio
             : RTCRtpMediaType.RTCRtpMediaTypeVideo,
-        init: RTCRtpTransceiverInit(
-          direction: switch (channel) {
-            _audio => _voiceDirection(peer),
-            _screenSound => _soundDirection,
-            _ => TransceiverDirection.SendRecv,
-          },
-        ),
+        init: RTCRtpTransceiverInit(direction: direction),
       );
+      (_asked[connection] ??= {})[channel] = direction;
     }
     final transceivers = await _channels(connection);
     for (var i = 0; i < transceivers.length; i++) {
@@ -445,9 +450,10 @@ extension _Signalling on Call {
     Object? number,
   ) async {
     final transceivers = await _channels(connection);
+    final voice = await _voiceWanted(peer, connection);
     for (var i = 0; i < transceivers.length; i++) {
-      await transceivers[i].setDirection(switch (i) {
-        _audio => _voiceDirection(peer),
+      await _ask(connection, transceivers, i, switch (i) {
+        _audio => voice,
         _camera || _screen => TransceiverDirection.SendRecv,
         _screenSound => _soundDirection,
         // A call has no other channel: nothing comes on one (see [callSections]).
@@ -460,8 +466,12 @@ extension _Signalling on Call {
     await _tune(peer, connection);
     _signal(peer.id, {'t': 'answer', 'sdp': sdp, 'n': ?number});
     _sentWhileGone(peer);
-    peer._agreed?.complete();
-    peer._agreed = null;
+    // The voice channel as the microphone asks, now that this is agreed: a send stream
+    // made by it starts with its encoding on, or off as set while it had none.
+    if (!await _voiceTo(peer)) {
+      peer._agreed?.complete();
+      peer._agreed = null;
+    }
   }
 
   /// Sets this side's description and returns it with its network candidates inside, once
