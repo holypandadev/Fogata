@@ -9,12 +9,19 @@ again; likewise playout for a call that started meanwhile. Reproduced in the cal
 (tools/call-lab/mic.sh restart:down20 with RESTART_MUTED=1: a's microphone off as the
 server goes, turned on while it is away): a did not record within 20 s of the server back.
 
-Without a server they now report success: the voice engine goes on to start, which
-StartPlayout and StartRecording keep for the server's return (play_wanted_, rec_wanted_
-kStarted), and Restore starts them.
+Without a server they now report success, and so do StartPlayout and StartRecording,
+which keep the start for the server's return (play_wanted_, rec_wanted_ kStarted), where
+Restore does it. AudioState sees a start of recording that succeeded: the server's going
+marked a change of devices (patch 0011), so the echo controller is made anew there, and a
+new AEC3 processes nothing before played sound comes again (playout waits for the server
+too): the recording that starts late never runs on the AEC3 of before with a second of
+stale played sound. The voice engine's own state (Recording(), Playing()) stays false until
+the server is back, so another stream started meanwhile asks again (at most another new
+echo controller); a start kept and then stopped meanwhile is forgotten (StopRecording,
+StopPlayout), and Restore never does it.
 
 diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
-index b7244db..42b60a1 100644
+index b7244db..47fb9e3 100644
 --- a/modules/audio_device/linux/audio_device_pulse_linux.cc
 +++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
 @@ -955,7 +955,10 @@ int32_t AudioDeviceLinuxPulse::InitPlayout() {
@@ -41,3 +48,29 @@ index b7244db..42b60a1 100644
    }
  
    // Initialize the microphone (devices might have been added or removed)
+@@ -1166,7 +1172,11 @@ int32_t AudioDeviceLinuxPulse::StartRecording() {
+     rec_wanted_ = Wanted::kStarted;
+   }
+   if (!_recIsInitialized) {
+-    return -1;
++    // Fogata, patch 0012: with no server the start is kept (rec_wanted_) and done
++    // when one answers (Restore): told done now, so that the voice engine goes on
++    // as after a start (AudioState takes a recording that starts for a start of
++    // recording, patches 0010 and 0011).
++    return connected_ ? -1 : 0;
+   }
+ 
+   _recStartEvent.Reset();
+@@ -1293,7 +1303,11 @@ int32_t AudioDeviceLinuxPulse::StartPlayout() {
+     play_wanted_ = Wanted::kStarted;
+   }
+   if (!_playIsInitialized) {
+-    return -1;
++    // Fogata, patch 0012: with no server the start is kept (play_wanted_) and done
++    // when one answers (Restore): told done now, so that the voice engine goes on
++    // as after a start (AudioState takes a recording that starts for a start of
++    // recording, patches 0010 and 0011).
++    return connected_ ? -1 : 0;
+   }
+ 
+   _playStartEvent.Reset();

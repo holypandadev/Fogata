@@ -14,7 +14,8 @@ off and on again in the call restarts it, every time; a change of devices while 
 makes it anew once, and one while recording runs counts at the next start too; a stream
 heard coming or going while it was off, and recording turned off, make it anew;
 a start of recording that fails makes and restarts nothing, and leaves the call and a
-change it was told for the next start. Where the test expects a restart, a change marked
+change it was told for the next start; one the device keeps for later (no sound server,
+WebRTC patch 0012) makes it anew after the change the server's going marked. Where the test expects a restart, a change marked
 meanwhile by something else in the process (a real audio device module) makes it anew,
 which the test accepts. AudioDeviceImpl marks another output or input chosen, not the same
 one chosen again, and devices that came or went. Built in again: the library shows only
@@ -89,10 +90,10 @@ index 1ec6733..ea0195a 100644
  
 diff --git a/test/echo_call.test.cc b/test/echo_call.test.cc
 new file mode 100644
-index 0000000..ef44ee1
+index 0000000..c5e485a
 --- /dev/null
 +++ b/test/echo_call.test.cc
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,368 @@
 +// WebRTC's audio state and audio processing with Fogata's patches 0010 and 0011
 +// (tools/webrtc/patches/webrtc): a call's start makes the echo controller anew;
 +// only a microphone turned on again in the call recording stopped in restarts it
@@ -179,6 +180,9 @@ index 0000000..ef44ee1
 +      if (fail_) {
 +        return -1;
 +      }
++      if (keep_) {
++        return 0;  // Kept for later, as with no sound server (patch 0012).
++      }
 +      recording_ = true;
 +      return 0;
 +    });
@@ -229,6 +233,7 @@ index 0000000..ef44ee1
 +  int restarted_before_ = 0;
 +  bool recording_ = false;
 +  bool fail_ = false;
++  bool keep_ = false;
 +  webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
 +  webrtc::scoped_refptr<webrtc::test::MockAudioDeviceModule> adm_;
 +  webrtc::scoped_refptr<webrtc::internal::AudioState> state_;
@@ -348,6 +353,26 @@ index 0000000..ef44ee1
 +  EXPECT_EQ(Made(), 1);
 +  EXPECT_EQ(Restarted(), 0);
 +
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}
++
++// With no sound server the device keeps a start, tells it done and records later on
++// its own (WebRTC patch 0012): the start counts, and the change of devices the
++// server's going marked makes the echo controller anew; nothing restarts it later.
++TEST_F(EchoCall, AStartKeptForLaterMakesItAnew) {
++  state_->AddReceivingStream(&heard_);
++  Start();
++  state_->RemoveSendingStream(&voice_);
++  webrtc::MarkAudioDevicesChanged();  // The server went.
++  keep_ = true;
++  Count();
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_FALSE(recording_);
++  keep_ = false;
++  recording_ = true;  // The server back: the device starts on its own.
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
 +  state_->RemoveSendingStream(&voice_);
 +  state_->RemoveReceivingStream(&heard_);
 +}
