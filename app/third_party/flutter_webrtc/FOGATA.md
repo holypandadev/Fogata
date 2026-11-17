@@ -582,8 +582,9 @@ The last two rows are what keeping the room costs: when the room changes and no 
 says so (a headset taken off but still plugged in and laid by the microphone, a single
 output that serves headphones and speakers with nothing to tell them apart), the
 transparent mode kept says there is no echo, and the other side hears themselves for about
-a second after the unmute until AEC3 finds it; any version does the same when that change
-is made with the microphone on. Not seen as a change: a Bluetooth headset on Linux that
+a second after the unmute until AEC3 finds it. The same echo added with the microphone on
+(4 runs each, another session) came back for 0.5 s at -16 dBFS, with 0009 alike (0.4 s;
+p 0.29 and 0.88): the unmute that keeps the room takes about half a second longer. Not seen as a change: a Bluetooth headset on Linux that
 switches profile as recording stops and starts removes and adds its devices, so its
 unmutes most likely still get a new AEC3, as with 0009; on macOS, an output switching its
 data source on the same device. The unmute check with a headset (`mic.sh unmute:headset`,

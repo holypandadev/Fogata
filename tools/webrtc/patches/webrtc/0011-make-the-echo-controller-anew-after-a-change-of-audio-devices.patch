@@ -38,8 +38,10 @@ microphone; the other side talking in speech-like noise; 6 runs each): the other
 themselves 0.3 s after the unmute at -25 dBFS at the loudest, as with 0009 (0.3 s, -24 dBFS;
 p 1.0 and 0.59), where patch 0010 alone let them hear themselves 0.9 s at -14 dBFS. The
 same change with nothing marked (the room's echo added with no device event) stays at
-1.1 s and -15 dBFS against 0.2 s and -32 dBFS with 0009: what any version does when a room
-changes with the microphone on.
+1.1 s and -15 dBFS against 0.2 s and -32 dBFS with 0009: the cost of the room kept for an
+unmute. The same echo added with the microphone on (UNMUTE_ROOM_AT, 4 runs each, another
+session) came back for 0.5 s at -16 dBFS, with 0009 alike (0.4 s, -16 dBFS; p 0.29 and
+0.88).
 
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
 index 23219a0..0a5e515 100644
