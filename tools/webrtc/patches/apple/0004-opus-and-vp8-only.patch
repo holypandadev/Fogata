@@ -4,10 +4,10 @@ factories VP8 alone, and the framework holds no VideoToolbox H.264 encoder or de
 VP9 and no AV1. No other codec can be negotiated, and none is there to decode what others
 send.
 diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
-index 324f297b7f..236edc2822 100644
+index 1095b5810f..54b4e7bdf2 100644
 --- a/sdk/BUILD.gn
 +++ b/sdk/BUILD.gn
-@@ -832,9 +832,7 @@ if (is_ios || is_mac) {
+@@ -833,9 +833,7 @@ if (is_ios || is_mac) {
          ":helpers_objc",
          ":native_video",
          ":videocodec_objc",
@@ -17,7 +17,7 @@ index 324f297b7f..236edc2822 100644
          ":vpx_codec_constants",
          "../api/video_codecs:scalability_mode",
          "../api/video_codecs:scalability_mode_helper",
-@@ -1249,7 +1247,6 @@ if (is_ios || is_mac) {
+@@ -1250,7 +1248,6 @@ if (is_ios || is_mac) {
          ":videorendereradapter_objc",
          ":audiorendereradapter_objc",
          ":videosource_objc",
@@ -25,7 +25,7 @@ index 324f297b7f..236edc2822 100644
          "../api:create_modular_peer_connection_factory",
          "../api:data_channel_interface",
          "../api:dtmf_sender_interface",
-@@ -1274,8 +1271,8 @@ if (is_ios || is_mac) {
+@@ -1275,8 +1272,8 @@ if (is_ios || is_mac) {
          "../api/audio:audio_processing_options_resolver",
          "../api/audio:builtin_audio_processing_builder",
          "../api/audio_codecs:audio_codecs_api",
@@ -36,7 +36,7 @@ index 324f297b7f..236edc2822 100644
          "../api/crypto:frame_decryptor_interface",
          "../api/crypto:frame_encryptor_interface",
          "../api/environment",
-@@ -1692,12 +1689,8 @@ if (is_ios || is_mac) {
+@@ -1694,12 +1691,8 @@ if (is_ios || is_mac) {
            "objc/api/peerconnection/RTCVideoSource.h",
            "objc/api/peerconnection/RTCVideoTrack.h",
            "objc/api/video_codec/RTCVideoCodecConstants.h",
@@ -49,7 +49,7 @@ index 324f297b7f..236edc2822 100644
            "objc/api/video_frame_buffer/RTCNativeI420Buffer.h",
            "objc/api/video_frame_buffer/RTCNativeMutableI420Buffer.h",
            "objc/base/RTCCodecSpecificInfo.h",
-@@ -1733,10 +1726,6 @@ if (is_ios || is_mac) {
+@@ -1735,10 +1728,6 @@ if (is_ios || is_mac) {
            "objc/components/video_codec/RTCDefaultVideoDecoderFactory.h",
            "objc/components/video_codec/RTCDefaultVideoEncoderFactory.h",
            "objc/components/video_codec/RTCH264ProfileLevelId.h",
@@ -60,7 +60,7 @@ index 324f297b7f..236edc2822 100644
            "objc/components/video_frame_buffer/RTCCVPixelBuffer.h",
            "objc/helpers/RTCDispatcher.h",
            "objc/helpers/RTCYUVHelper.h",
-@@ -1767,7 +1756,6 @@ if (is_ios || is_mac) {
+@@ -1769,7 +1758,6 @@ if (is_ios || is_mac) {
            ":videocapture_objc",
            ":desktopcapture_objc",
            ":videocodec_objc",
@@ -95,7 +95,7 @@ index 0e8de054bf..c11c67398d 100644
  #include "media/base/media_constants.h"
  #include "modules/audio_device/include/audio_device.h"
  #include "modules/audio_device/audio_engine_device.h"
-@@ -99,13 +100,12 @@ static webrtc::Environment CreateDefaultEnvironment() {
+@@ -99,13 +100,12 @@ @implementation RTC_OBJC_TYPE (RTCPeerConnectionFactory) {
  - (instancetype)init {
    webrtc::PeerConnectionFactoryDependencies dependencies;
    dependencies.audio_encoder_factory =
@@ -114,7 +114,7 @@ index 0e8de054bf..c11c67398d 100644
    dependencies.env = CreateDefaultEnvironment();
  #ifdef WEBRTC_IOS
    dependencies.adm = webrtc::CreateAudioDeviceModule(*dependencies.env);
-@@ -126,9 +126,9 @@ static webrtc::Environment CreateDefaultEnvironment() {
+@@ -126,9 +126,9 @@ - (instancetype)init {
    webrtc::PeerConnectionFactoryDependencies dependencies;
    dependencies.env = CreateDefaultEnvironment();
    dependencies.audio_encoder_factory =
@@ -126,7 +126,7 @@ index 0e8de054bf..c11c67398d 100644
    if (encoderFactory) {
      dependencies.video_encoder_factory = webrtc::ObjCToNativeVideoEncoderFactory(encoderFactory);
    }
-@@ -170,8 +170,8 @@ static webrtc::Environment CreateDefaultEnvironment() {
+@@ -170,8 +170,8 @@ - (instancetype)init {
    }
  
    return [self
@@ -159,7 +159,7 @@ index 1b7038bc20..aea2f3301e 100644
  
  #if defined(WEBRTC_IOS)
  #include "api/environment/environment.h"
-@@ -27,19 +26,14 @@
+@@ -27,19 +26,14 @@ @implementation RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) (DefaultComponent
  
  + (RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) *)defaultBuilder {
    RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) *builder = [[RTC_OBJC_TYPE(RTCPeerConnectionFactoryBuilder) alloc] init];
@@ -273,7 +273,7 @@ index 056a887e9b..216546ece3 100644
  @implementation RTC_OBJC_TYPE (RTCDefaultVideoEncoderFactory)
  
  @synthesize preferredCodec;
-@@ -34,37 +28,16 @@
+@@ -34,37 +28,16 @@ @implementation RTC_OBJC_TYPE (RTCDefaultVideoEncoderFactory)
    NSMutableArray<RTC_OBJC_TYPE(RTCVideoCodecInfo) *> *result =
        [NSMutableArray array];
  
@@ -336,7 +336,7 @@ index 023d0d2a65..75eb3eb2b5 100644
  
  @interface RTC_OBJC_TYPE (RTCVideoEncoderFactorySimulcast) ()
  
-@@ -42,25 +34,9 @@
+@@ -42,25 +34,9 @@ - (instancetype)initWithPrimary:(id<RTC_OBJC_TYPE(RTCVideoEncoderFactory)>)prima
      return [RTC_OBJC_TYPE(RTCVideoEncoderSimulcast) simulcastEncoderWithPrimary: _primary fallback: _fallback videoCodecInfo: info];
  }
  

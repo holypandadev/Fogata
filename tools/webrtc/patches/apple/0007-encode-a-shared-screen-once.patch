@@ -8,10 +8,10 @@ field trial Fogata-SharedScreenEncode/Enabled/ turns it on. Without the trial, o
 source not marked (cameras), nothing changes.
 
 diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
-index 236edc2..5d8d59b 100644
+index 54b4e7bdf2..abbbf2e63e 100644
 --- a/sdk/BUILD.gn
 +++ b/sdk/BUILD.gn
-@@ -623,6 +623,40 @@ if (is_ios || is_mac) {
+@@ -624,6 +624,40 @@ if (is_ios || is_mac) {
        ]
      }
  
@@ -52,7 +52,7 @@ index 236edc2..5d8d59b 100644
      rtc_library("videoframebuffer_objc") {
        visibility = [ "*" ]
        sources = [
-@@ -1232,11 +1266,15 @@ if (is_ios || is_mac) {
+@@ -1233,11 +1267,15 @@ if (is_ios || is_mac) {
        ]
        public_configs = [ ":common_config_objc" ]
  
@@ -68,7 +68,7 @@ index 236edc2..5d8d59b 100644
          ":helpers_objc",
          ":mediaconstraints_objc",
          ":mediasource_objc",
-@@ -1903,8 +1941,12 @@ if (is_ios || is_mac) {
+@@ -1905,8 +1943,12 @@ if (is_ios || is_mac) {
  
        public_configs = [ ":common_config_objc" ]
  
@@ -82,7 +82,7 @@ index 236edc2..5d8d59b 100644
          ":helpers_objc",
          ":videocodec_objc",
 diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
-index c11c673..21b0e45 100644
+index c11c67398d..21b0e45ed9 100644
 --- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
 +++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
 @@ -36,6 +36,8 @@
@@ -94,7 +94,7 @@ index c11c673..21b0e45 100644
  #include "sdk/objc/native/api/ssl_certificate_verifier.h"
  
  #include "api/audio/builtin_audio_processing_builder.h"
-@@ -130,7 +132,11 @@ static webrtc::Environment CreateDefaultEnvironment() {
+@@ -130,7 +132,11 @@ - (instancetype)init {
    dependencies.audio_decoder_factory =
        webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>();
    if (encoderFactory) {
@@ -107,7 +107,7 @@ index c11c673..21b0e45 100644
    }
    if (decoderFactory) {
      dependencies.video_decoder_factory = webrtc::ObjCToNativeVideoDecoderFactory(decoderFactory);
-@@ -157,7 +163,10 @@ static webrtc::Environment CreateDefaultEnvironment() {
+@@ -157,7 +163,10 @@ - (instancetype)init {
    std::unique_ptr<webrtc::VideoEncoderFactory> native_encoder_factory;
    std::unique_ptr<webrtc::VideoDecoderFactory> native_decoder_factory;
    if (encoderFactory) {
@@ -120,7 +120,7 @@ index c11c673..21b0e45 100644
    if (decoderFactory) {
      native_decoder_factory = webrtc::ObjCToNativeVideoDecoderFactory(decoderFactory);
 diff --git a/sdk/objc/api/peerconnection/RTCVideoSource.h b/sdk/objc/api/peerconnection/RTCVideoSource.h
-index 283a8c8..478def2 100644
+index 283a8c8664..478def23e1 100644
 --- a/sdk/objc/api/peerconnection/RTCVideoSource.h
 +++ b/sdk/objc/api/peerconnection/RTCVideoSource.h
 @@ -32,6 +32,15 @@ RTC_OBJC_EXPORT
@@ -140,10 +140,10 @@ index 283a8c8..478def2 100644
  
  NS_ASSUME_NONNULL_END
 diff --git a/sdk/objc/api/peerconnection/RTCVideoSource.mm b/sdk/objc/api/peerconnection/RTCVideoSource.mm
-index 46251ff..1b4da1d 100644
+index 46251ff6e4..1b4da1d786 100644
 --- a/sdk/objc/api/peerconnection/RTCVideoSource.mm
 +++ b/sdk/objc/api/peerconnection/RTCVideoSource.mm
-@@ -80,6 +80,10 @@ static webrtc::ObjCVideoTrackSource *getObjCVideoSource(
+@@ -80,6 +80,10 @@ - (void)adaptOutputFormatToWidth:(int)width height:(int)height fps:(int)fps {
        ->OnOutputFormatRequest(width, height, fps);
  }
  
@@ -155,7 +155,7 @@ index 46251ff..1b4da1d 100644
  
  - (webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>)nativeVideoSource {
 diff --git a/sdk/objc/native/src/objc_video_track_source.h b/sdk/objc/native/src/objc_video_track_source.h
-index 35d3190..4fab315 100644
+index 35d31909ae..4fab315a73 100644
 --- a/sdk/objc/native/src/objc_video_track_source.h
 +++ b/sdk/objc/native/src/objc_video_track_source.h
 @@ -13,6 +13,8 @@
@@ -210,7 +210,7 @@ index 35d3190..4fab315 100644
  
  }  // namespace webrtc
 diff --git a/sdk/objc/native/src/objc_video_track_source.mm b/sdk/objc/native/src/objc_video_track_source.mm
-index 9586e31..2a73b32 100644
+index 9586e31a4f..2a73b32c78 100644
 --- a/sdk/objc/native/src/objc_video_track_source.mm
 +++ b/sdk/objc/native/src/objc_video_track_source.mm
 @@ -16,6 +16,7 @@
@@ -221,7 +221,7 @@ index 9586e31..2a73b32 100644
  
  @interface RTC_OBJC_TYPE(RTCObjCVideoSourceAdapter) ()
  @property(nonatomic) webrtc::ObjCVideoTrackSource *objCVideoTrackSource;
-@@ -38,14 +39,24 @@ ObjCVideoTrackSource::ObjCVideoTrackSource(const Environment &env,
+@@ -38,14 +39,24 @@ - (void)capturer:(RTC_OBJC_TYPE(RTCVideoCapturer) *)capturer
                                             bool is_screencast)
      : AdaptedVideoTrackSource(/* required resolution alignment */ 2),
        env_(env),
@@ -248,7 +248,7 @@ index 9586e31..2a73b32 100644
  bool ObjCVideoTrackSource::is_screencast() const {
    return is_screencast_;
  }
-@@ -72,6 +83,9 @@ void ObjCVideoTrackSource::OnOutputFormatRequest(int width,
+@@ -72,6 +83,9 @@ - (void)capturer:(RTC_OBJC_TYPE(RTCVideoCapturer) *)capturer
  
  void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
                                             frame) {
@@ -258,7 +258,7 @@ index 9586e31..2a73b32 100644
    const int64_t timestamp_us =
        frame.timeStampNs / webrtc::kNumNanosecsPerMicrosec;
    const int64_t translated_timestamp_us = timestamp_aligner_.TranslateTimestamp(
-@@ -132,11 +146,15 @@ void ObjCVideoTrackSource::OnCapturedFrame(RTC_OBJC_TYPE(RTCVideoFrame) *
+@@ -132,11 +146,15 @@ - (void)capturer:(RTC_OBJC_TYPE(RTCVideoCapturer) *)capturer
      rotation = kVideoRotation_0;
    }
  

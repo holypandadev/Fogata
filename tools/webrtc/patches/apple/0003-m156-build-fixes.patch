@@ -4,10 +4,10 @@ and the network thread in place of webrtc-sdk's worker thread, which M156 no lon
 apart from it (the audio device module is made and driven on that thread).
 
 diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
-index ebee27f..2439a99 100644
+index 238da2e7aa..1095b5810f 100644
 --- a/sdk/BUILD.gn
 +++ b/sdk/BUILD.gn
-@@ -969,7 +969,7 @@ if (is_ios || is_mac) {
+@@ -960,7 +960,7 @@ if (is_ios || is_mac) {
        deps = [
          ":base_objc",
          ":wrapped_native_codec_objc",
@@ -17,7 +17,7 @@ index ebee27f..2439a99 100644
        ]
      }
 diff --git a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
-index 5421994..0e8de05 100644
+index 5421994002..0e8de054bf 100644
 --- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
 +++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
 @@ -123,9 +123,6 @@ - (instancetype)init {

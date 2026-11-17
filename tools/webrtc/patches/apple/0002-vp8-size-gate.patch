@@ -2,10 +2,10 @@ The size check of the C++ wrapper (//libwebrtc/src/internal/vp8_size_gate) in th
 Objective-C SDK: every VP8 decoder refuses keyframes larger than 8K before decoding them,
 and RTCI420Buffer.refusedSize tells the size a stand-in picture stands for.
 diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
-index 36d7422943..ebee27fc26 100644
+index dcbb19cfea..238da2e7aa 100644
 --- a/sdk/BUILD.gn
 +++ b/sdk/BUILD.gn
-@@ -602,6 +602,27 @@ if (is_ios || is_mac) {
+@@ -603,6 +603,27 @@ if (is_ios || is_mac) {
        ]
      }
  
@@ -33,7 +33,7 @@ index 36d7422943..ebee27fc26 100644
      rtc_library("videoframebuffer_objc") {
        visibility = [ "*" ]
        sources = [
-@@ -613,8 +634,10 @@ if (is_ios || is_mac) {
+@@ -614,8 +635,10 @@ if (is_ios || is_mac) {
          "objc/components/video_frame_buffer/RTCCVPixelBuffer.h",
          "objc/components/video_frame_buffer/RTCCVPixelBuffer.mm",
        ]
@@ -44,7 +44,7 @@ index 36d7422943..ebee27fc26 100644
          "../rtc_base:logging",
          "//api/video:video_frame",
          "//api/video:video_rtp_headers",
-@@ -863,9 +886,11 @@ if (is_ios || is_mac) {
+@@ -854,9 +877,11 @@ if (is_ios || is_mac) {
          "objc/api/video_codec/RTCVideoEncoderVP8.mm",
        ]
  
@@ -68,7 +68,7 @@ index 6f3f11f1fb..4e85b18b8d 100644
  
  @interface RTC_OBJC_TYPE (RTCVideoDecoderVP8Builder)
      : RTC_OBJC_TYPE(RTCNativeVideoDecoder) <RTC_OBJC_TYPE (RTCNativeVideoDecoderBuilder)>
-@@ -29,13 +30,13 @@
+@@ -29,13 +30,13 @@ @interface RTC_OBJC_TYPE (RTCVideoDecoderVP8Builder)
  
      - (std::unique_ptr<webrtc::VideoDecoder>)build:
          (const webrtc::Environment &)env {
@@ -117,7 +117,7 @@ index 4682bf810f..240a93f4b5 100644
  
  #if !defined(NDEBUG) && defined(WEBRTC_IOS)
  #import <UIKit/UIKit.h>
-@@ -166,4 +168,10 @@
+@@ -166,4 +168,10 @@ - (id)debugQuickLookObject {
  }
  #endif
  
