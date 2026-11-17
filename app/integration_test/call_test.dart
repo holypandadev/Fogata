@@ -4884,7 +4884,9 @@ Future<void> _noise(WidgetTester tester, AppState state) async {
 /// b plays throughout, which unmute.py measures and unmute_check.py judges. Copy b
 /// listens, its microphone off, or (UNMUTE_FAR) on with mic.sh's tone or words in it.
 Future<void> _unmute(WidgetTester tester, AppState state) async {
-  if (_copies != 2) throw StateError('the unmute check takes two copies');
+  if (_copies != 2 && _copies != 3) {
+    throw StateError('the unmute check takes two or three copies');
+  }
   final offs = (_env['FOGATA_TEST_UNMUTE_OFFS'] ?? '2 10 60')
       .split(' ')
       .where((s) => s.isNotEmpty)
@@ -4906,7 +4908,7 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
   await _until(
     tester,
     'connected',
-    () => call.peers.values.any((p) => p.connected),
+    () => call.peers.values.where((p) => p.connected).length >= _copies - 1,
     seconds: 120,
   );
   _mark('connected');
