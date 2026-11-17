@@ -3,8 +3,7 @@ Make the echo controller anew after a change of audio devices
 Patch 0010 keeps what AEC3 learned of the room when a microphone is turned on again in a
 call: with a headset, that there is no echo. A headset taken off for speakers while the
 microphone was off then kept that, and the other side heard themselves for seconds after
-the unmute, until AEC3 found the echo (in the call lab: -14 dBFS at the loudest for 6.4 s at
-the median, against 0.3 s for an AEC3 made anew).
+the unmute, until AEC3 found the echo (figures below).
 
 Whatever learns of a change of audio devices now marks it, from any thread
 (MarkAudioDevicesChanged, api/audio/audio_device.h: a count for the library), and

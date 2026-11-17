@@ -22,8 +22,10 @@ down now and then; an echo canceller removes one the other plays back to it).
 
 speech: one voice talking 2.1 s of every 3 s (mic.sh unmute with UNMUTE_FAR=speech), the
 same noise as the turns' with the same loudness rising and falling 4 times a second, at
--28 dBFS RMS while it talks; every phrase is noise of its own, so that nothing in it repeats
-(the unmute check's words repeat every 3 s, and their pitch every few milliseconds).
+about -27 dBFS RMS while it talks (SPEECH_RMS, divided by the envelope's mean, not its RMS);
+every phrase in the file is noise of its own, so that the file repeats only as it is played
+again (every 30 s as lab.sh plays it), far beyond what an echo canceller spans (the unmute
+check's words repeat every 3 s, and their pitch every few milliseconds).
 
 screen: another application's sound for a shared screen to take (lab_apps_tone): noise
 from 5.3 to 6.5 kHz, above the voices, steady in level, 60 s. Its echo in a room, unlike a

@@ -4904,10 +4904,9 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
     await _until(
       tester,
       'heard from ${_names['a']}: unmute done',
-      () => _said(
-        state,
-        ['unmute done'],
-      ).keys.any((other) => other.name == _names['a']),
+      () => _said(state, [
+        'unmute done',
+      ]).keys.any((other) => other.name == _names['a']),
       seconds: total + 300,
     );
     return;
@@ -4935,8 +4934,11 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
         tester,
         'connected again',
         () =>
-            state.callState.call?.peers.values.any((p) => p.connected) ??
-            false,
+            (state.callState.call?.peers.values
+                    .where((p) => p.connected)
+                    .length ??
+                0) >=
+            _copies - 1,
         seconds: 120,
       );
       if (!state.callState.call!.mic) {

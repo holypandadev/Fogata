@@ -550,7 +550,9 @@ lab_phase_recorder() { # marking role, "roles recorded"
 # moments of the words after each unmute, in ms; UNMUTE_WORDS_START after a saw b connected
 # (`mark-a-connected`). UNMUTE_ECHO=1: b talks (the same words every 3 s) and what a plays
 # goes back into a's microphone 30 ms later, as from speakers; UNMUTE_ROOM_AFTER=<n>: only
-# from a's n-th mute on (`mark-a-mute-<n>`), as a headset taken off while muted.
+# from a's n-th mute on (`mark-a-mute-<n>`), as a headset taken off while muted;
+# UNMUTE_ROOM_AT=<ms>: from that long after a saw b connected, with the microphone on (the
+# moment written to meet/lab-room-on).
 # UNMUTE_UNPLUG=<n>: the same with a device event the sound server tells of, as a
 # headset unplugged: a's output goes away at its n-th mute, and what a plays falls to the
 # default output, whose sound goes back into a's microphone. When b talks, its microphone
@@ -614,6 +616,16 @@ lab_unmute_sound() {
       echo "the room's echo from $(date +%s%3N)" >> "$RUN/lab.log"
     ) &
     echo $! > "$RUN/room-after.pid"
+  elif [ "$room" = 1 ] && [ -n "${UNMUTE_ROOM_AT:-}" ]; then
+    (
+      until [ -s "$M/mark-a-connected" ]; do sleep 0.05; done
+      at=$(cat "$M/mark-a-connected")
+      python3 -I -c "import time; time.sleep(max(0, ($at + $UNMUTE_ROOM_AT) / 1000 - time.time()))"
+      pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
+        source_dont_move=true sink_dont_move=true > /dev/null
+      date +%s%3N > "$M/lab-room-on"
+    ) &
+    echo $! > "$RUN/room-after.pid"
   elif [ "$room" = 1 ]; then
     pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
       source_dont_move=true sink_dont_move=true > /dev/null
@@ -640,7 +652,7 @@ lab_unmute_sound() {
       -ar 48000 -ac 1 -sample_fmt s16 "$RUN/sound/far.wav"
   fi
   if [ "$far" = speech ]; then
-    # Speech-like noise that never repeats (tone.py speech), rather than the same words.
+    # Speech-like noise that repeats only every 30 s (tone.py speech), not every 3 s.
     python3 -I "$LAB_DIR/tone.py" "$RUN/sound/far.wav" speech 30
   fi
   if [ "$far" = tone ]; then

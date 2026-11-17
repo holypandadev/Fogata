@@ -47,9 +47,9 @@ a sawtooth whose pitch falls within each syllable, between 160 and 106 Hz: with 
 the other side's voice back for 4.8 s at the median (0 to 8.9) at -40 dBFS at the loudest,
 where AEC3 with WebRTC's headroom took 0.9 s (0 to 3.7) at -52 dBFS (8 runs each, p 0.05;
 restarted rather than made anew, 4.9 s, the same). The lab's logs show the same delay found
-(7 blocks) in the same time and the filters converged as soon: what differs is how long the
-filters' estimate stays usable on a signal that repeats. With speech-like noise that never
-repeats (tone.py speech, as the echo check's voices) there is no difference (0 s heard, p
+(7 blocks) in the same time and the filters converged as soon; why the signal that repeats
+comes back longer is not known. With speech-like noise that repeats only every 30 s
+(tone.py speech, as the echo check's voices) there is no difference (0 s heard, p
 0.96 and 0.47). A held note, music or a game's sound playing on the far side is periodic
 too; a real voice was not tried (no speech synthesiser in the lab).
 

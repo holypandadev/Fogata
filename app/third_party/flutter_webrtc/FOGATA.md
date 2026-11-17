@@ -524,8 +524,9 @@ whose pitch falls within each syllable between 160 and 106 Hz) came back at a ca
 with speakers for 4.8 s at the median (0 to 8.9), at -40 dBFS at the loudest, where AEC3
 with WebRTC's 2 ms took 0.9 s (0 to 3.7) at -52 dBFS (8 runs each, p 0.05; the same with
 AEC3 restarted rather than made anew). The logs of the lab show the same delay found in
-the same time and the filters converged as soon. With speech-like noise that never repeats
-there is no difference. A held note, music or a game's sound on the other side is periodic
+the same time and the filters converged as soon; why the signal that repeats comes back
+longer is not known. With speech-like noise that repeats only every 30 s there is no
+difference. A held note, music or a game's sound on the other side is periodic
 too; a real voice was not tried.
 
 ## A microphone turned on again while the other side talks (Linux, Windows, macOS)
@@ -560,7 +561,7 @@ plugged in or out, the default or a port changed, a stream moved, a device chose
 platform's device module marks it). Restarted, AEC3 processes nothing before fresh played
 sound arrives, as a new one. Measured in one session of the call lab, everything
 interleaved (`tools/call-lab/mic.sh unmute`, the other side talking in speech-like noise
-that never repeats; with speakers unless said; 8 or 6 runs, medians and ranges; "heard":
+that repeats only every 30 s; with speakers unless said; 8 or 6 runs, medians and ranges; "heard":
 how long their voice came back to them above -50 dBFS; p of a rank test against 0009):
 
 | | 0009 (published) | now | p |

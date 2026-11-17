@@ -90,10 +90,10 @@ index 1ec6733..ea0195a 100644
  
 diff --git a/test/echo_call.test.cc b/test/echo_call.test.cc
 new file mode 100644
-index 0000000..c5e485a
+index 0000000..be81551
 --- /dev/null
 +++ b/test/echo_call.test.cc
-@@ -0,0 +1,368 @@
+@@ -0,0 +1,378 @@
 +// WebRTC's audio state and audio processing with Fogata's patches 0010 and 0011
 +// (tools/webrtc/patches/webrtc): a call's start makes the echo controller anew;
 +// only a microphone turned on again in the call recording stopped in restarts it
@@ -359,7 +359,11 @@ index 0000000..c5e485a
 +
 +// With no sound server the device keeps a start, tells it done and records later on
 +// its own (WebRTC patch 0012): the start counts, and the change of devices the
-+// server's going marked makes the echo controller anew; nothing restarts it later.
++// server's going marked makes the echo controller anew; when the device then records
++// on its own, and while it records, nothing makes or restarts it again. The device here
++// is simulated: that PulseAudio's module answers 0 to a start it keeps with no server
++// is what the lab's restart check with the microphone muted covers
++// (tools/call-lab/mic.sh restart:down20 with RESTART_MUTED=1), as no unit test runs it.
 +TEST_F(EchoCall, AStartKeptForLaterMakesItAnew) {
 +  state_->AddReceivingStream(&heard_);
 +  Start();
@@ -369,8 +373,14 @@ index 0000000..c5e485a
 +  Count();
 +  state_->AddSendingStream(&voice_, 48000, 1);
 +  EXPECT_FALSE(recording_);
++  EXPECT_EQ(Made(), 1);
++  EXPECT_EQ(Restarted(), 0);
 +  keep_ = false;
 +  recording_ = true;  // The server back: the device starts on its own.
++  webrtc::test::MockAudioSendStream screen_sound;
++  state_->AddSendingStream(&screen_sound, 48000, 2);  // Recording runs: no start.
++  state_->RemoveSendingStream(&screen_sound);
++  EXPECT_TRUE(recording_);
 +  EXPECT_EQ(Made(), 1);
 +  EXPECT_EQ(Restarted(), 0);
 +  state_->RemoveSendingStream(&voice_);
