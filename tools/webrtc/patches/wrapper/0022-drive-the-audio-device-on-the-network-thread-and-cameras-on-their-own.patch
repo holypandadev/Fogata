@@ -1,0 +1,335 @@
+Drive the audio device on the network thread, and cameras on a thread of their own
+
+WebRTC M158 has no worker thread apart from the network thread: the worker thread of
+PeerConnectionFactoryDependencies and the CreatePeerConnectionFactory overload that took
+one are gone, and the voice engine, with the audio device module it drives, runs where
+ICE, DTLS and RTP do. The factory made a worker thread of its own, handed it to WebRTC,
+and made and drove the audio device module there. It now does all of that on the network
+thread, the one thread the voice engine calls the module on: the module is used from one
+thread only, and on Linux it connects again there to a sound server that went away
+(WebRTC patch 0006), which needs it made there. The audio device's lists, its choice of
+devices and its volumes (patch 0010) are done there as before, by a blocking call or a
+task from the caller's thread; the audio processing and the custom audio transport are
+made there. Cameras (VcmCapturer), which nothing of WebRTC calls and which may take a
+while to open, start and stop, are opened, started and stopped on a thread of their own,
+capture_thread, in place of the worker thread.
+
+diff --git a/include/libwebrtc.h b/include/libwebrtc.h
+index 1dcb072..2f9243b 100644
+--- a/include/libwebrtc.h
++++ b/include/libwebrtc.h
+@@ -24,7 +24,7 @@ class LibWebRTC {
+    *
+    * Initializes the WebRTC PeerConnectionFactory and threads. This method is
+    * thread-safe and can be called from any thread. It initializes SSL and
+-   * creates three threads: worker_thread, signaling_thread and network_thread.
++   * creates three threads: capture_thread, signaling_thread and network_thread.
+    *
+    * @return true if initialization is successful, false otherwise.
+    */
+@@ -65,7 +65,7 @@ class LibWebRTC {
+    *
+    * Terminates the WebRTC PeerConnectionFactory and threads. This method is
+    * thread-safe and can be called from any thread. It cleans up SSL and stops
+-   * and destroys the three threads: worker_thread, signaling_thread and
++   * and destroys the three threads: capture_thread, signaling_thread and
+    * network_thread.
+    *
+    */
+diff --git a/src/internal/vcm_capturer.h b/src/internal/vcm_capturer.h
+index e0cb036..a186699 100644
+--- a/src/internal/vcm_capturer.h
++++ b/src/internal/vcm_capturer.h
+@@ -32,10 +32,10 @@ class VcmCapturer : public VideoCapturer,
+   // [options]: the cameras' (the portal's on Linux), or null for those opened
+   // directly.
+   static std::shared_ptr<VcmCapturer> Create(
+-      webrtc::Thread* worker_thread, size_t width, size_t height,
++      webrtc::Thread* capture_thread, size_t width, size_t height,
+       size_t target_fps, size_t capture_device_index,
+       VideoCaptureOptions* options = nullptr);
+-  VcmCapturer(webrtc::Thread* worker_thread);
++  VcmCapturer(webrtc::Thread* capture_thread);
+ 
+   virtual ~VcmCapturer();
+ 
+@@ -53,14 +53,14 @@ class VcmCapturer : public VideoCapturer,
+   void Destroy();
+ 
+   webrtc::scoped_refptr<VideoCaptureModule> vcm_;
+-  webrtc::Thread* worker_thread_ = nullptr;
++  webrtc::Thread* capture_thread_ = nullptr;
+   VideoCaptureCapability capability_;
+ };
+ 
+ class CapturerTrackSource : public webrtc::VideoTrackSource {
+  public:
+   static webrtc::scoped_refptr<CapturerTrackSource> Create(
+-      webrtc::Thread* worker_thread);
++      webrtc::Thread* capture_thread);
+ 
+  public:
+   explicit CapturerTrackSource(std::shared_ptr<VideoCapturer> capturer)
+diff --git a/src/internal/vcm_capturer.cc b/src/internal/vcm_capturer.cc
+index 8e2143a..09961dd 100644
+--- a/src/internal/vcm_capturer.cc
++++ b/src/internal/vcm_capturer.cc
+@@ -21,8 +21,8 @@
+ namespace webrtc {
+ namespace internal {
+ 
+-VcmCapturer::VcmCapturer(webrtc::Thread* worker_thread)
+-    : vcm_(nullptr), worker_thread_(worker_thread) {}
++VcmCapturer::VcmCapturer(webrtc::Thread* capture_thread)
++    : vcm_(nullptr), capture_thread_(capture_thread) {}
+ 
+ bool VcmCapturer::Init(size_t width, size_t height, size_t target_fps,
+                        size_t capture_device_index,
+@@ -75,11 +75,11 @@ bool VcmCapturer::Init(size_t width, size_t height, size_t target_fps,
+ }
+ 
+ std::shared_ptr<VcmCapturer> VcmCapturer::Create(
+-    webrtc::Thread* worker_thread, size_t width, size_t height,
++    webrtc::Thread* capture_thread, size_t width, size_t height,
+     size_t target_fps, size_t capture_device_index,
+     VideoCaptureOptions* options) {
+   std::shared_ptr<VcmCapturer> vcm_capturer(
+-      std::make_shared<VcmCapturer>(worker_thread));
++      std::make_shared<VcmCapturer>(capture_thread));
+   if (!vcm_capturer->Init(width, height, target_fps, capture_device_index,
+                           options)) {
+     RTC_LOG(LS_WARNING) << "Failed to create VcmCapturer(w = " << width
+@@ -91,7 +91,7 @@ std::shared_ptr<VcmCapturer> VcmCapturer::Create(
+ }
+ 
+ bool VcmCapturer::StartCapture() {
+-  int32_t result = worker_thread_->BlockingCall(
++  int32_t result = capture_thread_->BlockingCall(
+       [&] { return vcm_->StartCapture(capability_); });
+ 
+   if (result != 0) {
+@@ -104,11 +104,11 @@ bool VcmCapturer::StartCapture() {
+ 
+ bool VcmCapturer::CaptureStarted() {
+   return vcm_ != nullptr &&
+-         worker_thread_->BlockingCall([&] { return vcm_->CaptureStarted(); });
++         capture_thread_->BlockingCall([&] { return vcm_->CaptureStarted(); });
+ }
+ 
+ void VcmCapturer::StopCapture() {
+-  worker_thread_->BlockingCall([&] {
++  capture_thread_->BlockingCall([&] {
+     vcm_->StopCapture();
+     // Release reference to VCM.
+     vcm_ = nullptr;
+@@ -130,7 +130,7 @@ void VcmCapturer::OnFrame(const VideoFrame& frame) {
+ }
+ 
+ webrtc::scoped_refptr<CapturerTrackSource> CapturerTrackSource::Create(
+-    webrtc::Thread* worker_thread) {
++    webrtc::Thread* capture_thread) {
+   const size_t kWidth = 640;
+   const size_t kHeight = 480;
+   const size_t kFps = 30;
+@@ -142,7 +142,7 @@ webrtc::scoped_refptr<CapturerTrackSource> CapturerTrackSource::Create(
+   }
+   int num_devices = info->NumberOfDevices();
+   for (int i = 0; i < num_devices; ++i) {
+-    capturer = VcmCapturer::Create(worker_thread, kWidth, kHeight, kFps, i);
++    capturer = VcmCapturer::Create(capture_thread, kWidth, kHeight, kFps, i);
+     if (capturer) {
+       return webrtc::scoped_refptr<CapturerTrackSource>(
+           new webrtc::RefCountedObject<CapturerTrackSource>(capturer));
+diff --git a/src/rtc_audio_device_impl.cc b/src/rtc_audio_device_impl.cc
+index 32e3ed1..69c8ee7 100644
+--- a/src/rtc_audio_device_impl.cc
++++ b/src/rtc_audio_device_impl.cc
+@@ -18,9 +18,10 @@ AudioDeviceImpl::~AudioDeviceImpl() {
+   audio_device_module_->SetObserver(nullptr);
+ }
+ 
+-// Fogata: on the worker thread, as every other call of the audio device module: on
+-// Linux the module connects there again to a sound server that went away, which
+-// changes what the lists are read from.
++// Fogata: on WebRTC's worker thread, as every other call of the audio device module:
++// on Linux the module connects there again to a sound server that went away, which
++// changes what the lists are read from. Since M158 that is the network thread, which
++// the factory hands over (still named worker_thread_ here).
+ int16_t AudioDeviceImpl::PlayoutDevices() {
+   return worker_thread_->BlockingCall([&] {
+     RTC_DCHECK_RUN_ON(worker_thread_);
+diff --git a/src/rtc_peerconnection_factory_impl.h b/src/rtc_peerconnection_factory_impl.h
+index 8b26a74..f0158d5 100644
+--- a/src/rtc_peerconnection_factory_impl.h
++++ b/src/rtc_peerconnection_factory_impl.h
+@@ -106,7 +106,9 @@ class RTCPeerConnectionFactoryImpl : public RTCPeerConnectionFactory {
+       scoped_refptr<RTCMediaConstraints> constraints);
+ #endif
+  private:
+-  std::unique_ptr<webrtc::Thread> worker_thread_;
++  // Fogata: where cameras start and stop (WebRTC's own threads are the signaling and
++  // the network thread).
++  std::unique_ptr<webrtc::Thread> capture_thread_;
+   std::unique_ptr<webrtc::Thread> signaling_thread_;
+   std::unique_ptr<webrtc::Thread> network_thread_;
+   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
+diff --git a/src/rtc_peerconnection_factory_impl.cc b/src/rtc_peerconnection_factory_impl.cc
+index cec792a..b507d07 100644
+--- a/src/rtc_peerconnection_factory_impl.cc
++++ b/src/rtc_peerconnection_factory_impl.cc
+@@ -87,9 +87,15 @@ env_(CreateEnvironmentWithFieldTrials()) {}
+ RTCPeerConnectionFactoryImpl::~RTCPeerConnectionFactoryImpl() {}
+ 
+ bool RTCPeerConnectionFactoryImpl::Initialize() {
+-  worker_thread_ = webrtc::Thread::Create();
+-  worker_thread_->SetName("worker_thread", nullptr);
+-  RTC_CHECK(worker_thread_->Start()) << "Failed to start thread";
++  // Fogata: WebRTC has no worker thread of its own any more (M158): what it did there,
++  // the voice engine and the audio device module among it, runs on the network
++  // thread, with ICE, DTLS and RTP. The audio device module is made, asked and driven
++  // there too (it is used from one thread only, and on Linux connects again there to a
++  // sound server that went away); cameras are opened and closed on a thread of their
++  // own, as they may take a while to start and stop.
++  capture_thread_ = webrtc::Thread::Create();
++  capture_thread_->SetName("capture_thread", nullptr);
++  RTC_CHECK(capture_thread_->Start()) << "Failed to start thread";
+ 
+   signaling_thread_ = webrtc::Thread::Create();
+   signaling_thread_->SetName("signaling_thread", nullptr);
+@@ -100,17 +106,17 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
+   RTC_CHECK(network_thread_->Start()) << "Failed to start thread";
+   if (!audio_device_module_) {
+     task_queue_factory_ = webrtc::CreateDefaultTaskQueueFactory();
+-    worker_thread_->BlockingCall([&] { CreateAudioDeviceModule_w(); });
++    network_thread_->BlockingCall([&] { CreateAudioDeviceModule_w(); });
+   }
+ 
+   if (!audio_processing_impl_) {
+-    worker_thread_->BlockingCall([this] {
++    network_thread_->BlockingCall([this] {
+       audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>(env_);
+     });
+   }
+ 
+   if (!audio_transport_factory_) {
+-    worker_thread_->BlockingCall([this] {
++    network_thread_->BlockingCall([this] {
+       audio_transport_factory_ =
+           webrtc::make_ref_counted<CustomAudioTransportFactory>();
+     });
+@@ -118,7 +124,7 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
+ 
+   if (!rtc_peerconnection_factory_) {
+     rtc_peerconnection_factory_ = CreatePeerConnectionFactory(
+-        network_thread_.get(), worker_thread_.get(), signaling_thread_.get(),
++        network_thread_.get(), signaling_thread_.get(),
+         audio_device_module_,
+         webrtc::CreateAudioEncoderFactory<webrtc::AudioEncoderOpus>(),
+         webrtc::CreateAudioDecoderFactory<webrtc::AudioDecoderOpus>(),
+@@ -141,14 +147,14 @@ bool RTCPeerConnectionFactoryImpl::Initialize() {
+ }
+ 
+ bool RTCPeerConnectionFactoryImpl::Terminate() {
+-  worker_thread_->BlockingCall([&] {
++  network_thread_->BlockingCall([&] {
+     audio_device_impl_ = nullptr;
+     video_device_impl_ = nullptr;
+     audio_processing_impl_ = nullptr;
+   });
+   rtc_peerconnection_factory_ = NULL;
+   if (audio_device_module_) {
+-    worker_thread_->BlockingCall([this] { DestroyAudioDeviceModule_w(); });
++    network_thread_->BlockingCall([this] { DestroyAudioDeviceModule_w(); });
+   }
+ 
+   return true;
+@@ -197,13 +203,13 @@ void RTCPeerConnectionFactoryImpl::Delete(
+ 
+ scoped_refptr<RTCAudioDevice> RTCPeerConnectionFactoryImpl::GetAudioDevice() {
+   if (!audio_device_module_) {
+-    worker_thread_->BlockingCall([this] { CreateAudioDeviceModule_w(); });
++    network_thread_->BlockingCall([this] { CreateAudioDeviceModule_w(); });
+   }
+ 
+   if (!audio_device_impl_)
+     audio_device_impl_ =
+         scoped_refptr<AudioDeviceImpl>(new RefCountedObject<AudioDeviceImpl>(
+-            audio_device_module_, worker_thread_.get()));
++            audio_device_module_, network_thread_.get()));
+ 
+   return audio_device_impl_;
+ }
+@@ -211,7 +217,7 @@ scoped_refptr<RTCAudioDevice> RTCPeerConnectionFactoryImpl::GetAudioDevice() {
+ scoped_refptr<RTCAudioProcessing>
+ RTCPeerConnectionFactoryImpl::GetAudioProcessing() {
+   if (!audio_processing_impl_) {
+-    worker_thread_->BlockingCall([this] {
++    network_thread_->BlockingCall([this] {
+       audio_processing_impl_ = new RefCountedObject<RTCAudioProcessingImpl>(env_);
+     });
+   }
+@@ -222,7 +228,7 @@ RTCPeerConnectionFactoryImpl::GetAudioProcessing() {
+ scoped_refptr<RTCVideoDevice> RTCPeerConnectionFactoryImpl::GetVideoDevice() {
+   if (!video_device_impl_)
+     video_device_impl_ = scoped_refptr<RTCVideoDeviceImpl>(
+-        new RefCountedObject<RTCVideoDeviceImpl>(worker_thread_.get()));
++        new RefCountedObject<RTCVideoDeviceImpl>(capture_thread_.get()));
+ 
+   return video_device_impl_;
+ }
+diff --git a/src/rtc_video_device_impl.h b/src/rtc_video_device_impl.h
+index 595d0dd..1708371 100644
+--- a/src/rtc_video_device_impl.h
++++ b/src/rtc_video_device_impl.h
+@@ -52,7 +52,7 @@ class RTCVideoDeviceImpl : public RTCVideoDevice
+ #endif
+ {
+  public:
+-  RTCVideoDeviceImpl(webrtc::Thread* worker_thread);
++  RTCVideoDeviceImpl(webrtc::Thread* capture_thread);
+   ~RTCVideoDeviceImpl();
+ 
+  public:
+@@ -82,7 +82,7 @@ class RTCVideoDeviceImpl : public RTCVideoDevice
+       webrtc::VideoCaptureOptions** options);
+ 
+   std::unique_ptr<webrtc::VideoCaptureModule::DeviceInfo> device_info_;
+-  webrtc::Thread* worker_thread_ = nullptr;
++  webrtc::Thread* capture_thread_ = nullptr;
+ 
+ #if defined(WEBRTC_USE_PIPEWIRE)
+   void OnInitialized(webrtc::VideoCaptureOptions::Status status) override;
+diff --git a/src/rtc_video_device_impl.cc b/src/rtc_video_device_impl.cc
+index 31c0831..ac08805 100644
+--- a/src/rtc_video_device_impl.cc
++++ b/src/rtc_video_device_impl.cc
+@@ -9,9 +9,9 @@
+ 
+ namespace libwebrtc {
+ 
+-RTCVideoDeviceImpl::RTCVideoDeviceImpl(webrtc::Thread* worker_thread)
++RTCVideoDeviceImpl::RTCVideoDeviceImpl(webrtc::Thread* capture_thread)
+     : device_info_(webrtc::VideoCaptureFactory::CreateDeviceInfo()),
+-      worker_thread_(worker_thread) {}
++      capture_thread_(capture_thread) {}
+ 
+ RTCVideoDeviceImpl::~RTCVideoDeviceImpl() {
+ #if defined(WEBRTC_USE_PIPEWIRE)
+@@ -161,14 +161,14 @@ scoped_refptr<RTCVideoCapturer> RTCVideoDeviceImpl::Create(const char* name,
+   if (!Current(&options)) {
+     return nullptr;
+   }
+-  auto vcm = worker_thread_->BlockingCall([&, width, height, target_fps] {
+-    return webrtc::internal::VcmCapturer::Create(worker_thread_, width, height,
++  auto vcm = capture_thread_->BlockingCall([&, width, height, target_fps] {
++    return webrtc::internal::VcmCapturer::Create(capture_thread_, width, height,
+                                                  target_fps, index, options);
+   });
+   if (vcm == nullptr) {
+     return nullptr;
+   }
+-  return worker_thread_->BlockingCall([vcm] {
++  return capture_thread_->BlockingCall([vcm] {
+     return scoped_refptr<RTCVideoCapturerImpl>(
+         new RefCountedObject<RTCVideoCapturerImpl>(vcm));
+   });

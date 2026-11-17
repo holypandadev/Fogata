@@ -183,7 +183,8 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    them, listed once their formats are known, with the V4L2 bus of those PipeWire reaches
    through V4L2; without PipeWire's library the session stops instead of using it.
 6. `0006-pulseaudio-connect-again-to-a-sound-server-that-went-away` (Linux only): the
-   PulseAudio device connects again, from WebRTC's worker thread, to a sound server that
+   PulseAudio device connects again, from WebRTC's worker thread (the network thread
+   since M158, see "On the network thread" below), to a sound server that
    went away (0.5 s after, then after 1, 2 and 4 s, then every 5 s; a server that does not
    answer within 5 s is tried again), lists no device at all meanwhile, takes the chosen
    output and input again by the server's names for them where they are still listed (else
@@ -255,7 +256,8 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
 
 `patches/wrapper` (to webrtc-sdk/libwebrtc):
 
-1. builds against M156 (moved headers and targets, header extension ids);
+1. builds against M158 (moved headers and targets, header extension ids, a data
+   channel's buffer made from a span);
 2. VP8 and Opus only;
 3. the VP8 size check, with its tests (`test/vp8_size_gate.test.cc`), and
    `RTCVideoFrame::TooLarge`;
@@ -340,8 +342,40 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     the microphone turns off, and one after it, change neither the format the audio
     processing is given nor its echo controller; the same device chosen again marks
     nothing.
+22. the audio device module is made, asked and driven on the network thread, which is
+    WebRTC's worker thread since M158 (the factory made a worker thread of its own and
+    handed it to WebRTC), and cameras start and stop on a thread of their own
+    (`capture_thread`).
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of
 frames); what the C++ wrapper does not need is left out of Linux and Windows, and what
 calls never use is left out everywhere.
+
+## On the network thread
+
+Since M158 WebRTC has no worker thread apart from the network thread: the voice engine and
+the audio device module run where ICE, DTLS and RTP do, and anything that waits there
+holds them all (wrapper patch 22). What waits there, beside what WebRTC itself does:
+
+- starting and stopping playout and recording, at a call's start and end and when the
+  microphone goes on or off: on Windows up to 1 s to start and 2 s to stop each
+  (WASAPI's own limits), on Linux up to 12 s for a PulseAudio stream that does not start;
+- a choice of output or input during a call (the wrapper's `SetPlayoutDevice` and
+  `SetRecordingDevice` stop, choose, initialize and start again in one task): the sum of
+  the above;
+- the audio device's lists and volumes, asked from the plugin's platform thread by a
+  blocking call: milliseconds, up to 5 s for each question to a PulseAudio server that
+  does not answer. Each device's name is one more question: a list of N devices is N+1
+  questions (its count, then each name), each a blocking call of its own from the
+  application's thread onto the network thread;
+- PulseAudio connecting again (patch 0006): connecting does not wait, but once the
+  server is back the device lists its devices and starts playout and recording again in
+  one task, which may add up to more than 30 s with a server that answers its connection
+  and then nothing else, longer than ICE's consent to send lasts (30 s);
+- on Linux without PulseAudio, ALSA's playout and recording try a busy device again
+  every second, five times.
+
+With a sound server that answers and devices that start, each takes milliseconds. Builds
+of M158 are to be checked for stalls in a call while the microphone goes on and off, the
+output and input change, and PulseAudio restarts.

@@ -5,7 +5,7 @@ server went away (PipeWire's PulseAudio service or PulseAudio restarted, as afte
 update): its lists then held only the default, and nothing played or recorded until the
 application restarted. Now PulseAudio's mainloop thread, seeing the context fail, posts to
 the thread that made the device (WebRTC's worker thread, where the voice engine calls
-it), which:
+it; since M158 that is the network thread, which carries ICE, DTLS and RTP too), which:
 - stops playout and recording, keeping what the voice engine had asked for, lists no
   device at all (not even the default) while no server answers, and tells the device's
   observer (AudioDeviceObserver::OnDevicesUpdated, now also on Linux);
@@ -26,6 +26,12 @@ and every question to the server, of the device and of its mixer (5 s, then canc
 the mixer's wait also took a null operation, which libpulse asserts on), as a stream
 starting already was (9 s). The device's own disconnect no longer reaches its state
 callback.
+
+Since M158 every wait above holds the network thread: a server that takes connections and
+does not answer stops ICE, DTLS and RTP for up to 5 s for each question, and a stream
+that does not start for up to 12 s (StartPlayout and StartRecording, also when playout
+and recording start again after the server came back). With a server that answers each
+takes milliseconds.
 
 diff --git a/modules/audio_device/BUILD.gn b/modules/audio_device/BUILD.gn
 index 1205038..407af4f 100644
