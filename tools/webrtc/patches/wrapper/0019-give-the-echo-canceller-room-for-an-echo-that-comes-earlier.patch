@@ -36,6 +36,23 @@ without the patch, then with 16, 32 (this patch) and 48 ms of headroom:
   under one's own voice at the median without the patch and with it, later turns 73 and
   72 dB; WebRTC's audio threads used 2.88 % of a core with it and without.
 
+Measured again in one session with WebRTC patches 0010 to 0012, interleaved with the
+library as published (without this patch) and with every echo controller restarted: the
+echo check let 10 turns through in 136 with the quantum free and stalls of 20 and 40 ms (35
+in 137 without this patch), 4 in 110 at 480 with stalls of 40 and 80 ms (28 in 109).
+
+A known cost: a far side that repeats itself exactly. The unmute check's own far side
+(mic.sh unmute, UNMUTE_FAR=words) is the same 2.1 s phrase every 3 s, three words made of
+a sawtooth whose pitch falls within each syllable, between 160 and 106 Hz: with it, a call's start with speakers sent
+the other side's voice back for 4.8 s at the median (0 to 8.9) at -40 dBFS at the loudest,
+where AEC3 with WebRTC's headroom took 0.9 s (0 to 3.7) at -52 dBFS (8 runs each, p 0.05;
+restarted rather than made anew, 4.9 s, the same). The lab's logs show the same delay found
+(7 blocks) in the same time and the filters converged as soon: what differs is how long the
+filters' estimate stays usable on a signal that repeats. With speech-like noise that never
+repeats (tone.py speech, as the echo check's voices) there is no difference (0 s heard, p
+0.96 and 0.47). A held note, music or a game's sound playing on the far side is periodic
+too; a real voice was not tried (no speech synthesiser in the lab).
+
 diff --git a/src/rtc_audio_processing_impl.cc b/src/rtc_audio_processing_impl.cc
 index 39cf151..62c8964 100644
 --- a/src/rtc_audio_processing_impl.cc

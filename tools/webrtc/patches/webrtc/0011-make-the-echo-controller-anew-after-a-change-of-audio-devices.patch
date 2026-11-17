@@ -33,6 +33,15 @@ its unmutes most likely still make a new echo controller, as 0009 did (the unmut
 does not reach it); a change PulseAudio tells of is marked one round trip to the server
 later (the defaults and ports are asked for and compared), a few milliseconds.
 
+Measured in one session of the call lab (mic.sh unmute, UNMUTE_UNPLUG: a's output taken
+away while it is muted, its sound falling to the default output, which goes back into its
+microphone; the other side talking in speech-like noise; 6 runs each): the other side heard
+themselves 0.3 s after the unmute at -25 dBFS at the loudest, as with 0009 (0.3 s, -24 dBFS;
+p 1.0 and 0.59), where patch 0010 alone let them hear themselves 0.9 s at -14 dBFS. The
+same change with nothing marked (the room's echo added with no device event) stays at
+1.1 s and -15 dBFS against 0.2 s and -32 dBFS with 0009: what any version does when a room
+changes with the microphone on.
+
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
 index 23219a0..0a5e515 100644
 --- a/api/audio/audio_device.h

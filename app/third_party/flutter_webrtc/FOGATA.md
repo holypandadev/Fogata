@@ -510,6 +510,24 @@ WebRTC-SDK's `RTCDefaultAudioProcessingModule` (`AudioManager.m`) with stock set
 wrapper's patch 0019 does not reach it, so its headroom stays at 2 ms. Whether a Mac's audio engine moves the echo as PipeWire does
 has not been measured.
 
+Measured again in one session with WebRTC patches 0010 to 0012, interleaved with the
+library as published and with every echo controller restarted (turns let through):
+
+| | as published | with 0019 | every one restarted |
+|---|---|---|---|
+| quantum free, stalls of 20 and 40 ms | 35 of 137 | 10 of 136 | 9 of 136 |
+| quantum 480, stalls of 40 and 80 ms | 28 of 109 | 4 of 110 | 1 of 110 |
+
+A known cost of the headroom: a far side that repeats itself exactly. The unmute check's
+own far side (`UNMUTE_FAR=words`: the same 2.1 s phrase every 3 s, three words of a sawtooth
+whose pitch falls within each syllable between 160 and 106 Hz) came back at a call's start
+with speakers for 4.8 s at the median (0 to 8.9), at -40 dBFS at the loudest, where AEC3
+with WebRTC's 2 ms took 0.9 s (0 to 3.7) at -52 dBFS (8 runs each, p 0.05; the same with
+AEC3 restarted rather than made anew). The logs of the lab show the same delay found in
+the same time and the filters converged as soon. With speech-like noise that never repeats
+there is no difference. A held note, music or a game's sound on the other side is periodic
+too; a real voice was not tried.
+
 ## A microphone turned on again while the other side talks (Linux, Windows, macOS)
 
 Turning the microphone off has the voice channel only receive, which stops the audio
@@ -535,34 +553,42 @@ Linux only).
 | speakers: noise in the first 0.5 s, against later | -8 dB | -2 dB |
 | speakers: the other's tone sent back between the first words (median) | -59 dBFS | -61 dBFS |
 
-As a new AEC3, the restarted one processes nothing before fresh played sound arrives;
-without that, a call's start with speakers sent the other side's voice back for seconds.
-With speakers and the other side talking (10 runs each, medians with the range; "heard":
-how long their voice came back to them above -50 dBFS):
+Only a microphone turned on again in the call it was turned off in (the same people heard
+all along) keeps the room; a call's start makes AEC3 anew as 0009 did, and so does an
+unmute after a change of audio devices (`tools/webrtc/patches/webrtc/0011`: a device
+plugged in or out, the default or a port changed, a stream moved, a device chosen; each
+platform's device module marks it). Restarted, AEC3 processes nothing before fresh played
+sound arrives, as a new one. Measured in one session of the call lab, everything
+interleaved (`tools/call-lab/mic.sh unmute`, the other side talking in speech-like noise
+that never repeats; with speakers unless said; 8 or 6 runs, medians and ranges; "heard":
+how long their voice came back to them above -50 dBFS; p of a rank test against 0009):
 
-| speakers, the other side talking | 0009 (anew) | 0010 |
-|---|---|---|
-| a call's start: loudest sent back | -56 dBFS (-81 to -46) | -49 dBFS (-74 to -29) |
-| a call's start: heard | 0 s (0 to 2.5) | 0.9 s (0 to 6) |
-| an unmute (20): heard | 0.5 s (0.3 to 3.2) | 0.4 s (0 to 2.7) |
-| a headset taken off while muted: loudest | -31 dBFS (-50 to -19) | -14 dBFS (-20 to -12) |
-| a headset taken off while muted: heard | 0.3 s (0 to 2.6) | 6.4 s (2.3 to 14.5) |
+| | 0009 (published) | now | p |
+|---|---|---|---|
+| a call's start: loudest sent back | -68 dBFS (-83 to -42) | -70 dBFS (-83 to -40) | 0.96 |
+| a call's start: heard | 0 s (0 to 1.5) | 0 s (0 to 1.6) | 0.47 |
+| an unmute in the call (16): heard | 0.3 s (0 to 0.5) | 0.4 s (0 to 1.0) | 0.28 |
+| a second call in the same process: heard | 0.3 s (0.3 to 0.4) | 0.4 s (0.3 to 2.8) | 0.44 |
+| a headset unplugged while muted: heard | 0.3 s (0.2 to 0.3) | 0.3 s (0.2 to 0.3) | 1.0 |
+| a headset unplugged while muted: loudest | -24 dBFS (-27 to -19) | -25 dBFS (-31 to -17) | 0.59 |
+| headset to speakers while muted, no device event: heard | 0.2 s (0 to 0.3) | 1.1 s (0.3 to 2.2) | 0.01 |
+| the same: loudest | -32 dBFS (-54 to -27) | -15 dBFS (-29 to -11) | 0.006 |
 
-The last two rows are the cost: the transparent mode kept says the room has no echo, and
-after a headset is taken off for speakers while the microphone is off the other side hears
-themselves for some seconds after the unmute, until AEC3 finds the echo. A new AEC3 let
-less through for a shorter time, but held the words down after every unmute on a headset.
-Forcing an echo path change at the first delay found after the restart, keeping wrapper
-patch 0019's headroom after a reset, and judging the transparent mode's sane filter from
-that headroom were each tried: none made that case shorter beyond the runs' scatter, and
-each made a call's start worse (patch 0010's header). The first call in a process is
-unchanged: its AEC3 knows nothing of the room, and with a headset its first seconds hold
-the noise down by about 10 dB as before. Every later call keeps the AEC3 of the one before
-(one audio processing for the process), realigned. The echo check with both patches let
-no turn of 78 through without stalls, 1 of 103 with the quantum free and stalls of 20 and
-40 ms, and 8 of 164 at 480 with stalls of 40 and 80 ms (4 of 158 without the wait for fresh
-played sound, 7 of 131 with patch 0019 alone: within the runs' scatter); the other side
-talking over one's words cut as much of them as with 0009.
+The last two rows are what keeping the room costs: when the room changes and no device
+says so (a headset taken off but still plugged in and laid by the microphone, a single
+output that serves headphones and speakers with nothing to tell them apart), the
+transparent mode kept says there is no echo, and the other side hears themselves for about
+a second after the unmute until AEC3 finds it; any version does the same when that change
+is made with the microphone on. Not seen as a change: a Bluetooth headset on Linux that
+switches profile as recording stops and starts removes and adds its devices, so its
+unmutes most likely still get a new AEC3, as with 0009; on macOS, an output switching its
+data source on the same device. The unmute check with a headset (`mic.sh unmute:headset`,
+6 runs) and with speakers (3 runs) passed; the other side talking over one's words cut as
+much of them as with 0009, and later in a call less (16 % of each word against 37 %, 4
+runs). Forcing an echo path change at the first delay found after the restart, keeping
+wrapper patch 0019's headroom after a reset, judging the transparent mode's sane filter
+from that headroom and making AEC3's render buffer anew at the restart were tried and left
+out (patch 0010's header).
 
 ## Sound of a shared screen (macOS)
 

@@ -320,7 +320,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     the delay estimator found it again, a second or more later, and a turn of the other
     person's voice went back to them. 16, 32 and 48 ms were measured in the call lab
     (`mic.sh echo` with `ECHO_STALL`): the patch's header and
-    `app/third_party/flutter_webrtc/FOGATA.md` give the figures;
+    `app/third_party/flutter_webrtc/FOGATA.md` give the figures. A known cost: a far
+    side that repeats itself exactly (the unmute check's synthetic words) comes back longer
+    at a call's start (4.8 s against 0.9 s); speech-like noise does not;
 20. the tests of WebRTC's patch 0010 (`test/echo_room.test.cc`): an echo
     controller that can restart for recording is kept and one that cannot is made anew,
     and AEC3 with a headset (7 s of the other side's sound, no echo) lets the first 0.5 s

@@ -43,9 +43,30 @@ at worst) and the room's noise in the first 0.5 s at 0 dB (-12 before). Without
 render_properly_started_ a call's start sent the other side's voice back for 5.5 s at the
 median (10 runs); forcing an echo path change at the first delay found after a restart,
 keeping wrapper patch 0019's headroom after a reset and judging the transparent mode's sane
-filter from that headroom were each tried and made a call's start worse. With a call's
-start now made anew, and a change of devices (patch 0011), the figures are in
-app/third_party/flutter_webrtc/FOGATA.md.
+filter from that headroom were each tried and made a call's start worse. Making the render
+buffer anew at the restart (it keeps the played blocks of the moment recording stopped,
+which Reset only skips) was tried too: no unmute measured better, and one in six headset
+checks failed.
+
+Measured as it is, in one session of the call lab (mic.sh unmute, the other side talking
+in speech-like noise that never repeats, tone.py speech; with speakers unless said; 8 or 6
+runs, medians; "heard": how long their voice came back above -50 dBFS; p of a rank test
+against 0009 as published, all in the same session):
+- a call's start: -70 dBFS at the loudest, heard 0 s (0009: -68 dBFS, 0 s; p 0.96 and
+  0.47);
+- a microphone on again in the call (16 unmutes): heard 0.4 s (0009: 0.3 s, p 0.28); with
+  a headset (unmute:headset, 6 runs) the first word went out at 0 dB against the later
+  ones, as in every run since this patch was first written;
+- a second call in the same process: heard 0.4 s (0009: 0.3 s, p 0.44);
+- a headset taken off for speakers while the microphone was off, with no change of devices
+  anyone could tell (the cost of keeping the room): -15 dBFS, heard 1.1 s (0.3 to 2.2)
+  against -32 dBFS and 0.2 s with 0009 (p 0.01); with the device's change marked (patch
+  0011), as 0009;
+- the other side talking over one's words: cut as much as with 0009, and later in a call
+  less (16 % of each word against 37 %).
+In the lab's logs a new AEC3 and a restarted one find the same delay (7 blocks with wrapper
+patch 0019's headroom) within 0.2 to 1.5 s and converge as fast; the restart is kept for
+an unmute because it keeps the transparent mode, not because it aligns faster.
 
 diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
 index 9b28e82..cd90465 100644
