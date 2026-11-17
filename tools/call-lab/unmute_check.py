@@ -22,13 +22,17 @@ the microphone takes to start, not the echo canceller holding it down (which low
 noise, never to nothing), so the first gap is judged from one 50 ms step after the first
 sound b plays, and not at all when less than 0.1 s of it is left before the first word;
 the note says when the sound came.
+An echo controller made between a mute and the end of the next unmute's words with none
+made anew on purpose fails it too, whatever the levels: from a's WebRTC log (a.out).
 Usage: unmute_check.py <run folder> headset|speakers
 """
 
 import array
 import math
 import pathlib
+import re
 import sys
+import time
 import wave
 
 WORD_UNDER = 6.0
@@ -145,6 +149,56 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
                 f"unmute {n}: b's tone went back to it at {tone:.0f} dBFS, {own - tone:.0f} dB under "
                 f"a's words (at least {TONE_UNDER:.0f}): a's echo canceller let it through"
             )
+
+# a's WebRTC log (a.out, with FOGATA_WEBRTC_LOG): an echo controller made between a mute
+# and the end of the following unmute's words (AEC3's "AEC3 created") that none made anew
+# on purpose explains ("echo controller made anew": a call's start, a change of devices)
+# lost the room the unmute's restart keeps, whatever the levels came out: the audio
+# processing initialized itself again (WebRTC patch 0010 says why: "initialized again
+# for ...: echo controller made again"), as a block recorded at 8000 Hz as the
+# microphone turned off did before that patch kept the format.
+STAMP = re.compile(r"^webrtc (\d\d):(\d\d):(\d\d)\.(\d\d\d) ")
+
+
+def logged(line, near):
+    """The moment of a log line (time of day, local) as seconds since the epoch, on the
+    day of `near`."""
+    m = STAMP.match(line)
+    if not m:
+        return None
+    h, mi, s, ms = (int(x) for x in m.groups())
+    day = time.localtime(near)
+    midnight = time.mktime((day.tm_year, day.tm_mon, day.tm_mday, 0, 0, 0, 0, 0, -1))
+    t = midnight + h * 3600 + mi * 60 + s + ms / 1000
+    return t + 86400 if t < near - 43200 else t - 86400 if t > near + 43200 else t
+
+
+out = run / "a.out"
+log = [l for l in out.read_text(errors="replace").splitlines() if STAMP.match(l)] if out.exists() else []
+if not log:
+    notes.append("a's WebRTC log (a.out) not there: echo controllers made not judged")
+for k in range(1, n + 1) if log else []:
+    try:
+        muted = int((meet / f"mark-a-mute-{k}").read_text().split()[0]) / 1000
+        on = int((meet / f"mark-a-unmute-{k}").read_text().split()[0]) / 1000
+    except (OSError, ValueError, IndexError):
+        notes.append(f"unmute {k}: no mute marked before it: echo controllers made not judged")
+        continue
+    seen = [(logged(l, muted), l) for l in log]
+    seen = [(t, l) for t, l in seen if t is not None and muted <= t <= on + GAPS[-1][1]]
+    anew = [t for t, l in seen if "echo controller made anew" in l]
+    made = [(t, l) for t, l in seen if "AEC3 created" in l]
+    said = [l for t, l in seen if "echo controller made again" in l]
+    if made and not anew:
+        when = ", ".join(time.strftime("%H:%M:%S", time.localtime(t)) + f".{int(t * 1000) % 1000:03d}" for t, _ in made)
+        problems.append(
+            f"unmute {k}: {len(made)} echo controller(s) made between the mute and the words "
+            f"after it with none made anew ({when}): the room it kept was lost"
+            + ("; " + "; ".join(l[l.find("AudioProcessing"):] for l in said) if said else "")
+        )
+    elif made:
+        notes.append(f"unmute {k}: {len(made)} echo controller(s) made, made anew on purpose")
+
 if n == 0:
     problems.append("no unmute marked (mark-a-unmute-<n>)")
 print(f"{'FAIL' if problems else 'PASS'} unmute:{kind}")

@@ -232,7 +232,8 @@ jobs:
       # A microphone turned on again while the other side holds a tone, with a headset and
       # with speakers (tools/call-lab/mic.sh unmute:headset, unmute:speakers; the room's
       # sound is made with ffmpeg): what the other side hears of it must be as later in
-      # the call, and its tone must not go back to it (tools/call-lab/unmute_check.py).
+      # the call, and its tone must not go back to it, and no echo controller may be made
+      # meanwhile but one made anew on purpose (tools/call-lab/unmute_check.py).
       - name: Turning the microphone on again while the other side talks
         if: ${{ !cancelled() && steps.debug.outcome == 'success' }}
         timeout-minutes: 20

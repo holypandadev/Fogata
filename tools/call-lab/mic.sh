@@ -125,7 +125,9 @@
 #            and with a room's echo. With a headset, a's words and the room's noise must go
 #            out as they do later in the call (a new echo canceller held the microphone down
 #            until it had heard 6 s of b without echo, then let go at once); with speakers,
-#            b's tone must not go back to it at an unmute
+#            b's tone must not go back to it at an unmute; and a's WebRTC log must show no
+#            echo controller made between a mute and the next unmute's words but one made
+#            anew on purpose (another one knows nothing of the room the unmute keeps)
 #   restart  a and b talk and hear each other; the session's sound server is stopped and
 #            started again (restart:<how>, RESTART_HOW): pulse, PipeWire's PulseAudio service
 #            alone; all, the three daemons, as `systemctl --user restart pipewire
