@@ -12,8 +12,9 @@ holding a tone: after each unmute the first words went out about 17 dB weaker an
 room's noise about 10 dB lower for 3 to 6 s, which then came back at once, as a step.
 
 Only where nothing can have changed the room is it kept. AudioState tells a microphone
-turned on again in the call recording stopped in (the call's streams received and played
-all along since: stopped_in_call_) from a call's start, and only there asks the audio
+turned on again in the call recording stopped in (the same streams received and played
+all along since: stopped_in_call_, which any stream heard coming or going, playout or
+recording turned off, ends) from a call's start, and only there asks the audio
 processing to restart its echo controller for recording
 (AudioProcessing::RestartEchoControllerForRecording, EchoControl::RestartForRecording); a
 call's start makes it anew as 0009 did (RestartEchoController, unchanged): between calls
@@ -54,8 +55,8 @@ index 9b28e82..cd90465 100644
    // Returns wheter the signal is altered.
    virtual bool ActiveProcessing() const = 0;
  
-+  // Fogata: the audio device starts recording again (a call, or a microphone
-+  // turned on again) after played sound kept coming while nothing was
++  // Fogata: the audio device starts recording again in a call (a microphone
++  // turned on again), after played sound kept coming while nothing was
 +  // recorded. The echo controller drops what it aligned of the played sound
 +  // with the recorded one and finds that alignment again, as a new one would,
 +  // but keeps what it learned of the room that does not depend on it. Returns
@@ -224,7 +225,7 @@ index c7fd326..510c4b1 100644
    // other way not used. Ideally, the captured audio would still be processed,
    // but some components may change behavior based on this information.
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index f63352c..7edf7d9 100644
+index f63352c..ccef4af 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
 @@ -81,6 +81,7 @@ void AudioState::SetPlayout(bool enabled) {
@@ -235,16 +236,26 @@ index f63352c..7edf7d9 100644
    }
    playout_enabled_ = enabled;
    UpdateNullAudioPollerState();
-@@ -115,6 +116,8 @@ void AudioState::RemoveReceivingStream(AudioReceiveStreamInterface* stream) {
+@@ -90,6 +91,8 @@ void AudioState::AddReceivingStream(AudioReceiveStreamInterface* stream) {
+   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+   RTC_DCHECK_EQ(0, receiving_streams_.count(stream));
+   receiving_streams_.insert(stream);
++  // Fogata: another one heard is not the call recording stopped in (patch 0010).
++  stopped_in_call_ = false;
+   if (!config_.audio_mixer->AddSource(stream->source())) {
+     RTC_DLOG(LS_ERROR) << "Failed to add source to mixer.";
+   }
+@@ -113,6 +116,9 @@ void AudioState::RemoveReceivingStream(AudioReceiveStreamInterface* stream) {
+   auto count = receiving_streams_.erase(stream);
+   RTC_DCHECK_EQ(1, count);
    config_.audio_mixer->RemoveSource(stream->source());
++  // Fogata: one heard gone is not the call recording stopped in either: someone left,
++  // or the call ended (patch 0010).
++  stopped_in_call_ = false;
    if (receiving_streams_.empty()) {
      config_.audio_device_module->StopPlayout();
-+    // Fogata: the call is over; the next recording starts another (patch 0010).
-+    stopped_in_call_ = false;
    }
-   UpdateNullAudioPollerState();
- }
-@@ -134,6 +137,7 @@ void AudioState::SetRecording(bool enabled) {
+@@ -134,6 +140,7 @@ void AudioState::SetRecording(bool enabled) {
    } else {
      // Disable recording.
      adm->StopRecording();
@@ -252,7 +263,7 @@ index f63352c..7edf7d9 100644
    }
    recording_enabled_ = enabled;
  }
-@@ -167,6 +171,9 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
+@@ -167,6 +174,9 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
    UpdateAudioTransportWithSendingStreams();
    if (sending_streams_.empty()) {
      config_.audio_device_module->StopRecording();
@@ -262,7 +273,7 @@ index f63352c..7edf7d9 100644
    }
  }
  
-@@ -202,11 +209,24 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
+@@ -202,11 +212,24 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
  // added while recording runs (a second connection, a shared screen's sound),
  // muting or replacing a track, and the device itself starting again (a device
  // chosen, a sound server back) leave it as it is.
@@ -350,3 +361,15 @@ index 2f8ead4..f4b8afd 100644
  
    // Capture-side exclusive methods possibly running APM in a
    // multi-threaded manner. Acquire the capture lock.
+diff --git a/modules/audio_processing/include/mock_audio_processing.h b/modules/audio_processing/include/mock_audio_processing.h
+index db22a2d..b12b29a 100644
+--- a/modules/audio_processing/include/mock_audio_processing.h
++++ b/modules/audio_processing/include/mock_audio_processing.h
+@@ -182,6 +182,7 @@ class MockAudioProcessing : public AudioProcessing {
+ 
+   MOCK_METHOD(AudioProcessing::Config, GetConfig, (), (const, override));
+   MOCK_METHOD(void, RestartEchoController, (), (override));
++  MOCK_METHOD(void, RestartEchoControllerForRecording, (), (override));
+ };
+ 
+ class MockAudioProcessingBuilder : public AudioProcessingBuilderInterface {

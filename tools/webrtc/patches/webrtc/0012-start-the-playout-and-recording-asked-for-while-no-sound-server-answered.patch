@@ -1,0 +1,43 @@
+Start the playout and recording asked for while no sound server answered
+
+Patch 0006 keeps what the voice engine asked of PulseAudio while no server answers, and
+Restore starts it again once one does. But InitPlayout and InitRecording failed meanwhile,
+so the voice engine never asked to start (AudioState starts only what initialized): a
+microphone turned on while the server was away (the voice channel sending again) was only
+initialized when the server came back, and recorded nothing until it was turned off and on
+again; likewise playout for a call that started meanwhile. Reproduced in the call lab
+(tools/call-lab/mic.sh restart:down20 with RESTART_MUTED=1: a's microphone off as the
+server goes, turned on while it is away): a did not record within 20 s of the server back.
+
+Without a server they now report success: the voice engine goes on to start, which
+StartPlayout and StartRecording keep for the server's return (play_wanted_, rec_wanted_
+kStarted), and Restore starts them.
+
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
+index b7244db..42b60a1 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -955,7 +955,10 @@ int32_t AudioDeviceLinuxPulse::InitPlayout() {
+   }
+   if (!connected_) {
+     RTC_LOG(LS_WARNING) << "no PulseAudio server: playout waits for one";
+-    return -1;
++    // Fogata, patch 0012: told done, so that the voice engine goes on to start it,
++    // which is kept for the server's return (Restore starts what was started).
++    // Failed, it never asked: what was turned on meanwhile stayed off.
++    return 0;
+   }
+ 
+   // Initialize the speaker (devices might have been added or removed)
+@@ -1074,7 +1077,10 @@ int32_t AudioDeviceLinuxPulse::InitRecording() {
+   }
+   if (!connected_) {
+     RTC_LOG(LS_WARNING) << "no PulseAudio server: recording waits for one";
+-    return -1;
++    // Fogata, patch 0012: told done, so that the voice engine goes on to start it,
++    // which is kept for the server's return (Restore starts what was started).
++    // Failed, it never asked: what was turned on meanwhile stayed off.
++    return 0;
+   }
+ 
+   // Initialize the microphone (devices might have been added or removed)

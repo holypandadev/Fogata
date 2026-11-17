@@ -27,6 +27,12 @@ The wrapper marks a device chosen (another index than the last asked for) and a 
 the device list (wrapper patch 0021); the macOS engine device marks its own (apple patch
 0008).
 
+Known and not tried: a Bluetooth headset on Linux switching profile (A2DP and HFP) as
+recording stops and starts removes and adds its sink and source and moves the streams, so
+its unmutes most likely still make a new echo controller, as 0009 did (the unmute's fix
+does not reach it); a change PulseAudio tells of is marked one round trip to the server
+later (the defaults and ports are asked for and compared), a few milliseconds.
+
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
 index 23219a0..0a5e515 100644
 --- a/api/audio/audio_device.h
@@ -62,10 +68,10 @@ index 23219a0..0a5e515 100644
   public:
    enum AudioLayer {
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index 7edf7d9..8ec9e28 100644
+index ccef4af..fed71f9 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
-@@ -221,12 +221,22 @@ void AudioState::StartRecordingForCall() {
+@@ -224,12 +224,22 @@ void AudioState::StartRecordingForCall() {
    }
    const bool same_call = stopped_in_call_;
    stopped_in_call_ = false;

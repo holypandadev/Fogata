@@ -201,13 +201,14 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    `patches/apple/0001` keeps webrtc-sdk's own rule in `MuteStream`, which never takes a
    sender with no track for muted.
 9. `0009-make-the-echo-controller-anew-when-recording-starts-for-a-call`: when the audio
-   device starts recording again (the first stream that sends sound of a call after the
-   last one's went, or the microphone on again with nothing else sending), the audio
-   processing makes its echo controller anew (`AudioProcessing::RestartEchoController`)
-   and leaves the rest of the processing as it was. AEC3 kept the last call's alignment of
-   what was played with what is recorded, and let the other side's first second or two
-   of speech go back to them, until it noticed (once a second) the played blocks piled
-   up. `patches/apple/0001` keeps this in its own `AudioState::AddSendingStream`.
+   device starts recording again for a call (the first stream that sends sound of a call
+   after the last one's went; 0010 restarts it instead for the microphone on again in the
+   same call), the audio processing makes its echo controller anew
+   (`AudioProcessing::RestartEchoController`) and leaves the rest of the processing as it
+   was. AEC3 kept the last call's alignment of what was played with what is recorded,
+   and let the other side's first second or two of speech go back to them, until it
+   noticed (once a second) the played blocks piled up. `patches/apple/0001` keeps this in
+   its own `AudioState::AddSendingStream`.
 
 10. `0010-align-the-echo-canceller-anew-when-recording-starts`: a microphone turned on
    again in a call (the call's streams received and played all along since recording
@@ -233,7 +234,15 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    of the default output or input, of a device's active port (an analog jack) and a stream
    of its own moved; Windows Core Audio an endpoint added, removed or changing state and a
    change of the default device. The wrapper (`patches/wrapper/0021`) and the macOS engine
-   device (`patches/apple/0008`) mark the devices chosen.
+   device (`patches/apple/0008`) mark the devices chosen. Known and not tried: a Bluetooth
+   headset on Linux switching profile as recording stops and starts removes and adds its
+   devices, so its unmutes most likely still get a new echo controller (as before 0010);
+   a change PulseAudio tells of is marked one round trip to the server later.
+12. `0012-start-the-playout-and-recording-asked-for-while-no-sound-server-answered`: with
+   no PulseAudio server, `InitPlayout` and `InitRecording` report success, so that the
+   voice engine goes on to start them, which patch 0006 keeps for the server's return: a
+   microphone turned on while the server was away recorded nothing once it was back
+   (`tools/call-lab/mic.sh restart:down20` with `RESTART_MUTED=1`).
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -289,11 +298,11 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     the trial). A joiner gets a key frame at once; one owed on a still screen is made of
     the last frame again; one failed encode is a dropped frame, three in a row give every
     connection an encoder of its own;
-18. the test of WebRTC's patch 0009 (`test/echo_restart.test.cc`), with the audio state,
-    a mock audio device and a mock audio processing built in: the audio processing is
-    asked to restart its echo controller (`RestartEchoController`) once each time
-    recording starts, and at no other time (with patch 0010 that realigns AEC3 rather than
-    making it anew);
+18. the test of WebRTC's patches 0009 and 0010 (`test/echo_restart.test.cc`), with the
+    audio state, a mock audio device and a mock audio processing built in: the echo
+    controller is made anew (`RestartEchoController`) at each call's start and restarted
+    for recording (`RestartEchoControllerForRecording`) for the microphone on again in the
+    same call, and at no other time;
 19. the echo canceller (AEC3) has room for an echo that comes earlier than the one it
     found: 512 samples of delay headroom (8 blocks, 32 ms; WebRTC's default is 32, 2 ms)
     and linear filters 8 blocks longer (21), so that they reach as far after the echo as
@@ -321,7 +330,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     went; and the tests of WebRTC's patches 0010 and 0011 with the audio state
     (`test/echo_call.test.cc`): a call's start makes the echo controller anew, a
     microphone turned on again in the call restarts it, a change of devices meanwhile makes
-    it anew once, and a start of recording that fails touches nothing.
+    it anew once, so do a stream heard coming or going and playout or recording turned off
+    meanwhile, and a start of recording that fails touches nothing; the same device
+    chosen again marks nothing.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

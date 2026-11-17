@@ -1,11 +1,11 @@
 Test that the echo controller is made anew only when recording starts again
 
-WebRTC's audio state with its patch 0009, a mock audio device that keeps whether it
-records and a mock audio processing: the echo controller is made anew once each time
-recording starts (a call, the microphone on again with nothing else sending, the next
-call starting with recording), never while a shared screen's sound or another
-connection's voice comes and goes, nor when recording fails to start. Built in again
-with the mocks: the library shows only its own API.
+WebRTC's audio state with its patches 0009 and 0010, a mock audio device that keeps
+whether it records and a mock audio processing: the echo controller is made anew at each
+call's start (the first, and the next one starting with recording) and restarted for
+recording once for the microphone on again with nothing else sending, never while a
+shared screen's sound or another connection's voice comes and goes, nor when recording
+fails to start. Built in again with the mocks: the library shows only its own API.
 
 diff --git a/BUILD.gn b/BUILD.gn
 index f50b7d4..2b2bfb3 100644
@@ -32,11 +32,12 @@ new file mode 100644
 index 0000000..101dd5e
 --- /dev/null
 +++ b/test/echo_restart.test.cc
-@@ -0,0 +1,104 @@
-+// WebRTC's audio state with Fogata's patches (tools/webrtc/patches/webrtc/0009): the
-+// audio processing's echo controller is made anew each time the audio device starts
-+// recording for streams that send sound after it had stopped, and at no other time.
-+// Built in again with mocks: the library shows only its own API.
+@@ -0,0 +1,110 @@
++// WebRTC's audio state with Fogata's patches (tools/webrtc/patches/webrtc/0009 and
++// 0010): each time the audio device starts recording for streams that send sound after
++// it had stopped, the audio processing's echo controller is made anew for a call, or
++// restarted for recording for a microphone turned on again in the same call; at no
++// other time. Built in again with mocks: the library shows only its own API.
 +
 +#include "audio/audio_state.h"
 +
@@ -58,13 +59,16 @@ index 0000000..101dd5e
 +// A call's voice, a shared screen's sound and a second connection's voice start and
 +// go while recording runs; between calls, and while the microphone is off (the voice
 +// channel only receives, so the recording stops), it stops and starts again.
-+TEST(EchoRestart, EchoControllerMadeAnewOnceEachTimeRecordingStarts) {
++TEST(EchoRestart, EchoControllerMadeAnewForACallAndRestartedForAnUnmute) {
 +  auto apm = webrtc::make_ref_counted<
 +      NiceMock<webrtc::test::MockAudioProcessing>>();
 +  int made_anew = 0;
 +  ON_CALL(*apm, RestartEchoController()).WillByDefault([&made_anew] {
 +    ++made_anew;
 +  });
++  int restarted = 0;
++  ON_CALL(*apm, RestartEchoControllerForRecording())
++      .WillByDefault([&restarted] { ++restarted; });
 +  auto adm = webrtc::test::MockAudioDeviceModule::CreateNice();
 +  bool recording = false;
 +  ON_CALL(*adm, Recording()).WillByDefault([&recording] { return recording; });
@@ -111,26 +115,28 @@ index 0000000..101dd5e
 +  EXPECT_EQ(made_anew, 1);
 +
 +  // The microphone off with nothing else going out stops recording; on again, it
-+  // starts again, and the echo controller is made anew.
++  // starts again, and the echo controller is restarted for recording (the same call).
 +  state->RemoveSendingStream(&voice);
 +  EXPECT_FALSE(recording);
 +  state->AddSendingStream(&voice, 48000, 1);
-+  EXPECT_EQ(made_anew, 2);
++  EXPECT_EQ(made_anew, 1);
++  EXPECT_EQ(restarted, 1);
 +
-+  // The call ends; the next one starts with recording this time.
++  // The call ends; the next one starts with recording this time: made anew.
 +  state->RemoveSendingStream(&voice);
 +  state->RemoveReceivingStream(&heard);
-+  EXPECT_EQ(made_anew, 2);
++  EXPECT_EQ(made_anew, 1);
 +  state->AddSendingStream(&voice, 48000, 1);
-+  EXPECT_EQ(made_anew, 3);
++  EXPECT_EQ(made_anew, 2);
 +  state->AddReceivingStream(&heard);
-+  EXPECT_EQ(made_anew, 3);
++  EXPECT_EQ(made_anew, 2);
 +
 +  // Recording that does not start leaves the echo controller as it is.
 +  state->RemoveSendingStream(&voice);
 +  ON_CALL(*adm, StartRecording()).WillByDefault(Return(-1));
 +  state->AddSendingStream(&voice, 48000, 1);
-+  EXPECT_EQ(made_anew, 3);
++  EXPECT_EQ(made_anew, 2);
++  EXPECT_EQ(restarted, 1);
 +
 +  state->RemoveSendingStream(&voice);
 +  state->RemoveReceivingStream(&heard);

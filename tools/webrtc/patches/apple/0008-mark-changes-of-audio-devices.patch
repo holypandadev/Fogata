@@ -2,36 +2,35 @@ Mark changes of audio devices in the macOS audio engine device
 
 WebRTC patch 0011 makes the echo controller anew at the next start of recording after a
 change of audio devices. WebRTC-SDK's AudioEngineDevice, the audio device module of the
-macOS framework, marks one (MarkAudioDevicesChanged) when the system's list of devices
-changes, when the default output or input changes (after its debounce), and when an output
-or input other than the current one is chosen. Not marked: an output switching its data
-source on the same device (the headphone jack of Macs that show headphones and internal
-speakers as one device), which neither the list nor the default shows; and the engine's
-configuration changes, which it may also post as it reconfigures itself.
+macOS framework, marks one (MarkAudioDevicesChanged) when CoreAudio tells of a change of
+the system's list of devices or of its default output or input, at once on CoreAudio's
+thread (its own handling waits 500 ms, and a microphone turned on within it must know),
+and when an output or input other than the current one is chosen. Not marked: an output
+switching its data source on the same device (the headphone jack of Macs that show
+headphones and internal speakers as one device: it would take a listener on the current
+output device itself, followed from device to device, and it could not be tried here);
+and the engine's configuration changes, which it may also post as it reconfigures itself,
+at every microphone turned on.
 
 diff --git a/modules/audio_device/audio_engine_device.mm b/modules/audio_device/audio_engine_device.mm
-index 53a2f59..fc29488 100644
+index 53a2f59..aaca3ba 100644
 --- a/modules/audio_device/audio_engine_device.mm
 +++ b/modules/audio_device/audio_engine_device.mm
-@@ -265,6 +265,8 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
-       if (old_output_device_ids != output_device_ids_ ||
-           old_input_device_ids != input_device_ids_) {
-         LOGI() << "Did update devices";
-+        // Fogata: another room maybe (WebRTC patch 0011).
-+        MarkAudioDevicesChanged();
+@@ -247,6 +247,13 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
  
-         // Current device
-         if (engine_state_.output_device_id != kAudioObjectUnknown) {
-@@ -312,6 +314,8 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
-                      RTC_DCHECK_RUN_ON(thread_);
-                      LOGI() << "Processing debounced default device update for selector: "
-                             << selector;
-+                     // Fogata: another room maybe (WebRTC patch 0011).
-+                     MarkAudioDevicesChanged();
+   for (const AudioObjectPropertyAddress& address :
+        webrtc::ArrayView<const AudioObjectPropertyAddress>(addresses, numberAddresses)) {
++    // Fogata: another room maybe (WebRTC patch 0011), told at once, before the
++    // debounced handling, so that a microphone turned on within it knows.
++    if (address.mSelector == kAudioHardwarePropertyDevices ||
++        address.mSelector == kAudioHardwarePropertyDefaultOutputDevice ||
++        address.mSelector == kAudioHardwarePropertyDefaultInputDevice) {
++      MarkAudioDevicesChanged();
++    }
+     ptrThis->HandleDeviceListenerEvent(address.mSelector);
+   }
  
-                      if (selector == kAudioHardwarePropertyDefaultOutputDevice) {
-                        LOGI() << "Did update default output device";
-@@ -902,6 +906,10 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
+@@ -902,6 +909,10 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
  
    // Set as default device if index == 0
    AudioDeviceID output_device_id = index == 0 ? kAudioObjectUnknown : output_device_ids_[index - 1];
@@ -42,7 +41,7 @@ index 53a2f59..fc29488 100644
  
    int32_t result = ModifyEngineState([output_device_id](EngineState state) -> EngineState {
      state.output_device_id = output_device_id;
-@@ -1047,6 +1055,10 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
+@@ -1047,6 +1058,10 @@ AVAudioVoiceProcessingOtherAudioDuckingLevel ToAVDuckingLevel(
  
    // Set as default device if index == 0
    AudioDeviceID input_device_id = index == 0 ? kAudioObjectUnknown : input_device_ids_[index - 1];
