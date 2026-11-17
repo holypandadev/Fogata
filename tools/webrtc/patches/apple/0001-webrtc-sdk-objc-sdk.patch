@@ -14,7 +14,8 @@ On 8127: the commit's check that a closed PeerConnection adds no transceiver, it
 PeerConnectionInterface and its newer SSL roots are WebRTC's own now; the H.264 high
 profile field trial key goes, as WebRTC removed it; the frame transformer's thread is
 checked with WebRTC's new sequence checker; RemoteAudioSource::SetVolume, which WebRTC now
-posts to the main thread when called from another, checks the thread only there; the GCD
+posts to the main thread when called from another, checks the thread only there, and
+keeps the volume it is given at once, for GetVolume from any thread; the GCD
 task queue's Delete keeps only the commit's check of the queue it runs on, which also
 covers a task of that queue (the port to 8078 kept WebRTC's own check before it, whose
 dispatch_sync deadlocked first where the commit's check was meant to help); the tests'
@@ -9741,32 +9742,43 @@ index 2124f7e725..5a6878bb05 100644
         CanClosePeerConnectionWithoutCrashing) {
    auto caller = CreatePeerConnection();
 diff --git a/pc/remote_audio_source.cc b/pc/remote_audio_source.cc
-index b958e27c6d..e7e1db0fc0 100644
+index b958e27c6d..0279e35b14 100644
 --- a/pc/remote_audio_source.cc
 +++ b/pc/remote_audio_source.cc
-@@ -127,11 +127,17 @@ void RemoteAudioSource::SetVolume(double volume) {
-   }
-   RTC_DCHECK_RUN_ON(main_thread_);
-   RTC_LOG(LS_INFO) << StringFormat("RAS::%s({volume=%.2f})", __func__, volume);
-+  volume_ = volume;
-   for (auto* observer : audio_observers_) {
-     observer->OnSetVolume(volume);
+@@ -118,6 +118,9 @@ bool RemoteAudioSource::remote() const {
+ void RemoteAudioSource::SetVolume(double volume) {
+   RTC_DCHECK_GE(volume, 0);
+   RTC_DCHECK_LE(volume, 10);
++  // Read back at once from any thread (GetVolume), while the observers may still
++  // hear of it later, on the main thread.
++  volume_.store(volume, std::memory_order_relaxed);
+   if (!main_thread_->IsCurrent()) {
+     // The Android and Objective-C SDKs call SetVolume() on the application's
+     // thread, but the audio observers are registered on the main thread.
+@@ -132,6 +135,10 @@ void RemoteAudioSource::SetVolume(double volume) {
    }
  }
  
 +double RemoteAudioSource::GetVolume() const {
-+  RTC_DCHECK_RUN_ON(main_thread_);
-+  return volume_;
++  return volume_.load(std::memory_order_relaxed);
 +}
 +
  void RemoteAudioSource::RegisterAudioObserver(AudioObserver* observer) {
    RTC_DCHECK_RUN_ON(main_thread_);
    RTC_DCHECK(observer != nullptr);
 diff --git a/pc/remote_audio_source.h b/pc/remote_audio_source.h
-index bd77fad39d..3b6d5e7219 100644
+index bd77fad39d..d9aefcdbc7 100644
 --- a/pc/remote_audio_source.h
 +++ b/pc/remote_audio_source.h
-@@ -63,6 +63,7 @@ class RemoteAudioSource : public Notifier<AudioSourceInterface> {
+@@ -13,6 +13,7 @@
+ 
+ #include <stdint.h>
+ 
++#include <atomic>
+ #include <list>
+ #include <optional>
+ 
+@@ -63,6 +64,7 @@ class RemoteAudioSource : public Notifier<AudioSourceInterface> {
    // SetVolume() may be called on any thread. The audio observers are notified
    // on the main thread.
    void SetVolume(double volume) override;
@@ -9774,11 +9786,12 @@ index bd77fad39d..3b6d5e7219 100644
    void RegisterAudioObserver(AudioObserver* observer) override;
    void UnregisterAudioObserver(AudioObserver* observer) override;
  
-@@ -86,6 +87,7 @@ class RemoteAudioSource : public Notifier<AudioSourceInterface> {
+@@ -86,6 +88,8 @@ class RemoteAudioSource : public Notifier<AudioSourceInterface> {
    Mutex sink_lock_;
    std::list<AudioTrackSinkInterface*> sinks_;
    SourceState state_;
-+  double volume_ = 1.0;
++  // The last volume set, from any thread.
++  std::atomic<double> volume_{1.0};
  };
  
  }  // namespace webrtc
