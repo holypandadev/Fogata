@@ -16,14 +16,24 @@ word (12.5 s), which a settled echo canceller lets through as it does mid-call:
 - speakers (b's tone goes back into a's microphone): b's tone as a sent it (220 Hz, between
   a's words in the first 3.5 s) must stay TONE_UNDER dB under a's words, the bar the echo
   check (mic_check.py) sets for a call's first turn.
-b plays nothing of a at all (digital silence, under SILENT) until a's first sound after the
-unmute reaches it: on a slow computer later than 0.25 s after the mark. That is the time
-the microphone takes to start, not the echo canceller holding it down (which lowers the
-noise, never to nothing), so the first gap is judged from one 50 ms step after the first
-sound b plays, and not at all when less than 0.1 s of it is left before the first word;
-the note says when the sound came.
-An echo controller made between a mute and the end of the next unmute's words with none
-made anew on purpose fails it too, whatever the levels: from a's WebRTC log (a.out).
+b plays nothing of a at all (under SILENT: digital silence, or a few steps of the
+converter at most) until a's first sound after the unmute reaches it: on a slow computer
+later than 0.25 s after the mark, and the sound then takes up to 0.25 s to be all
+there: the step it begins in, then one to four more that came 3 to 48 dB under, in this
+lab and on GitHub's runners alike, mostly after the shortest mute. That is the
+microphone and the sound's way starting, not the echo canceller holding the microphone
+down (which lowers the noise by about 12 dB, never to nothing, and for seconds), so the
+first gap is judged from STARTS after the first sound b plays, on the steps that are
+not silent, and not at all when less than 0.15 s of them is left before the first
+word: only when the sound came within 0.1 s. The note says when it came. The words,
+the later gaps and the echo controllers made judge every unmute.
+A sound that reaches b more than LATE after the unmute fails it by that name: the unmute
+took that long (its offer and answer between the two, or the microphone's start), which
+is not the echo canceller's doing, and what a said before it came is not judged.
+An echo controller made between a mute and the end of the next unmute's words fails it
+too, whatever the levels, from a's WebRTC log (a.out): one made with none made anew on
+purpose, and one made anew on purpose in a run that changes no device (settings.txt:
+neither UNMUTE_UNPLUG nor UNMUTE_REJOIN), where nothing gives a reason for it.
 Usage: unmute_check.py <run folder> headset|speakers
 """
 
@@ -43,7 +53,9 @@ F = RATE // 20
 GAPS = [(0.25, 0.5), (2.65, 3.5), (5.65, 6.5), (8.65, 9.5), (11.65, 12.5), (14.65, 15.5)]
 WORDS = [0.5, 3.5, 6.5, 9.5, 12.5]
 HEARD = -45.0  # dBFS: b must hear a's last word at least this loud
-SILENT = -120.0  # dBFS: under it b plays nothing of a: no sound of a's has reached it yet
+SILENT = -90.0  # dBFS: under it b plays nothing of a: no sound of a's has reached it yet
+STARTS = 0.25  # s after a's first sound that b plays it starting, not yet as it is
+LATE = 2.0  # s after an unmute by which b must play a's sound
 
 run = pathlib.Path(sys.argv[1])
 kind = sys.argv[2]
@@ -94,13 +106,17 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
     at = int((meet / f"mark-a-unmute-{n}").read_text().split()[0]) / 1000
     # When a's first sound after the unmute reached b (None: not within the first word).
     first = int((at - t0) * 20)
-    came = next((k for k in range(max(0, first), min(len(lev), first + 50)) if lev[k] > SILENT), None)
+    came = next((k for k in range(max(0, first), min(len(lev), first + 300)) if lev[k] > SILENT), None)
     came = None if came is None else max(0.0, (came - first) / 20)
+    there = 15.0 if came is None else came + STARTS  # from here on b plays a as it is
     gaps = [pct(window(at, a, b), 0.2) for a, b in GAPS]
-    if came is None or came + 0.05 > GAPS[0][0]:
-        left = [] if came is None else window(at, came + 0.05, GAPS[0][1])
-        gaps[0] = pct(left, 0.2) if len(left) >= 2 else float("nan")
-    words = [pct(window(at, w + 0.1, w + 2.0), 0.9) for w in WORDS]
+    for k, (a, b) in enumerate(GAPS[:-1]):
+        if there > a:
+            left = [x for x in window(at, there, b) if x > SILENT]
+            gaps[k] = pct(left, 0.2) if len(left) >= 3 else float("nan")
+    # A word is judged on what b played of it once the sound was there, half a second at least.
+    words = [window(at, max(w + 0.1, there), w + 2.0) for w in WORDS]
+    words = [pct(x, 0.9) if len(x) >= 10 else float("nan") for x in words]
     if len(window(at, *GAPS[-1])) < 5:
         problems.append(f"unmute {n}: b's recording ends before 15.5 s after it")
         continue
@@ -111,15 +127,22 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
         f"unmute {n}: noise floor between the words "
         + " ".join("none" if x != x else f"{x:+.0f}" for x in g)
         + f" dB against the last gap ({rg:.0f} dBFS); words "
-        + " ".join(f"{x:+.0f}" for x in wv)
+        + " ".join("none" if x != x else f"{x:+.0f}" for x in wv)
         + f" dB against the last ({rw:.0f} dBFS)"
     )
-    if came is None or came + 0.05 > GAPS[0][0]:
+    if there > GAPS[0][0]:
         notes.append(
             f"unmute {n}: a's first sound reached b "
-            + ("more than 2.5 s" if came is None else f"{came:.2f} s")
+            + ("more than 15 s" if came is None else f"{came:.2f} s")
             + " after the unmute; the first gap is judged from then on"
             + ("" if gaps[0] == gaps[0] else " (too little of it left: not judged)")
+        )
+    if came is None or came > LATE:
+        problems.append(
+            f"unmute {n}: a's sound reached b "
+            + ("more than 15 s" if came is None else f"{came:.2f} s")
+            + f" after the unmute (at most {LATE:.0f}): the unmute took that long, its offer "
+            "and answer or the microphone's start; what a said before is not judged"
         )
     if rw < HEARD:
         problems.append(f"unmute {n}: b heard a's last word at {rw:.0f} dBFS: a not heard")
@@ -173,6 +196,9 @@ def logged(line, near):
     return t + 86400 if t < near - 43200 else t - 86400 if t > near + 43200 else t
 
 
+settings = run / "settings.txt"
+settings = settings.read_text(errors="replace") if settings.exists() else ""
+changes = any(re.search(rf"\b{k}=\S", settings) for k in ("UNMUTE_UNPLUG", "UNMUTE_REJOIN"))
 out = run / "a.out"
 log = [l for l in out.read_text(errors="replace").splitlines() if STAMP.match(l)] if out.exists() else []
 if not log:
@@ -195,6 +221,11 @@ for k in range(1, n + 1) if log else []:
             f"unmute {k}: {len(made)} echo controller(s) made between the mute and the words "
             f"after it with none made anew ({when}): the room it kept was lost"
             + ("; " + "; ".join(l[l.find("AudioProcessing"):] for l in said) if said else "")
+        )
+    elif made and not changes:
+        problems.append(
+            f"unmute {k}: {len(made)} echo controller(s) made anew on purpose between the mute "
+            "and the words after it, in a run that changes no device: the room was not kept"
         )
     elif made:
         notes.append(f"unmute {k}: {len(made)} echo controller(s) made, made anew on purpose")
