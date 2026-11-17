@@ -567,6 +567,7 @@ lab_unmute_sound() {
   echo $! > "$RUN/room-ffmpeg.pid"
   local far=${UNMUTE_FAR:-} room=${UNMUTE_ROOM:-}
   [ "${UNMUTE_ECHO:-}" = 1 ] && { far=${far:-words}; room=1; }
+  [ -n "${UNMUTE_FAR_FILE:-}" ] && far=file
   local name device names="played-b mic-a"
   [ -n "$far" ] && names="$names mic-b"
   for name in $names; do
@@ -629,6 +630,15 @@ lab_unmute_sound() {
     ) &
     echo $! > "$RUN/room-move.pid"
   fi
+  if [ "$far" = file ]; then
+    # A recording of one's own as b's voice, at the words' loudness, played again and again.
+    local mean
+    mean=$(ffmpeg -hide_banner -nostats -i "$UNMUTE_FAR_FILE" -af volumedetect -f null - 2>&1 |
+      sed -n 's/.*mean_volume: \(-\{0,1\}[0-9.]*\) dB.*/\1/p')
+    ffmpeg -hide_banner -loglevel error -y -i "$UNMUTE_FAR_FILE" \
+      -af "volume=$(python3 -I -c "print(round(${UNMUTE_WORDS_DB:--28} - ($mean), 2))")dB" \
+      -ar 48000 -ac 1 -sample_fmt s16 "$RUN/sound/far.wav"
+  fi
   if [ "$far" = speech ]; then
     # Speech-like noise that never repeats (tone.py speech), rather than the same words.
     python3 -I "$LAB_DIR/tone.py" "$RUN/sound/far.wav" speech 30
@@ -642,7 +652,7 @@ lab_unmute_sound() {
   if [ -n "$far" ]; then
     (
       while true; do
-        if [ "$far" = tone ] || [ "$far" = speech ]; then
+        if [ "$far" = tone ] || [ "$far" = speech ] || [ "$far" = file ]; then
           paplay --device=labb_test "$RUN/sound/far.wav" 2> /dev/null
         else
           paplay --device=labb_test "$RUN/sound/words.wav" 2> /dev/null &
