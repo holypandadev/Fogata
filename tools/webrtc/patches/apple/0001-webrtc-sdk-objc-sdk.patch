@@ -142,10 +142,10 @@ index d1abef671d..b20273af21 100644
        "../../modules/audio_device:audio_device_impl",
        "../environment",
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
-index 9a7d7690d9..c81bd27edc 100644
+index 0343e67b00..cf4974dba7 100644
 --- a/api/audio/audio_device.h
 +++ b/api/audio/audio_device.h
-@@ -15,7 +15,18 @@
+@@ -16,7 +16,18 @@
  #include <optional>
  
  #include "api/audio/audio_device_defines.h"
@@ -164,7 +164,7 @@ index 9a7d7690d9..c81bd27edc 100644
  
  namespace webrtc {
  
-@@ -36,19 +47,68 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -52,19 +63,68 @@ class AudioDeviceModule : public RefCountInterface {
      kAndroidAAudioAudio,
      kAndroidJavaInputAndAAudioOutputAudio,
      kDummyAudio,
@@ -238,7 +238,7 @@ index 9a7d7690d9..c81bd27edc 100644
    struct Stats {
      // The fields below correspond to similarly-named fields in the WebRTC stats
      // spec. https://w3c.github.io/webrtc-stats/#playoutstats-dict*
-@@ -76,6 +136,10 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -92,6 +152,10 @@ class AudioDeviceModule : public RefCountInterface {
    };
  
   public:
@@ -249,7 +249,7 @@ index 9a7d7690d9..c81bd27edc 100644
    // Retrieve the currently utilized audio layer
    virtual int32_t ActiveAudioLayer(AudioLayer* audioLayer) const = 0;
  
-@@ -90,11 +154,9 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -106,11 +170,9 @@ class AudioDeviceModule : public RefCountInterface {
    // Device enumeration
    virtual int16_t PlayoutDevices() = 0;
    virtual int16_t RecordingDevices() = 0;
@@ -263,7 +263,7 @@ index 9a7d7690d9..c81bd27edc 100644
                                        char guid[kAdmMaxGuidSize]) = 0;
  
    // Device selection
-@@ -160,12 +222,38 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -176,12 +238,38 @@ class AudioDeviceModule : public RefCountInterface {
    // Playout delay
    virtual int32_t PlayoutDelay(uint16_t* delayMS) const = 0;
  
@@ -304,7 +304,7 @@ index 9a7d7690d9..c81bd27edc 100644
    virtual int32_t EnableBuiltInAEC(bool enable) = 0;
    virtual int32_t EnableBuiltInAGC(bool enable) = 0;
    virtual int32_t EnableBuiltInNS(bool enable) = 0;
-@@ -186,10 +274,8 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -202,10 +290,8 @@ class AudioDeviceModule : public RefCountInterface {
      return std::nullopt;
    }
  
@@ -317,7 +317,7 @@ index 9a7d7690d9..c81bd27edc 100644
  
  // Only supported on iOS.
  #if defined(WEBRTC_IOS)
-@@ -197,6 +283,10 @@ class AudioDeviceModule : public RefCountInterface {
+@@ -213,6 +299,10 @@ class AudioDeviceModule : public RefCountInterface {
    virtual int GetRecordAudioParameters(AudioParameters* params) const = 0;
  #endif  // WEBRTC_IOS
  
@@ -328,7 +328,7 @@ index 9a7d7690d9..c81bd27edc 100644
   protected:
    ~AudioDeviceModule() override {}
  };
-@@ -219,8 +309,54 @@ class AudioDeviceObserver {
+@@ -235,8 +325,54 @@ class AudioDeviceObserver {
   public:
    virtual ~AudioDeviceObserver() = default;
  
@@ -385,10 +385,10 @@ index 9a7d7690d9..c81bd27edc 100644
  
  }  // namespace webrtc
 diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
-index c7fd326d59..54454c64d4 100644
+index 510c4b1bee..641dd25846 100644
 --- a/api/audio/audio_processing.h
 +++ b/api/audio/audio_processing.h
-@@ -536,6 +536,7 @@ class RTC_EXPORT AudioProcessing : public RefCountInterface {
+@@ -542,6 +542,7 @@ class RTC_EXPORT AudioProcessing : public RefCountInterface {
    // Default false. This method takes a lock. To achieve this in a lock-less
    // manner the PostRuntimeSetting can instead be used.
    virtual void set_output_will_be_muted(bool muted) = 0;
@@ -2120,10 +2120,10 @@ index 0000000000..5e86fb378b
 +
 +}  // namespace webrtc
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index f63352cc42..997fefa9de 100644
+index fed71f9f1e..f5a5282e28 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
-@@ -149,13 +149,21 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
+@@ -156,13 +156,21 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
  
    // Make sure recording is initialized; start recording if enabled.
    auto* adm = config_.audio_device_module.get();
@@ -9177,7 +9177,7 @@ index d4985b69c7..7fd3a9f3da 100644
    int32_t AttachAudioBuffer() {
      RTC_DLOG(LS_INFO) << __FUNCTION__;
 diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
-index d2ea94caa1..6b7d840778 100644
+index 4afed86520..2a1781d86b 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
 +++ b/modules/audio_processing/audio_processing_impl.cc
 @@ -633,6 +633,11 @@ void AudioProcessingImpl::InitializeLocked(const ProcessingConfig& config) {
@@ -9205,10 +9205,10 @@ index d2ea94caa1..6b7d840778 100644
    MutexLock lock(&mutex_capture_);
    HandleCaptureOutputUsedSetting(!muted);
 diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
-index 2f8ead4178..5252fea51b 100644
+index f4b8afd470..e5ee5b468f 100644
 --- a/modules/audio_processing/audio_processing_impl.h
 +++ b/modules/audio_processing/audio_processing_impl.h
-@@ -107,6 +107,7 @@ class AudioProcessingImpl : public AudioProcessing {
+@@ -108,6 +108,7 @@ class AudioProcessingImpl : public AudioProcessing {
    bool GetLinearAecOutput(
        std::span<std::array<float, 160>> linear_output) const override;
    void set_output_will_be_muted(bool muted) override;
@@ -9217,7 +9217,7 @@ index 2f8ead4178..5252fea51b 100644
        RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_capture_);
    int set_stream_delay_ms(int delay) override;
 diff --git a/modules/audio_processing/include/mock_audio_processing.h b/modules/audio_processing/include/mock_audio_processing.h
-index db22a2d4f9..f62ee6dd7c 100644
+index b12b29a4e1..29f27e23e7 100644
 --- a/modules/audio_processing/include/mock_audio_processing.h
 +++ b/modules/audio_processing/include/mock_audio_processing.h
 @@ -119,6 +119,7 @@ class MockAudioProcessing : public AudioProcessing {
