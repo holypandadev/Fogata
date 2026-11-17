@@ -10,21 +10,21 @@
 # archives are too. Wherever it comes from, it must have the SHA-256 below.
 Pod::Spec.new do |s|
   s.name = 'WebRTC-SDK'
-  s.version = '156.8078.7'
+  s.version = '156.8078.8'
   s.summary = 'WebRTC M156 for macOS, built by Fogata.'
   s.homepage = 'https://webrtc.googlesource.com/src'
   s.license = { :type => 'BSD-3-Clause', :file => 'WebRTC.xcframework/LICENSE' }
   s.author = 'The WebRTC project authors'
 
-  sha256 = '0ddecab0690e567dba13e7b77a2fc4e79b72c89cb94c54319b31a30a84cc2833'
+  sha256 = 'a51df7ec6ca618c22e23bfd5883d3abd80a2dc80fd44554400685943f2898c5d'
   local = ENV['FOGATA_WEBRTC_XCFRAMEWORK'].to_s
   if local.empty?
     store = ENV['FOGATA_LIBWEBRTC_DIR'].to_s
     store = File.join(Dir.home, 'fogata-libwebrtc') if store.empty?
-    local = File.join(store, 'fogata-libwebrtc.m156.8078.7', 'WebRTC.xcframework.zip')
+    local = File.join(store, 'fogata-libwebrtc.m156.8078.8', 'WebRTC.xcframework.zip')
   end
   published = 'https://github.com/holypandadev/fogata-libwebrtc/releases/download/' \
-              'fogata-libwebrtc.m156.8078.7/WebRTC.xcframework.zip'
+              'fogata-libwebrtc.m156.8078.8/WebRTC.xcframework.zip'
   url = File.exist?(File.expand_path(local)) ? "file://#{File.expand_path(local)}" : published
   s.source = { :http => url, :sha256 => sha256 }
 
