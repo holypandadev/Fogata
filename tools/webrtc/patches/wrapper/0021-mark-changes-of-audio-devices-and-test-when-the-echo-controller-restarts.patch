@@ -21,6 +21,12 @@ which the test accepts. AudioDeviceImpl marks another output or input chosen, no
 one chosen again, and devices that came or went. Built in again: the library shows only
 its own API.
 
+A block the device records as the last stream sending goes (the mock's stop delivers one,
+and another comes after it) changes neither the format the audio processing is given nor
+its echo controller, and the next unmute restarts it, with WebRTC's own audio transport
+and with the wrapper's; with no stream left the transport is given the format of the last
+ones (WebRTC patch 0010).
+
 diff --git a/BUILD.gn b/BUILD.gn
 index 7486756..9f6c4a2 100644
 --- a/BUILD.gn
@@ -90,18 +96,22 @@ index 1ec6733..ea0195a 100644
  
 diff --git a/test/echo_call.test.cc b/test/echo_call.test.cc
 new file mode 100644
-index 0000000..be81551
+index 0000000..8fec0df
 --- /dev/null
 +++ b/test/echo_call.test.cc
-@@ -0,0 +1,378 @@
+@@ -0,0 +1,526 @@
 +// WebRTC's audio state and audio processing with Fogata's patches 0010 and 0011
 +// (tools/webrtc/patches/webrtc): a call's start makes the echo controller anew;
 +// only a microphone turned on again in the call recording stopped in restarts it
 +// for recording, and not after a change of audio devices
-+// (MarkAudioDevicesChanged). Built in again with mocks: the library shows only
-+// its own API.
++// (MarkAudioDevicesChanged); what is recorded as the microphone turns off keeps
++// the format the audio processing is given, which would make it anew otherwise.
++// Built in again with mocks: the library shows only its own API.
 +
++#include <cstdint>
 +#include <memory>
++#include <utility>
++#include <vector>
 +
 +#include "api/audio/audio_device.h"
 +#include "api/audio/audio_processing.h"
@@ -110,8 +120,11 @@ index 0000000..be81551
 +#include "api/make_ref_counted.h"
 +#include "api/scoped_refptr.h"
 +#include "audio/audio_state.h"
++#include "audio/audio_transport_impl.h"
++#include "call/audio_sender.h"
 +#include "rtc_base/thread.h"
 +#include "base/refcountedobject.h"
++#include "src/internal/custom_audio_transport_impl.h"
 +#include "src/rtc_audio_device_impl.h"
 +#include "call/test/mock_audio_receive_stream.h"
 +#include "call/test/mock_audio_send_stream.h"
@@ -123,6 +136,8 @@ index 0000000..be81551
 +
 +namespace {
 +
++using ::testing::_;
++using ::testing::AnyNumber;
 +using ::testing::Return;
 +
 +// An echo controller that restarts for recording, counting each restart.
@@ -161,8 +176,41 @@ index 0000000..be81551
 +  int* const restarted_;
 +};
 +
++// WebRTC's own audio transport, keeping what the audio state gave it last.
++class Given : public webrtc::AudioTransportImpl {
++ public:
++  using webrtc::AudioTransportImpl::AudioTransportImpl;
++  void UpdateAudioSenders(std::vector<webrtc::AudioSender*> senders,
++                          int send_sample_rate_hz,
++                          size_t send_num_channels) override {
++    senders_ = senders.size();
++    rate_ = send_sample_rate_hz;
++    channels_ = send_num_channels;
++    webrtc::AudioTransportImpl::UpdateAudioSenders(
++        std::move(senders), send_sample_rate_hz, send_num_channels);
++  }
++  size_t senders_ = 0;
++  int rate_ = 0;
++  size_t channels_ = 0;
++};
++
++class GivenFactory : public webrtc::AudioTransportFactory {
++ public:
++  std::unique_ptr<webrtc::AudioTransport> Create(
++      webrtc::AudioMixer* mixer,
++      webrtc::AudioProcessing* audio_processing,
++      webrtc::AsyncAudioProcessing::Factory* async) override {
++    auto transport = std::make_unique<Given>(mixer, audio_processing, async);
++    given_ = transport.get();
++    return transport;
++  }
++  Given* given_ = nullptr;
++};
++
 +// One audio state with a real audio processing (echo controller from Factory)
-+// and a mock audio device whose recording starts unless told to fail.
++// and a mock audio device whose recording starts unless told to fail; its stop
++// delivers a recorded block first when told to, as the device's thread does until
++// the stop returns.
 +class EchoCall : public ::testing::Test {
 + protected:
 +  EchoCall() {
@@ -187,15 +235,68 @@ index 0000000..be81551
 +      return 0;
 +    });
 +    ON_CALL(*adm_, StopRecording()).WillByDefault([this] {
++      if (deliver_on_stop_) {
++        Deliver();
++      }
 +      recording_ = false;
 +      return 0;
 +    });
++    Build(nullptr);
++    // WebRTC's own transport hands what is recorded to the streams sending.
++    EXPECT_CALL(voice_, SendAudioDataForMock(_)).Times(AnyNumber());
++  }
++
++  // The audio state again, with this audio transport (nullptr: WebRTC's own).
++  void Build(webrtc::scoped_refptr<webrtc::AudioTransportFactory> transport) {
 +    webrtc::AudioState::Config state_config;
 +    state_config.audio_mixer = webrtc::AudioMixerImpl::Create();
 +    state_config.audio_processing = apm_;
 +    state_config.audio_device_module = adm_;
++    state_config.audio_transport_factory = std::move(transport);
 +    state_ =
 +        webrtc::make_ref_counted<webrtc::internal::AudioState>(state_config);
++  }
++
++  // 10 ms recorded in two channels at 48 kHz, as the lab's microphones are.
++  void Deliver() {
++    std::vector<int16_t> samples(480 * 2, 1000);
++    uint32_t new_level = 0;
++    state_->audio_transport()->RecordedDataIsAvailable(
++        samples.data(), 480, 4, 2, 48000, 0, 0, 0, false, new_level);
++    ++delivered_;
++  }
++
++  // The microphone turned off in the call while the device records a block as its
++  // stop returns, and another after it (one still in flight as the stop returns):
++  // what the audio processing is given stays as in the call, and nothing
++  // makes or restarts the echo controller, which the next unmute restarts.
++  void ExpectBlocksAtTheStopToChangeNothing() {
++    state_->AddReceivingStream(&heard_);
++    Start();
++    Deliver();  // The audio processing takes the call's format.
++    const int rate = apm_->proc_sample_rate_hz();
++    const size_t channels = apm_->num_input_channels();
++    for (int i = 0; i < 2; ++i) {
++      deliver_on_stop_ = true;
++      delivered_ = 0;
++      Count();
++      state_->RemoveSendingStream(&voice_);
++      deliver_on_stop_ = false;
++      EXPECT_EQ(delivered_, 1);
++      Deliver();
++      EXPECT_EQ(Made(), 0) << "the audio processing started over";
++      EXPECT_EQ(Restarted(), 0);
++      EXPECT_EQ(apm_->proc_sample_rate_hz(), rate);
++      EXPECT_EQ(apm_->num_input_channels(), channels);
++      UnmuteAndExpectRestart();
++      Count();
++      Deliver();
++      EXPECT_EQ(Made(), 0) << "the restarted echo controller lost";
++      EXPECT_EQ(apm_->proc_sample_rate_hz(), rate);
++      EXPECT_EQ(apm_->num_input_channels(), channels);
++    }
++    state_->RemoveSendingStream(&voice_);
++    state_->RemoveReceivingStream(&heard_);
 +  }
 +
 +  // A call starts: what was made and restarted since the counts were taken.
@@ -234,6 +335,8 @@ index 0000000..be81551
 +  bool recording_ = false;
 +  bool fail_ = false;
 +  bool keep_ = false;
++  bool deliver_on_stop_ = false;
++  int delivered_ = 0;
 +  webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
 +  webrtc::scoped_refptr<webrtc::test::MockAudioDeviceModule> adm_;
 +  webrtc::scoped_refptr<webrtc::internal::AudioState> state_;
@@ -430,6 +533,57 @@ index 0000000..be81551
 +  EXPECT_EQ(Restarted(), 0);
 +
 +  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}
++
++// A block recorded as the last stream sending goes, with WebRTC's own transport
++// and with the wrapper's (CustomAudioTransportImpl, the one calls use): the stop
++// came after the transport was told nothing sends, and that block went to the
++// audio processing at 8000 Hz, which made another echo controller that knew
++// nothing of the room, and the unmute's first block another.
++TEST_F(EchoCall, ABlockRecordedAsTheMicrophoneTurnsOffChangesNothing) {
++  ExpectBlocksAtTheStopToChangeNothing();
++}
++
++TEST_F(EchoCall, ABlockRecordedAsTheMicrophoneTurnsOffChangesNothingInCalls) {
++  Build(webrtc::make_ref_counted<webrtc::CustomAudioTransportFactory>());
++  ExpectBlocksAtTheStopToChangeNothing();
++}
++
++// With no stream left sending, the transport is given the format of the last ones,
++// not 8000 Hz in one channel; with streams, theirs.
++TEST_F(EchoCall, TheFormatGivenWithNoStreamIsTheLastOne) {
++  auto factory = webrtc::make_ref_counted<GivenFactory>();
++  Build(factory);
++  ASSERT_NE(factory->given_, nullptr);
++  const Given& given = *factory->given_;
++  webrtc::test::MockAudioSendStream screen_sound;
++  EXPECT_CALL(screen_sound, SendAudioDataForMock(_)).Times(AnyNumber());
++  state_->AddReceivingStream(&heard_);
++
++  state_->AddSendingStream(&voice_, 48000, 1);
++  EXPECT_EQ(given.senders_, 1u);
++  EXPECT_EQ(given.rate_, 48000);
++  EXPECT_EQ(given.channels_, 1u);
++  state_->AddSendingStream(&screen_sound, 48000, 2);
++  EXPECT_EQ(given.senders_, 2u);
++  EXPECT_EQ(given.channels_, 2u);
++  state_->RemoveSendingStream(&voice_);
++  EXPECT_EQ(given.senders_, 1u);
++  EXPECT_EQ(given.channels_, 2u);
++  state_->RemoveSendingStream(&screen_sound);
++  EXPECT_EQ(given.senders_, 0u);
++  EXPECT_EQ(given.rate_, 48000);
++  EXPECT_EQ(given.channels_, 2u);
++
++  state_->AddSendingStream(&voice_, 16000, 1);
++  EXPECT_EQ(given.senders_, 1u);
++  EXPECT_EQ(given.rate_, 16000);
++  EXPECT_EQ(given.channels_, 1u);
++  state_->RemoveSendingStream(&voice_);
++  EXPECT_EQ(given.senders_, 0u);
++  EXPECT_EQ(given.rate_, 16000);
++  EXPECT_EQ(given.channels_, 1u);
 +  state_->RemoveReceivingStream(&heard_);
 +}
 +

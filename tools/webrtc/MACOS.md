@@ -51,6 +51,11 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    seen: an output switching its data source on the same device (a headphone jack shown
    with the internal speakers as one device), and the engine's configuration changes,
    which it may also post as it reconfigures itself.
+9. `0009-keep-the-format-the-microphone-was-processed-in-after-the-last-stream-goes`:
+   WebRTC-SDK's audio transport processes what is recorded while nothing sends in the
+   device's own format; once streams have sent, it keeps theirs (`patches/webrtc/0010`
+   gives the last one), so that a block recorded as the microphone turns off does not
+   make the audio processing initialize itself again, with another echo controller.
 
 The macOS framework is all these patches are for: the iOS framework and WebRTC's own
 Objective-C tests, which still name the VideoToolbox codecs, are not built from them.
@@ -66,7 +71,7 @@ x64 (`args/common.gn`, `args/mac.gn`, macOS 12 and later), joins them with `lipo
 that the framework exports no class of a codec other than Opus and VP8 and names no source
 file of one (nor of the frame cryptor), makes
 `WebRTC.xcframework` with WebRTC's `LICENSE` and the licences of everything built in
-(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m156.8078.7/WebRTC.xcframework.zip`
+(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m156.8078.8/WebRTC.xcframework.zip`
 with its SHA-256.
 
 To change the port, fix it in `~/webrtc-work/webrtc/src`, build again with `--no-prepare`,

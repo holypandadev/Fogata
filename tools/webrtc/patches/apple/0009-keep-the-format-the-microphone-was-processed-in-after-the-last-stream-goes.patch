@@ -1,0 +1,49 @@
+Keep the format the microphone was processed in after the last stream sending goes
+
+WebRTC-SDK's audio transport processes what is recorded while no stream sends in the
+device's own format (its rate and channels) instead of the one the audio state gives.
+WebRTC patch 0010 has the audio state give the last streams' format with none left, so
+that a block recorded as the microphone turns off in a call, or after it, does not make
+the audio processing initialize itself again, which makes another echo controller that
+knows nothing of the room. Here the transport keeps that format once streams have sent;
+before any, the device's, as WebRTC-SDK has it.
+
+diff --git a/audio/audio_transport_impl.cc b/audio/audio_transport_impl.cc
+index 38ebf3a..a54bc44 100644
+--- a/audio/audio_transport_impl.cc
++++ b/audio/audio_transport_impl.cc
+@@ -163,7 +163,11 @@ int32_t AudioTransportImpl::RecordedDataIsAvailable(
+   bool swap_stereo_channels = false;
+   {
+     MutexLock lock(&capture_lock_);
+-    bool has_senders = !audio_senders_.empty();
++    // Fogata: once streams have sent, the format they were given stays with none
++    // (WebRTC patch 0010: AudioState gives the last one): a block recorded as the
++    // last stream goes, or after it, must not make the audio processing
++    // initialize itself again, which makes another echo controller.
++    bool has_senders = !audio_senders_.empty() || had_senders_;
+     // If no senders attached, use the provided sample rate and channel count to
+     // initialize the AudioFrame so ProcessCaptureFrame will have correct sample
+     // rate.
+@@ -287,6 +291,7 @@ void AudioTransportImpl::UpdateAudioSenders(std::vector<AudioSender*> senders,
+                                             int send_sample_rate_hz,
+                                             size_t send_num_channels) {
+   MutexLock lock(&capture_lock_);
++  had_senders_ = had_senders_ || !senders.empty();
+   audio_senders_ = std::move(senders);
+   send_sample_rate_hz_ = send_sample_rate_hz;
+   send_num_channels_ = send_num_channels;
+diff --git a/audio/audio_transport_impl.h b/audio/audio_transport_impl.h
+index da57475..bc6cd17 100644
+--- a/audio/audio_transport_impl.h
++++ b/audio/audio_transport_impl.h
+@@ -105,6 +105,9 @@ class AudioTransportImpl : public AudioTransport {
+   std::vector<AudioSender*> audio_senders_ RTC_GUARDED_BY(capture_lock_);
+   int send_sample_rate_hz_ RTC_GUARDED_BY(capture_lock_) = 8000;
+   size_t send_num_channels_ RTC_GUARDED_BY(capture_lock_) = 1;
++  // Fogata: streams have sent; their format stays with none
++  // (RecordedDataIsAvailable).
++  bool had_senders_ RTC_GUARDED_BY(capture_lock_) = false;
+   bool swap_stereo_channels_ RTC_GUARDED_BY(capture_lock_) = false;
+   PushResampler<int16_t> capture_resampler_;
+ 

@@ -85,7 +85,7 @@ wrapper's tests of the size check, of the microphone's channels, of the voice en
 muted state, of the echo controller made anew, of the arrays it hands across and of the
 shared screen encoder, and writes into `<work>/dist`:
 
-    fogata-libwebrtc.m156.8078.7/libwebrtc-linux-x64-release.zip   (+ .sha256)
+    fogata-libwebrtc.m156.8078.8/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
 laid out like webrtc-sdk's archives (`linux-x64-release/{lib,include,LICENSE,NOTICE.md}`).
 `NOTICE.md` holds the licence of WebRTC and of every library built into it, as WebRTC's
@@ -226,6 +226,13 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
    new one). The patch's header gives what was tried and left out: forcing an echo path
    change at the first delay found, the configured headroom after a reset, and a
    transparent mode's sane filter counted from that headroom, each worse at a call's start.
+   As the microphone turns off, recording stops before the audio transport is told that
+   nothing sends, and with nothing sending the transport keeps the last streams' format
+   (it took 8000 Hz in one channel): a block recorded meanwhile made the audio processing
+   initialize itself again, with another echo controller that knew nothing of the room
+   (2 unmutes in 12 on GitHub's runners). The audio processing says in the log when an
+   initialization again makes another echo controller ("echo controller made again"),
+   which `tools/call-lab/unmute_check.py` fails on between a mute and the next unmute.
 11. `0011-make-the-echo-controller-anew-after-a-change-of-audio-devices`: whatever learns
    of a change of audio devices marks it (`MarkAudioDevicesChanged`, a count for the
    library), and a microphone turned on again after one makes the echo controller anew
@@ -333,8 +340,10 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M156 (`patches/apple`)
     (`test/echo_call.test.cc`): a call's start makes the echo controller anew, a
     microphone turned on again in the call restarts it, a change of devices meanwhile makes
     it anew once, so do a stream heard coming or going and playout or recording turned off
-    meanwhile, and a start of recording that fails touches nothing; the same device
-    chosen again marks nothing.
+    meanwhile, and a start of recording that fails touches nothing; a block recorded as
+    the microphone turns off, and one after it, change neither the format the audio
+    processing is given nor its echo controller; the same device chosen again marks
+    nothing.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

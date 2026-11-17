@@ -68,6 +68,27 @@ In the lab's logs a new AEC3 and a restarted one find the same delay (7 blocks w
 patch 0019's headroom) within 0.2 to 1.5 s and converge as fast; the restart is kept for
 an unmute because it keeps the transparent mode, not because it aligns faster.
 
+The room is kept through the microphone turned off too. AudioState told the audio
+transport that nothing sends (with no stream it then processes what is recorded at 8000
+Hz in one channel) before it stopped recording, and a block the device recorded until
+its stop returned went to the audio processing in that format: it initialized itself
+again, with another echo controller, and again at the unmute's first block, so that the
+restart for recording restarted an echo controller that knew nothing of the room. Seen
+on a slower computer (GitHub's runners) in 2 of 12 unmutes, which went out as before this
+patch (the first word 11 dB under, the room's noise 11 dB under for 3.5 s); never in 15
+runs of the lab on a faster one. Now recording stops before the transport is told, and
+with no stream left the transport is given the format of the last ones, so that a block
+still in flight as recording stops (PulseAudio's thread delivers without its lock held)
+changes nothing; before any stream, as upstream. On macOS WebRTC-SDK's transport takes
+the device's format with no stream instead, which apple patch 0009 makes keep the last
+one too. The audio processing says in the log when an initialization again makes another
+echo controller ("initialized again for recording 8000 Hz 1 ch (was 48000 Hz 1 ch): echo
+controller made again", for playout, for another configuration), which the call lab's
+unmute check fails on between a mute and the unmute's words unless the echo controller
+was made anew on purpose. Other initializations in a call stay as upstream, now said in
+the log: another format of what plays (another output device) or another configuration
+of the processing (the microphone's options changed) makes another echo controller.
+
 diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
 index 9b28e82..cd90465 100644
 --- a/api/audio/echo_control.h
@@ -246,7 +267,7 @@ index c7fd326..510c4b1 100644
    // other way not used. Ideally, the captured audio would still be processed,
    // but some components may change behavior based on this information.
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index f63352c..ccef4af 100644
+index f63352c..1330ce5 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
 @@ -81,6 +81,7 @@ void AudioState::SetPlayout(bool enabled) {
@@ -284,17 +305,50 @@ index f63352c..ccef4af 100644
    }
    recording_enabled_ = enabled;
  }
-@@ -167,6 +174,9 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
-   UpdateAudioTransportWithSendingStreams();
+@@ -164,10 +171,19 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
+   RTC_DCHECK_RUN_ON(&worker_thread_checker_);
+   auto count = sending_streams_.erase(stream);
+   RTC_DCHECK_EQ(1, count);
+-  UpdateAudioTransportWithSendingStreams();
    if (sending_streams_.empty()) {
++    // Fogata, patch 0010: recording stops before the audio transport hears that
++    // nothing sends, so that what the device records while it stops (its thread
++    // delivers until the stop returns: on Windows it waits up to 2 s for it) is
++    // processed as before, and not in the format the transport takes with no
++    // stream (UpdateAudioTransportWithSendingStreams), which would make the audio
++    // processing initialize itself again, and another echo controller with it.
      config_.audio_device_module->StopRecording();
 +    // Fogata: the microphone turned off in a call that goes on playing (the voice
 +    // channel only receiving): its next start is in the same call (patch 0010).
 +    stopped_in_call_ = !receiving_streams_.empty() && playout_enabled_;
    }
++  UpdateAudioTransportWithSendingStreams();
  }
  
-@@ -202,11 +212,24 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
+ void AudioState::SetStereoChannelSwapping(bool enable) {
+@@ -185,6 +201,21 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
+     max_sample_rate_hz = std::max(max_sample_rate_hz, kv.second.sample_rate_hz);
+     max_num_channels = std::max(max_num_channels, kv.second.num_channels);
+   }
++  // Fogata, patch 0010: with no stream left the transport is given the format of
++  // the last ones, not 8000 Hz in one channel: the transport processes what is
++  // recorded in that format even with no stream, and another one would make the
++  // audio processing initialize itself again, and another echo controller with
++  // it, which knows nothing of the room the restart for recording keeps
++  // (StartRecordingForCall). A block recorded with no stream (one in flight as
++  // recording stops: PulseAudio's thread delivers it without its lock held)
++  // then changes nothing. Before any stream, as upstream.
++  if (sending_streams_.empty()) {
++    max_sample_rate_hz = last_send_sample_rate_hz_;
++    max_num_channels = last_send_num_channels_;
++  } else {
++    last_send_sample_rate_hz_ = max_sample_rate_hz;
++    last_send_num_channels_ = max_num_channels;
++  }
+   audio_transport_->UpdateAudioSenders(std::move(audio_senders),
+                                       max_sample_rate_hz, max_num_channels);
+ }
+@@ -202,11 +233,24 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
  // added while recording runs (a second connection, a shared screen's sound),
  // muting or replacing a track, and the device itself starting again (a device
  // chosen, a sound server back) leave it as it is.
@@ -321,7 +375,7 @@ index f63352c..ccef4af 100644
    }
  }
 diff --git a/audio/audio_state.h b/audio/audio_state.h
-index 7742337..7a7104e 100644
+index 7742337..3900ecd 100644
 --- a/audio/audio_state.h
 +++ b/audio/audio_state.h
 @@ -67,8 +67,8 @@ class AudioState : public webrtc::AudioState {
@@ -345,11 +399,78 @@ index 7742337..7a7104e 100644
  
    // Transports mixed audio from the mixer to the audio device and
    // recorded audio to the sending streams.
+@@ -95,6 +98,10 @@ class AudioState : public webrtc::AudioState {
+   };
+   flat_map<webrtc::AudioSendStream*, StreamProperties> sending_streams_
+       RTC_GUARDED_BY(&worker_thread_checker_);
++  // Fogata: the format last given to the audio transport with streams, which it
++  // keeps with none (patch 0010, UpdateAudioTransportWithSendingStreams).
++  int last_send_sample_rate_hz_ RTC_GUARDED_BY(&worker_thread_checker_) = 8000;
++  size_t last_send_num_channels_ RTC_GUARDED_BY(&worker_thread_checker_) = 1;
+ };
+ }  // namespace internal
+ }  // namespace webrtc
 diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
-index d2ea94c..4afed86 100644
+index d2ea94c..356d1b0 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
 +++ b/modules/audio_processing/audio_processing_impl.cc
-@@ -1846,6 +1846,20 @@ void AudioProcessingImpl::RestartEchoController() {
+@@ -326,6 +326,19 @@ bool NeedEchoController(const AudioProcessing::Config& config,
+   return config.echo_canceller.enabled || has_echo_control_factory;
+ }
+ 
++// Fogata, patch 0010: an initialization again (another format of what is recorded
++// or played, another configuration) makes another echo controller, which knows
++// nothing of the room; said in the log, so that it can be told from a restart
++// asked for (RestartEchoController, RestartEchoControllerForRecording).
++void LogEchoControllerMadeAgain(const char* what,
++                                const StreamConfig& was,
++                                const StreamConfig& is) {
++  RTC_LOG(LS_INFO) << "AudioProcessing: initialized again for " << what << " "
++                   << is.sample_rate_hz() << " Hz " << is.num_channels()
++                   << " ch (was " << was.sample_rate_hz() << " Hz "
++                   << was.num_channels() << " ch): echo controller made again";
++}
++
+ constexpr int kUnspecifiedDataDumpInputVolume = -100;
+ constexpr int kBandSplitRate = AudioProcessing::kSampleRate16kHz;
+ 
+@@ -531,6 +544,11 @@ void AudioProcessingImpl::MaybeInitializeRender(
+   }
+ 
+   MutexLock lock_capture(&mutex_capture_);
++  if (NeedEchoController(config_, !!echo_control_factory_)) {
++    LogEchoControllerMadeAgain("playout",
++                               formats_.api_format.reverse_input_stream(),
++                               input_config);
++  }
+   InitializeLocked(processing_config);
+ }
+ 
+@@ -747,6 +765,12 @@ void AudioProcessingImpl::ApplyConfig(const AudioProcessing::Config& config) {
+   // additional reinitializations on the next capture / render processing call.
+   bool reinitialization_needed =
+       UpdateActiveSubmoduleStates() || pipeline_config_changed;
++  if ((aec_config_changed || reinitialization_needed) &&
++      NeedEchoController(config_, !!echo_control_factory_)) {
++    // Fogata, patch 0010: said as for another format (LogEchoControllerMadeAgain).
++    RTC_LOG(LS_INFO) << "AudioProcessing: initialized again for another "
++                        "configuration: echo controller made again";
++  }
+   if (reinitialization_needed) {
+     InitializeLocked(formats_.api_format);
+   }
+@@ -900,6 +924,10 @@ void AudioProcessingImpl::MaybeInitializeCapture(
+     MutexLock lock_capture(&mutex_capture_);
+     // Reread the API format since the render format may have changed.
+     processing_config = formats_.api_format;
++    if (NeedEchoController(config_, !!echo_control_factory_)) {
++      LogEchoControllerMadeAgain("recording", processing_config.input_stream(),
++                                 input_config);
++    }
+     processing_config.input_stream() = input_config;
+     processing_config.output_stream() = output_config;
+     InitializeLocked(processing_config);
+@@ -1846,6 +1874,20 @@ void AudioProcessingImpl::RestartEchoController() {
    InitializeEchoController();
  }
  
