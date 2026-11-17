@@ -2121,7 +2121,7 @@ index 0000000000..5e86fb378b
 +
 +}  // namespace webrtc
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
-index fed71f9f1e..f5a5282e28 100644
+index 0cf769aa89..09b2627a6a 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
 @@ -156,13 +156,21 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
@@ -9178,7 +9178,7 @@ index d4985b69c7..7fd3a9f3da 100644
    int32_t AttachAudioBuffer() {
      RTC_DLOG(LS_INFO) << __FUNCTION__;
 diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
-index 4afed86520..2a1781d86b 100644
+index 356d1b0695..594accc91f 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
 +++ b/modules/audio_processing/audio_processing_impl.cc
 @@ -633,6 +633,11 @@ void AudioProcessingImpl::InitializeLocked(const ProcessingConfig& config) {
