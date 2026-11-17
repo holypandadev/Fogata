@@ -526,8 +526,11 @@ with WebRTC's 2 ms took 0.9 s (0 to 3.7) at -52 dBFS (8 runs each, p 0.05; the s
 AEC3 restarted rather than made anew). The logs of the lab show the same delay found in
 the same time and the filters converged as soon; why the signal that repeats comes back
 longer is not known. With speech-like noise that repeats only every 30 s there is no
-difference. A held note, music or a game's sound on the other side is periodic
-too; a real voice was not tried.
+difference. With a synthesised voice reading text that does not repeat (8 runs each), a
+call's start came back at -47 dBFS at the loudest (-63 to -45) for 0.9 s (0 to 7.6),
+against -67 dBFS (-72 to -44) and 0 s (0 to 1.6) with WebRTC's 2 ms (p 0.06 and 0.22:
+within the runs' scatter, the loudest by a little); its unmutes with speakers came back
+0.4 s against 1.7 s. A held note, music or a game's sound on the other side is periodic too.
 
 ## A microphone turned on again while the other side talks (Linux, Windows, macOS)
 

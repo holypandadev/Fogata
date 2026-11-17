@@ -50,8 +50,12 @@ restarted rather than made anew, 4.9 s, the same). The lab's logs show the same 
 (7 blocks) in the same time and the filters converged as soon; why the signal that repeats
 comes back longer is not known. With speech-like noise that repeats only every 30 s
 (tone.py speech, as the echo check's voices) there is no difference (0 s heard, p
-0.96 and 0.47). A held note, music or a game's sound playing on the far side is periodic
-too; a real voice was not tried (no speech synthesiser in the lab).
+0.96 and 0.47). With a synthesised voice reading text that does not repeat (mic.sh unmute,
+UNMUTE_FAR_FILE; 8 runs each, one session), a call's start sent it back at -47 dBFS at the
+loudest (-63 to -45) and for 0.9 s (0 to 7.6), against -67 dBFS (-72 to -44) and 0 s (0 to
+1.6) without this patch (p 0.06 and 0.22: within the runs' scatter, the loudest by a
+little); its unmutes with speakers came back 0.4 s against 1.7 s. A held note, music or a
+game's sound playing on the far side is periodic too.
 
 diff --git a/src/rtc_audio_processing_impl.cc b/src/rtc_audio_processing_impl.cc
 index 39cf151..62c8964 100644
