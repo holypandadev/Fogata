@@ -24,10 +24,18 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # Minutes each took on one of GitHub's computers (ubuntu-24.04, November 2026).
 MINUTES = {
-    "friends-remove": 7.0, "lan-sealed": 6.5, "friends-link": 5.0, "friends-code": 4.0,
-    "friends-later": 4.0, "symmetric-symmetric-member": 3.6, "tcp-known": 3.2,
-    "transfer-two-routers-back": 3.1, "friends-later-code": 3.1, "inbound-flood": 2.9,
-    "transfer-lan": 2.9,
+    "friends-remove": 9.2, "friends-ex-mutual": 4.0, "friends-later": 4.0,
+    "friends-later-code": 4.0, "member-lost-direct": 3.6, "direct-apart": 3.5, "dht-liars": 3.1,
+    "silent-flood": 2.9, "room-files": 2.5, "group-join": 2.4, "mdns-flood": 2.1,
+    "friends-code": 2.0, "friends-link": 2.0, "update-chain": 1.9, "cone-cone-member": 1.8,
+    "lan-sealed": 1.8, "tcp-known": 1.8, "lan-first-contact": 1.7, "lan-first-contact-quiet": 1.7,
+    "transfer-cone-cone": 1.7, "transfer-two-routers": 1.7, "cone-cone": 1.6,
+    "cone-symmetric": 1.6, "cone-symmetric-member": 1.6, "home-two-routers": 1.6,
+    "home-two-routers-closed": 1.6, "home-two-routers-firewall": 1.6,
+    "symmetric-symmetric-member": 1.6, "tcp-slow": 1.6, "transfer-cone-symmetric": 1.6,
+    "transfer-two-routers-back": 1.6, "fake-observed": 1.5, "transfer-lan": 1.4,
+    "inbound-flood": 1.2, "mdns-stale": 1.1, "media-silent": 1.1, "update-refusals": 0.8,
+    "network-check": 0.7, "network-check-negative": 0.7, "selftest": 0.1,
 }
 DEFAULT = 1.5
 LIARS_JOBS = 2
