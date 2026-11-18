@@ -1208,6 +1208,9 @@ class L10nEn extends L10n {
       'The one chosen is not connected: the default is used.';
 
   @override
+  String get devicesInUse => 'In use';
+
+  @override
   String get devicesVoiceSettings => 'Voice & video settings';
 
   @override
@@ -1290,6 +1293,26 @@ class L10nEn extends L10n {
   @override
   String callKeptOut(String name) {
     return 'Lost the connection with $name.';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return 'Sound cannot play on $chosen. It plays on $inUse.';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'Sound cannot play on $chosen with this microphone. It plays on $inUse.';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen was unplugged. Sound plays on $inUse.';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return 'Could not record from $chosen. Recording from $inUse.';
   }
 
   @override

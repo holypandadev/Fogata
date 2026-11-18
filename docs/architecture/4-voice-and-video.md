@@ -673,14 +673,24 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   gone over 5 s is told, and its return too. It used to keep a dead connection until the
   application restarted, listing only "System default".
   On macOS one audio engine plays and records; our copy of flutter_webrtc remakes it when
-  it stops while it should play (its FOGATA.md, "The others' voices play without a
-  microphone"): as it was first, as an engine also stops when another output is chosen or
-  the system switches devices, and without the microphone only if that does not run,
-  trying the microphone again by itself after 2, 10 and 30 s and at each change of the
-  devices or of those chosen. The speaker chosen stays chosen when the microphone is
-  turned on. While the microphone is left out the call still shows it on, and the
-  call's own check (8 s with nothing read or sent) says it could not be used and turns
-  it off.
+  it stops while it should play or record (its FOGATA.md, "The others' voices play without
+  a microphone"): as it was first, as an engine also stops when the system switches
+  devices, and without the microphone only if that does not run, trying the microphone
+  again by itself after 2, 10 and 30 s and at each change of the devices or of those
+  chosen. The engine's input and output are one audio unit with one device (Apple's voice
+  processing is off: WebRTC cancels the echo), so the speaker and microphone chosen are
+  given to it by our copy, not by WebRTC's audio module, which lost its engine, and the
+  microphone with it, for any output chosen other than the microphone's own device: one
+  device when both are on it, else a private aggregate of the two (its FOGATA.md, "The
+  devices chosen, with the microphone"). An output that cannot be put with the
+  microphone (another sample rate, or a pair the engine refused in the call) is not given
+  to the engine at all: it follows the system's devices, muted or not, as with nothing
+  chosen; a recording lost when the engine refused at an unmute is started again by the
+  call, stopping and starting its voice encodings. The call reads what the engine uses every 2 s,
+  tells when it is not the output or the microphone chosen (each time that begins), and
+  shows the one in use beside the person's choice, which stays as made. While the
+  microphone is left out the call still shows it on, and the call's own check (8 s with
+  nothing read or sent) says it could not be used and turns it off.
 - Noise suppression (Settings, under the microphone; off by default, kept in `app.json`)
   is RNNoise (`crates/fogata-denoise`, nnnoiseless: a small neural network that tells
   speech from noise in 22 bands and lowers the bands that hold noise, so a fan, a hum,

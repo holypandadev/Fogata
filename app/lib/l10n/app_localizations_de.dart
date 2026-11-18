@@ -1221,6 +1221,9 @@ class L10nDe extends L10n {
       'Das gewählte Gerät ist nicht verbunden: Der Standard wird verwendet.';
 
   @override
+  String get devicesInUse => 'In Verwendung';
+
+  @override
   String get devicesVoiceSettings => 'Audio- & Videoeinstellungen';
 
   @override
@@ -1304,6 +1307,26 @@ class L10nDe extends L10n {
   @override
   String callKeptOut(String name) {
     return 'Die Verbindung zu $name ist abgebrochen.';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return 'Der Ton kann nicht über $chosen ausgegeben werden. Er kommt über $inUse.';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'Der Ton kann mit diesem Mikrofon nicht über $chosen ausgegeben werden. Er kommt über $inUse.';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen wurde getrennt. Der Ton kommt über $inUse.';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return 'Aufnahme mit $chosen nicht möglich. Es wird mit $inUse aufgenommen.';
   }
 
   @override

@@ -1665,6 +1665,12 @@ abstract class L10n {
   /// **'The one chosen is not connected: the default is used.'**
   String get devicesChosenMissing;
 
+  /// Shown beside a speaker or microphone in the device panel during a call (macOS) when the call's sound plays on it, or the call records from it, although another one was chosen.
+  ///
+  /// In en, this message translates to:
+  /// **'In use'**
+  String get devicesInUse;
+
   /// Last row of a device panel: opens Settings › Voice & video.
   ///
   /// In en, this message translates to:
@@ -1772,6 +1778,30 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Lost the connection with {name}.'**
   String callKeptOut(String name);
+
+  /// Error toast in a call (macOS): the speakers or headphones chosen are connected but the call's sound plays on another output. {chosen} is the name of the output chosen, {inUse} the name of the one the sound plays on.
+  ///
+  /// In en, this message translates to:
+  /// **'Sound cannot play on {chosen}. It plays on {inUse}.'**
+  String callOutputUnusable(String chosen, String inUse);
+
+  /// Error toast in a call (macOS): the speakers or headphones chosen run at another sample rate than the microphone in use, so they cannot be used together and the call's sound plays on another output. {chosen} is the name of the output chosen, {inUse} the name of the one the sound plays on.
+  ///
+  /// In en, this message translates to:
+  /// **'Sound cannot play on {chosen} with this microphone. It plays on {inUse}.'**
+  String callOutputNotWithMicrophone(String chosen, String inUse);
+
+  /// Error toast in a call (macOS): the speakers or headphones chosen were unplugged, so the call's sound plays on another output. {chosen} is the name of the output chosen, {inUse} the name of the one the sound plays on.
+  ///
+  /// In en, this message translates to:
+  /// **'{chosen} was unplugged. Sound plays on {inUse}.'**
+  String callOutputGone(String chosen, String inUse);
+
+  /// Error toast in a call (macOS): the microphone chosen could not be used, so the call records from another one. {chosen} is the name of the microphone chosen, {inUse} the name of the one in use.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not record from {chosen}. Recording from {inUse}.'**
+  String callInputUnusable(String chosen, String inUse);
 
   /// A call connection's level, in a word (shown on a small pill and after "Your connection:").
   ///

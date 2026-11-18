@@ -611,6 +611,15 @@ class Call extends ChangeNotifier {
     _engine = await createPeerConnection({});
     if (_closed) return;
     await suppressNoise(noiseSuppression);
+    if (onMacOS) {
+      // What an earlier call chose, or saw refused, is not this one's (flutter_webrtc's
+      // FOGATA.md, "The devices chosen, with the microphone").
+      try {
+        await WebRTC.invokeMethod<void, dynamic>('fogataNewCall');
+      } catch (e) {
+        _trace('new call told: $e');
+      }
+    }
     await _chooseOutput();
     await _chooseInput();
     if (mic && !_closed) await _openMic();
@@ -1371,7 +1380,9 @@ class Call extends ChangeNotifier {
     // On with the microphone's track there to send; until it is (still opening), the
     // encoding stays as [_voiceWanted] leaves it, so nothing records for nothing.
     var voiceOn = false;
-    if (mic && track != null) {
+    // While the recording is started again ([_recoverVoice]) every voice encoding is
+    // wanted off, and this step is the only one that sets them.
+    if (mic && track != null && !_recovering) {
       voiceOn = await _encode(connection, _audio, true) == true;
       if (!voiceOn && !gone()) _startLater(peer, connection, _audio);
     }
@@ -1476,7 +1487,7 @@ class Call extends ChangeNotifier {
     RTCPeerConnection connection,
   ) async {
     var stopped = false;
-    if (!mic &&
+    if ((!mic || _recovering) &&
         peer._upOnce &&
         peer.connection == connection &&
         await _sendsVoice(connection)) {
@@ -1504,7 +1515,7 @@ class Call extends ChangeNotifier {
     final what = channel == _audio ? 'voice' : 'screen sound';
     _trace('$what to ${peer.id.substring(0, 8)} not started: trying again');
     bool wanted() => channel == _audio
-        ? mic && _track(_audio, peer) != null
+        ? mic && !_recovering && _track(_audio, peer) != null
         : _soundInChannel ||
               (_replacing && shareSound && (mic || _silent || _silenceComing));
     unawaited(() async {
@@ -1717,6 +1728,10 @@ class Call extends ChangeNotifier {
   Future<void> useOutput(String? id) async {
     output = id;
     await _select(id ?? await _first('audiooutput'), Helper.selectAudioOutput);
+    // On macOS the voice engine is made again for it, recording nothing for a moment
+    // (flutter_webrtc's FOGATA.md, "The devices chosen, with the microphone"): judged
+    // from the start again, from when it has been chosen.
+    if (onMacOS) _micCheck.reset();
   }
 
   /// Changes the camera; if it is on, the others see the new one at once.
@@ -2119,6 +2134,9 @@ class Call extends ChangeNotifier {
   /// Whether the microphone, on, reads anything.
   final _micCheck = MicCheck();
 
+  @visibleForTesting
+  MicCheck get micCheckForTests => _micCheck;
+
   /// Hands a microphone that reads nothing to whoever shows the call, with what to say;
   /// without one, the call says it and turns its microphone off itself.
   void Function(String text)? onMicUnusable;
@@ -2135,6 +2153,155 @@ class Call extends ChangeNotifier {
 
   /// The microphone chosen going away and coming back, told once each way.
   final _micWatch = MicWatch();
+
+  /// The output and the microphone chosen, as the voice engine uses them (macOS), told when
+  /// it uses others, and its recording lost.
+  final _outputWatch = OutputWatch();
+  final _inputWatch = InputWatch();
+  final _recordingWatch = RecordingWatch();
+
+  /// Hands what to say of an output or microphone chosen that the voice engine does not use
+  /// (macOS) to whoever shows the call; without one, the call says it itself. The choice
+  /// stays as the person made it.
+  void Function(String text)? onOutputRefused;
+
+  /// The output and the microphone the voice engine uses when they are not those chosen
+  /// (their ids, 'default' for the system's; macOS), to show beside the choice; null when
+  /// they are, or it is not known.
+  String? outputInUse;
+  String? inputInUse;
+
+  /// Whether some connection agreed to send voice, at the last reading of the statistics.
+  bool _voiceSending = false;
+
+  /// macOS, with an output or a microphone chosen: reads the voice engine's facts
+  /// (flutter_webrtc's FOGATA.md, "The devices chosen, with the microphone") and tells
+  /// what they show ([OutputWatch], [InputWatch], [RecordingWatch]); read with the
+  /// statistics, every 2 s. With nothing chosen nothing is asked, as before devices were
+  /// given to the engine by the plugin.
+  Future<void> _checkOutput() async {
+    if (!onMacOS || _closed || _checkingOutput) return;
+    if (output == null && input == null) {
+      // The system's devices chosen again: nothing in use beside a choice any more.
+      if (outputInUse != null || inputInUse != null) {
+        outputInUse = null;
+        inputInUse = null;
+        notifyListeners();
+      }
+      return;
+    }
+    _checkingOutput = true;
+    try {
+      final facts = await WebRTC.invokeMethod<Object?, dynamic>(
+        'fogataAudioOutput',
+      );
+      if (_closed || facts is! Map) return;
+      final out = _outputWatch.take(facts, const [], asked: output);
+      final inp = _inputWatch.take(facts, const [], asked: input);
+      if (out.inUse != outputInUse || inp.inUse != inputInUse) {
+        outputInUse = out.inUse;
+        inputInUse = inp.inUse;
+        notifyListeners();
+      }
+      for (final text in [out.text, inp.text].whereType<String>()) {
+        _trace('devices chosen: $text');
+        if (onOutputRefused case final tell?) {
+          tell(text);
+        } else {
+          _report(text);
+        }
+      }
+      if (_recordingWatch.take(facts, mic: mic, sending: _voiceSending)) {
+        await _recoverVoice();
+      }
+    } catch (e) {
+      _trace('output: $e');
+    } finally {
+      _checkingOutput = false;
+    }
+  }
+
+  bool _checkingOutput = false;
+
+  /// The voice engine lost the recording the call wants ([RecordingWatch]): every voice
+  /// encoding is to be off, then on again, so that WebRTC stops recording (its last sending
+  /// stream gone) and starts it afresh its own way: AudioState asks the audio module to
+  /// record and restarts its echo canceller, as at any unmute. Each participant's own step
+  /// ([_voiceTo]) is the only one that sets their encoding: while [_recovering] it wants
+  /// it off (a step of any origin meanwhile, a participant who arrives, does the same), and
+  /// once no voice encoding is on anywhere (3 s at most) it is cleared and every step runs
+  /// again, turning them on with their own retries. Not through [setMic]: the others are
+  /// told nothing and the microphone's check is not started over. Given up as soon as the
+  /// person turns the microphone off or the call ends. Once for each loss.
+  Future<void> _recoverVoice() async {
+    final asked = _micAsked;
+    bool on() => !_closed && mic && _micAsked == asked;
+    if (!on() || _recovering) return;
+    _trace(
+      'recording lost with the microphone on: every voice encoding off, then on',
+    );
+    voiceRecoveries++;
+    _recovering = true;
+    try {
+      for (final peer in peers.values.toList()) {
+        _queueVoice(peer);
+      }
+      final end = DateTime.now().add(const Duration(seconds: 3));
+      while (on()) {
+        final still = await _voiceOn();
+        if (still.isEmpty) break;
+        // A participant who arrived meanwhile, or whose step came before: their step
+        // again (once at a time: [_queueVoice]).
+        still.forEach(_queueVoice);
+        if (DateTime.now().isAfter(end)) {
+          _trace('recording restart: a voice encoding still on after 3 s');
+          break;
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 50));
+      }
+      if (!on()) {
+        _trace(
+          'recording restart given up: the microphone was turned off, or the call ended',
+        );
+      }
+    } finally {
+      _recovering = false;
+      for (final peer in peers.values.toList()) {
+        _queueVoice(peer);
+      }
+    }
+  }
+
+  /// While the recording is started again ([_recoverVoice]).
+  bool _recovering = false;
+
+  /// How many times the recording was started again, for tests.
+  @visibleForTesting
+  int voiceRecoveries = 0;
+
+  /// The participants whose voice encoding is on, as their sender reads back.
+  Future<List<CallPeer>> _voiceOn() async {
+    final on = <CallPeer>[];
+    for (final peer in peers.values.toList()) {
+      final connection = peer.connection;
+      if (connection == null) continue;
+      try {
+        final channels = await _channels(connection);
+        if (channels.length <= _audio) continue;
+        final encodings =
+            channels[_audio].sender.parameters.encodings ??
+            const <RTCRtpEncoding>[];
+        if (encodings.any((e) => e.active)) on.add(peer);
+      } catch (_) {
+        // A connection closed meanwhile sends nothing.
+      }
+    }
+    return on;
+  }
+
+  /// Runs [_recoverVoice], for tests.
+  @visibleForTesting
+  Future<void> recoverVoiceForTests() => _recoverVoice();
 
   /// The sound server going away and coming back (Linux), told once each way.
   final _soundServer = SoundServerWatch();

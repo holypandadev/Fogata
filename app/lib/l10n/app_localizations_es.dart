@@ -1215,6 +1215,9 @@ class L10nEs extends L10n {
       'El elegido no está conectado: se usa el predeterminado.';
 
   @override
+  String get devicesInUse => 'En uso';
+
+  @override
   String get devicesVoiceSettings => 'Ajustes de voz y video';
 
   @override
@@ -1298,6 +1301,26 @@ class L10nEs extends L10n {
   @override
   String callKeptOut(String name) {
     return 'Se perdió la conexión con $name.';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return 'El sonido no puede salir por $chosen. Sale por $inUse.';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'El sonido no puede salir por $chosen con este micrófono. Sale por $inUse.';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen se desconectó. El sonido sale por $inUse.';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return 'No se pudo grabar con $chosen. Se graba con $inUse.';
   }
 
   @override

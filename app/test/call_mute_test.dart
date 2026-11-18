@@ -1077,6 +1077,115 @@ void main() {
     _holds(call);
   });
 
+  // macOS: the voice engine lost its recording (a start that failed): every voice encoding
+  // goes off, all before any is on again, so that WebRTC stops recording and starts it
+  // afresh its own way; each participant's own step is the only one that sets them.
+  group('a recording lost is started again', () {
+    test('every voice encoding off, then on', () async {
+      final (call, _, ana, bea, busy) = twoInCall();
+      busy.complete();
+      await settle(call);
+      final peers = [call.peers[_ana]!, call.peers[_bea]!];
+      expect(peers.every(_records), isTrue);
+      final senders = [ana.voiceSender, bea.voiceSender];
+      final askedBefore = [for (final s in senders) s.asked.length];
+      // When the first starts again, whether every other was off already.
+      bool? othersOff;
+      for (final (i, sender) in senders.indexed) {
+        final before = sender.onStart;
+        sender.onStart = () {
+          before?.call();
+          othersOff ??= senders.indexed.every((e) => e.$1 == i || !e.$2.active);
+        };
+      }
+      await call.recoverVoiceForTests().timeout(soon);
+      await settle(call);
+      for (final (i, sender) in senders.indexed) {
+        expect(sender.asked.skip(askedBefore[i]), [false, true], reason: '$i');
+      }
+      // WebRTC's recording went false, then true.
+      expect(othersOff, isTrue);
+      expect(peers.every(_records), isTrue);
+      expect(call.voiceRecoveries, 1);
+    });
+
+    test('a step of another origin meanwhile leaves the voice off', () async {
+      final (call, _, ana, bea, busy) = twoInCall();
+      busy.complete();
+      await settle(call);
+      // Bea's encoding takes a while to change: Ana is off before her.
+      bea.voiceSender.takes = const Duration(milliseconds: 150);
+      final restart = call.recoverVoiceForTests();
+      await until(() => !ana.voiceSender.active);
+      // A step of Ana's for another reason (her connection said up again).
+      call.comeUpForTests(call.peers[_ana]!);
+      await Future<void>.delayed(const Duration(milliseconds: 60));
+      expect(ana.voiceSender.active, isFalse);
+      await restart.timeout(soon);
+      await settle(call);
+      expect(_records(call.peers[_ana]!), isTrue);
+      expect(_records(call.peers[_bea]!), isTrue);
+    });
+
+    test(
+      'a participant who arrives meanwhile is off, then on with the others',
+      () async {
+        final (call, _, ana, bea, busy) = twoInCall();
+        busy.complete();
+        await settle(call);
+        bea.voiceSender.takes = const Duration(milliseconds: 150);
+        final restart = call.recoverVoiceForTests();
+        await until(() => !ana.voiceSender.active);
+        final cee = _Connection();
+        const ceeId = 'cccccccc';
+        final peer = CallPeer(ceeId)
+          ..connection = cee
+          ..upForTests()
+          ..describedForTests();
+        call.peers[ceeId] = peer;
+        _adopt(call, cee);
+        call.comeUpForTests(peer);
+        // Their step turns their encoding off too, before the others are on again.
+        await until(
+          () => !cee.voiceSender.active,
+          within: const Duration(seconds: 1),
+        );
+        expect(ana.voiceSender.active, isFalse);
+        await restart.timeout(soon);
+        await settle(call);
+        for (final id in [_ana, _bea, ceeId]) {
+          expect(_records(call.peers[id]!), isTrue, reason: id);
+        }
+      },
+    );
+
+    test('a turn-on refused once is tried again by the step', () async {
+      final (call, _, ana, bea, busy) = twoInCall();
+      busy.complete();
+      await settle(call);
+      final restart = call.recoverVoiceForTests();
+      await until(() => !ana.voiceSender.active && !bea.voiceSender.active);
+      ana.voiceSender.answer = _Answer.refusesOnce;
+      await restart.timeout(soon);
+      await until(() => _records(call.peers[_ana]!));
+      expect(_records(call.peers[_bea]!), isTrue);
+    });
+
+    test('given up when the microphone is turned off', () async {
+      final (call, _, ana, bea, busy) = twoInCall();
+      busy.complete();
+      await settle(call);
+      final restart = call.recoverVoiceForTests();
+      await call.setMic(false);
+      await restart.timeout(soon);
+      await settle(call);
+      expect(call.mic, isFalse);
+      expect(ana.voiceSender.active, isFalse);
+      expect(bea.voiceSender.active, isFalse);
+      _holds(call);
+    });
+  });
+
   test('an unmute is not held up by one participant\'s busy turn', () async {
     final (call, first, ana, bea, busy) = twoInCall();
     final again = _Stream();

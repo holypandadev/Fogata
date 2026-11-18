@@ -863,12 +863,14 @@ something makes the engine again.
     both copies, identical); a microphone that became usable is opened at once.
   - As the module's observer (unless an embedding plugin registered one): when the engine
     stops while playout goes on, it looks once the module's change is done, and again
-    500 ms later; an engine still stopped while the module counts itself as playing is
-    released and made again (three times in a row at most; an engine made again that
+    500 ms later; an engine still stopped while the module counts itself as playing (or,
+    with devices chosen, as recording with its input available: a call where nobody else
+    sends sound only records, and in Device mode the module's output follows its input)
+    is released and made again (three times in a row at most; an engine made again that
     then ran 5 s worked, and a later stop starts the count again). It is made as it was
     first, the input in it if it was: an engine stops with its input in it as well when
-    another output is chosen (the module makes a new engine then) or the system switches
-    devices, and the microphone had no part in that. Taking every such stop for a
+    the system switches devices, and the microphone had no part in that. Taking every
+    such stop for a
     microphone that cannot be opened lost the microphone at each change of output, until
     the system's devices changed. Only when the engine made again with the input does not
     run, or stops again at once, is it made with the speaker alone; the input is then
@@ -880,21 +882,8 @@ something makes the engine again.
     or changed its profile): it is made again as it was. Without the observer (another
     one was set), no stop is heard, and the input is taken for the cause once the engine
     made as it was did not run.
-  - The output chosen holds when the microphone is turned on. The module gives its
-    output the chosen device only to an engine it makes in that change (WebRTC-SDK's
-    `audio_engine_device.mm`, the step "Configure device", run only when the engine is
-    new or must be made again). Adding the input to an engine that played alone does not
-    make a new one: it turns voice processing on, the system's voice processing then
-    plays through an aggregate of the system's default input and output, and the others'
-    voices went to the default output instead of the one chosen. So the chosen output
-    (`selectAudioOutput`, `FlutterRTCMediaStream.m`, both copies, identical, tells it
-    with `outputChosen:`) is given to the engine's output unit
-    (`kAudioOutputUnitProperty_CurrentDevice`) in the module's `willStartEngine` when the
-    engine was not made in that change and starts with the input for the first time,
-    just as the module does for a new engine. A chosen output that is gone is left to the
-    system's default, as the module does. The module's own `outputDevice` and
-    `inputDevice` cannot tell the device chosen (this audio module does not answer
-    `GetPlayoutDevice`: always nil), hence the copy kept here.
+  - Gives the engine the devices chosen: see "The devices chosen, with the microphone"
+    below.
   - Its work runs on a queue of its own: the module's getters (`isPlaying`,
     `isEngineRunning`) and setters wait for its thread (WebRTC-SDK's `RTCAudioDeviceModule`
     calls the module with `BlockingCall` on the factory's network thread, which is also
@@ -903,11 +892,8 @@ something makes the engine again.
     start half done. `stop` waits for the queue before the factory goes.
   - The log says "Fogata: microphone not usable, playing only: ...", "microphone usable",
     "microphone could not be opened", "the audio engine stopped while playing; made
-    again without the microphone" (or "as it was"), "trying the microphone again (n of
-    3)" and "the output chosen given again with the microphone".
-  - `app/integration_test/call_test.dart`'s FOGATA_TEST_OUTPUT_SWAP chooses another
-    output in the middle of a measured call and the first one again, and logs what the
-    copy sent with each and these lines.
+    again without the microphone" (or "as it was") and "trying the microphone again (n of
+    3)".
 - `FlutterWebRTCPlugin.m` (both copies, identical; macOS only): made with the factory,
   stopped in `dealloc`.
 - A headless check outside the app (the module of `app/macos/WebRTC-SDK.podspec`, its
@@ -916,6 +902,189 @@ something makes the engine again.
   and `startPlayout` changes nothing; with this, the engine runs again within a second,
   recording asked later leaves it running, and a microphone that fails again is handled
   the same way.
+
+## The devices chosen, with the microphone (macOS)
+
+The module's engine runs without Apple's voice processing: the microphone asks WebRTC's
+own noise suppressor off (Fogata runs RNNoise, "The microphone's noise suppression"), and
+with that the module's audio processing options rule the platform path out, so the echo
+is cancelled by WebRTC's AEC3 and the engine's state says `vp=0`. Without voice
+processing an AVAudioEngine on macOS plays and records through one audio unit (AUHAL),
+which is given one device (`kAudioOutputUnitProperty_CurrentDevice`); left alone it
+follows the system's default input and output, putting the two together itself when they
+are different devices. The module gave that unit the device chosen whenever it made its
+engine (WebRTC-SDK's `audio_engine_device.mm`, the step "Configure device"), the output
+chosen even while the engine recorded. A unit with its input enabled refuses a device
+without an input (CoreAudio's `kAudioUnitErr_InvalidPropertyValue`, -10851): any output
+that is not the microphone's own device. The module then rolled back what it had made in that change, but it had already
+stopped and released the engine before, and it keeps its state as before the change: it
+counts itself as recording with no engine, nothing makes one again, and choosing the first
+output again is no change for it (its device is already that one). The microphone sent
+nothing from the change on, and 8 s later the call said it could not be used and turned
+it off. The input chosen while the output was another device met the same.
+
+- `FogataPlayout.{h,m}`: as the module's observer it gives the engine the devices chosen
+  itself, and the module is kept on the system's devices. An AVAudioEngine whose unit was
+  never given a device follows the system's default input and output, whatever their
+  rates (as every call did before); a unit once given a device cannot be put back to
+  following, only a new engine follows again, and the module makes a new one whenever its
+  input and output are both made unavailable and then available again.
+  - `selectAudioOutput` and `selectAudioInput` (`FlutterRTCMediaStream.m`, both copies,
+    identical) tell it (`outputChosen:name:`, `inputChosen:name:`, with the name the list
+    gave) instead of the module. On its queue the module is told the device only with
+    nothing enabled (`setEngineAvailability:` neither input nor output) and back to the
+    system's at once: it marks the change for the echo canceller (Apple patch 0008, WebRTC
+    patch 0011) and never gives a device to an engine itself. Its engine, if it had one, is
+    made again then. A device chosen, the same one again included, is always tried so, and
+    what the engine refused before is forgotten; only the system's default chosen while it
+    already was changes nothing (a call's start), so a call with nothing chosen goes as
+    before.
+  - R1. One question decides: can the pair of the output chosen (else the system's) and
+    the microphone the call uses (the one chosen, else the system's), recording or not,
+    be put together? From the devices' properties only, nothing opened: the same device,
+    or two at the same nominal rate (an aggregate cannot resample), not refused by the
+    engine in this call.
+  - R2. If not, the engine is never given a device: it follows the system's devices, muted
+    or not, as with nothing chosen.
+  - R3. If so, in the module's `willEnableEngine` (before it reads the formats of the
+    engine's input and output) and `willStartEngine`, the engine's unit is given the output
+    chosen alone while the engine does not record (with only a microphone chosen, nothing),
+    and the pair while it does: the one device, or a private aggregate
+    (`AudioHardwareCreateAggregateDevice`, listed in this process only, its unique id
+    starting with `fogata.route.`): the output's clock, the input drift compensated. A
+    microphone turned on goes the module's own way: WebRTC's `InitRecording` stops the
+    engine that only played and enables its input, and the aggregate is given to its unit
+    before the input's format is read. Each device given is kept only when the engine
+    itself then reads an output, and an input when it records, with channels and a rate
+    (what the module checks next); else the unit is given back what it had. An
+    AVAudioEngine given an aggregate can read its output with no channels at all while the
+    HAL and the audio unit see two ("Output device not available"), in one order of the two
+    devices and not in the other, whatever the aggregate's other settings, and which order
+    it reads is not fixed: the input's device first is tried, then the output's (only when
+    the output records nothing, so that the engine records from the microphone). When the
+    input's device plays too and comes first, the engine's one channel is mapped to the
+    output's first two channels alone (`kAudioOutputUnitProperty_ChannelMap`), set only
+    once the device is read (R7), so a device refused leaves no map behind; a map that
+    cannot be set, or a device of more than 64 channels, is refused. Making an aggregate
+    waits 100 ms at most for its streams, on the module's thread.
+  - The aggregate of the pair chosen is kept while that pair is chosen, present and
+    usable: made at the choice (or at the first unmute), kept through the mutes (the
+    engine that only plays is given the output device itself), destroyed when the choice
+    changes, a device goes or the pair is refused. Making or destroying a device tells
+    WebRTC the devices changed (Apple patch 0008), and its echo canceller is then made anew
+    at the next unmute instead of keeping what it knows of the room (WebRTC patches 0010,
+    0011); kept, mutes and unmutes change no device. A choice itself still costs that once:
+    the devices did change. An aggregate with no engine on it runs no device: made and left
+    unused, neither of its devices nor the aggregate is running anywhere (the HAL's
+    `kAudioDevicePropertyDeviceIsRunningSomewhere`), so the microphone is not opened. The
+    last one stays until the process ends, or the next call chooses other devices.
+  - R4. When the engine refuses at run time what R1 allowed (both orders, at a choice or
+    at an unmute), or an engine given the pair with the microphone does not start
+    (`checkStarted`, once the module's change is done) or stops (`lookAtEngine`, at its
+    first look), or an engine with the pair does not run after a choice, the pair is taken
+    as refused for this call (R1 then says no), and a new engine follows the system's
+    devices (`followAnew`, asked once until made). If the module's request to record was
+    dropped by a failed start, that engine only plays, and the call starts the recording
+    again (see below). The same when an engine given a device must follow the system
+    again.
+  - R6. Once the devices settle after a change, an output (or a microphone, while
+    recording) chosen that is there again but not in use is given back to the engine, as
+    if chosen again, when R1 allows it.
+  - `state:` answers facts only: for the output and the input, the one chosen and the name
+    the list gave it, whether it is in the system now, and the one in use with its name
+    (what follows the system is given as the system's devices, by their own ids; the input
+    in use only while something records); whether
+    the pair can be put together (R1) and "rate" when the rates differ; whether a choice is
+    being carried out; whether the module was asked to record, whether it records (asked,
+    its input let in, its engine running), and whether its input is let in. The method
+    `fogataAudioOutput` (`FlutterWebRTCPlugin.m`, both copies) answers them, read-only.
+  - `getSources` (both copies) leaves the aggregates out.
+  - The log says "Fogata: the output chosen (…) given to the engine made again (result,
+    running)", "a device of both made, the input first", "playing on …, recording from
+    …, through a device of both", "the devices chosen cannot be put together (why): the
+    engine follows the system's devices", "the engine reads from … an output of 0 channels
+    …", "the output … cannot be used with the microphone …: why", "the engine refused …;
+    following the system's devices", "a new engine following the system's devices", "the
+    output chosen is there again: given back to the engine" and "the audio engine stopped
+    while playing; made again without the devices chosen".
+  - A call starts clean (`newCall`, the method `fogataNewCall`, before the call chooses its
+    devices): the devices an earlier call chose and the pairs it saw refused are forgotten.
+  - For the call test only, the method `fogataTestRefuse` (`testRefuse:`) makes R1 answer
+    no for every pair (1), refuses the next pair given with the microphone in either order,
+    once (2), or makes the next start of an engine given the pair fail, once, its formats
+    read (3: the observer's `willStartEngine` answers an error, and the module undoes its
+    change as when the engine does not start). It acts only in a process started with
+    FOGATA_TEST_REFUSE set, which only the call test's launch sets; elsewhere, whatever
+    calls it, nothing changes; and each call starts with it off.
+- The application decides what to tell from those facts, every 2 s in a call with a
+  device chosen (`Call._checkOutput`; with nothing chosen nothing is asked):
+  `OutputWatch` tells "Sound cannot play on …. It plays on …" (with "… with this
+  microphone" when the facts say the rates differ) when the engine plays on another
+  output while the one chosen is there, seen twice in a row (a device plugged in again is
+  given back within a moment, R6), and "… was unplugged. Sound plays on …" when the one
+  chosen goes away, each time either begins; `InputWatch` tells "Could not record from ….
+  Recording from …" the same way (a microphone unplugged is told from the device list,
+  `MicWatch`). The one chosen being the system's own device, followed, is the one in use:
+  nothing to say. Facts about another choice than the call's last, or taken while a choice
+  is carried out, say nothing; back on the one chosen, a later change is told again. The
+  person's choice stays chosen, shown and kept as made; the device panel shows "In use"
+  beside the one used instead (`Call.outputInUse`, `inputInUse`).
+- R5. When the module was asked to record and nothing records, or it was not asked
+  although the call sends voice (a start that failed: the module then drops WebRTC's
+  request and nothing asks again), two readings in a row with the microphone on and its
+  input let in (`RecordingWatch`), the call has every voice encoding off, all of them
+  before any starts again (WebRTC stops recording when its last sending stream stops),
+  then on again, so that WebRTC's
+  AudioState asks the module to record afresh and restarts its echo canceller, as at any
+  unmute (`Call._recoverVoice`). Not through `setMic`: the others are told nothing and the
+  microphone's check is not started over. Given up as soon as the person turns the
+  microphone off or the call ends. Once for each loss, and again when the engine changed
+  since (the pair now refused, R4). Seen 4 to 6 s after the loss (two readings in a row,
+  the voice sent read from the reading before). Each participant's own step is the only
+  one that sets their encoding: while the restart runs it wants it off (a step of any
+  origin meanwhile, a participant who arrives, does the same), and once no voice encoding
+  is on anywhere (3 s at most) every step runs again, turning them on with its own retries.
+- The call judges whether its microphone reads anything from the start again when an
+  output is chosen on macOS (`Call.useOutput`, `MicCheck.reset`), as it does for another
+  input: the engine is made again then and records nothing for a moment.
+- Without the observer (an embedding plugin registered one) the module chooses the devices
+  itself, as before.
+- Known: with an output chosen, the module counts itself on the system's default output,
+  so a change of the system's default output makes its engine again (a short gap) where it
+  kept the device chosen before. An engine made again without a change of what it enables
+  (the system's default changed) reads its formats before it is given the devices chosen:
+  a microphone chosen at another rate than the system's default input is read at the
+  default's rate, as when the module gave the device itself. A device's rate changed while
+  it is chosen is seen only at the next engine made.
+- Not done: a Bluetooth headset as the microphone, whose rate changes when its microphone
+  opens, after the aggregate was made at the rate it had: the engine would read the
+  aggregate's formats at the old rate, and if it then does not start, the pair is taken as
+  refused as above; if it starts at the wrong rate, nothing here sees it. The system's
+  default output changing while a pair chosen is in use: the engine made again reads its
+  formats, channels as well as rate, from the system's devices before the aggregate is
+  given in `willStartEngine`, and a mismatch shows only as an engine that does not start
+  (refused as above) or plays wrongly.
+- `app/integration_test/call_test.dart`'s FOGATA_TEST_OUTPUT_SWAP chooses another output
+  in the middle of a measured call and the first one again, turning the microphone off
+  and on twice while the other plays (60 s each, FOGATA_TEST_MEASURE 186; under 56 is
+  refused, as a stretch with the microphone on then has too few readings to judge its
+  level), logs what the copy
+  sent and its microphone read in each stretch (packets, seconds read, level, seconds
+  spanned) and these lines, and fails (`integration_test/output_swap_verdict.dart`) when:
+  past the two readings after a change, a reading has no voice sent or no sound read, or
+  the level is exactly 0 in every judged reading of a stretch of five or more; while the
+  facts say the pair can be put together, the output in use is not the one chosen (6 s
+  after the choice, and at each reading with the microphone on), or an output notice is
+  given; the microphone was turned off, or the person told it could not be used; or the
+  module records at the end of a stretch with the microphone off, or 3 s after leaving the
+  room. A reading spanning under a second (the last, as the measure ends) is not judged.
+  FOGATA_TEST_REFUSE=pair has R1 answer no throughout, and the run fails unless the
+  engine is never given the output chosen and the notice is given (R2);
+  FOGATA_TEST_REFUSE=unmute has the second unmute's pair refused in either order, and
+  FOGATA_TEST_REFUSE=start has that unmute's start fail with the pair given, and either
+  run fails unless, at the end of the other output's time, the facts say the pair cannot
+  be put together, the engine follows the system and records, and the call started the
+  recording again (R4 and R5); that stretch is let take four readings.
 
 ## A received track is found as the connection that received it (all platforms)
 

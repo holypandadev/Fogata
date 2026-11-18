@@ -1106,6 +1106,9 @@ class L10nZh extends L10n {
   String get devicesChosenMissing => '所选设备未连接：使用默认设备。';
 
   @override
+  String get devicesInUse => '使用中';
+
+  @override
   String get devicesVoiceSettings => '语音和视频设置';
 
   @override
@@ -1185,6 +1188,26 @@ class L10nZh extends L10n {
   @override
   String callKeptOut(String name) {
     return '与$name的连接已断开。';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return '声音无法从$chosen播放，现在从$inUse播放。';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return '使用此麦克风时，声音无法从$chosen播放，现在从$inUse播放。';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen已断开，现在从$inUse播放声音。';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return '无法使用$chosen录音，现在使用$inUse录音。';
   }
 
   @override

@@ -1127,6 +1127,9 @@ class L10nJa extends L10n {
   String get devicesChosenMissing => '選択したデバイスが接続されていません。デフォルトを使用しています。';
 
   @override
+  String get devicesInUse => '使用中';
+
+  @override
   String get devicesVoiceSettings => '音声・ビデオの設定';
 
   @override
@@ -1208,6 +1211,26 @@ class L10nJa extends L10n {
   @override
   String callKeptOut(String name) {
     return '$nameとの接続が切れました。';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return '$chosenから音を出せません。$inUseから出ています。';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'このマイクでは$chosenから音を出せません。$inUseから出ています。';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosenが外れました。$inUseから音が出ています。';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return '$chosenで録音できませんでした。$inUseで録音しています。';
   }
 
   @override

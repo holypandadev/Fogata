@@ -1460,6 +1460,12 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// The output or microphone chosen could not be used ([Call.onOutputRefused], macOS):
+  /// [text] says which one plays or records instead. The person's choice stays theirs,
+  /// shown and kept as they made it; choosing it again tries it again.
+  @visibleForTesting
+  void outputRefused(String text) => say(text, error: true);
+
   /// The room this device is in without a call (no sound server): whoever calls it there
   /// is told so ([Call.noVoice]) instead of being left trying.
   String? _noCallIn;

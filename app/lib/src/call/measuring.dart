@@ -179,6 +179,7 @@ extension _Measuring on Call {
   Future<void> _measure([Set<String>? only]) async {
     // A reading that takes long is not overtaken by the next one.
     if (_reading) return;
+    if (only == null) unawaited(_checkOutput());
     _reading = true;
     try {
       await _measureNow(only);
@@ -295,6 +296,7 @@ extension _Measuring on Call {
     }
     if (_closed) return;
     if (only == null && sharing) _fitScreenLoad(encoders);
+    if (only == null) _voiceSending = voiceSending;
     if (only == null &&
         _micCheck.take(
           // Nothing records while no sound server answers (Linux): nothing to judge.

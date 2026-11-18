@@ -1274,6 +1274,9 @@ class L10nRu extends L10n {
       'Выбранное устройство не подключено: используется устройство по умолчанию.';
 
   @override
+  String get devicesInUse => 'Используется';
+
+  @override
   String get devicesVoiceSettings => 'Настройки голоса и видео';
 
   @override
@@ -1357,6 +1360,26 @@ class L10nRu extends L10n {
   @override
   String callKeptOut(String name) {
     return 'Связь потеряна: $name.';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return 'Звук не может идти через $chosen. Он идёт через $inUse.';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'С этим микрофоном звук не может идти через $chosen. Он идёт через $inUse.';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen отключено. Звук идёт через $inUse.';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return 'Не удалось записывать с $chosen. Запись идёт с $inUse.';
   }
 
   @override

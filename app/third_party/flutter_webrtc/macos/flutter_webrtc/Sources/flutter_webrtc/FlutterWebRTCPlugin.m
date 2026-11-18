@@ -708,6 +708,24 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     const BOOL on = [argsMap[@"on"] boolValue];
     const int64_t api = [argsMap[@"api"] longLongValue];
     result(@([FogataDenoise suppress:on api:api]));
+  } else if ([@"fogataAudioOutput" isEqualToString:call.method]) {
+    // Fogata: the devices chosen, those the call's engine uses and whether it records,
+    // facts only (FogataPlayout's state:); read-only.
+    [FogataPlayout state:^(NSDictionary* state) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        result(state);
+      });
+    }];
+  } else if ([@"fogataNewCall" isEqualToString:call.method]) {
+    // Fogata: a call starts (FogataPlayout's newCall).
+    [FogataPlayout newCall];
+    result(nil);
+  } else if ([@"fogataTestRefuse" isEqualToString:call.method]) {
+    // Fogata: for app/integration_test/call_test.dart only (FOGATA_TEST_REFUSE): see
+    // FogataPlayout's testRefuse:. Nothing in the application calls it.
+    NSDictionary* argsMap = call.arguments;
+    [FogataPlayout testRefuse:[argsMap[@"mode"] intValue]];
+    result(nil);
   } else if ([@"fogataSharedScreenEncode" isEqualToString:call.method]) {
     // Fogata: whether the connections that send a shared screen share one encoder of
     // it: the trial is on and the framework has Fogata's Apple patch 7.

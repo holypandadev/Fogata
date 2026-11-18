@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:fogata/src/call.dart';
+import 'package:fogata/src/host.dart';
 import 'package:fogata/src/l10n.dart';
 import 'package:fogata/src/rust/api/types.dart';
 
@@ -204,6 +205,243 @@ void main() {
     });
   });
 
+  group('devices the voice engine does not use (macOS)', () {
+    // As the engine names devices: by their unique ids, the system's ones too.
+    const monitor = 'monitor-uid',
+        speakers = 'speakers-uid',
+        headset = 'headset-uid';
+    const names = {
+      monitor: 'Monitor',
+      speakers: 'Mac mini Speakers',
+      headset: 'USB Headset',
+    };
+    Map<String, Object?> facts({
+      String? chosen = monitor,
+      String inUse = monitor,
+      bool present = true,
+      bool changing = false,
+      String? reason,
+      String? inputChosen,
+      String inputInUse = headset,
+      bool inputPresent = true,
+    }) => {
+      'chosen': ?chosen,
+      'chosenName': chosen == null ? null : names[chosen],
+      'chosenPresent': present,
+      'inUse': inUse,
+      'inUseName': names[inUse],
+      'reason': ?reason,
+      'inputChosen': ?inputChosen,
+      'inputChosenName': inputChosen == null ? null : 'Webcam Mic',
+      'inputChosenPresent': inputPresent,
+      'inputInUse': inputInUse,
+      'inputInUseName': names[inputInUse] ?? 'Webcam Mic',
+      'changing': changing,
+    };
+    DeviceTold none = (text: null, inUse: null);
+
+    test(
+      'another output in use, seen twice, is told once and shown beside',
+      () {
+        final watch = OutputWatch();
+        expect(watch.take(facts(), const [], asked: monitor), none);
+        final other = facts(inUse: speakers);
+        // Once: a moment between (a device given back) says nothing.
+        expect(watch.take(other, const [], asked: monitor), none);
+        expect(watch.take(other, const [], asked: monitor), (
+          text: l10n.callOutputUnusable('Monitor', 'Mac mini Speakers'),
+          inUse: speakers,
+        ));
+        expect(watch.take(other, const [], asked: monitor), (
+          text: null,
+          inUse: speakers,
+        ));
+        // Back on the one chosen, then away again: told again.
+        expect(watch.take(facts(), const [], asked: monitor), none);
+        watch.take(other, const [], asked: monitor);
+        expect(watch.take(other, const [], asked: monitor).text, isNotNull);
+      },
+    );
+
+    test('with the rates different, it says so', () {
+      final watch = OutputWatch();
+      final other = facts(inUse: speakers, reason: 'rate');
+      watch.take(other, const [], asked: monitor);
+      expect(
+        watch.take(other, const [], asked: monitor).text,
+        l10n.callOutputNotWithMicrophone('Monitor', 'Mac mini Speakers'),
+      );
+    });
+
+    test('the one chosen being the system\'s own, in use, says nothing', () {
+      final watch = OutputWatch();
+      for (var i = 0; i < 3; i++) {
+        expect(watch.take(facts(), const [], asked: monitor), none);
+      }
+    });
+
+    test(
+      'facts about another choice, or while one is carried out, say nothing',
+      () {
+        final watch = OutputWatch();
+        final other = facts(inUse: speakers);
+        for (var i = 0; i < 2; i++) {
+          expect(watch.take(other, const [], asked: speakers), none);
+          expect(
+            watch.take(
+              facts(inUse: speakers, changing: true),
+              const [],
+              asked: monitor,
+            ),
+            none,
+          );
+        }
+      },
+    );
+
+    test('an output unplugged is told at once each time it goes, then back says nothing', () {
+      final watch = OutputWatch();
+      final gone = facts(inUse: speakers, present: false);
+      final told = l10n.callOutputGone('Monitor', 'Mac mini Speakers');
+      expect(watch.take(gone, const [], asked: monitor).text, told);
+      expect(watch.take(gone, const [], asked: monitor).text, isNull);
+      // Plugged in again and given back to the engine: nothing said.
+      expect(
+        watch.take(facts(inUse: speakers), const [], asked: monitor).text,
+        isNull,
+      );
+      expect(watch.take(facts(), const [], asked: monitor), none);
+      expect(watch.take(gone, const [], asked: monitor).text, told);
+    });
+
+    test('nothing chosen, or no facts, says nothing', () {
+      final watch = OutputWatch();
+      expect(
+        watch.take(facts(chosen: null, inUse: speakers), const [], asked: null),
+        none,
+      );
+      expect(watch.take(null, const [], asked: monitor), none);
+      expect(watch.take(true, const [], asked: monitor), none);
+    });
+
+    test(
+      'another microphone in use, seen twice, is told once with the one in use',
+      () {
+        final watch = InputWatch();
+        final other = facts(inputChosen: 'webcam', inputInUse: headset);
+        expect(watch.take(other, const [], asked: 'webcam'), none);
+        expect(watch.take(other, const [], asked: 'webcam'), (
+          text: l10n.callInputUnusable('Webcam Mic', 'USB Headset'),
+          inUse: headset,
+        ));
+        expect(watch.take(other, const [], asked: 'webcam').text, isNull);
+        // Unplugged: MicWatch tells it, from the list.
+        final gone = facts(
+          inputChosen: 'webcam',
+          inputInUse: headset,
+          inputPresent: false,
+        );
+        final fresh = InputWatch();
+        expect(fresh.take(gone, const [], asked: 'webcam').text, isNull);
+        expect(fresh.take(gone, const [], asked: 'webcam').text, isNull);
+        // About another choice: nothing.
+        expect(InputWatch().take(other, const [], asked: null), none);
+      },
+    );
+
+    test('a recording lost is recovered once, after two readings', () {
+      final watch = RecordingWatch();
+      final lost = {
+        'recordingAsked': true,
+        'recording': false,
+        'inputUsable': true,
+        'changing': false,
+      };
+      expect(watch.take(lost, mic: true, sending: true), isFalse);
+      expect(watch.take(lost, mic: true, sending: true), isTrue);
+      expect(watch.take(lost, mic: true, sending: true), isFalse);
+      // Recording again: a later loss is recovered again.
+      final back = {...lost, 'recording': true};
+      expect(watch.take(back, mic: true, sending: true), isFalse);
+      expect(watch.take(lost, mic: true, sending: true), isFalse);
+      expect(watch.take(lost, mic: true, sending: true), isTrue);
+    });
+
+    test('a microphone chosen is judged only while something records', () {
+      // Muted: the facts give no input in use; nothing is told, nothing shown beside.
+      final watch = InputWatch();
+      final muted = {
+        'inputChosen': 'webcam',
+        'inputChosenName': 'Webcam Mic',
+        'inputChosenPresent': true,
+        'changing': false,
+      };
+      for (var i = 0; i < 3; i++) {
+        expect(watch.take(muted, const [], asked: 'webcam'), (
+          text: null,
+          inUse: null,
+        ));
+      }
+    });
+
+    test('the pair now refused lets a restart be tried again', () {
+      // The first restart came while the engine still had the pair; the engine then
+      // refused it and follows the system's devices: the next one may work.
+      final watch = RecordingWatch();
+      final lost = {
+        'recordingAsked': false,
+        'recording': false,
+        'inputUsable': true,
+        'changing': false,
+        'combinable': true,
+      };
+      expect(watch.take(lost, mic: true, sending: true), isFalse);
+      expect(watch.take(lost, mic: true, sending: true), isTrue);
+      expect(watch.take(lost, mic: true, sending: true), isFalse);
+      final refused = {...lost, 'combinable': false};
+      expect(watch.take(refused, mic: true, sending: true), isTrue);
+      expect(watch.take(refused, mic: true, sending: true), isFalse);
+    });
+
+    test(
+      'a start that dropped the request counts as lost while voice is sent',
+      () {
+        final watch = RecordingWatch();
+        final dropped = {
+          'recordingAsked': false,
+          'recording': false,
+          'inputUsable': true,
+          'changing': false,
+        };
+        expect(watch.take(dropped, mic: true, sending: false), isFalse);
+        expect(watch.take(dropped, mic: true, sending: false), isFalse);
+        expect(watch.take(dropped, mic: true, sending: true), isFalse);
+        expect(watch.take(dropped, mic: true, sending: true), isTrue);
+      },
+    );
+
+    test('nothing is recovered with the microphone off, its input out, or a choice going on', () {
+      final watch = RecordingWatch();
+      final lost = {
+        'recordingAsked': true,
+        'recording': false,
+        'inputUsable': true,
+        'changing': false,
+      };
+      for (var i = 0; i < 3; i++) {
+        expect(watch.take(lost, mic: false, sending: true), isFalse);
+        expect(
+          watch.take({...lost, 'inputUsable': false}, mic: true, sending: true),
+          isFalse,
+        );
+        expect(
+          watch.take({...lost, 'changing': true}, mic: true, sending: true),
+          isFalse,
+        );
+      }
+    });
+  });
+
   group('the sound server going away (Linux)', () {
     final mic = input('headset', 'USB Headset');
     final speaker = MediaDeviceInfo(
@@ -294,6 +532,30 @@ void main() {
       expect(read(12), isFalse);
       expect(read(20), isTrue);
     });
+
+    test(
+      'another output chosen is judged from the start again on macOS',
+      () async {
+        // macOS makes its voice engine again for it, recording nothing for a moment.
+        pinnedHost = HostSystem.macos;
+        addTearDown(() => pinnedHost = null);
+        final c = Call(group: 'g', me: me);
+        bool read(int t) => c.micCheckForTests.take(
+          on: true,
+          sending: true,
+          read: 0,
+          sent: const {'ana': 0},
+          now: at(t),
+        );
+        for (var t = 0; t <= 6; t += 2) {
+          expect(read(t), isFalse);
+        }
+        await c.useOutput('monitor');
+        expect(read(8), isFalse);
+        expect(read(14), isFalse);
+        expect(read(16), isTrue);
+      },
+    );
 
     test('not while the microphone waits for a new description', () {
       // Turned on mid-call: the connection sends voice only once the other side answered,

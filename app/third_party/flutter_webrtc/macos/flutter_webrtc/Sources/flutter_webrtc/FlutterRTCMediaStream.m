@@ -710,6 +710,8 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 #if TARGET_OS_OSX
     NSArray* inputDevices = [audioDeviceModule inputDevices];
     for (RTCIODevice* device in inputDevices) {
+      // Fogata: not the devices made to play and record on two (FogataPlayout.h).
+      if ([FogataPlayout isOwnDevice:device.deviceId]) continue;
       [sources addObject:@{
         @"deviceId" : device.deviceId,
         @"label" : device.name,
@@ -719,6 +721,7 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
 
     NSArray* outputDevices = [audioDeviceModule outputDevices];
     for (RTCIODevice* device in outputDevices) {
+      if ([FogataPlayout isOwnDevice:device.deviceId]) continue;
       [sources addObject:@{
         @"deviceId" : device.deviceId,
         @"label" : device.name,
@@ -768,8 +771,14 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   NSArray* inputDevices = [audioDeviceModule inputDevices];
   for (RTCIODevice* device in inputDevices) {
     if ([deviceId isEqualToString:device.deviceId]) {
-      [audioDeviceModule setInputDevice:device];
-      [FogataPlayout inputMayHaveChanged];
+      if ([FogataPlayout choosesDevices]) {
+        // Fogata: given to the engine there, the module kept on the system's devices
+        // (FogataPlayout.h).
+        [FogataPlayout inputChosen:device.deviceId name:device.name];
+      } else {
+        [audioDeviceModule setInputDevice:device];
+        [FogataPlayout inputMayHaveChanged];
+      }
       if (result)
         result(nil);
       return;
@@ -808,10 +817,16 @@ typedef void (^NavigatorUserMediaSuccessCallback)(RTCMediaStream* mediaStream);
   NSArray* outputDevices = [audioDeviceModule outputDevices];
   for (RTCIODevice* device in outputDevices) {
     if ([deviceId isEqualToString:device.deviceId]) {
-      [audioDeviceModule setOutputDevice:device];
-      // Kept when the microphone is added to the engine, and a microphone left out is
-      // tried again with it.
-      [FogataPlayout outputChosen:device.deviceId];
+      if ([FogataPlayout choosesDevices]) {
+        // Fogata: given to the engine there, with the microphone, the module kept on the
+        // system's devices; a microphone left out is tried again with it
+        // (FogataPlayout.h). The module itself would give the engine's one unit an
+        // output that cannot record while it records, and lose its engine.
+        [FogataPlayout outputChosen:device.deviceId name:device.name];
+      } else {
+        [audioDeviceModule setOutputDevice:device];
+        [FogataPlayout outputChosen:device.deviceId name:device.name];
+      }
       result(nil);
       return;
     }

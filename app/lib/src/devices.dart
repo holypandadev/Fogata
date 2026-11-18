@@ -971,8 +971,18 @@ class _DevicePanelState extends State<DevicePanel> {
     // A chosen device that is not plugged in: the default is used meanwhile.
     final missing =
         _loaded && chosen != null && !_devices.any((d) => d.deviceId == chosen);
+    // The one the call's voice engine uses when it is not the one chosen (macOS), shown
+    // beside it: the choice stays the person's.
+    final call = state.callState.call;
+    final used = switch (widget.kind) {
+      DeviceKind.input => call?.inputInUse,
+      DeviceKind.output => call?.outputInUse,
+      DeviceKind.camera => null,
+    };
     Widget row(String text, String? id) {
       final selected = chosen == id;
+      final inUse =
+          used != null && (used == 'default' ? id == null : id == used);
       return Pressable(
         key: ValueKey('device:${id ?? ''}'),
         onTap: () => choose(id),
@@ -998,6 +1008,11 @@ class _DevicePanelState extends State<DevicePanel> {
                   ),
                 ),
               ),
+              if (inUse && !selected)
+                Padding(
+                  padding: const EdgeInsets.only(left: 8),
+                  child: Text(l10n.devicesInUse, style: tx(c.fg3, size: 12)),
+                ),
               if (selected) FgIcon(Ic.check, size: 14, color: c.fg),
             ],
           ),

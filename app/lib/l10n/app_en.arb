@@ -1600,6 +1600,10 @@
   "@devicesChosenMissing": {
     "description": "Device panel: the device chosen before is unplugged, so the system default is used."
   },
+  "devicesInUse": "In use",
+  "@devicesInUse": {
+    "description": "Shown beside a speaker or microphone in the device panel during a call (macOS) when the call's sound plays on it, or the call records from it, although another one was chosen."
+  },
   "devicesVoiceSettings": "Voice & video settings",
   "@devicesVoiceSettings": {
     "description": "Last row of a device panel: opens Settings › Voice & video."
@@ -1706,6 +1710,54 @@
     "description": "Error toast in a call: the connection with a participant was closed because their copy sent video far larger than any copy of the app sends. {name} is their name.",
     "placeholders": {
       "name": {
+        "type": "String"
+      }
+    }
+  },
+  "callOutputUnusable": "Sound cannot play on {chosen}. It plays on {inUse}.",
+  "@callOutputUnusable": {
+    "description": "Error toast in a call (macOS): the speakers or headphones chosen are connected but the call's sound plays on another output. {chosen} is the name of the output chosen, {inUse} the name of the one the sound plays on.",
+    "placeholders": {
+      "chosen": {
+        "type": "String"
+      },
+      "inUse": {
+        "type": "String"
+      }
+    }
+  },
+  "callOutputNotWithMicrophone": "Sound cannot play on {chosen} with this microphone. It plays on {inUse}.",
+  "@callOutputNotWithMicrophone": {
+    "description": "Error toast in a call (macOS): the speakers or headphones chosen run at another sample rate than the microphone in use, so they cannot be used together and the call's sound plays on another output. {chosen} is the name of the output chosen, {inUse} the name of the one the sound plays on.",
+    "placeholders": {
+      "chosen": {
+        "type": "String"
+      },
+      "inUse": {
+        "type": "String"
+      }
+    }
+  },
+  "callOutputGone": "{chosen} was unplugged. Sound plays on {inUse}.",
+  "@callOutputGone": {
+    "description": "Error toast in a call (macOS): the speakers or headphones chosen were unplugged, so the call's sound plays on another output. {chosen} is the name of the output chosen, {inUse} the name of the one the sound plays on.",
+    "placeholders": {
+      "chosen": {
+        "type": "String"
+      },
+      "inUse": {
+        "type": "String"
+      }
+    }
+  },
+  "callInputUnusable": "Could not record from {chosen}. Recording from {inUse}.",
+  "@callInputUnusable": {
+    "description": "Error toast in a call (macOS): the microphone chosen could not be used, so the call records from another one. {chosen} is the name of the microphone chosen, {inUse} the name of the one in use.",
+    "placeholders": {
+      "chosen": {
+        "type": "String"
+      },
+      "inUse": {
         "type": "String"
       }
     }

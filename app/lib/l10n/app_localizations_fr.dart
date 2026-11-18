@@ -1229,6 +1229,9 @@ class L10nFr extends L10n {
       'L’appareil choisi n’est pas branché : celui par défaut est utilisé.';
 
   @override
+  String get devicesInUse => 'Utilisé';
+
+  @override
   String get devicesVoiceSettings => 'Paramètres voix et vidéo';
 
   @override
@@ -1312,6 +1315,26 @@ class L10nFr extends L10n {
   @override
   String callKeptOut(String name) {
     return 'Connexion perdue avec $name.';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return 'Le son ne peut pas sortir par $chosen. Il sort par $inUse.';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'Le son ne peut pas sortir par $chosen avec ce micro. Il sort par $inUse.';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen a été débranché. Le son sort par $inUse.';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return 'Impossible d\'enregistrer avec $chosen. Enregistrement avec $inUse.';
   }
 
   @override

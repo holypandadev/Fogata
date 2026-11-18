@@ -311,6 +311,203 @@ class MicWatch {
   }
 }
 
+/// What a device watch makes of the voice engine's facts (macOS: flutter_webrtc's method
+/// `fogataAudioOutput`): what to tell, if anything, and the device in use when it is not
+/// the one chosen (its id, 'default' for the system's), to show beside the choice.
+typedef DeviceTold = ({String? text, String? inUse});
+
+const DeviceTold _nothing = (text: null, inUse: null);
+
+/// The id of a device chosen as the engine's facts and the call give it: null for the
+/// system's default.
+String? _chosenId(Object? id) => id is String && id != 'default' ? id : null;
+
+/// A device's name: as the engine named it ([named]), else as listed now ('default': the
+/// first listed of [kind], Call._first), else its id.
+String _deviceName(
+  List<MediaDeviceInfo> devices,
+  String kind,
+  String id,
+  Object? named,
+) {
+  if (named is String && named.trim().isNotEmpty) return named.trim();
+  final listed = devices.where((d) => d.kind == kind).toList();
+  if (id == 'default') return MicWatch.defaultInputName(listed);
+  final label = listed.where((d) => d.deviceId == id).firstOrNull?.label.trim();
+  return label == null || label.isEmpty ? id : label;
+}
+
+/// What a device chosen is, from the voice engine's facts: in use ('ok'), another in use
+/// while it is there ('other'), or not there ('gone'). Another in use is taken only when
+/// seen twice in a row (4 s): a device plugged in again is given back to the engine within
+/// a second or two (FOGATA.md, R6), and a moment between says nothing. Facts about another
+/// choice than the call's last ([take]'s `asked`), or taken while a choice is carried out,
+/// say nothing; back on the one chosen, a later change is told again.
+class _ChosenWatch {
+  _ChosenWatch(this.prefix);
+
+  /// The facts' prefix for the device: '' for the output, 'input' for the input.
+  final String prefix;
+
+  String? _for;
+  String _was = 'ok';
+  bool _otherOnce = false;
+
+  String _key(String name) => prefix.isEmpty
+      ? name
+      : '$prefix${name[0].toUpperCase()}${name.substring(1)}';
+
+  /// What changed: (what it is now, the device in use when another, whether it is new).
+  ({String now, String? inUse, bool began})? take(
+    Object? facts,
+    String? asked,
+  ) {
+    if (facts is! Map) return null;
+    final chosen = _chosenId(facts[prefix.isEmpty ? 'chosen' : 'inputChosen']);
+    if (chosen != _chosenId(asked)) return null;
+    if (chosen != _for) {
+      _for = chosen;
+      _was = 'ok';
+      _otherOnce = false;
+    }
+    if (chosen == null || facts['changing'] == true) return null;
+    final inUse = facts[_key('inUse')];
+    var now = _was;
+    if (facts[prefix.isEmpty ? 'chosenPresent' : 'inputChosenPresent'] ==
+        false) {
+      now = 'gone';
+    } else if (inUse is String) {
+      now = inUse == chosen ? 'ok' : 'other';
+    }
+    if (now == 'other' && _was != 'other' && !_otherOnce) {
+      _otherOnce = true;
+      return (now: _was, inUse: null, began: false);
+    }
+    _otherOnce = false;
+    final began = now != _was && now != 'ok';
+    _was = now;
+    return (
+      now: now,
+      inUse: now == 'other' && inUse is String ? inUse : null,
+      began: began,
+    );
+  }
+}
+
+/// The output chosen, from the voice engine's facts every 2 s (flutter_webrtc's FOGATA.md,
+/// "The devices chosen, with the microphone"): the engine plays on the system's output when
+/// the one chosen cannot be put together with the microphone, or the engine refused it,
+/// and when it is unplugged. Each time either begins it is told ("… with this microphone"
+/// when the facts say the rates differ), and the output in use is shown beside the choice,
+/// which stays the person's.
+@visibleForTesting
+class OutputWatch {
+  final _watch = _ChosenWatch('');
+
+  DeviceTold take(
+    Object? facts,
+    List<MediaDeviceInfo> devices, {
+    required String? asked,
+  }) {
+    final seen = _watch.take(facts, asked);
+    if (seen == null || facts is! Map) return _nothing;
+    String? text;
+    if (seen.began) {
+      final chosen = _chosenId(facts['chosen'])!;
+      final was = _deviceName(
+        devices,
+        'audiooutput',
+        chosen,
+        facts['chosenName'],
+      );
+      final inUse = facts['inUse'];
+      final where = inUse is String
+          ? _deviceName(devices, 'audiooutput', inUse, facts['inUseName'])
+          : _deviceName(devices, 'audiooutput', 'default', null);
+      text = seen.now == 'gone'
+          ? l10n.callOutputGone(was, where)
+          : facts['reason'] == 'rate'
+          ? l10n.callOutputNotWithMicrophone(was, where)
+          : l10n.callOutputUnusable(was, where);
+    }
+    return (text: text, inUse: seen.inUse);
+  }
+}
+
+/// The microphone chosen, as [OutputWatch] does the output: told when the engine records
+/// from another one while the one chosen is there. One that is unplugged is told by
+/// [MicWatch], from the devices listed.
+@visibleForTesting
+class InputWatch {
+  final _watch = _ChosenWatch('input');
+
+  DeviceTold take(
+    Object? facts,
+    List<MediaDeviceInfo> devices, {
+    required String? asked,
+  }) {
+    final seen = _watch.take(facts, asked);
+    if (seen == null || facts is! Map) return _nothing;
+    String? text;
+    if (seen.began && seen.now == 'other') {
+      text = l10n.callInputUnusable(
+        _deviceName(
+          devices,
+          'audioinput',
+          _chosenId(facts['inputChosen'])!,
+          facts['inputChosenName'],
+        ),
+        _deviceName(
+          devices,
+          'audioinput',
+          seen.inUse!,
+          facts['inputInUseName'],
+        ),
+      );
+    }
+    return (text: text, inUse: seen.inUse);
+  }
+}
+
+/// Whether the voice engine lost the recording the call wants (macOS), from its facts
+/// every 2 s: the call has its microphone on and the engine's input is let in, no choice
+/// is being carried out, and either the module was asked to record but nothing records
+/// (its engine stopped or not made), or it was not asked although the call sends voice
+/// (a start that failed: the module then drops WebRTC's request, and nothing asks again).
+/// Seen twice in a row, it answers true once, for the call to stop and start its voice
+/// encodings so that WebRTC records again its own way ([Call._recoverVoice]); a recording
+/// seen again, or the pair chosen now refused by the engine (a new engine following the
+/// system's devices), lets it answer true again.
+@visibleForTesting
+class RecordingWatch {
+  int _seen = 0;
+  bool _recovered = false;
+  Object? _combinable;
+
+  bool take(Object? facts, {required bool mic, required bool sending}) {
+    // The engine changed what it is since (the pair chosen now refused, R4: a new engine
+    // following the system's devices): a restart of the recording may work now.
+    if (facts is Map) {
+      final combinable = facts['combinable'];
+      if (_combinable == true && combinable == false) _recovered = false;
+      _combinable = combinable;
+    }
+    if (facts is! Map || facts['recording'] == true || !mic) {
+      _seen = 0;
+      if (facts is Map && facts['recording'] == true) _recovered = false;
+      return false;
+    }
+    final lost =
+        facts['changing'] != true &&
+        facts['inputUsable'] == true &&
+        (facts['recordingAsked'] == true || sending);
+    _seen = lost ? _seen + 1 : 0;
+    if (_seen < 2 || _recovered) return false;
+    _recovered = true;
+    return true;
+  }
+}
+
 /// WebRTC's processing of the microphone, the same for every source that sends sound
 /// (see [Call._capture]). Linux and Windows read the plain names; macOS reads only the
 /// `mandatory` map, WebRTC's own names as text, and takes whatever WebRTC last set for

@@ -258,6 +258,7 @@ extension _Calls on AppState {
     fresh.onProblem = (text) => say(text, error: true);
     fresh.onNotice = say;
     fresh.onMicUnusable = (text) => micUnusable(fresh, text);
+    fresh.onOutputRefused = outputRefused;
     // What the others sent while the call was not made yet, in the order it came: kept by
     // the call until it has its connection with each of them (see [Call.onSignal]).
     if (_signalsFor == group) {

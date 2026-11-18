@@ -1231,6 +1231,9 @@ class L10nPt extends L10n {
       'O dispositivo escolhido não está conectado: usando o padrão.';
 
   @override
+  String get devicesInUse => 'Em uso';
+
+  @override
   String get devicesVoiceSettings => 'Configurações de voz e vídeo';
 
   @override
@@ -1314,6 +1317,26 @@ class L10nPt extends L10n {
   @override
   String callKeptOut(String name) {
     return 'A conexão com $name foi perdida.';
+  }
+
+  @override
+  String callOutputUnusable(String chosen, String inUse) {
+    return 'O som não pode sair por $chosen. Ele sai por $inUse.';
+  }
+
+  @override
+  String callOutputNotWithMicrophone(String chosen, String inUse) {
+    return 'O som não pode sair por $chosen com este microfone. Ele sai por $inUse.';
+  }
+
+  @override
+  String callOutputGone(String chosen, String inUse) {
+    return '$chosen foi desconectado. O som sai por $inUse.';
+  }
+
+  @override
+  String callInputUnusable(String chosen, String inUse) {
+    return 'Não foi possível gravar com $chosen. Gravando com $inUse.';
   }
 
   @override
