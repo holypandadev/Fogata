@@ -1724,13 +1724,17 @@ class Call extends ChangeNotifier {
   // ----- Devices -----
 
   /// Changes the microphone in the middle of the call; null is the system's default.
+  /// Chosen in the input turn ([_inputTurn]), so never in the middle of choosing the
+  /// silent input.
   Future<void> useInput(String? id) async {
     input = id;
     // Another input is judged from the start.
     _micCheck.reset();
-    // Taken when the silent input is left.
-    if (_silent) return;
-    await _select(id ?? await _first('audioinput'), Helper.selectAudioInput);
+    await _inputTurn(() async {
+      // Taken when the silent input is left.
+      if (_silent) return;
+      await _select(id ?? await _first('audioinput'), Helper.selectAudioInput);
+    });
   }
 
   /// Changes the speakers or headphones; null is the system's default.

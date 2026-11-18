@@ -414,7 +414,8 @@ others in a call would hear their own voices back. Instead:
   back").
   WebRTC records from its input whenever any channel of sound sends; while the
   microphone is off and a shared screen's sound goes out, the application points WebRTC
-  here so the microphone stays closed.
+  here so the microphone stays closed. Every choice of input (this one, the microphone
+  again, another microphone chosen in the settings) waits for the one before it.
 - Both connect to PipeWire's own socket, which a Flatpak gets only when given it
   (`--filesystem=xdg-run/pipewire-0`, in tools/beta/flatpak.sh): with only PulseAudio's,
   a shared screen goes without sound and the silent input is not made.

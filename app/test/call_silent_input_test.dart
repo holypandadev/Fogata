@@ -211,6 +211,31 @@ void main() {
     expect(engine.silence, isTrue);
   });
 
+  // Another microphone chosen, muted, while the silent input is being chosen: taken
+  // after that choice, it is kept for when the silent input is left, and WebRTC never
+  // records the microphone meanwhile.
+  test('a microphone chosen while the silent input is chosen records '
+      'nothing', () async {
+    engine.holdSelect = Completer();
+    final call = _sharing();
+    try {
+      final quiet = call.setShareSound(true);
+      await _until(() => engine.asked.contains('select silence'));
+      // The system's default, as chosen in the settings.
+      final use = call.useInput(null);
+      for (var i = 0; i < 20; i++) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      engine.holdSelect!.complete();
+      await quiet;
+      await use;
+      expect(engine.recording, 'silence');
+    } finally {
+      await call.stop();
+    }
+    expect(engine.recording, 'mic-1');
+  });
+
   test('a call with the system default records from a real input, never a '
       'silent one left by the call before', () async {
     engine.silence = true;
