@@ -968,7 +968,8 @@ it off. The input chosen while the output was another device met the same.
     cannot be set, or a device of more than 64 channels, is refused. Making an aggregate
     waits 100 ms at most for its streams, on the module's thread.
   - The aggregate of the pair chosen is kept while that pair is chosen, present and
-    usable: made at the choice (or at the first unmute), kept through the mutes (the
+    usable: made at the choice (ahead of the microphone, while the engine only plays, so
+    WebRTC has seen that change before the first unmute), kept through the mutes (the
     engine that only plays is given the output device itself), destroyed when the choice
     changes, a device goes or the pair is refused. Making or destroying a device tells
     WebRTC the devices changed (Apple patch 0008), and its echo canceller is then made anew
@@ -980,8 +981,9 @@ it off. The input chosen while the output was another device met the same.
     last one stays until the process ends, or the next call chooses other devices.
   - R4. When the engine refuses at run time what R1 allowed (both orders, at a choice or
     at an unmute), or an engine given the pair with the microphone does not start
-    (`checkStarted`, once the module's change is done) or stops (`lookAtEngine`, at its
-    first look), or an engine with the pair does not run after a choice, the pair is taken
+    (`checkStarted`, once the module's change is done) or stops twice in a row
+    (`lookAtEngine`; a single stop only makes the engine again), or an engine with the pair
+    does not run after a choice, the pair is taken
     as refused for this call (R1 then says no), and a new engine follows the system's
     devices (`followAnew`, asked once until made). If the module's request to record was
     dropped by a failed start, that engine only plays, and the call starts the recording
@@ -993,7 +995,8 @@ it off. The input chosen while the output was another device met the same.
   - `state:` answers facts only: for the output and the input, the one chosen and the name
     the list gave it, whether it is in the system now, and the one in use with its name
     (what follows the system is given as the system's devices, by their own ids; the input
-    in use only while something records); whether
+    in use only while something records; no output in use while there is no engine running);
+    whether
     the pair can be put together (R1) and "rate" when the rates differ; whether a choice is
     being carried out; whether the module was asked to record, whether it records (asked,
     its input let in, its engine running), and whether its input is let in. The method
@@ -1008,7 +1011,9 @@ it off. The input chosen while the output was another device met the same.
     output chosen is there again: given back to the engine" and "the audio engine stopped
     while playing; made again without the devices chosen".
   - A call starts clean (`newCall`, the method `fogataNewCall`, before the call chooses its
-    devices): the devices an earlier call chose and the pairs it saw refused are forgotten.
+    devices): the devices an earlier call chose, the pair it gave and the devices in use,
+    and the pairs it saw refused are forgotten. An engine released forgets the pair given
+    to it and the devices in use.
   - For the call test only, the method `fogataTestRefuse` (`testRefuse:`) makes R1 answer
     no for every pair (1), refuses the next pair given with the microphone in either order,
     once (2), or makes the next start of an engine given the pair fail, once, its formats
@@ -1040,7 +1045,8 @@ it off. The input chosen while the output was another device met the same.
   microphone's check is not started over. Given up as soon as the person turns the
   microphone off or the call ends. Once for each loss, and again when the engine changed
   since (the pair now refused, R4). Seen 4 to 6 s after the loss (two readings in a row,
-  the voice sent read from the reading before). Each participant's own step is the only
+  the voice sent read from the reading before), or at the first reading that sees both the
+  loss and the pair just refused (2 s or so). Each participant's own step is the only
   one that sets their encoding: while the restart runs it wants it off (a step of any
   origin meanwhile, a participant who arrives, does the same), and once no voice encoding
   is on anywhere (3 s at most) every step runs again, turning them on with its own retries.
@@ -1083,8 +1089,9 @@ it off. The input chosen while the output was another device met the same.
   FOGATA_TEST_REFUSE=unmute has the second unmute's pair refused in either order, and
   FOGATA_TEST_REFUSE=start has that unmute's start fail with the pair given, and either
   run fails unless, at the end of the other output's time, the facts say the pair cannot
-  be put together, the engine follows the system and records, and the call started the
-  recording again (R4 and R5); that stretch is let take four readings.
+  be put together and the engine follows the system and records, and, when a reading of
+  that stretch lost the voice, the call started the recording again (R4 and R5); that
+  stretch is let take four readings.
 
 ## A received track is found as the connection that received it (all platforms)
 

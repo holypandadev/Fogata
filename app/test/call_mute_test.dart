@@ -1171,6 +1171,32 @@ void main() {
       expect(_records(call.peers[_bea]!), isTrue);
     });
 
+    test('a participant still connecting holds nothing up', () async {
+      final (call, _, ana, bea, busy) = twoInCall();
+      busy.complete();
+      await settle(call);
+      // Cee's connection has not come up: WebRTC runs no stream of it, whatever its
+      // encoding says, and nothing turns that off.
+      final cee = _Connection()..neverUp();
+      const ceeId = 'cccccccc';
+      call.peers[ceeId] = CallPeer(ceeId)
+        ..connection = cee
+        ..describedForTests();
+      _adopt(call, cee);
+      final before = [
+        ana.voiceSender.asked.length,
+        bea.voiceSender.asked.length,
+      ];
+      await call.recoverVoiceForTests().timeout(
+        const Duration(milliseconds: 1500),
+      );
+      await settle(call);
+      expect(ana.voiceSender.asked.skip(before[0]), [false, true]);
+      expect(bea.voiceSender.asked.skip(before[1]), [false, true]);
+      expect(_records(call.peers[_ana]!), isTrue);
+      expect(_records(call.peers[_bea]!), isTrue);
+    });
+
     test('given up when the microphone is turned off', () async {
       final (call, _, ana, bea, busy) = twoInCall();
       busy.complete();

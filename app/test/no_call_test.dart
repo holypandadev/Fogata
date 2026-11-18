@@ -403,6 +403,28 @@ void main() {
       expect(watch.take(refused, mic: true, sending: true), isFalse);
     });
 
+    test('a loss seen as the pair is refused is recovered at once', () {
+      // The engine's start with the pair failed and a new engine follows the system:
+      // the first reading that shows both starts the recording again.
+      final watch = RecordingWatch();
+      final recording = {
+        'recordingAsked': true,
+        'recording': true,
+        'inputUsable': true,
+        'changing': false,
+        'combinable': true,
+      };
+      expect(watch.take(recording, mic: true, sending: true), isFalse);
+      final refusedAndLost = {
+        ...recording,
+        'recordingAsked': false,
+        'recording': false,
+        'combinable': false,
+      };
+      expect(watch.take(refusedAndLost, mic: true, sending: true), isTrue);
+      expect(watch.take(refusedAndLost, mic: true, sending: true), isFalse);
+    });
+
     test(
       'a start that dropped the request counts as lost while voice is sent',
       () {

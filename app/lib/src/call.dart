@@ -2284,7 +2284,10 @@ class Call extends ChangeNotifier {
     final on = <CallPeer>[];
     for (final peer in peers.values.toList()) {
       final connection = peer.connection;
-      if (connection == null) continue;
+      // A connection that has never come up runs no stream, so its encoding holds no
+      // recording (WebRTC runs what is agreed to send only once up); its step leaves it
+      // as it is ([_voiceWanted]).
+      if (connection == null || !peer._upOnce) continue;
       try {
         final channels = await _channels(connection);
         if (channels.length <= _audio) continue;

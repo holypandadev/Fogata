@@ -486,10 +486,15 @@ class RecordingWatch {
 
   bool take(Object? facts, {required bool mic, required bool sending}) {
     // The engine changed what it is since (the pair chosen now refused, R4: a new engine
-    // following the system's devices): a restart of the recording may work now.
+    // following the system's devices): a restart of the recording may work now, and a
+    // loss seen now has that known cause, so one reading is enough.
+    var refusedNow = false;
     if (facts is Map) {
       final combinable = facts['combinable'];
-      if (_combinable == true && combinable == false) _recovered = false;
+      if (_combinable == true && combinable == false) {
+        _recovered = false;
+        refusedNow = true;
+      }
       _combinable = combinable;
     }
     if (facts is! Map || facts['recording'] == true || !mic) {
@@ -502,7 +507,7 @@ class RecordingWatch {
         facts['inputUsable'] == true &&
         (facts['recordingAsked'] == true || sending);
     _seen = lost ? _seen + 1 : 0;
-    if (_seen < 2 || _recovered) return false;
+    if ((_seen < 2 && !(lost && refusedNow)) || _recovered) return false;
     _recovered = true;
     return true;
   }

@@ -368,6 +368,9 @@ static int gTestRefuse = 0;
   current->_chosenInput = nil;
   current->_chosenInputName = nil;
   [current->_refused removeAllObjects];
+  current->_givenPair = nil;
+  current->_outputInUse = nil;
+  current->_inputInUse = nil;
   os_unfair_lock_unlock(&current->_lock);
 }
 - (instancetype)initWithModule:(RTCAudioDeviceModule*)module observe:(BOOL)observe {
@@ -463,6 +466,10 @@ static int gTestRefuse = 0;
   // What follows the system is told as the system's devices now, by their own ids.
   AudioObjectID output = outputInUse != nil ? DeviceOf(outputInUse) : OutputDevice(nil);
   AudioObjectID input = inputInUse != nil ? DeviceOf(inputInUse) : InputDevice(nil);
+  RTCAudioDeviceModule* module = _module;
+  // No engine: nothing plays, and nothing is in use.
+  BOOL engine = !_stopped && module != nil && module.isEngineRunning;
+  if (!engine) output = kAudioObjectUnknown;
   if (chosenOutput != nil) facts[@"chosen"] = chosenOutput;
   if (chosenOutputName != nil) facts[@"chosenName"] = chosenOutputName;
   facts[@"chosenPresent"] = @(IsPresent(chosenOutput, YES));
@@ -473,9 +480,8 @@ static int gTestRefuse = 0;
   if (chosenInput != nil) facts[@"inputChosen"] = chosenInput;
   if (chosenInputName != nil) facts[@"inputChosenName"] = chosenInputName;
   facts[@"inputChosenPresent"] = @(IsPresent(chosenInput, NO));
-  RTCAudioDeviceModule* module = _module;
   BOOL asked = !_stopped && module != nil && module.isRecording;
-  BOOL recording = asked && _inputAvailable && module.isEngineRunning;
+  BOOL recording = asked && _inputAvailable && engine;
   // The input in use is a fact only while something records.
   if (recording && input != kAudioObjectUnknown) {
     facts[@"inputInUse"] = UIDOf(input);
@@ -608,14 +614,6 @@ static int gTestRefuse = 0;
   _anewAsked = YES;
   os_unfair_lock_unlock(&_lock);
   if (ask) [self followAnew];
-}
-
-// Any thread: whether the pair given to the engine now has the microphone in it.
-- (BOOL)givenWithInput {
-  os_unfair_lock_lock(&_lock);
-  NSString* pair = _givenPair;
-  os_unfair_lock_unlock(&_lock);
-  return pair != nil && ![pair hasSuffix:@"|"];
 }
 
 // Any thread: the pair given to the engine now is taken as refused for this call (R4), so
@@ -833,10 +831,10 @@ static int gTestRefuse = 0;
       return;
     }
     BOOL again = self->_recoveries > 0;
-    // An engine given the pair with the microphone that stopped refused that pair (R4), at
-    // once; the devices chosen go before the microphone does in any case.
-    BOOL devicesOut = (again || [self givenWithInput]) && [self devicesChosen] &&
-                      [self refuseGiven];
+    // An engine made again with the devices chosen that stopped again refused them (R4):
+    // they go before the microphone does. A single stop is not taken for a refusal (a
+    // device unplugged, the system switching devices stop an engine too).
+    BOOL devicesOut = again && [self devicesChosen] && [self refuseGiven];
     BOOL leftOut = self->_inputAvailable && inputsFault && again && !devicesOut;
     BOOL input = self->_inputAvailable && !leftOut;
     self->_recoveries++;
@@ -1047,9 +1045,11 @@ static int gTestRefuse = 0;
     return;
   }
   _engineRouted = YES;
-  // The aggregate of the pair chosen stays while the engine only plays (R3 and point 4 in
-  // FOGATA.md): a microphone turned on uses it again, with no device made or gone.
-  [self keepAggregateFor:[self chosenPairKey]];
+  // The aggregate of the pair chosen stays while the engine only plays (R3 in FOGATA.md):
+  // a microphone turned on uses it again, with no device made or gone.
+  NSString* key = [self chosenPairKey];
+  [self keepAggregateFor:key];
+  if (inputDevice == kAudioObjectUnknown) [self makeAggregateFor:key output:output];
   NSLog(@"Fogata: playing on %@%@%@", NameOf(output),
         inputDevice != kAudioObjectUnknown
             ? [NSString stringWithFormat:@", recording from %@", NameOf(inputDevice)]
@@ -1106,6 +1106,28 @@ static int gTestRefuse = 0;
 - (void)keepAggregateFor:(nullable NSString*)pair {
   if (_aggregate == kAudioObjectUnknown || [pair isEqualToString:_aggregateOf]) return;
   [self dropAggregateUnless:kAudioObjectUnknown];
+}
+
+// On the module's thread, while the engine only plays on `output`: the aggregate of the
+// pair chosen (`key`) is made now, with no engine on it, if it is not there yet. Made at
+// an unmute instead, the HAL would tell of it only after WebRTC read its count of device
+// changes for that unmute, and the next unmute would make the echo canceller anew once
+// more. The engine reads it then; if it reads nothing from it, both orders are made anew
+// as before.
+- (void)makeAggregateFor:(nullable NSString*)key output:(AudioObjectID)output {
+  if (key == nil || _aggregate != kAudioObjectUnknown) return;
+  os_unfair_lock_lock(&_lock);
+  NSString* chosenInput = _chosenInput;
+  os_unfair_lock_unlock(&_lock);
+  AudioObjectID input = PairInput(chosenInput);
+  if (input == kAudioObjectUnknown || input == output) return;
+  NSString* why = nil;
+  AudioObjectID made = MakeAggregate(output, input, YES, &why);
+  if (made == kAudioObjectUnknown) return;
+  _aggregate = made;
+  _aggregateOf = key;
+  _aggregateSkipped = OutputChannels(input);
+  NSLog(@"Fogata: a device of both made ahead of the microphone, the input first");
 }
 
 // On the module's thread: the aggregate made before goes unless it is `kept` (the engine's
@@ -1195,8 +1217,14 @@ static int gTestRefuse = 0;
   return 0;
 }
 
+// On the module's thread: the engine goes, and what it was given with it.
 - (NSInteger)audioDeviceModule:(RTCAudioDeviceModule*)audioDeviceModule
              willReleaseEngine:(AVAudioEngine*)engine {
+  os_unfair_lock_lock(&_lock);
+  _givenPair = nil;
+  _outputInUse = nil;
+  _inputInUse = nil;
+  os_unfair_lock_unlock(&_lock);
   return 0;
 }
 
