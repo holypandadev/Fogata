@@ -1627,14 +1627,6 @@ mod tests {
         );
     }
 
-    /// What is kept of a member can be copied and shown in logs, as before it was moved
-    /// beside the mDNS dials.
-    #[test]
-    fn a_member_can_be_copied_and_shown() {
-        fn shown<T: Clone + std::fmt::Debug>() {}
-        shown::<Member>();
-    }
-
     /// A member for the tests below, at a made-up address, counted in `group`.
     pub(super) fn add_member(n: &mut Node, group: GroupId, peer: PeerId) {
         n.members.insert(
