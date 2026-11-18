@@ -4341,44 +4341,6 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// What looking whether attachments are still plain costs once a folder is sealed
-    /// (`Core::at_rest`, once per start of the application), with 5 000 attachments in 50
-    /// chats: `cargo test --release -p fogata-core --lib cost_of_telling_plain_files --
-    /// --ignored --nocapture`, in `FOGATA_COST_DIR` (on a real disk) when set.
-    #[test]
-    #[ignore]
-    fn cost_of_telling_plain_files() {
-        use std::time::Instant;
-        let dir = std::env::var_os("FOGATA_COST_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join(format!("fogata-cost-plain-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&dir);
-        let store = DirectStore::open_sealed(&dir, Some(DataKey::generate().unwrap()));
-        for chat in 0..50u32 {
-            let friend = DeviceIdentity::generate().unwrap().public_key();
-            store.files_dir(&friend).unwrap();
-            for n in 0..100u32 {
-                let bytes = [chat.to_be_bytes(), n.to_be_bytes()].concat().repeat(1000);
-                let file = Attachment {
-                    id: *blake3::hash(&bytes).as_bytes(),
-                    name: "photo.jpg".into(),
-                    size: bytes.len() as u64,
-                    kind: FileKind::Picture,
-                    video: None,
-                    local: Local::Here,
-                    voice: None,
-                };
-                store.keep_bytes(&friend, &file, &bytes).unwrap();
-            }
-        }
-        let start = Instant::now();
-        assert!(!store.holds_plain_file());
-        let took = start.elapsed();
-        println!("5 000 sealed attachments looked at in {took:?}");
-        fs::remove_dir_all(&dir).unwrap();
-    }
-
     /// What a start costs with 20 sealed chats of 10,000 messages each: every chat read
     /// whole (as before summaries were kept, and as a folder's first start without them
     /// still does), and a start from the summaries, with one chat read when it is opened;
