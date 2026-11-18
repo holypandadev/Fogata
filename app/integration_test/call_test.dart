@@ -4425,7 +4425,15 @@ class _OutputSwap {
       if (facts['recording'] != true) {
         _notApplied.add('nothing records after the refusal');
       }
-      if (recoveries < 1) {
+      // A restart by the call is wanted only where the recording was lost: a reading of
+      // the stretch with the refusal that sent no voice or read no sound.
+      final refused = _segments.where(
+        (s) => s.name.contains(swapRefusedForTest),
+      );
+      final lost = refused.any(
+        (s) => s.readings.any((r) => !(r.voice > 0) || r.read == 0),
+      );
+      if (lost && recoveries < 1) {
         _notApplied.add(
           'the call did not start the recording again after the refusal',
         );
