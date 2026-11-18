@@ -10,7 +10,7 @@
 # archives are too. Wherever it comes from, it must have the SHA-256 below.
 Pod::Spec.new do |s|
   s.name = 'WebRTC-SDK'
-  s.version = '156.8078.8'
+  s.version = '156.8078.9'
   s.summary = 'WebRTC M156 for macOS, built by Fogata.'
   s.homepage = 'https://webrtc.googlesource.com/src'
   s.license = { :type => 'BSD-3-Clause', :file => 'WebRTC.xcframework/LICENSE' }
@@ -21,10 +21,10 @@ Pod::Spec.new do |s|
   if local.empty?
     store = ENV['FOGATA_LIBWEBRTC_DIR'].to_s
     store = File.join(Dir.home, 'fogata-libwebrtc') if store.empty?
-    local = File.join(store, 'fogata-libwebrtc.m156.8078.8', 'WebRTC.xcframework.zip')
+    local = File.join(store, 'fogata-libwebrtc.m156.8078.9', 'WebRTC.xcframework.zip')
   end
   published = 'https://github.com/holypandadev/fogata-libwebrtc/releases/download/' \
-              'fogata-libwebrtc.m156.8078.8/WebRTC.xcframework.zip'
+              'fogata-libwebrtc.m156.8078.9/WebRTC.xcframework.zip'
   url = File.exist?(File.expand_path(local)) ? "file://#{File.expand_path(local)}" : published
   s.source = { :http => url, :sha256 => sha256 }
 
