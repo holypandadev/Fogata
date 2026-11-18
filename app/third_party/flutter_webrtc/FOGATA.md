@@ -1039,19 +1039,22 @@ it off. The input chosen while the output was another device met the same.
 - R5. When the module was asked to record and nothing records, or it was not asked
   although the call sends voice (a start that failed: the module then drops WebRTC's
   request and nothing asks again), two readings in a row with the microphone on and its
-  input let in (`RecordingWatch`), the call has every voice encoding off, and the
-  screen's sound's where it is sent, on every connection, up or not (one WebRTC finds up
-  before the call does runs its streams), all of them
-  before any starts again (WebRTC stops recording when its last sending stream stops),
-  then on again, so that WebRTC's
+  input let in (`RecordingWatch`), the call has every voice encoding off, on every
+  connection, up or not (one WebRTC finds up before the call does runs its streams), all
+  of them before any starts again (WebRTC stops recording when its last sending stream
+  stops). The step turns the screen's sound off too where the call's own channel sends it
+  (Linux and Windows); on macOS that sound goes on connections of its own, with their own
+  factory, and has no part in the microphone's recording, so this matters nowhere today.
+  Then they are on again, so that WebRTC's
   AudioState asks the module to record afresh and restarts its echo canceller, as at any
   unmute (`Call._recoverVoice`). Not through `setMic`: the others are told nothing and the
   microphone's check is not started over. Given up as soon as the person turns the
   microphone off or the call ends. Once for each loss, and again when the engine changed
   since (the pair now refused, R4). Seen 4 to 6 s after the loss (two readings in a row,
   the voice sent read from the reading before), or, once the pair is seen refused, at the
-  first reading with the microphone on and nothing recorded, asked or not (2 s or so; that
-  holds until something records or the microphone is turned off). Each participant's own
+  first reading with the microphone on, someone in the call up to take the voice and
+  nothing recorded, asked or not (2 s or so; that holds until something records or the
+  microphone is turned off, and alone in the call it waits for someone). Each participant's own
   step is the only one that sets their encoding: while the restart runs it wants it off (a
   step of any origin meanwhile, a participant who arrives, does the same), and once no
   encoding of sound is on anywhere (3 s at most) every step runs again, turning them on
@@ -1096,8 +1099,8 @@ it off. The input chosen while the output was another device met the same.
   FOGATA_TEST_REFUSE=start has that unmute's start fail with the pair given, and either
   run fails unless, at the end of the other output's time, the facts say the pair cannot
   be put together and the engine follows the system and records, and, when a reading of
-  that stretch judged as any change's (past the first two, a second or more long) read no
-  sound from the microphone, the call started the recording again (R4 and R5); that
+  that stretch past its four (a second or more long) read no sound from the microphone,
+  or always with =start, the call started the recording again (R4 and R5); that
   stretch is let take four readings.
 
 ## A received track is found as the connection that received it (all platforms)

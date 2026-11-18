@@ -445,6 +445,34 @@ void main() {
       },
     );
 
+    test('a refusal while alone waits for someone the voice goes to', () {
+      final watch = RecordingWatch();
+      final playing = {
+        'recordingAsked': false,
+        'recording': false,
+        'inputUsable': true,
+        'changing': false,
+        'combinable': true,
+      };
+      expect(
+        watch.take(playing, mic: true, sending: false, listened: false),
+        isFalse,
+      );
+      // Refused while the engine only plays, nobody in the call: nothing to start.
+      final refused = {...playing, 'combinable': false};
+      for (var i = 0; i < 3; i++) {
+        expect(
+          watch.take(refused, mic: true, sending: false, listened: false),
+          isFalse,
+        );
+      }
+      // Someone comes, and nothing records for them: started again at once.
+      expect(
+        watch.take(refused, mic: true, sending: false, listened: true),
+        isTrue,
+      );
+    });
+
     test(
       'a refusal ends as something records, and is not taken while muted',
       () {

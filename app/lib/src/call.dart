@@ -2220,7 +2220,12 @@ class Call extends ChangeNotifier {
           _report(text);
         }
       }
-      if (_recordingWatch.take(facts, mic: mic, sending: _voiceSending)) {
+      if (_recordingWatch.take(
+        facts,
+        mic: mic,
+        sending: _voiceSending,
+        listened: peers.values.any((p) => p.connected),
+      )) {
         await _recoverVoice();
       }
     } catch (e) {
