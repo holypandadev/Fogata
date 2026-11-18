@@ -799,6 +799,9 @@ const _windows = [
   (Size(800, 560), [1.0]),
 ];
 
+/// The ARB files, read once for every case (first used by the first case that reads them).
+final _arbs = readArbs();
+
 void main() {
   setUpAll(loadFonts);
   tearDown(() => useLanguage('en'));
@@ -950,7 +953,7 @@ void main() {
               name: '$name $at $code x$scale',
             );
             // The language really in use is the one asked for, not the system's.
-            final arbs = readArbs();
+            final arbs = _arbs;
             final word =
                 arbs[code == 'pseudo'
                     ? 'en'
