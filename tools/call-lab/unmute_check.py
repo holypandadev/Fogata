@@ -13,9 +13,26 @@ word (12.5 s), which a settled echo canceller lets through as it does mid-call:
   without echo: the first words went out 8 dB weaker on average (17 dB at worst) and the
   floor of the first 0.5 s 12 dB lower, then it came back at once. With the echo canceller
   kept knowing the room (WebRTC patch 0010) both stayed within 2 dB in this lab.
-- speakers (b's tone goes back into a's microphone): b's tone as a sent it (220 Hz, between
-  a's words in the first 3.5 s) must stay TONE_UNDER dB under a's words, the bar the echo
-  check (mic_check.py) sets for a call's first turn.
+- speakers (b's tone goes back into a's microphone): b's tone as a sent it (220 Hz) must
+  stay TONE_UNDER dB under a's words, the bar the echo check (mic_check.py) sets for a call's
+  first turn, before a says anything: from a's first sound at b (0.25 s after the unmute
+  at the earliest) until a's first word reaches b. That is where an echo canceller that
+  kept a room without echo (a headset taken off for speakers, no device change seen) lets
+  the tone through. A word's last syllable ends WORD_END into it, and reaches b 0.10 to
+  0.18 s later in this lab and on GitHub's runners (DELAY: the least).
+  After a's words b's steady tone comes back for moments, and that is WebRTC's own, left
+  as WebRTC has it: AEC3 holds a gentler suppression for 200 ms after the near end stops
+  talking (its dominant near-end detector, dominant_nearend_detection.hold_duration, 50
+  blocks), and b's tone itself, as b sends it, drops for moments while a's word plays at
+  b (b's own processing), and around those changes a's echo canceller lets it through for
+  another 0.2 to 0.35 s, up to 0.85 s after the word's end. In this lab and on the
+  runners those moments came as loud as 10 dB under a's words (the tone's echo itself
+  reaches a's microphone 17 to 25 dB under them on the runners), at any moment of a call,
+  not only after an unmute. So from each word's end to the next word
+  they are measured and noted for every unmute, and fail by TONE_UNDER only when the tone
+  stays above that bar all the way from one word to the next (an echo let through, no
+  moment of double talk), and at their loudest only louder than TAIL_UNDER dB under the
+  words, which no echo of the lab's can reach without something amplifying it.
 b plays nothing of a at all (under SILENT: digital silence, or a few steps of the
 converter at most) until a's first sound after the unmute reaches it: on a slow computer
 later than 0.25 s after the mark, and the sound then takes up to 0.25 s to be all
@@ -48,6 +65,9 @@ import wave
 WORD_UNDER = 6.0
 FLOOR_UNDER = 6.0
 TONE_UNDER = 20.0
+TAIL_UNDER = 5.0  # dB: the bar after each of a's words, where WebRTC lets the tone through
+WORD_END = 2.0  # s into each word that its last syllable ends (unmute-sound.sh)
+DELAY = 0.10  # s from a's microphone to b at the least (0.10 to 0.18 measured)
 RATE = 48000
 F = RATE // 20
 GAPS = [(0.25, 0.5), (2.65, 3.5), (5.65, 6.5), (8.65, 9.5), (11.65, 12.5), (14.65, 15.5)]
@@ -163,15 +183,60 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
                     "a step"
                 )
     else:
-        tone = max(tone_db(at, a, b) for a, b in ((0.25, 0.5), (2.65, 2.9), (2.9, 3.15), (3.15, 3.4)))
         own = pct([x for x in words if x == x], 0.5)
-        notes.append(f"unmute {n}: b's tone as a sent it between the first words {tone:.0f} dBFS, "
-                     f"{own - tone:.0f} dB under a's words")
-        if tone > own - TONE_UNDER:
-            problems.append(
-                f"unmute {n}: b's tone went back to it at {tone:.0f} dBFS, {own - tone:.0f} dB under "
-                f"a's words (at least {TONE_UNDER:.0f}): a's echo canceller let it through"
-            )
+
+        def tones(a, b):
+            """b's tone (dBFS) in each 0.25 s from a to b, a step of 0.05 s apart, with where
+            each starts."""
+            steps = [a + k * 0.05 for k in range(max(1, int(round((b - a - 0.25) / 0.05)) + 1))]
+            return [(tone_db(at, t, min(b, t + 0.25)), t) for t in steps]
+
+        def loudest(a, b):
+            return max(tones(a, b))
+
+        # Before a's first word: from a's first sound at b to the word reaching it.
+        first = (max(GAPS[0][0], 15.0 if came is None else came + 0.05), WORDS[0] + DELAY)
+        if first[1] - first[0] >= 0.15:
+            tone, t = loudest(*first)
+            notes.append(f"unmute {n}: b's tone as a sent it before a's first word at most {tone:.0f} "
+                         f"dBFS, {own - tone:.0f} dB under a's words ({t:.2f} s on)")
+            if tone > own - TONE_UNDER:
+                problems.append(
+                    f"unmute {n}: b's tone went back to it at {tone:.0f} dBFS, {own - tone:.0f} dB "
+                    f"under a's words, {t:.2f} s after the unmute, before a said anything (at least "
+                    f"{TONE_UNDER:.0f}): a's echo canceller let it through"
+                )
+        else:
+            notes.append(f"unmute {n}: a's sound reached b too late to judge b's tone before a's "
+                         "first word")
+        # After each word, to the next one reaching b (the last: to 15.5 s): WebRTC's double
+        # talk, judged at its loudest only by TAIL_UNDER; and throughout, by TONE_UNDER: an
+        # echo let through all the way from one word to the next is no moment of double talk.
+        ends = [w + WORD_END + DELAY for w in WORDS]
+        spans = [tones(e, b) for e, b in zip(ends, [w + DELAY for w in WORDS[1:]] + [GAPS[-1][1]])]
+        tails = [max(x) for x in spans]
+        for w, x in zip(WORDS, spans):
+            low, t = min(x)
+            if low > own - TONE_UNDER:
+                problems.append(
+                    f"unmute {n}: b's tone went back to it all the way from a's word at {w:.1f} s to "
+                    f"the next, at {low:.0f} dBFS at the least, {own - low:.0f} dB under a's words (at "
+                    f"least {TONE_UNDER:.0f}): a's echo canceller let it through"
+                )
+        notes.append(
+            f"unmute {n}: b's tone after each of a's words (WebRTC's double talk, at least "
+            f"{TAIL_UNDER:.0f} dB under) " + " ".join(f"{own - x:.0f}" for x, _ in tails)
+            + " dB under a's words, at "
+            + " ".join(f"{t - w - WORD_END:.2f}" for (_, t), w in zip(tails, WORDS))
+            + " s after each word's end at a"
+        )
+        for w, (x, t) in zip(WORDS, tails):
+            if x > own - TAIL_UNDER:
+                problems.append(
+                    f"unmute {n}: b's tone after a's word at {w:.1f} s came back at {x:.0f} dBFS, "
+                    f"{own - x:.0f} dB under a's words (at least {TAIL_UNDER:.0f} there): louder "
+                    "than the echo of it can be"
+                )
 
 # a's WebRTC log (a.out, with FOGATA_WEBRTC_LOG): an echo controller made between a mute
 # and the end of the following unmute's words (AEC3's "AEC3 created") that none made anew
