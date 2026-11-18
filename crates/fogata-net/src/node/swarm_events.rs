@@ -479,13 +479,23 @@ impl Node {
                 self.want_datagrams(peer_id);
                 self.check_udp(peer_id);
             }
-            // A link that stopped answering (Wi-Fi gone, a sleep, a router that forgot it)
-            // stays open until the system gives up on it, which takes minutes over TCP.
-            // Two missed pings in a row close it, so the peer is dialled again.
             #[cfg(test)]
             BehaviourEvent::Identify(identify::Event::Pushed { peer_id, .. }) => {
                 *self.pushed.entry(peer_id).or_default() += 1;
             }
+            // A link that stopped answering (Wi-Fi gone, a sleep, a router that forgot it)
+            // stays open until the system gives up on it, which takes minutes over TCP.
+            // Two failures reported in a row close it, so the peer is dialled again. What
+            // that takes on a dead TCP connection, from libp2p-ping 0.48 (pings every 15 s
+            // on one kept stream, each given 20 s; its first failure in a row is not
+            // reported; after a failure the next ping opens a new stream, whose negotiation
+            // libp2p-swarm gives 10 s, and after a failed opening the next goes at once):
+            // the first ping after the death goes within 15 s and fails 20 s later, silent;
+            // 15 s on, a new stream fails to open after 10 s (reported, one); the next at
+            // once, 10 s more (reported, two): closed 55 to 70 s after the link died, unless
+            // the system reports it broken sooner. A dead QUIC connection closes on its own
+            // before that: 30 s (`QUIC_IDLE`) after the last packet heard, which keep-alives
+            // every 5 s make 25 to 30 s after the death.
             BehaviourEvent::Ping(ping::Event {
                 peer,
                 connection,

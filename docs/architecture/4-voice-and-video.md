@@ -139,9 +139,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
 (`app/lib/src/call.dart`) opens one WebRTC connection to every other participant (mesh):
 
 - **Signalling** travels as `MemberRequest::Signal` (offers, answers and small state
-  messages, opaque to the node) over the member's best connection (best path, QUIC first;
-  see `request-response` in 3), only between members of the room's group. The device with
-  the smaller id makes the offer. Each description carries its network candidates, gathered before it is sent (quick: the only server is the
+  messages, opaque to the node) over the member's best connection that is not suspect
+  (best path, QUIC first; see `request-response` in 3), only between members of the room's
+  group. The device with the smaller id makes the offer. Each description carries its
+  network candidates, gathered before it is sent (quick: the only server is the
   device's own bridge), so one message per side brings everything and no candidate can be
   lost or reach a later connection. A signal to a member this device is not connected to
   yet is dropped, and members connect to each other at different moments, so the side that

@@ -26,7 +26,8 @@ pub(super) const MAX_WAITING_BYTES: usize = 16 * 1024 * 1024;
 /// small request and its answer take about two round trips, under 1.5 s even through a
 /// member's relay. A connection that died unnoticed takes far longer to be known dead: a
 /// request on it fails after 10 s (the stream does not open), a dead QUIC connection closes
-/// 25 to 30 s after it died, a TCP one 55 to 70 s after (three failed pings).
+/// 25 to 30 s after it died, a TCP one 55 to 70 s after (see the `Ping` arm of
+/// `on_behaviour_event` in swarm_events.rs).
 pub(super) const SUSPECT_AFTER: Duration = Duration::from_secs(3);
 
 /// Most bytes of a quick request.

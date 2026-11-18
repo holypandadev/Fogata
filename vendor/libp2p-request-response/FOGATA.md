@@ -21,10 +21,13 @@ Only this change:
    A connection that died unnoticed (after an outage, or a sleep: an old one ranks before
    one dialled anew on the same path) is still chosen until it is suspect: 3 s after a small
    request on it went unanswered (`SUSPECT_AFTER` in crates/fogata-net/src/node/outbox.rs),
-   or, a direct QUIC one, after 6 s without a packet from the peer. Requests sent on it before
-   then are lost, at most the 6 on their way to that peer at once; each fails after 10 s (its
-   stream does not open). Without the guard it is chosen until it is known dead: a QUIC
-   connection closes 25 to 30 s after it died, a TCP one 55 to 70 s after.
+   or, a direct QUIC one, once the most recently heard of the peer's direct QUIC connections
+   has received nothing for 6 s: silence is counted per peer, so an old dead QUIC connection
+   beside a live new one is caught only by the 3 s rule. Requests sent on it before then are
+   lost, at most the 6 on their way to that peer at once; each fails after 10 s (its stream
+   does not open). Without the guard it is chosen until it is known dead: a QUIC connection
+   closes 25 to 30 s after it died, a TCP one 55 to 70 s after (derived from libp2p-ping's
+   timers in the `Ping` arm of `on_behaviour_event`, crates/fogata-net/src/node/swarm_events.rs).
 
    Tests: `signals_in_a_row_all_go_on_the_best_connection`, which fails with the published
    crate's choice (the signals come on both connections in turn),
