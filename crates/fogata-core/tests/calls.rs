@@ -1077,7 +1077,15 @@ async fn anyone_in_a_call_rings_their_own_friends_into_it() {
             .map(|(p, _)| &p.name)
             .collect::<Vec<_>>()
     );
-    assert!(ana.calls().await.unwrap()[0].adding.is_empty());
+    // Ana no longer rings Carla: she hears her answer, or sees her come in, a moment after
+    // her room shows all four.
+    let rung = timeout(Duration::from_secs(60), async {
+        while !ana.calls().await.unwrap()[0].adding.is_empty() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(rung.is_ok(), "{:?}", ana.calls().await.unwrap()[0].adding);
     // Dani, rung in by Bea, is made able to ring friends in too.
     can_add(&dani).await;
 
