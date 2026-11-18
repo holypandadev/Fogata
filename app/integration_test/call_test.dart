@@ -215,11 +215,18 @@ Future<void> _tap(WidgetTester tester, Finder finder) async {
 AppState _state(WidgetTester tester) =>
     AppScope.read(tester.element(find.byType(Shell)));
 
-/// Tells the other copies a step through the room's chat.
+/// Tells the other copies a step through the room's chat. A word that did not go fails
+/// here, with why, rather than leave the others waiting for it.
 Future<void> _say(AppState state, String word) async {
-  await state.sendChat('test: $word');
+  if (!await state.sendChat('test: $word')) {
+    throw StateError('could not say "$word": ${_lastError(state)}');
+  }
   _log('said: $word');
 }
+
+/// The last error the app showed, for a failure's message.
+String _lastError(AppState state) =>
+    state.toasts.list.where((t) => t.error).lastOrNull?.text ?? 'nothing shown';
 
 /// Another copy in the call: its device id and name.
 typedef _Other = ({String id, String name});
@@ -489,7 +496,9 @@ Future<void> _call(WidgetTester tester) async {
       () => file.existsSync() && file.readAsStringSync().isNotEmpty,
       seconds: 900,
     );
-    await state.useInvitation(file.readAsStringSync());
+    if (!await state.useInvitation(file.readAsStringSync())) {
+      throw StateError('friend link not used: ${_lastError(state)}');
+    }
     // Ana adds us to her group: it arrives as an invitation to join.
     await _until(
       tester,
