@@ -291,22 +291,19 @@ void main() {
         'settings ${section.name}': () =>
             fakeRoom(people: 2)..openSettings(section),
     };
-    for (final look in [Look.dark, Look.light]) {
-      for (final MapEntry(key: name, value: make) in pages.entries) {
-        testWidgets('$name, ${look.name}', (tester) async {
-          final handle = tester.ensureSemantics();
-          try {
-            await _show(tester, make(), tokens: look.tokens);
-            await expectLater(
-              tester,
-              meetsGuideline(labeledTapTargetGuideline),
-            );
-          } finally {
-            handle.dispose();
-          }
-          await _close(tester);
-        });
-      }
+    // In the dark theme only: a theme changes colours, never which controls a page has
+    // nor what they are called.
+    for (final MapEntry(key: name, value: make) in pages.entries) {
+      testWidgets('$name, dark', (tester) async {
+        final handle = tester.ensureSemantics();
+        try {
+          await _show(tester, make());
+          await expectLater(tester, meetsGuideline(labeledTapTargetGuideline));
+        } finally {
+          handle.dispose();
+        }
+        await _close(tester);
+      });
     }
   });
 
