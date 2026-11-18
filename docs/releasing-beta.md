@@ -154,14 +154,15 @@ name, in the release's notes for the maintainers, never passed over in silence.
    computer with one, not on GitHub's: a screen shared under KDE Plasma Wayland while
    nothing on it moves shows at once when opened, `tools/smoke-wayland/still.sh` (30
    calls, about 15 minutes; docs/ci.md, "A still shared screen under Wayland").
-3. **The network.** `tools/netlab/netlab.sh`, every scenario (about 70 minutes), here or on
-   one of GitHub's computers (`gh workflow run netlab.yml`, which also runs `dht-liars`
-   thirty times: two devices started in the same seconds must find each other within its
-   limit every time). `media-silent` proves what it is for only where
-   `net.core.wmem_max` is the kernel's default, which that workflow sets: on a computer
-   that raised it, the scenario says so, and the run that counts is GitHub's. And on
-   the real internet, the release build of the command line must log "this device's
-   public address confirmed" within seconds:
+3. **The network.** `tools/netlab/netlab.sh`, every scenario (about 90 minutes), here or on
+   GitHub's computers (`gh workflow run netlab.yml`, which also runs `dht-liars` thirty
+   times: two devices started in the same seconds must find each other within its limit
+   every time; the scenarios on four computers and `dht-liars` on two more, about half an
+   hour, and its last job, "Network lab", is the result). `media-silent` proves what it is
+   for only where `net.core.wmem_max` is the kernel's default, which that workflow sets: on
+   a computer that raised it, the scenario says so, and the run that counts is GitHub's.
+   And on the real internet, the release build of the command line must log "this
+   device's public address confirmed" within seconds:
    `RUST_LOG=warn,fogata_net::node::network=debug target/release/fogata --data-dir $(mktemp -d) network`.
 4. **Windows, a real call.** The push checks passed while a call on Windows carried no
    sound at all. On a Windows computer (a virtual one will do, with a virtual sound

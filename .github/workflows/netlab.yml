@@ -1,14 +1,20 @@
 # The network lab (tools/netlab/netlab.sh: a simulated internet with home routers of every
-# kind, in network namespaces) on one of GitHub's own computers, started by hand:
+# kind, in network namespaces) on GitHub's own computers, started by hand:
 #
-#   gh workflow run netlab.yml                         every scenario, then dht-liars 30 times
+#   gh workflow run netlab.yml                         every scenario, and dht-liars 30 times
 #   gh workflow run netlab.yml -f scenarios="cone-cone direct-apart" -f liars=0
 #
-# It builds the command line with its lab feature, as the script does anywhere, runs the
-# scenarios one after another (a little over an hour for all of them), and then dht-liars
-# again and again: two devices that start in the same seconds and find each other through
-# the DHT, the one scenario whose time depends on the moment, so one run of it says little.
-# Nothing here signs or publishes anything, and the job's token can only read the
+# The scenarios take a little over an hour one after another, and dht-liars as long again:
+# two devices that start in the same seconds and find each other through the DHT, the one
+# scenario whose time depends on the moment, so one run of it says little. So they run on
+# several computers at once, about half an hour in all: tools/netlab/shards.py splits the
+# lab's own list of scenarios (`netlab.sh --list`) among four by the minutes each takes, and
+# fails unless every scenario is in exactly one of them; dht-liars runs on two more, half of
+# its times each. Every scenario starts its own namespaces and its own folder, so none needs
+# another's state or computer. Given scenarios run on one computer. Each computer builds the
+# command line with its lab feature, as the script does anywhere. "Network lab" at the end
+# is the one result to look at: it fails unless every computer passed.
+# Nothing here signs or publishes anything, and the jobs' token can only read the
 # repository.
 name: Network lab
 
@@ -20,7 +26,7 @@ on:
         required: false
         default: ""
       liars:
-        description: How many times to run dht-liars after them
+        description: How many times to run dht-liars besides them
         required: false
         default: "30"
 
@@ -33,9 +39,36 @@ env:
   FOGATA_UPDATE_WEB: "off"
 
 jobs:
-  netlab:
+  plan:
+    name: Split the lab
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 5
+    outputs:
+      jobs: ${{ steps.split.outputs.jobs }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The scenarios of each computer
+        id: split
+        env:
+          SCENARIOS: ${{ inputs.scenarios }}
+          LIARS: ${{ inputs.liars || '30' }}
+        run: |
+          # shellcheck disable=SC2086  # the scenarios, one word each
+          python3 -I tools/netlab/shards.py 4 "$LIARS" $SCENARIOS
+
+  lab:
+    name: ${{ matrix.name }}
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      # One computer's failure stops none of the others: every scenario is still run.
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.jobs) }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -60,41 +93,73 @@ jobs:
       - name: Install the Rust of rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
 
+      # The crates, and the builds of the dependencies (never of the workspace's own crates,
+      # which rust-cache leaves out) in the lab's target folder: one cache for every computer
+      # of this workflow, apart from ci.yml's. Saved by one computer of a run on main only:
+      # a run on another branch reads it and never writes it, so what other code builds
+      # never reaches another run (see ci.yml).
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> target/netlab
+          shared-key: netlab
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' && matrix.id == 'scenarios-1' }}
+
       - name: The network lab
+        if: matrix.scenarios != ''
         env:
-          SCENARIOS: ${{ inputs.scenarios }}
+          SCENARIOS: ${{ matrix.scenarios }}
         run: |
           set -o pipefail
+          mkdir -p "$RUNNER_TEMP/netlab"
           # shellcheck disable=SC2086  # the scenarios, one word each
-          tools/netlab/netlab.sh $SCENARIOS 2>&1 | tee "$RUNNER_TEMP/netlab.log"
+          tools/netlab/netlab.sh $SCENARIOS 2>&1 | tee "$RUNNER_TEMP/netlab/netlab.log"
 
       # Two devices that start in the same seconds and find each other through the DHT: how
       # long each run took, and how many missed the scenario's limit.
       - name: dht-liars, again and again
-        if: always()
+        if: matrix.first > 0
         env:
-          TIMES: ${{ inputs.liars || '30' }}
+          FIRST: ${{ matrix.first }}
+          LAST: ${{ matrix.last }}
         run: |
+          mkdir -p "$RUNNER_TEMP/netlab"
+          tools/netlab/netlab.sh --build
           bin=$PWD/target/netlab/release/fogata
-          [[ -x $bin ]] || { echo "no lab program built"; exit 1; }
           failed=0
-          for i in $(seq "$TIMES"); do
-            FOGATA_BIN=$bin tools/netlab/netlab.sh dht-liars > "$RUNNER_TEMP/liars-$i.log" 2>&1 || failed=$((failed + 1))
-            echo "run $i: $(grep -E 'connected after|^result:' "$RUNNER_TEMP/liars-$i.log" | tr '\n' ' ')"
+          for i in $(seq "$FIRST" "$LAST"); do
+            FOGATA_BIN=$bin tools/netlab/netlab.sh dht-liars > "$RUNNER_TEMP/netlab/liars-$i.log" 2>&1 || failed=$((failed + 1))
+            echo "run $i: $(grep -E 'connected after|^result:' "$RUNNER_TEMP/netlab/liars-$i.log" | tr '\n' ' ')"
           done
-          echo "dht-liars: $failed of $TIMES failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "dht-liars, runs $FIRST to $LAST: $failed of $((LAST - FIRST + 1)) failed" | tee -a "$GITHUB_STEP_SUMMARY"
           [[ $failed == 0 ]]
 
       - name: What passed and what did not
-        if: always()
+        if: always() && matrix.scenarios != ''
         run: |
-          grep -E '^(=== |result: )' "$RUNNER_TEMP/netlab.log" >> "$GITHUB_STEP_SUMMARY" || true
+          grep -E '^(=== |result: )' "$RUNNER_TEMP/netlab/netlab.log" >> "$GITHUB_STEP_SUMMARY" || true
 
-      - name: Keep the log
+      - name: Keep the logs
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: netlab
-          path: ${{ runner.temp }}/netlab.log
+          name: netlab-${{ matrix.id }}
+          path: ${{ runner.temp }}/netlab/
           if-no-files-found: ignore
           retention-days: 14
+
+  # The one result to look at: every computer of the lab passed.
+  result:
+    name: Network lab
+    needs: [plan, lab]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Every computer passed
+        env:
+          PLAN: ${{ needs.plan.result }}
+          LAB: ${{ needs.lab.result }}
+        run: |
+          echo "split: $PLAN, lab: $LAB" | tee -a "$GITHUB_STEP_SUMMARY"
+          [[ $PLAN == success && $LAB == success ]]

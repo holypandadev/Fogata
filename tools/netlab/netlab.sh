@@ -11,6 +11,8 @@
 #   public     no NAT at all.
 #
 # Usage: tools/netlab/netlab.sh [scenario...]     (default: every connection scenario)
+#        tools/netlab/netlab.sh --list   the scenarios run by default, one a line
+#        tools/netlab/netlab.sh --build  only builds the lab's program (and checks it)
 #
 # Media transport probes (not run by default):
 #   probe-direct   cone + cone, packets go directly
@@ -50,6 +52,11 @@ SCENARIOS=(selftest cone-cone cone-cone-member cone-symmetric cone-symmetric-mem
     transfer-two-routers transfer-two-routers-back update-chain update-refusals)
 
 if [[ -z "${NETLAB_INSIDE:-}" ]]; then
+    # .github/workflows/netlab.yml splits this list among its jobs (tools/netlab/shards.py).
+    if [[ ${1:-} == --list ]]; then
+        printf '%s\n' "${SCENARIOS[@]}"
+        exit 0
+    fi
     if [[ -z "${FOGATA_BIN:-}" ]]; then
         (cd "$ROOT" && cargo build --release -p fogata --features lab --target-dir "$LAB_TARGET") ||
             { echo "netlab: could not build the CLI with its lab feature" >&2; exit 1; }
@@ -57,6 +64,7 @@ if [[ -z "${NETLAB_INSIDE:-}" ]]; then
     [[ -x "$BIN" ]] || { echo "netlab: no $BIN" >&2; exit 1; }
     "$BIN" lab-silent --help > /dev/null 2>&1 ||
         { echo "netlab: $BIN has no lab tools: build it with cargo build --release -p fogata --features lab" >&2; exit 1; }
+    [[ ${1:-} == --build ]] && exit 0
     list=("$@")
     [[ ${#list[@]} -eq 0 ]] && list=("${SCENARIOS[@]}")
     failed=0
