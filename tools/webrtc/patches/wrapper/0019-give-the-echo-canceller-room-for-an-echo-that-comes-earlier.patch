@@ -10,20 +10,32 @@ back to them for a whole turn until the delay estimator found the echo again, a 
 more later. An echo that comes later (silence played on an underflow) stays inside the
 filter.
 
-The processing now asks AEC3 for 512 samples (8 blocks, 32 ms) of headroom and makes the
-refined and coarse filters 8 blocks longer (21), so that they reach as far after the echo as
-before; the same for the multichannel configuration. The initial-state filters, used for
-the first 2.5 s of the other side's sound after every reset (a call's start, a microphone on
-again, a delay found again, a stall), keep WebRTC's 12 blocks, which with the echo 8 blocks
-in reach 4 blocks past it (about 11.5 in stock AEC3): lengthened too, they converged more
-slowly and a call's first turn went out less cancelled (57 dB under one's own voice at the
-median instead of 76, once only 18 dB). After a reset AEC3 keeps only 2 blocks of headroom
-until it finds the delay again; keeping the configured headroom there too made a call's
-start worse (WebRTC patch 0010's header), so it is left as it is.
+The processing now asks AEC3 for 512 samples (8 blocks, 32 ms) of headroom, in its mono and
+multichannel configurations. The filters keep WebRTC's lengths (13 blocks, 12 in the initial
+state), which with the echo 8 blocks in reach 5 blocks past it (4 in the initial state).
+After a reset AEC3 keeps only 2 blocks of headroom until it finds the delay again; keeping
+the configured headroom there too made a call's start worse (WebRTC patch 0010's header), so
+it is left as it is.
 
-Measured in the call lab (tools/call-lab/mic.sh echo, ECHO_STALL stopping the session's
-PipeWire now and then, the echo's move timed in the samples each copy wrote and read),
-without the patch, then with 16, 32 (this patch) and 48 ms of headroom:
+As first written, this patch also made the refined and coarse filters 8 blocks longer (21),
+so that they reached as far after the echo as before. Those longer filters converge more
+slowly, and a call's start with speakers sent the other side's voice back for seconds: with
+a synthesised voice reading text that does not repeat (mic.sh unmute, UNMUTE_FAR_FILE), in
+one session, 10 runs each, a call's start sent it back for 2.7 s at the median (0 to 7.6) at
+-49 dBFS at the loudest, against 0 s (0 to 2.0) and -66 dBFS with WebRTC's own configuration
+(p 0.008 for both) and 0.5 s at -51 dBFS with the library before WebRTC patch 0010; in
+another session, 16 ms of headroom with the filters 8 blocks longer sent it back for 6.8 s
+at the median at -46 dBFS (p 0.005 and 0.019 against the library before patch 0010), and
+the initial-state filters lengthened as well, for 5.8 s at -35 dBFS (6 runs). As it is now
+(32 ms, WebRTC's filters), in that session: 0 s at the median (0 to 1.4) at -54 dBFS,
+against 0 s (0 to 7.7) at -56 dBFS before patch 0010 (p 1.0 and 0.34) and 0 s at -60 dBFS
+with WebRTC's own configuration. Its unmutes with speakers came back 0.3 s at the median
+(1.6 s before patch 0010, which is what shortens them, not this patch).
+
+Measured in the call lab with the filters 8 blocks longer (tools/call-lab/mic.sh echo,
+ECHO_STALL stopping the session's PipeWire now and then, the echo's move timed in the
+samples each copy wrote and read), without the patch, then with 16, 32 and 48 ms of
+headroom:
 - moves up to 16 ms earlier followed by a turn let through: 30 in 68, 2 in 66, 4 in 73,
   9 in 63; moves of 16 to 32 ms: 26 in 79, 15 in 78, 4 in 71, 11 in 66; over 32 ms: 13 in
   53, 9 in 53, 8 in 52, 10 in 51;
@@ -41,7 +53,21 @@ library as published (without this patch) and with every echo controller restart
 echo check let 10 turns through in 136 with the quantum free and stalls of 20 and 40 ms (35
 in 137 without this patch), 4 in 110 at 480 with stalls of 40 and 80 ms (28 in 109).
 
-A known cost: a far side that repeats itself exactly. The unmute check's own far side
+As it is now, in one session with WebRTC patches 0010 to 0012, 6 runs each, interleaved
+with WebRTC's own configuration, with the filters 8 blocks longer and with 16 ms of
+headroom and the filters 8 blocks longer: with the quantum free and stalls of 20 and 40 ms
+the echo check let 4 turns through in 159, against 51 in 111 with WebRTC's configuration,
+7 in 154 with the longer filters and 8 in 151 with 16 ms; at 480 with stalls of 40 and
+80 ms, 11 in 148, against 39 in 121, 12 in 151 and 21 in 141. After each of one's own
+words in a call with speakers and a steady tone on the other side (mic.sh unmute:speakers,
+6 runs each, 18 unmutes), the tone came back in the next 0.25 s at -55 dBFS at the median
+of each unmute's worst, -36 at the worst, against -58 and -34 with WebRTC's configuration
+and -47 and -30 with the longer filters (p 0.28 and 0.17): AEC3's own, which holds its
+gentler suppression for 200 ms after one's own voice (dominant_nearend_detection,
+hold_duration 50 blocks).
+
+With the filters 8 blocks longer, a known cost was a far side that repeats itself exactly
+(not measured again with WebRTC's filters). The unmute check's own far side
 (mic.sh unmute, UNMUTE_FAR=words) is the same 2.1 s phrase every 3 s, three words made of
 a sawtooth whose pitch falls within each syllable, between 160 and 106 Hz: with it, a call's start with speakers sent
 the other side's voice back for 4.8 s at the median (0 to 8.9) at -40 dBFS at the loudest,
@@ -50,15 +76,12 @@ restarted rather than made anew, 4.9 s, the same). The lab's logs show the same 
 (7 blocks) in the same time and the filters converged as soon; why the signal that repeats
 comes back longer is not known. With speech-like noise that repeats only every 30 s
 (tone.py speech, as the echo check's voices) there is no difference (0 s heard, p
-0.96 and 0.47). With a synthesised voice reading text that does not repeat (mic.sh unmute,
-UNMUTE_FAR_FILE; 8 runs each, one session), a call's start sent it back at -47 dBFS at the
-loudest (-63 to -45) and for 0.9 s (0 to 7.6), against -67 dBFS (-72 to -44) and 0 s (0 to
-1.6) without this patch (p 0.06 and 0.22: within the runs' scatter, the loudest by a
-little); its unmutes with speakers came back 0.4 s against 1.7 s. A held note, music or a
-game's sound playing on the far side is periodic too.
+0.96 and 0.47). The synthesised voice's call start, which an earlier session of 8 runs
+each had within the runs' scatter (p 0.06 and 0.22), was the longer filters' cost
+measured above.
 
 diff --git a/src/rtc_audio_processing_impl.cc b/src/rtc_audio_processing_impl.cc
-index 39cf151..62c8964 100644
+index 39cf151..3f8d4d6 100644
 --- a/src/rtc_audio_processing_impl.cc
 +++ b/src/rtc_audio_processing_impl.cc
 @@ -1,6 +1,7 @@
@@ -69,7 +92,7 @@ index 39cf151..62c8964 100644
  #include "api/environment/environment_factory.h"
  #include "modules/audio_processing/audio_buffer.h"
  #include "modules/audio_processing/ns/ns_common.h"
-@@ -9,6 +10,29 @@
+@@ -9,6 +10,27 @@
  
  namespace libwebrtc {
  
@@ -82,15 +105,13 @@ index 39cf151..62c8964 100644
 +// WebRTC's default headroom (32 samples at 16 kHz: 2 ms) the linear filter cannot reach
 +// such an echo, and a whole turn of the other's voice went back to them until the delay
 +// estimator found the echo again, a second or more later. 512 samples (8 blocks,
-+// 32 ms) of headroom, and filters 8 blocks longer, so that
-+// they still reach as far after the echo as WebRTC's own.
++// 32 ms) of headroom. The filters keep WebRTC's lengths: 8 blocks longer, they took so
++// much longer to converge at a call's start that the other side's voice came back for
++// seconds.
 +constexpr size_t kDelayHeadroomSamples = 512;
-+constexpr size_t kExtraFilterBlocks = kDelayHeadroomSamples / 64;
 +
 +webrtc::EchoCanceller3Config WithEarlierEchoRoom(webrtc::EchoCanceller3Config config) {
 +  config.delay.delay_headroom_samples = kDelayHeadroomSamples;
-+  config.filter.refined.length_blocks += kExtraFilterBlocks;
-+  config.filter.coarse.length_blocks += kExtraFilterBlocks;
 +  return config;
 +}
 +
@@ -99,7 +120,7 @@ index 39cf151..62c8964 100644
  class CustomProcessingAdapter : public webrtc::CustomProcessing {
   public:
    CustomProcessingAdapter() = default;
-@@ -84,6 +108,10 @@ RTCAudioProcessingImpl::RTCAudioProcessingImpl(const webrtc::Environment& env) {
+@@ -84,6 +106,10 @@ RTCAudioProcessingImpl::RTCAudioProcessingImpl(const webrtc::Environment& env) {
        render_pre_processor_);
  
    apm_ = webrtc::BuiltinAudioProcessingBuilder()

@@ -42,7 +42,7 @@ new file mode 100644
 index 0000000..fbcfbaa
 --- /dev/null
 +++ b/test/echo_room.test.cc
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,156 @@
 +// WebRTC's audio processing and AEC3 with Fogata's patch 0010
 +// (tools/webrtc/patches/webrtc): recording starting again realigns the echo
 +// controller instead of making it anew, and AEC3 keeps what it knows of the
@@ -148,9 +148,7 @@ index 0000000..fbcfbaa
 +// either a restart for recording (kept) or a new AEC3 (as patch 0009 did).
 +float HeadsetOutputAfter(int seconds, bool restart, int measure) {
 +  webrtc::EchoCanceller3Config config;
-+  config.delay.delay_headroom_samples = 512;
-+  config.filter.refined.length_blocks += 8;
-+  config.filter.coarse.length_blocks += 8;
++  config.delay.delay_headroom_samples = 512;  // As wrapper patch 0019 sets it.
 +  auto env = webrtc::CreateTestEnvironment();
 +  auto aec = std::make_unique<webrtc::EchoCanceller3>(env, config, std::nullopt,
 +                                                      nullptr, kRate, 1, 1);

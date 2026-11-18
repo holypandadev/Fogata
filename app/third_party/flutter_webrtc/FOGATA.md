@@ -477,15 +477,17 @@ reaches the microphone earlier than the echo canceller has it. AEC3 keeps 2 ms o
 that (`delay_headroom_samples`, 32 at 16 kHz): an echo even a few ms earlier was out of
 its linear filter's reach until its delay estimator found it again, a second or more
 later. A lost cycle is about 10 ms at a quantum of 480 or 512 and 21 ms at 1024.
-`tools/webrtc/patches/wrapper/0019` gives it 512 samples (32 ms) and filters 8 blocks
-longer, so that they reach as far after the echo as before; the initial-state filters,
-used for the first 2.5 s of the other side's sound after every reset (a call's start, a
-microphone on again, a delay found again, a stall), keep WebRTC's 12 blocks, which with
-the echo 8 blocks in reach 4 blocks past it (about 11.5 in stock AEC3). After a reset
-AEC3 still aligns from the device's delay with 2 blocks of room until it finds the delay;
-keeping the 8 there too, and having legacy transparent mode judge a filter sane from where
-the room puts the echo, were tried and made a call's start worse (the next section).
-Measured with no patch, 16, 32 and 48 ms of room (turns let through):
+`tools/webrtc/patches/wrapper/0019` gives it 512 samples (32 ms); the linear filters keep
+WebRTC's lengths (13 blocks, 12 in the initial state used for the first 2.5 s of the other
+side's sound after every reset), which with the echo 8 blocks in reach 5 blocks past it
+(4 in the initial state). After a reset AEC3 still aligns from the device's delay with 2
+blocks of room until it finds the delay; keeping the 8 there too, and having legacy
+transparent mode judge a filter sane from where the room puts the echo, were tried and
+made a call's start worse (the next section). As first written, the patch also made the
+filters 8 blocks longer, so that they reached as far after the echo as before; the tables
+below were measured that way, and the cost it had at a call's start, and why it went, are
+at the end of this section. Measured with no patch, 16, 32 and 48 ms of room (turns let
+through):
 
 | | none | 16 ms | 32 ms | 48 ms |
 |---|---|---|---|---|
@@ -518,7 +520,32 @@ library as published and with every echo controller restarted (turns let through
 | quantum free, stalls of 20 and 40 ms | 35 of 137 | 10 of 136 | 9 of 136 |
 | quantum 480, stalls of 40 and 80 ms | 28 of 109 | 4 of 110 | 1 of 110 |
 
-A known cost of the headroom: a far side that repeats itself exactly. The unmute check's
+As it is now (32 ms, WebRTC's filters), in one session of 6 runs each with WebRTC's own
+configuration, the filters 8 blocks longer, and 16 ms with them longer (turns let through):
+
+| | WebRTC's configuration | 32 ms, WebRTC's filters | 32 ms, filters +8 | 16 ms, filters +8 |
+|---|---|---|---|---|
+| quantum free, stalls of 20 and 40 ms | 51 of 111 | 4 of 159 | 7 of 154 | 8 of 151 |
+| quantum 480, stalls of 40 and 80 ms | 39 of 121 | 11 of 148 | 12 of 151 | 21 of 141 |
+
+The longer filters converged more slowly at a call's start. With a synthesised voice on
+the other side that does not repeat (`mic.sh unmute` with `UNMUTE_FAR_FILE`), a call's start
+with speakers sent it back for 2.7 s at the median (0 to 7.6) at -49 dBFS at the loudest,
+against 0 s and -66 dBFS with WebRTC's configuration (10 runs each, one session, p 0.008
+for both). In another session (10 runs each): 32 ms with WebRTC's filters 0 s at the median
+(0 to 1.4) at -54 dBFS, against 0 s (0 to 7.7) at -56 dBFS with the library before the
+echo controller was restarted for an unmute (p 1.0 and 0.34), 0 s at -60 dBFS with WebRTC's
+configuration, and 6.8 s at -46 dBFS with 16 ms and the filters longer (p 0.005 and 0.019);
+the initial-state filters lengthened as well were worse still (5.8 s at -35 dBFS, 6 runs).
+Its unmutes with speakers come back 0.3 s at the median (1.6 s with the library before the
+restart for an unmute, which is what shortens them). After each of one's own words, with a
+steady tone on the other side (`unmute:speakers`), the tone comes back for up to 0.25 s as
+with WebRTC's configuration (-55 against -58 dBFS at the median of each unmute's worst,
+p 0.28; -47 with the filters longer): AEC3 holds its gentler suppression for 200 ms after
+one's own voice (`dominant_nearend_detection.hold_duration`, 50 blocks).
+
+With the filters 8 blocks longer, a known cost was a far side that repeats itself exactly
+(not measured again with WebRTC's filters). The unmute check's
 own far side (`UNMUTE_FAR=words`: the same 2.1 s phrase every 3 s, three words of a sawtooth
 whose pitch falls within each syllable between 160 and 106 Hz) came back at a call's start
 with speakers for 4.8 s at the median (0 to 8.9), at -40 dBFS at the loudest, where AEC3
@@ -526,11 +553,8 @@ with WebRTC's 2 ms took 0.9 s (0 to 3.7) at -52 dBFS (8 runs each, p 0.05; the s
 AEC3 restarted rather than made anew). The logs of the lab show the same delay found in
 the same time and the filters converged as soon; why the signal that repeats comes back
 longer is not known. With speech-like noise that repeats only every 30 s there is no
-difference. With a synthesised voice reading text that does not repeat (8 runs each), a
-call's start came back at -47 dBFS at the loudest (-63 to -45) for 0.9 s (0 to 7.6),
-against -67 dBFS (-72 to -44) and 0 s (0 to 1.6) with WebRTC's 2 ms (p 0.06 and 0.22:
-within the runs' scatter, the loudest by a little); its unmutes with speakers came back
-0.4 s against 1.7 s. A held note, music or a game's sound on the other side is periodic too.
+difference. The synthesised voice's call start, within the runs' scatter in an earlier
+session of 8 runs each (p 0.06 and 0.22), was the longer filters' cost given above.
 
 ## A microphone turned on again while the other side talks (Linux, Windows, macOS)
 
