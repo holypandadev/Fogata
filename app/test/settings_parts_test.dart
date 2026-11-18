@@ -543,6 +543,8 @@ void main() {
     );
     final other = Prefs(huge.path);
     await other.load();
+    // The note of it is written after the load returns: on the disk before the folder goes.
+    await flushAppErrors();
     expect(other.setAsideMs, isNotNull);
     expect(File('${huge.path}/app.json.bad').existsSync(), isTrue);
   });
