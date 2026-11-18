@@ -71,11 +71,18 @@
 // soon the call is back; FOGATA_TEST_REJOIN_TIMES sets how many times; see _rejoin.
 // FOGATA_TEST_OUTPUT_SWAP=<seconds>, with FOGATA_TEST_MEASURE, has that copy choose another
 // output that many seconds into the measure, through the call's menu's own path, and its
-// first one again as long after; FOGATA_TEST_OUTPUT_SWAP_TO names a part of the other's
-// name (else the first listed after the system's default and the one in use). Each line
-// of the measure says which output played, and the log sums what this copy sent with
-// each, whether its microphone stayed on, what it was told and, on macOS, the voice
-// engine's own lines; see _OutputSwap.
+// first one again as long after, turning its microphone off for 4 s and on again twice
+// while the other plays (60 s each, with FOGATA_TEST_MEASURE at 186 or more, leaves
+// enough readings to judge after each change); FOGATA_TEST_OUTPUT_SWAP_TO names a part
+// of the other's name (else the first listed after the system's default and the one in
+// use). Each line of the measure says which output played, and the log gives what this
+// copy sent and its microphone read in each stretch, whether its microphone stayed on,
+// what it was told and, on macOS, the voice engine's own lines; the copy fails when its
+// microphone was lost or recorded while off, or the engine did not use the devices chosen
+// when it could (output_swap_verdict.dart). FOGATA_TEST_REFUSE (macOS) has the plugin
+// refuse for the test: =pair, every pair of devices; =unmute, the pair at the second
+// unmute; =start, the engine's start with the pair at the second unmute; and the copy
+// fails unless the fall back happened. See _OutputSwap.
 
 import 'dart:async';
 import 'dart:convert';
@@ -121,6 +128,8 @@ import 'package:fogata/src/screens/shell.dart';
 import 'package:fogata/src/widgets.dart';
 import 'package:fogata/src/window.dart' show quitApplication;
 import 'package:integration_test/integration_test.dart';
+
+import 'output_swap_verdict.dart';
 
 final _env = Platform.environment;
 
@@ -685,6 +694,21 @@ Future<void> _call(WidgetTester tester) async {
     await _measureCall(tester, state, measure);
     await _say(state, 'done');
     await _hear(tester, state, ['done'], seconds: 300);
+    if (_env['FOGATA_TEST_OUTPUT_SWAP'] != null) {
+      // Once the call has ended, nothing may record.
+      await state.leaveRoom();
+      await Future<void>.delayed(const Duration(seconds: 3));
+      const when = 'after the call ended';
+      await _checkNotRecording(when);
+      if (_swapRecordingOff.contains(when)) {
+        _swapFailed = [
+          ?_swapFailed,
+          'still recording with the microphone off, $when',
+        ].join('; ');
+      }
+    }
+    // Judged once the others are done too, so that they end as well.
+    if (_swapFailed case final why?) throw StateError('output swap: $why');
     return;
   }
   final micCase = _env['FOGATA_TEST_MIC_CASE'];
@@ -4143,10 +4167,44 @@ Future<void> _measureCall(
 }
 
 /// FOGATA_TEST_OUTPUT_SWAP for [_measureCall]: chooses another output in the middle of the
-/// measure and the first one again, as the call's menu does ([AppState.setAudioOutput]),
-/// and says what this copy sent with each: a voice engine that loses the microphone when
-/// the output changes sends no voice after it (`voiceOut` 0) while the call shows the
-/// microphone on, until the call notices (about 8 s) and turns it off.
+/// measure and the first one again, as the call's menu does ([AppState.setAudioOutput]);
+/// while the other plays, turns the microphone off for 4 s and on again twice
+/// ([AppState.setMic]), at a quarter and at 60 % of its time. It says what this copy sent
+/// and what its microphone read with each: a voice engine that loses the microphone when
+/// the output changes, or when the microphone comes back, sends no voice after it, or
+/// reads no sound, while the call shows the microphone on. The copy fails then
+/// ([outputSwapVerdict], kept in [_swapFailed] until the others are done).
+String? _swapFailed;
+
+/// When the voice engine was found recording with the microphone off.
+final _swapRecordingOff = <String>[];
+
+/// The voice engine's facts (macOS: flutter_webrtc's read-only method
+/// `fogataAudioOutput`), as the application reads them; empty elsewhere.
+Future<Map<Object?, Object?>> _engineFacts() async {
+  if (!Platform.isMacOS) return const {};
+  final facts = await WebRTC.invokeMethod<Object?, dynamic>(
+    'fogataAudioOutput',
+  );
+  return facts is Map ? facts : const {};
+}
+
+/// Notes in [_swapRecordingOff] when the voice engine records now ([_engineFacts]),
+/// saying [when].
+Future<void> _checkNotRecording(String when) async {
+  if (!Platform.isMacOS) return;
+  try {
+    final recording = (await _engineFacts())['recording'];
+    _log(
+      'output swap: the voice engine '
+      '${recording == true ? 'records' : 'does not record'} $when',
+    );
+    if (recording == true) _swapRecordingOff.add(when);
+  } catch (e) {
+    _log('output swap: whether the voice engine records could not be read: $e');
+  }
+}
+
 class _OutputSwap {
   _OutputSwap._(this.state, this.start, this.after, this.first, this.other);
 
@@ -4162,15 +4220,33 @@ class _OutputSwap {
   /// Which output plays: 'first', 'other', then 'first again'.
   String now = 'first';
 
-  /// What this copy sent with each, by output (voice packets, readings), and what it was
-  /// told.
-  final _sent = <String, double>{};
-  final _readings = <String, int>{};
+  /// When, into the other output's time, the microphone goes off, for how long.
+  static const _offFor = Duration(seconds: 4);
+  List<Duration> get _offsAt => [after * 0.25, after * 0.6];
+  int _offs = 0;
+  bool _micOff = false;
+
+  /// The stretches between changes, with their readings; the reading being taken; the
+  /// seconds of sound read so far (to read each reading's share); what it was told.
+  final _segments = <SwapSegment>[
+    (name: 'first', micOn: true, readings: <SwapReading>[]),
+  ];
+  double? _voice;
+  double? _readSoFar;
   final _told = <String>{};
 
   static Future<_OutputSwap?> from(AppState state, DateTime start) async {
     final seconds = int.tryParse(_env['FOGATA_TEST_OUTPUT_SWAP'] ?? '');
     if (seconds == null) return null;
+    if (seconds < 56) {
+      // Two stretches of the microphone off in the other output's time, each followed by
+      // enough readings to judge the level past those excused (swapSilentLevels), need
+      // about that long.
+      throw StateError(
+        'FOGATA_TEST_OUTPUT_SWAP=$seconds is too short: use 60 (and FOGATA_TEST_MEASURE '
+        'at least 3 times that, plus 6)',
+      );
+    }
     final outputs = (await navigator.mediaDevices.enumerateDevices())
         .where((d) => d.kind == 'audiooutput')
         .toList();
@@ -4194,36 +4270,290 @@ class _OutputSwap {
     _log(
       'output swap: from ${first ?? 'the default'} to ${other.label} after $seconds s',
     );
-    return _OutputSwap._(
+    final swap = _OutputSwap._(
       state,
       start,
       Duration(seconds: seconds),
       first,
       other,
     );
+    await swap._micRead();
+    swap._readAt = DateTime.now();
+    // FOGATA_TEST_REFUSE=pair: no pair can be put together, so the engine follows the
+    // system's devices whatever is chosen (the fall back for an output at another rate).
+    if (_env['FOGATA_TEST_REFUSE'] == 'pair') await _testRefuse(1);
+    return swap;
   }
 
-  /// Chooses the other output, and then the first again, when their time comes.
+  /// Has the plugin take pairs as refused, for this test only (flutter_webrtc's
+  /// `fogataTestRefuse`, called from nowhere else).
+  static Future<void> _testRefuse(int mode) async {
+    if (!Platform.isMacOS) return;
+    _log('output swap: the plugin told to refuse ($mode), for the test');
+    await WebRTC.invokeMethod<void, dynamic>('fogataTestRefuse', {
+      'mode': mode,
+    });
+  }
+
+  /// The seconds of sound the microphone read so far and its level now, the loudest of
+  /// what the connections say (null when none says).
+  Future<(double?, double?)> _micRead() async {
+    double? seconds, level;
+    for (final peer in state.callState.call?.peers.values.toList() ?? []) {
+      try {
+        for (final r
+            in await peer.connection?.getStats() ?? const <StatsReport>[]) {
+          if (r.type != 'media-source' || r.values['kind'] != 'audio') continue;
+          final s = r.values['totalSamplesDuration'];
+          final l = r.values['audioLevel'];
+          if (s is num) seconds = math.max(seconds ?? 0, s.toDouble());
+          if (l is num) level = math.max(level ?? 0, l.toDouble());
+        }
+      } catch (_) {}
+    }
+    final read = seconds;
+    _readSoFar = read ?? _readSoFar;
+    return (read, level);
+  }
+
+  /// The reading taken goes to the stretch it was taken in, with what the microphone read
+  /// meanwhile.
+  Future<void> _closeReading() async {
+    final before = _readSoFar;
+    final from = _readAt;
+    final (seconds, level) = await _micRead();
+    final at = _readAt = DateTime.now();
+    final voice = _voice;
+    if (voice == null) return;
+    _voice = null;
+    final read = seconds != null && before != null ? seconds - before : null;
+    final took = from == null
+        ? null
+        : at.difference(from).inMilliseconds / 1000;
+    _segments.last.readings.add((
+      voice: voice,
+      read: read,
+      level: level,
+      took: took,
+    ));
+    await _checkInUse();
+  }
+
+  /// The toasts already looked at.
+  final _toastsSeen = <String>{};
+
+  /// At each reading past the two after a change, with the microphone on: while the facts
+  /// say the output chosen and the microphone can be put together, the engine must play
+  /// on the output chosen, and say nothing of an output it cannot use.
+  Future<void> _checkInUse() async {
+    final segment = _segments.last;
+    final chosen = _chosen;
+    final toasts = state.toasts.list.map((t) => t.text).toList();
+    final fresh = toasts.where(_toastsSeen.add).toList();
+    _outputNoticeSeen |= toasts.any(_outputNotice);
+    // =pair: the engine is never given the output chosen.
+    if (Platform.isMacOS &&
+        chosen != null &&
+        _env['FOGATA_TEST_REFUSE'] == 'pair') {
+      try {
+        final facts = await _engineFacts();
+        if (facts['inUse'] == chosen) {
+          _notApplied.add(
+            'the output chosen given to the engine though no pair could be put together',
+          );
+        }
+      } catch (_) {}
+    }
+    if (!Platform.isMacOS ||
+        chosen == null ||
+        !segment.micOn ||
+        segment.readings.length <=
+            (segment.name.contains(swapRefusedForTest)
+                ? swapExcusedRefused
+                : swapExcused)) {
+      return;
+    }
+    try {
+      final facts = await _engineFacts();
+      if (facts['combinable'] != true) return;
+      if (facts['inUse'] != chosen) {
+        _notApplied.add(
+          'playing on ${facts['inUseName']} with ${segment.name} although it could play '
+          'on the output chosen',
+        );
+      }
+      for (final text in fresh) {
+        if (_outputNotice(text)) {
+          _notApplied.add(
+            'told "$text" although the output chosen could be used',
+          );
+        }
+      }
+    } catch (e) {
+      _log('output swap: the facts could not be read: $e');
+    }
+  }
+
+  /// Whether a notice of an output chosen not used was given.
+  bool _outputNoticeSeen = false;
+
+  /// At the end of the other output's time, with FOGATA_TEST_REFUSE: the fall back must
+  /// have happened. =unmute and =start: the facts say the pair cannot be put together any
+  /// more, the engine follows the system's devices and records, and the call started the
+  /// recording again. =pair: the notice was given.
+  Future<void> _checkFallBack() async {
+    final how = _env['FOGATA_TEST_REFUSE'];
+    if (!Platform.isMacOS || how == null) return;
+    final facts = await _engineFacts();
+    final recoveries = state.callState.call?.voiceRecoveries ?? 0;
+    _log(
+      'output swap, fall back ($how): can be put together ${facts['combinable']}, playing '
+      'on ${facts['inUseName']}, recording ${facts['recording']}, recording started again '
+      '$recoveries times, an output notice ${_outputNoticeSeen ? 'given' : 'not given'}',
+    );
+    if (how == 'unmute' || how == 'start') {
+      if (facts['combinable'] != false) {
+        _notApplied.add(
+          'the pair refused for the test is not taken as refused',
+        );
+      }
+      if (facts['inUse'] == _chosen) {
+        _notApplied.add(
+          'the engine still plays on the output chosen after the refusal',
+        );
+      }
+      if (facts['recording'] != true) {
+        _notApplied.add('nothing records after the refusal');
+      }
+      if (recoveries < 1) {
+        _notApplied.add(
+          'the call did not start the recording again after the refusal',
+        );
+      }
+    } else if (how == 'pair' && !_outputNoticeSeen) {
+      _notApplied.add('no notice that the output chosen is not used');
+    }
+  }
+
+  /// Whether [text] tells of an output chosen that is not used.
+  static bool _outputNotice(String text) {
+    String start(String Function(String, String) say) =>
+        say('\u0000', '').split('\u0000').first;
+    return [
+      start(l10n.callOutputUnusable),
+      start(l10n.callOutputNotWithMicrophone),
+    ].any((s) => s.isNotEmpty && text.startsWith(s));
+  }
+
+  /// When the microphone's reading was last taken.
+  DateTime? _readAt;
+
+  void _segment(String name, {required bool micOn}) {
+    _segments.add((name: name, micOn: micOn, readings: <SwapReading>[]));
+  }
+
+  /// Chooses the other output, turns the microphone off and on while it plays, and
+  /// chooses the first again, when their time comes.
   Future<void> step(Duration since) async {
+    await _closeReading();
+    await _checkApplied();
     if (now == 'first' && since >= after) {
       await _choose('other', other.deviceId);
     } else if (now == 'other' && since >= after * 2) {
+      if (_micOff) await _setMic(true);
+      await _checkFallBack();
       await _choose('first again', first);
+    } else if (now == 'other') {
+      final into = since - after;
+      if (!_micOff && _offs < _offsAt.length && into >= _offsAt[_offs]) {
+        await _setMic(false);
+      } else if (_micOff && into >= _offsAt[_offs - 1] + _offFor) {
+        await _setMic(true);
+      }
     }
     _told.addAll(state.toasts.list.map((t) => t.text));
+  }
+
+  Future<void> _setMic(bool on) async {
+    // At the end of a stretch with the microphone off, the voice engine must not record.
+    if (on) {
+      await _checkNotRecording('at the end of a stretch with it off ($_offs)');
+    }
+    // FOGATA_TEST_REFUSE=unmute: the engine's acceptance of the pair at the second unmute
+    // is taken as a refusal, once, so that the fall back (a new engine following the
+    // system's devices, the recording started again by the call) is seen too.
+    final how = _env['FOGATA_TEST_REFUSE'];
+    final refuse = on && _offs == 2 && (how == 'unmute' || how == 'start');
+    // =unmute: the pair refused in either order; =start: the engine's start with the pair
+    // failing, the formats read.
+    if (refuse) await _testRefuse(how == 'unmute' ? 2 : 3);
+    _log('output swap: ${_state()}; microphone ${on ? 'on again' : 'off'}');
+    await state.setMic(on);
+    _micOff = !on;
+    if (!on) _offs++;
+    _segment(
+      on
+          ? 'the other output, the microphone on again ($_offs)'
+                '${refuse ? ', $swapRefusedForTest' : ''}'
+          : 'microphone off',
+      micOn: on,
+    );
   }
 
   Future<void> _choose(String which, String? id) async {
     _log('output swap: ${_state()}; choosing ${id ?? 'the default'} ($which)');
     await state.setAudioOutput(id);
     now = which;
+    _chosen = id;
+    _chosenAt = DateTime.now();
+    _segment('the $which output', micOn: true);
+  }
+
+  /// The output last chosen here (null: the system's default) and when, until the
+  /// devices in use have been looked at, 6 s after ([_checkApplied]).
+  String? _chosen;
+  DateTime? _chosenAt;
+
+  /// When the devices in use were not those chosen.
+  final _notApplied = <String>[];
+
+  /// 6 s after a choice, the voice engine must play on the output chosen when the facts
+  /// the application reads say it can be put together with the microphone.
+  Future<void> _checkApplied() async {
+    final at = _chosenAt;
+    if (!Platform.isMacOS ||
+        at == null ||
+        DateTime.now().difference(at) < const Duration(seconds: 6)) {
+      return;
+    }
+    _chosenAt = null;
+    try {
+      final facts = await _engineFacts();
+      final output = facts['inUse'];
+      _log(
+        'output swap: 6 s after choosing ${_chosen ?? 'the default'}, playing on $output '
+        '(${facts['inUseName']}), recording from ${facts['inputInUse']} '
+        '(${facts['inputInUseName']}); can be put together: ${facts['combinable']}, '
+        'reason ${facts['reason']}',
+      );
+      // The output chosen, unless the facts say it cannot be put together with the
+      // microphone (the engine then follows the system's devices). The system's default
+      // chosen, and the microphone (none is chosen here), follow the system.
+      final chosen = _chosen;
+      if (chosen != null && facts['combinable'] != false && output != chosen) {
+        _notApplied.add(
+          'playing on ${facts['inUseName']}, not the output chosen',
+        );
+      }
+    } catch (e) {
+      _notApplied.add('the devices in use could not be read: $e');
+    }
   }
 
   /// Takes one connection's reading of the measure.
   void take(Map<String, Object?> record) {
     final out = record['voiceOut'];
-    _sent[now] = (_sent[now] ?? 0) + (out is num ? out.toDouble() : 0);
-    _readings[now] = (_readings[now] ?? 0) + 1;
+    _voice = (_voice ?? 0) + (out is num ? out.toDouble() : 0);
   }
 
   String _state() {
@@ -4232,15 +4562,38 @@ class _OutputSwap {
   }
 
   Future<void> end() async {
+    await _closeReading();
+    if (_micOff) await _setMic(true);
     if (now == 'other') await _choose('first again', first);
     _told.addAll(state.toasts.list.map((t) => t.text));
-    for (final which in ['first', 'other', 'first again']) {
+    String n(double? v, int digits) => v?.toStringAsFixed(digits) ?? '?';
+    for (final segment in _segments) {
+      final r = segment.readings;
       _log(
-        'output swap: with the $which output, voice packets sent '
-        '${_sent[which] ?? 0} in ${_readings[which] ?? 0} readings',
+        'output swap: ${segment.name}${segment.micOn ? '' : ' (not judged)'}: '
+        '${r.length} readings, voice packets '
+        '${r.map((x) => n(x.voice, 0)).join(' ')}, seconds read '
+        '${r.map((x) => n(x.read, 1)).join(' ')}, level '
+        '${r.map((x) => n(x.level, 3)).join(' ')}, seconds spanned '
+        '${r.map((x) => n(x.took, 1)).join(' ')}',
       );
     }
     _log('output swap at the end: ${_state()}; told $_told');
+    _swapFailed = outputSwapVerdict(
+      recordingOff: _swapRecordingOff,
+      notApplied: _notApplied,
+      segments: _segments,
+      micOnAfter: state.callState.call?.mic ?? false,
+      told: _told,
+      micLost: [
+        l10n.callMicSilent(Platform.operatingSystem),
+        l10n.callMicFailed(Platform.operatingSystem),
+        l10n.callNoMicrophone,
+      ],
+    );
+    _log(
+      'output swap: ${_swapFailed == null ? 'passed' : 'failed: $_swapFailed'}',
+    );
     if (!Platform.isMacOS) return;
     // The voice engine's own lines ("Fogata: ..."), from the system's log.
     final since = start.subtract(const Duration(seconds: 5));
