@@ -694,7 +694,17 @@ Future<void> _call(WidgetTester tester) async {
     await _measureCall(tester, state, measure);
     await _say(state, 'done');
     await _hear(tester, state, ['done'], seconds: 300);
+    _mark('heard-done');
     if (_env['FOGATA_TEST_OUTPUT_SWAP'] != null) {
+      // Not before the others heard this copy's "done": the line and the leave go to them
+      // apart, and a line that comes after its sender left the room may never show.
+      await _until(
+        tester,
+        'everyone heard done',
+        () =>
+            others.every((r) => File('$_dir/mark-$r-heard-done').existsSync()),
+        seconds: 300,
+      );
       // Once the call has ended, nothing may record.
       await state.leaveRoom();
       await Future<void>.delayed(const Duration(seconds: 3));
