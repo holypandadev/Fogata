@@ -4426,10 +4426,10 @@ class _OutputSwap {
         _notApplied.add('nothing records after the refusal');
       }
       // A restart by the call is wanted only where the recording was lost
-      // ([swapRecordingLost]).
+      // ([swapRecordingLost]): always after a failed start.
       final lost = _segments
           .where((s) => s.name.contains(swapRefusedForTest))
-          .any(swapRecordingLost);
+          .any((s) => swapRecordingLost(s, startFailed: how == 'start'));
       if (lost && recoveries < 1) {
         _notApplied.add(
           'the call did not start the recording again after the refusal',

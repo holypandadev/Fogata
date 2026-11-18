@@ -139,27 +139,34 @@ void main() {
   test(
     'a restart of the recording is asked only where the refusal lost it',
     () {
-      // The numbers of two device runs: with the unmute refused the recording went on (the
-      // first reading after any unmute has no packets), with the start refused it was lost.
       const name =
           'the other output, the microphone on again (2), $swapRefusedForTest';
+      // The numbers of a device run with the unmute refused: the recording went on (the
+      // first reading after any unmute has no packets).
+      const voice = <double>[0, 88, 99, 77, 99, 100, 100, 100, 100, 102];
+      const read = <double?>[1.8, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.1, 2.0];
+      bool unmute(List<double?> read) => swapRecordingLost(
+        segment(name, voice, read: read),
+        startFailed: false,
+      );
+      expect(unmute(read), isFalse);
+      // A slow change to the system's devices, within the allowance: no restart asked.
+      expect(unmute([...read]..[2] = 0.0), isFalse);
+      // Nothing read past the allowance: one asked.
+      expect(unmute([...read]..[swapExcusedRefused] = 0.0), isTrue);
+      // A failed start always loses the recording, whatever was read.
       expect(
-        swapRecordingLost(
-          segment(
-            name,
-            [0, 88, 99, 77, 99, 100, 100, 100, 100, 102],
-            read: [1.8, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.1, 2.0],
-          ),
-        ),
-        isFalse,
+        swapRecordingLost(segment(name, voice, read: read), startFailed: true),
+        isTrue,
       );
       expect(
         swapRecordingLost(
           segment(
             name,
             [0, 0, 0, 0, 73, 86, 100, 101, 101, 100],
-            read: [0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+            read: [0.1, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
           ),
+          startFailed: true,
         ),
         isTrue,
       );
