@@ -153,12 +153,23 @@ fn files_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn shows(dir: &Path, needle: &[u8]) -> Option<PathBuf> {
-    files_under(dir).into_iter().find(|path| {
-        std::fs::read(path)
-            .unwrap()
-            .windows(needle.len())
-            .any(|w| w == needle)
-    })
+    // The running copy writes a file beside its place and renames it there, so one listed
+    // a moment ago may be gone when it is read: the folder is then looked through again.
+    'again: for _ in 0..20 {
+        for path in files_under(dir) {
+            match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if bytes.windows(needle.len()).any(|w| w == needle) {
+                        return Some(path);
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue 'again,
+                Err(e) => panic!("{}: {e}", path.display()),
+            }
+        }
+        return None;
+    }
+    panic!("the files under {} kept changing", dir.display())
 }
 
 #[tokio::test(flavor = "multi_thread")]
