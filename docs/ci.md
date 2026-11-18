@@ -195,7 +195,9 @@ and runs there, in this order:
    (`app/third_party/flutter_webrtc/common/cpp/test/run_tests.sh`): the video renderer's,
    built with ThreadSanitizer against the libwebrtc the build unpacked, and the noise
    suppression table's;
-4. `tools/check.sh`, strict: formatting, clippy with warnings as errors, every test (the video
+4. `tools/check.sh`, strict: formatting, clippy with warnings as errors, every test (with
+   cargo-nextest, several test binaries at a time, those that start devices on the network
+   at most two at once, `.config/nextest.toml`; the doc tests with `cargo test --doc`; the video
    players' check of a file's first bytes among them, on Linux built a second time with
    AddressSanitizer and UndefinedBehaviorSanitizer like the Linux player's other C++ tests,
    and on macOS the tests of its video loader, `app/packages/fogata_video/macos/test`), `cargo

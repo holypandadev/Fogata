@@ -130,7 +130,7 @@ jobs:
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@0.20.2,flutter_rust_bridge_codegen@2.13.0
+          tool: cargo-deny@0.20.2,cargo-nextest@0.9.151,flutter_rust_bridge_codegen@2.13.0
 
       # The crates, and the builds of the dependencies (never of the workspace's own crates,
       # which rust-cache leaves out) in the target folder ci.sh keeps, a cache of this job's
@@ -264,7 +264,7 @@ jobs:
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@0.20.2,flutter_rust_bridge_codegen@2.13.0
+          tool: cargo-deny@0.20.2,cargo-nextest@0.9.151,flutter_rust_bridge_codegen@2.13.0
 
       # Built here: the published binary of cargo-fuzz is built for musl and builds the fuzz
       # targets for musl, where the sanitizers do not work. Built once per version and kept in
@@ -388,7 +388,7 @@ jobs:
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2,cargo-nextest@0.9.151
 
       # The release build is universal: the Rust library is built for both Mac targets.
       - name: Install the Rust of rust-toolchain.toml
@@ -464,7 +464,7 @@ jobs:
 
       - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-deny@0.20.2
+          tool: cargo-deny@0.20.2,cargo-nextest@0.9.151
 
       - name: Install the Rust of rust-toolchain.toml
         shell: pwsh

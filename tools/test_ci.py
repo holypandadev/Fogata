@@ -10,6 +10,7 @@ flutter, so nothing is built.
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -97,6 +98,7 @@ class AdvisoryDatabase(Sandbox):
     def check(self):
         # cargo stops the script at its first call: what matters is whether it got there.
         self.stand_in("cargo", "exit 7")
+        self.stand_in("cargo-nextest", "exit 0")
         # The Rust rust-toolchain.toml names, without rustup (HOME is the test's).
         self.stand_in("rustc", 'echo "rustc $(sed -n \'s/^channel = "\\(.*\\)"$/\\1/p\' '
                       'rust-toolchain.toml) (test)"')
@@ -132,6 +134,7 @@ class FuzzPatches(Sandbox):
 
     def check(self, fuzz):
         self.stand_in("cargo", "exit 7")
+        self.stand_in("cargo-nextest", "exit 0")
         self.stand_in("rustc", 'echo "rustc $(sed -n \'s/^channel = "\\(.*\\)"$/\\1/p\' '
                       'rust-toolchain.toml) (test)"')
         repo = self.repo({
@@ -157,12 +160,49 @@ class FuzzPatches(Sandbox):
         self.assertIn("cargo fmt", self.calls.read_text())
 
 
+class Nextest(Sandbox):
+    """tools/check.sh runs the Rust tests with the cargo-nextest CI installs."""
+
+    def version(self):
+        text = (TOOLS.parent / ".config/nextest.toml").read_text()
+        return re.search(r'(?m)^nextest-version = \{ required = "(.*)" \}$', text).group(1)
+
+    def test_without_nextest_it_says_how_to_install_it_before_cargo_runs(self):
+        self.stand_in("cargo", "exit 7")
+        self.stand_in("rustc", 'echo "rustc $(sed -n \'s/^channel = "\\(.*\\)"$/\\1/p\' '
+                      'rust-toolchain.toml) (test)"')
+        repo = self.repo({
+            "tools/check.sh": (TOOLS / "check.sh").read_text(),
+            "rust-toolchain.toml": (TOOLS.parent / "rust-toolchain.toml").read_text(),
+            ".config/nextest.toml": (TOOLS.parent / ".config/nextest.toml").read_text(),
+            "Cargo.toml": PATCHES, "fuzz/Cargo.toml": PATCHES,
+        })
+        # The PATH without any folder that holds a real cargo-nextest.
+        path = ":".join([str(self.bin)] + [
+            folder for folder in os.environ["PATH"].split(":")
+            if folder and not (pathlib.Path(folder) / "cargo-nextest").exists()])
+        result = self.run_in(repo, "tools/check.sh", "--no-advisories", "--no-codegen",
+                             env={"PATH": path})
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn(f"cargo install cargo-nextest --version {self.version()} --locked",
+                      result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_ci_installs_the_version_the_configuration_requires(self):
+        text = (TOOLS.parent / ".github/workflows/ci.yml").read_text()
+        for job in ("linux-checks", "macos", "windows"):
+            with self.subTest(job=job):
+                body = re.search(rf"(?ms)^  {job}:\n(.*?)(?=^  \S|\Z)", text).group(1)
+                self.assertRegex(body, rf"tool: .*\bcargo-nextest@{re.escape(self.version())}\b")
+
+
 class UnsafeCode(Sandbox):
     """tools/check.sh pins where unsafe code may be, before clippy runs."""
 
     def check(self, lib, other=""):
         # cargo fmt passes; the first thing after the check of unsafe code stops the script.
         self.stand_in("cargo", 'if [[ $1 == fmt ]]; then exit 0; fi; exit 7')
+        self.stand_in("cargo-nextest", "exit 0")
         self.stand_in("rustc", 'echo "rustc $(sed -n \'s/^channel = "\\(.*\\)"$/\\1/p\' '
                       'rust-toolchain.toml) (test)"')
         files = {

@@ -1,0 +1,26 @@
+# How cargo-nextest runs the Rust tests (tools/check.sh, tools/ci-leg.ps1): each test in a
+# process of its own, several test binaries at once, as many tests at a time as the computer
+# has CPUs. The doc tests are not nextest's: check.sh and ci-leg.ps1 run them with
+# `cargo test --doc`.
+
+# The version CI installs (.github/workflows/ci.yml): an older one stops with this version in
+# its message, and check.sh names it in the command that installs it.
+nextest-version = { required = "0.9.151" }
+
+# The tests that start devices talking over this computer's network, at most two at a time on
+# the whole computer. They ran one at a time before (one test binary after another, each such
+# binary's tests one at a time behind its ONE_AT_A_TIME lock, which only holds within one
+# process): several at once on a busy computer leave the protocol's timers too little room.
+[test-groups]
+network = { max-threads = 2 }
+
+[profile.default]
+# Every test runs, also after one failed: one run says all that fails.
+fail-fast = false
+
+# fogata-core's and fogata-net's integration tests (but the fixtures of fogata-net's golden,
+# which start nothing), fogata-media's, the bridge's run through the screens' calls
+# (fogata-ffi's smoke), and fogata-core's unit tests of shared files, which start devices too.
+[[profile.default.overrides]]
+filter = "(kind(test) & (package(fogata-core) | package(fogata-net) | package(fogata-media)) & !(package(fogata-net) & binary(golden))) | (package(fogata-ffi) & kind(test) & binary(smoke)) | (package(fogata-core) & kind(lib) & test(/^shares::tests::/))"
+test-group = "network"

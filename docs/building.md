@@ -66,7 +66,9 @@ same text and title bar, and give the same result, on Linux, macOS and Windows.
 tools/check.sh
 ```
 
-runs before every commit: formatting, lints (warnings are errors), tests, `cargo-deny` (the
+runs before every commit: formatting, lints (warnings are errors), tests (with cargo-nextest,
+the version `.config/nextest.toml` requires:
+`cargo install cargo-nextest --version 0.9.151 --locked`), `cargo-deny` (the
 licence policy, crates from crates.io only, no wildcard versions, and known vulnerabilities
 from the RustSec database, fetched by hand with `cargo deny fetch db` so the checks stay
 offline; it fails when the database is missing or more than 14 days old, unless

@@ -3,10 +3,12 @@
 #
 #     tools/check.sh [--no-advisories] [--no-notices] [--no-codegen]
 #
-# Formatting, clippy with warnings as errors, every test, licences, bans and sources of the
-# crates, known vulnerabilities against the RustSec database on this computer (fetched by
-# hand with `cargo deny fetch db`, never online here, so the checks run offline; a database
-# whose last advisory is more than 14 days old fails, since it misses what came after), the
+# Formatting, clippy with warnings as errors, every test (with cargo-nextest, at the version
+# .config/nextest.toml requires, and the doc tests with cargo test), licences, bans and
+# sources of the crates, known vulnerabilities against the RustSec database on this computer
+# (fetched by hand with `cargo deny fetch db`, never online here, so the checks run offline;
+# a database whose last advisory is more than 14 days old fails, since it misses what came
+# after), the
 # tests of the release scripts and of these checks, of the commit marker and of the CMake
 # file that bundles the library, of the copy of libwebrtc's notices, the Linux desktop
 # entry, the Linux player's tone mapping and row packing (on Linux also built with ASan and
@@ -62,6 +64,13 @@ fi
 if [[ $codegen == 1 ]] && ! command -v flutter_rust_bridge_codegen > /dev/null; then
     echo "flutter_rust_bridge_codegen is not on the PATH: install it, or skip the check of the" \
         "bridge code with --no-codegen" >&2
+    exit 1
+fi
+# The Rust tests run with cargo-nextest (.config/nextest.toml), at the version CI installs.
+if ! command -v cargo-nextest > /dev/null; then
+    nextest=$(sed -n 's/^nextest-version = { required = "\(.*\)" }$/\1/p' .config/nextest.toml)
+    echo "cargo-nextest is not on the PATH: install the version CI uses with" \
+        "'cargo install cargo-nextest --version ${nextest:?} --locked'" >&2
     exit 1
 fi
 
@@ -144,17 +153,20 @@ cargo clippy --workspace --all-targets -- -D warnings
 # of the program that ships, and the core's lab code it turns on) is linted and tested too.
 cargo clippy -p fogata --all-targets --features lab -- -D warnings
 cargo clippy -p fogata-core --all-targets --features lab -- -D warnings
-cargo test --workspace --quiet
-cargo test -p fogata --features lab --quiet
+# Several test binaries at a time, each test in a process of its own (.config/nextest.toml
+# says which tests take turns); the doc tests, which nextest does not run, with cargo test.
+cargo nextest run --workspace --cargo-quiet
+cargo test --workspace --doc --quiet
+cargo nextest run -p fogata --features lab --cargo-quiet
 # The vendored libp2p-mdns, libp2p-identify, libp2p-quic, turn and spake2 are no workspace
 # members: their own tests run here. The vendored libp2p-stream has none of its own; fogata-net
 # tests its change (tests/bursts.rs). The vendored libp2p-kad's own tests need the rust-libp2p
 # tree (vendor/libp2p-kad/FOGATA.md); fogata-net tests its change (tests/lookups.rs).
-cargo test -p libp2p-mdns --lib --quiet
-cargo test -p libp2p-identify --lib --quiet
-cargo test -p libp2p-quic --lib --quiet
-cargo test -p turn --lib --quiet
-cargo test -p spake2 --lib --quiet
+cargo nextest run -p libp2p-mdns --lib --cargo-quiet
+cargo nextest run -p libp2p-identify --lib --cargo-quiet
+cargo nextest run -p libp2p-quic --lib --cargo-quiet
+cargo nextest run -p turn --lib --cargo-quiet
+cargo nextest run -p spake2 --lib --cargo-quiet
 # Warnings are printed (two versions of one crate, an allowance no crate needs), not hidden;
 # only errors fail. One line per crate, without the tree of what pulls it in.
 cargo deny --offline check --hide-inclusion-graph licenses bans sources

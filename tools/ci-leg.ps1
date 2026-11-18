@@ -8,8 +8,8 @@
 # tools/ci-leg.sh, the same for macOS). It refuses a clone not at that commit, or with any
 # change to a tracked file or any new file git does not ignore. Then it runs what tools/check.sh
 # runs on the other systems and can run here: formatting, clippy with warnings as errors and
-# every test of the workspace (the command line program also with its lab feature, which the
-# tests of the release commands need), the tests of the vendored crates, cargo deny (licences,
+# every test of the workspace (with cargo-nextest; the command line program also with its lab
+# feature, which the tests of the release commands need), the tests of the vendored crates, cargo deny (licences,
 # bans, sources), THIRD-PARTY-NOTICES up to date, the tests of the release scripts, then
 # `dart format` (the Dart code must be formatted already), `flutter analyze` and `flutter test`, and the smoke test (tools/smoke-windows.ps1: two copies
 # through the main things a person does, the screen shared through Windows' own capture; for a
@@ -117,13 +117,25 @@ Step 'clippy' {
   Invoke-Native 'cargo' @('clippy', '--workspace', '--all-targets', '--', '-D', 'warnings')
   Invoke-Native 'cargo' @('clippy', '-p', 'fogata', '--all-targets', '--features', 'lab', '--', '-D', 'warnings')
 }
+# The tests run as tools/check.sh runs them: with cargo-nextest (.config/nextest.toml), the doc
+# tests with cargo test.
+function Assert-Nextest {
+  if (-not (Get-Command 'cargo-nextest' -ErrorAction SilentlyContinue)) {
+    $version = [regex]::Match((Get-Content -Raw '.config/nextest.toml'),
+      '(?m)^nextest-version = \{ required = "(.*)" \}').Groups[1].Value
+    throw "cargo-nextest is not on the PATH: install the version CI uses with 'cargo install cargo-nextest --version $version --locked'"
+  }
+}
 Step 'test' {
-  Invoke-Native 'cargo' @('test', '--workspace', '--quiet')
-  Invoke-Native 'cargo' @('test', '-p', 'fogata', '--features', 'lab', '--quiet')
+  Assert-Nextest
+  Invoke-Native 'cargo' @('nextest', 'run', '--workspace', '--cargo-quiet')
+  Invoke-Native 'cargo' @('test', '--workspace', '--doc', '--quiet')
+  Invoke-Native 'cargo' @('nextest', 'run', '-p', 'fogata', '--features', 'lab', '--cargo-quiet')
 }
 Step 'vendor-tests' {
+  Assert-Nextest
   foreach ($crate in @('libp2p-mdns', 'libp2p-quic', 'turn', 'spake2')) {
-    Invoke-Native 'cargo' @('test', '-p', $crate, '--lib', '--quiet')
+    Invoke-Native 'cargo' @('nextest', 'run', '-p', $crate, '--lib', '--cargo-quiet')
   }
 }
 Step 'deny' { Invoke-Native 'cargo' @('deny', '--offline', 'check', '--hide-inclusion-graph', 'licenses', 'bans', 'sources') }
