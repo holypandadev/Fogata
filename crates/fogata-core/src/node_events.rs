@@ -555,7 +555,9 @@ async fn handle_room(
     if call {
         match &change {
             RoomChange::Left { device, .. } => calls::on_left(inner, group, *device).await,
-            RoomChange::Joined { device, .. } => calls::on_joined(inner, group, *device).await,
+            RoomChange::Joined { device, nick } => {
+                calls::on_joined(inner, group, *device, nick).await;
+            }
             _ => {}
         }
     }

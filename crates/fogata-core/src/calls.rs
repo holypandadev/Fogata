@@ -192,6 +192,9 @@ pub(crate) struct CallEntry {
     started_ms: Option<u64>,
     /// Everyone seen in the call's room.
     seen: HashSet<DevicePublicKey>,
+    /// The name the one who started the call went under in its room, as seen here: what
+    /// it is noted under when nothing else here names it (see [`name_of`]).
+    starter_nick: Option<String>,
     /// Whether anything came from another device since the call was answered, or one came
     /// into its room: a call answered here whose answer never arrived has had none.
     heard: bool,
@@ -234,6 +237,7 @@ impl CallEntry {
             } else {
                 HashSet::new()
             },
+            starter_nick: None,
             heard: false,
             telling: false,
             entered: false,
@@ -283,6 +287,8 @@ pub(crate) struct LeftCall {
     together_until: u64,
     /// Everyone seen in the call.
     seen: HashSet<DevicePublicKey>,
+    /// The name its starter went under in its room (see [`CallEntry::starter_nick`]).
+    starter_nick: Option<String>,
     /// Those still in the call as far as this device knows, with when each last said so (or
     /// was seen in it), and whether someone else was in it with them then.
     inside: HashMap<DevicePublicKey, (u64, bool)>,
@@ -387,6 +393,7 @@ fn answered(state: &mut State, group: GroupId) {
     if let Some(left) = left {
         call.seen.extend(left.seen);
         call.capable.extend(left.capable);
+        call.starter_nick = call.starter_nick.take().or(left.starter_nick);
     }
 }
 
@@ -1311,6 +1318,7 @@ async fn hang_up(inner: &Arc<Inner>, group: GroupId, with: DevicePublicKey) -> b
                     started_ms: c.started_ms.unwrap_or(c.since_ms),
                     together_until: now,
                     seen,
+                    starter_nick: c.starter_nick.clone(),
                     inside: friends
                         .iter()
                         .map(|d| (*d, (now, others.len() > 1)))
@@ -1680,11 +1688,19 @@ async fn people_in_room(inner: &Inner, group: GroupId) -> Vec<DevicePublicKey> {
         })
 }
 
-/// Someone came into the call's room: no longer away, nor waited for, nor rung. Those who
-/// left hear that the call goes on.
-pub(crate) async fn on_joined(inner: &Arc<Inner>, group: GroupId, device: DevicePublicKey) {
+/// Someone came into the call's room as `nick`: no longer away, nor waited for, nor rung.
+/// Those who left hear that the call goes on.
+pub(crate) async fn on_joined(
+    inner: &Arc<Inner>,
+    group: GroupId,
+    device: DevicePublicKey,
+    nick: &str,
+) {
     let changed = inner.lock().calls.get_mut(&group).is_some_and(|c| {
         c.seen.insert(device);
+        if !nick.is_empty() && c.log.shared_state().creator == Some(device) {
+            c.starter_nick = Some(nick.to_owned());
+        }
         c.heard = true;
         let away = c.left.remove(&device).is_some();
         let rung = c.adding.remove(&device).is_some();
@@ -1700,11 +1716,20 @@ pub(crate) async fn on_joined(inner: &Arc<Inner>, group: GroupId, device: Device
 /// call's room is read anew, as those who came and went would have told.
 pub(crate) async fn resync(inner: &Arc<Inner>) {
     let groups: Vec<GroupId> = inner.lock().calls.keys().copied().collect();
+    let me = inner.identity.public_key();
     for group in groups {
-        let here: HashSet<DevicePublicKey> =
-            people_in_room(inner, group).await.into_iter().collect();
-        for device in &here {
-            on_joined(inner, group, *device).await;
+        let room = inner
+            .node
+            .room(group, fogata_state::FIRST_ROOM)
+            .await
+            .ok()
+            .flatten();
+        let mut here = HashSet::new();
+        for (device, nick, _) in room.iter().flat_map(|r| &r.participants) {
+            if *device != me {
+                here.insert(*device);
+                on_joined(inner, group, *device, nick).await;
+            }
         }
         let gone: Vec<DevicePublicKey> =
             inner.lock().calls.get(&group).map_or_else(Vec::new, |c| {
@@ -1869,7 +1894,8 @@ fn watch_left(inner: Weak<Inner>, group: GroupId, at_ms: u64) {
 
 /// A call this device left is over as far as it knows: noted in the chats.
 async fn left_over(inner: &Inner, left: LeftCall) {
-    note(inner, &left.log, &left.seen, left.lasted_ms()).await;
+    let nick = left.starter_nick.as_deref();
+    note(inner, &left.log, &left.seen, left.lasted_ms(), nick).await;
     inner.emit(CoreEvent::CallsChanged);
 }
 
@@ -1882,13 +1908,21 @@ pub(crate) async fn on_shutdown(inner: &Inner) {
         .map(|(_, left)| left)
         .collect();
     for left in left {
-        note(inner, &left.log, &left.seen, left.lasted_ms()).await;
+        let nick = left.starter_nick.as_deref();
+        note(inner, &left.log, &left.seen, left.lasted_ms(), nick).await;
     }
 }
 
 /// Notes a call that is over in this device's chats with those it was in it with (see
-/// [`note_with`]): who started it and how long it lasted.
-async fn note(inner: &Inner, log: &GroupLog, seen: &HashSet<DevicePublicKey>, lasted_ms: u64) {
+/// [`note_with`]): who started it, by the name it went under in the room (`starter_nick`)
+/// when nothing else here names it, and how long it lasted.
+async fn note(
+    inner: &Inner,
+    log: &GroupLog,
+    seen: &HashSet<DevicePublicKey>,
+    lasted_ms: u64,
+    starter_nick: Option<&str>,
+) {
     let Ok(Some(book)) = inner.node.friends().await else {
         return;
     };
@@ -1902,7 +1936,8 @@ async fn note(inner: &Inner, log: &GroupLog, seen: &HashSet<DevicePublicKey>, la
         } else if starter == friend {
             (false, None)
         } else {
-            (false, Some(name_of(inner, &book, starter, log)))
+            let name = name_of(inner, &book, starter, log, starter_nick);
+            (false, Some(name))
         };
         direct::note_call(inner, &book, friend, mine, name, lasted_ms);
     }
@@ -1941,19 +1976,32 @@ fn note_with(
     out
 }
 
-/// Someone's name as known here: a friend's, a member's profile, or the one in the log.
-fn name_of(inner: &Inner, book: &FriendBook, device: DevicePublicKey, log: &GroupLog) -> String {
+/// Someone's name as known here: a friend's, a member's profile, the one it went under in
+/// the room (`nick`), or the one in the log. A member's profile may come after the call
+/// is over, or never (one who left early, before it reached this device); the starter
+/// has no name in the log. Noted once for good, the name is taken from all that is known.
+fn name_of(
+    inner: &Inner,
+    book: &FriendBook,
+    device: DevicePublicKey,
+    log: &GroupLog,
+    nick: Option<&str>,
+) -> String {
     if let Some(friend) = book.friends.get(&device) {
         return friend.profile.name.clone();
     }
     if let Some(profile) = inner.lock().profiles.get(&device) {
         return profile.name.clone();
     }
-    log.state()
-        .members
-        .get(&device)
-        .map(|m| m.name.clone())
-        .filter(|n| !n.is_empty())
+    nick.filter(|n| !n.is_empty())
+        .map(str::to_owned)
+        .or_else(|| {
+            log.state()
+                .members
+                .get(&device)
+                .map(|m| m.name.clone())
+                .filter(|n| !n.is_empty())
+        })
         .unwrap_or_else(|| device.short_fingerprint())
 }
 
@@ -2253,7 +2301,8 @@ async fn ended(inner: &Inner, group: GroupId, ending: Ending, reason: CallEnd) {
         if !left_it && reason != CallEnd::Elsewhere && !unheard {
             let started = call.started_ms.unwrap_or(call.since_ms);
             let lasted = call.alone_since.unwrap_or(now).saturating_sub(started);
-            note(inner, &call.log, &seen, lasted).await;
+            let nick = call.starter_nick.as_deref();
+            note(inner, &call.log, &seen, lasted, nick).await;
         }
     }
     inner.emit(CoreEvent::CallEnded {
@@ -2380,6 +2429,7 @@ mod tests {
             started_ms: 40_000,
             together_until: 100_000,
             seen: HashSet::from([bea, carla]),
+            starter_nick: None,
             inside: HashMap::from([(bea, (100_000, true)), (carla, (100_000, true))]),
             gone: HashMap::new(),
         };
@@ -2501,6 +2551,7 @@ mod tests {
             started_ms: 0,
             together_until: 10,
             seen: HashSet::from([bea]),
+            starter_nick: None,
             inside: HashMap::from([(bea, (10, false))]),
             gone: HashMap::new(),
         };
@@ -2629,6 +2680,42 @@ mod tests {
         );
     }
 
+    /// Rung into a call by a friend, this device notes it under the name its starter, no
+    /// friend of its own, went under in the room: that one's profile may come after the call
+    /// is over, or never, and the note is not left with a fingerprint for good.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_call_is_noted_under_the_name_its_starter_went_under_in_the_room() {
+        let base = std::env::temp_dir().join(format!("fogata-call-starter-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let [dir_a, dir_b] = friends(&base);
+        let [options_a, options_b] = dialling();
+        let (ana, _events_a) = Core::start(dir_a, options_a).unwrap();
+        let (bea, _events_b) = Core::start(dir_b, options_b).unwrap();
+        // Sofía, no friend of Bea's, starts a call with Ana, who rings Bea into it.
+        let sofia = identity();
+        let mut log = GroupLog::create(&sofia, "Call", 1).unwrap();
+        log.add(&sofia, ana.me(), "Ana", 1).unwrap();
+        log.add(&ana.inner.identity, bea.me(), "Bea", 2).unwrap();
+        let group = log.group_id();
+        let call = CallEntry::new(ana.me(), false, CallPhase::Connected, log);
+        bea.inner.lock().calls.insert(group, call);
+        // Bea sees her in the room under her name; no profile of hers comes.
+        on_joined(&bea.inner, group, sofia.public_key(), "Sofía").await;
+        assert!(!bea.inner.lock().profiles.contains_key(&sofia.public_key()));
+        finish(&bea.inner, group, CallEnd::Ended).await;
+        let chat = bea.direct_chat(ana.me(), 50).await.unwrap();
+        let noted: Vec<_> = chat
+            .items
+            .iter()
+            .filter_map(|i| match &i.item.body {
+                crate::direct::model::Body::Call { starter, .. } => Some(starter.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(noted, vec![Some("Sofía".to_string())]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_ring_while_appearing_offline_is_declined_and_shows_as_missed() {
         let base = std::env::temp_dir().join(format!("fogata-ring-offline-{}", std::process::id()));
@@ -2703,6 +2790,7 @@ mod tests {
                 started_ms: now - 30_000,
                 together_until: now - 1000,
                 seen: HashSet::from([bea]),
+                starter_nick: None,
                 inside: HashMap::from([(bea, (now - 1000, true))]),
                 gone: HashMap::new(),
             };
@@ -2801,6 +2889,7 @@ mod tests {
             started_ms: now - 30_000,
             together_until: now,
             seen: HashSet::new(),
+            starter_nick: None,
             inside: HashMap::new(),
             gone: HashMap::new(),
         };
@@ -2867,6 +2956,7 @@ mod tests {
                     started_ms: now - 50_000,
                     together_until: now - 10_000,
                     seen: HashSet::from([bea.public_key()]),
+                    starter_nick: None,
                     inside: HashMap::from([(bea.public_key(), (now, true))]),
                     gone: HashMap::new(),
                 },
