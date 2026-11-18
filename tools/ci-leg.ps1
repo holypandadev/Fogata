@@ -130,7 +130,9 @@ Step 'test' {
   Assert-Nextest
   Invoke-Native 'cargo' @('nextest', 'run', '--workspace', '--cargo-quiet')
   Invoke-Native 'cargo' @('test', '--workspace', '--doc', '--quiet')
-  Invoke-Native 'cargo' @('nextest', 'run', '-p', 'fogata', '--features', 'lab', '--cargo-quiet')
+  # With the lab feature, only the tests it changes (see tools/check.sh).
+  Invoke-Native 'cargo' @('nextest', 'run', '-p', 'fogata', '--features', 'lab', '--cargo-quiet',
+    '-E', 'binary_id(fogata::release)|(binary_id(fogata::bin/fogata)&test(=tests::the_labs_copy_has_its_tools))')
 }
 Step 'vendor-tests' {
   Assert-Nextest

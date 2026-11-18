@@ -157,7 +157,11 @@ cargo clippy -p fogata-core --all-targets --features lab -- -D warnings
 # says which tests take turns); the doc tests, which nextest does not run, with cargo test.
 cargo nextest run --workspace --cargo-quiet
 cargo test --workspace --doc --quiet
-cargo nextest run -p fogata --features lab --cargo-quiet
+# With the lab feature, only the tests it changes: tests/release.rs, and main.rs's test that
+# the lab's copy has its tools (the feature adds lab subcommands, flags and core functions
+# that only those reach; every other test of the program runs above without it).
+cargo nextest run -p fogata --features lab --cargo-quiet \
+    -E 'binary_id(fogata::release)|(binary_id(fogata::bin/fogata)&test(=tests::the_labs_copy_has_its_tools))'
 # The vendored libp2p-mdns, libp2p-identify, libp2p-quic, turn and spake2 are no workspace
 # members: their own tests run here. The vendored libp2p-stream has none of its own; fogata-net
 # tests its change (tests/bursts.rs). The vendored libp2p-kad's own tests need the rust-libp2p
