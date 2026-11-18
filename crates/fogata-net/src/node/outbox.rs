@@ -2,6 +2,8 @@
 //! a direct chat's messages one at a time, and what waits for an answer let go when a
 //! request is answered, lost or dropped unsent.
 
+use std::time::{Duration, Instant};
+
 use fogata_proto::MemberRequest;
 use libp2p::PeerId;
 
@@ -18,6 +20,50 @@ pub(super) const MAX_WAITING: usize = 1024;
 /// stops reading would otherwise keep up to [`MAX_WAITING`] banners or group messages here,
 /// hundreds of MiB, for as long as the queue takes to drain at a few requests per timeout.
 pub(super) const MAX_WAITING_BYTES: usize = 16 * 1024 * 1024;
+
+/// How long a quick request (see [`is_quick`]) may go unanswered on a connection before the
+/// connection is suspect, and other member requests go on the next best one while it is: a
+/// small request and its answer take about two round trips, under 1.5 s even through a
+/// member's relay. A connection that died unnoticed takes far longer to be known dead: a
+/// request on it fails after 10 s (the stream does not open), a dead QUIC connection closes
+/// 25 to 30 s after it died, a TCP one 55 to 70 s after (three failed pings).
+pub(super) const SUSPECT_AFTER: Duration = Duration::from_secs(3);
+
+/// Most bytes of a quick request.
+const QUICK_BYTES: usize = 64 * 1024;
+
+/// Whether `request` is a quick one: at most [`QUICK_BYTES`], of a kind whose answer is
+/// small (every request is answered as soon as it is read). Logs, rooms' past and
+/// whatever else can carry megabytes either way are not: on a slow link they may take
+/// longer than [`SUSPECT_AFTER`] on a connection that works. Every kind is named, with no
+/// wildcard.
+pub(super) fn is_quick(request: &MemberRequest) -> bool {
+    let small_answer = match request {
+        MemberRequest::Challenge { .. }
+        | MemberRequest::Deliver(_)
+        | MemberRequest::Spread { .. }
+        | MemberRequest::Roster { .. }
+        | MemberRequest::Profile { .. }
+        | MemberRequest::Addresses { .. }
+        | MemberRequest::Signal { .. }
+        | MemberRequest::Presence { .. }
+        | MemberRequest::JoinDeclined { .. }
+        | MemberRequest::OtherSession
+        | MemberRequest::Direct { .. }
+        | MemberRequest::GroupBanner { .. }
+        | MemberRequest::GroupPicture { .. }
+        | MemberRequest::KeyProblem { .. } => true,
+        MemberRequest::Sync { .. }
+        | MemberRequest::Push { .. }
+        | MemberRequest::JoinRequest { .. }
+        | MemberRequest::JoinCommit { .. }
+        | MemberRequest::RoomSync { .. }
+        | MemberRequest::Admitted { .. }
+        | MemberRequest::RoomEvents { .. }
+        | MemberRequest::FriendAsk { .. } => false,
+    };
+    small_answer && request_bytes(request) <= QUICK_BYTES
+}
 
 /// About the bytes `request` takes while it waits: what it carries that can be large.
 pub(super) fn request_bytes(request: &MemberRequest) -> usize {
@@ -78,15 +124,21 @@ impl Node {
             return;
         }
         outbox.in_flight += 1;
-        // On the peer's best connection, chosen as the request leaves: libp2p would take any
-        // of them, a slower one, or one about to close (a relayed or silent one kept a few
-        // seconds, a dead one after an outage). Without one known here, as libp2p chooses.
-        let best = self.best_connection_id(&peer);
+        // On the peer's best connection that is not suspect, chosen as the request leaves
+        // (see `request_connection`): libp2p would take any of them, a slower one, or one
+        // about to close (a relayed or silent one kept a few seconds). Without one known
+        // here, as libp2p chooses.
+        let quick = is_quick(&request);
+        let chosen = self.request_connection(&peer);
         let member = &mut self.swarm.behaviour_mut().member;
-        let id = match best {
+        let id = match chosen {
             Some(connection) => member.send_request_on(&peer, connection, request),
             None => member.send_request(&peer, request),
         };
+        if let Some(connection) = chosen.filter(|_| quick) {
+            self.quick_on_its_way
+                .insert(id, (connection, Instant::now()));
+        }
         self.pending.insert(id, (peer, kind));
     }
 

@@ -5,7 +5,7 @@
 //! the loopback interface; the other side is played by hand where the connection each signal
 //! came on has to be seen.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId, GroupKeys, MembershipProof};
 use fogata_net::{
@@ -16,7 +16,7 @@ use fogata_state::GroupLog;
 use futures::StreamExt;
 use libp2p::{
     PeerId, StreamProtocol, Swarm,
-    request_response::{self, ProtocolSupport},
+    request_response::{self, ProtocolSupport, ResponseChannel},
     swarm::{
         ConnectionId, SwarmEvent,
         dial_opts::{DialOpts, PeerCondition},
@@ -216,12 +216,18 @@ fn by_hand() -> Hand {
 }
 
 /// Bea played by hand: she proves herself when challenged, takes every other request, and
-/// keeps the connection each call signal came on.
+/// keeps the connection each call signal and group banner came on. Signals that come on a
+/// connection of `hold`, and banners while `hold_banners`, wait for their answer until
+/// [`Bea::release`].
 struct Bea {
     swarm: Hand,
     identity: DeviceIdentity,
     keys: GroupKeys,
     signals: Vec<ConnectionId>,
+    banners: Vec<ConnectionId>,
+    hold: HashSet<ConnectionId>,
+    hold_banners: bool,
+    held: Vec<ResponseChannel<MemberResponse>>,
 }
 
 impl Bea {
@@ -251,6 +257,18 @@ impl Bea {
             }
             MemberRequest::Signal { .. } => {
                 self.signals.push(connection_id);
+                if self.hold.contains(&connection_id) {
+                    self.held.push(channel);
+                    return None;
+                }
+                MemberResponse::Ack
+            }
+            MemberRequest::GroupBanner { .. } => {
+                self.banners.push(connection_id);
+                if self.hold_banners {
+                    self.held.push(channel);
+                    return None;
+                }
                 MemberResponse::Ack
             }
             _ => MemberResponse::Ack,
@@ -295,6 +313,44 @@ impl Bea {
         })
         .await
         .expect("closed");
+    }
+
+    /// Answers what waits for its answer, and holds nothing more.
+    fn release(&mut self) {
+        self.hold.clear();
+        self.hold_banners = false;
+        for channel in std::mem::take(&mut self.held) {
+            let _ = self
+                .swarm
+                .behaviour_mut()
+                .send_response(channel, MemberResponse::Ack);
+        }
+    }
+
+    /// Has `ana` send Bea a signal at a time until one comes on `connection`: one may go
+    /// another way, or be lost on a connection that just closed, while Ana's side does not
+    /// count `connection` best yet.
+    async fn until_signal_on(&mut self, ana: &NodeHandle, group: GroupId, on: ConnectionId) {
+        let came = timeout(Duration::from_secs(20), async {
+            loop {
+                self.signals.clear();
+                ana.signal(group, self.identity.public_key(), vec![5; 300])
+                    .await
+                    .unwrap();
+                let _ = timeout(Duration::from_secs(1), async {
+                    while self.signals.is_empty() {
+                        self.step().await;
+                    }
+                })
+                .await;
+                if self.signals == [on] {
+                    return;
+                }
+            }
+        })
+        .await;
+        assert!(came.is_ok(), "no signal came on {on:?}");
+        self.signals.clear();
     }
 
     /// Keeps Bea's side going for `time`.
@@ -349,6 +405,10 @@ async fn ana_and_bea_two_ways() -> (
         identity,
         keys,
         signals: Vec::new(),
+        banners: Vec::new(),
+        hold: HashSet::new(),
+        hold_banners: false,
+        held: Vec::new(),
     };
     let tcp = format!("/ip4/127.0.0.1/tcp/{port_a}").parse().unwrap();
     let tcp = bea.connect(ana_peer, tcp).await;
@@ -370,7 +430,7 @@ async fn ana_and_bea_two_ways() -> (
     assert!(member.is_ok(), "Bea is not a member at Ana's");
     // Bea may have proved herself on the TCP connection before Ana's side counts the QUIC
     // one open (it completes its handshake a moment after Bea's side does).
-    bea.run_for(Duration::from_millis(500)).await;
+    bea.until_signal_on(&node_a, group, quic).await;
     (node_a, events_a, bea, group, tcp, quic)
 }
 
@@ -398,8 +458,8 @@ async fn signals_go_on_the_connection_left_once_the_best_one_closed() {
 
     assert!(bea.swarm.close_connection(quic));
     bea.wait_closed(quic).await;
-    // Ana's side hears of it a moment later.
-    bea.run_for(Duration::from_millis(500)).await;
+    // Ana's side hears of it a moment later: a signal sent before is lost with the connection.
+    bea.until_signal_on(&node_a, group, tcp).await;
     let started = std::time::Instant::now();
     bea.take_signals(&node_a, group, 12).await;
     assert_eq!(bea.signals, [tcp; 12]);
@@ -408,6 +468,80 @@ async fn signals_go_on_the_connection_left_once_the_best_one_closed() {
         "took {:?}",
         started.elapsed()
     );
+}
+
+/// A little past `SUSPECT_AFTER` (crates/fogata-net/src/node/outbox.rs).
+const PAST_SUSPECT: Duration = Duration::from_millis(3500);
+
+/// The best connection to a member stops answering while another lives (here the member
+/// holds the answers to the signals that come on its QUIC connection): once a signal has
+/// waited there for 3 s, the next ones go on TCP, and once the held ones are answered,
+/// on QUIC again. Nothing is sent twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn signals_leave_a_best_connection_that_stopped_answering() {
+    let (node_a, _events_a, mut bea, group, tcp, quic) = ana_and_bea_two_ways().await;
+    bea.hold.insert(quic);
+    bea.take_signals(&node_a, group, 2).await;
+    assert_eq!(bea.signals, [quic; 2]);
+    bea.run_for(PAST_SUSPECT).await;
+    bea.take_signals(&node_a, group, 4).await;
+    assert_eq!(bea.signals, [tcp; 4]);
+
+    bea.release();
+    bea.until_signal_on(&node_a, group, quic).await;
+    bea.take_signals(&node_a, group, 6).await;
+    assert_eq!(bea.signals, [quic; 6]);
+}
+
+/// A large request slow to be answered on the best connection (a group banner of 200 KiB,
+/// whose answer the member holds) does not make it suspect: signals still go on it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_large_slow_request_does_not_make_the_best_connection_suspect() {
+    let (node_a, _events_a, mut bea, group, _tcp, quic) = ana_and_bea_two_ways().await;
+    let mut picture = b"\x89PNG\r\n\x1a\n".to_vec();
+    picture.resize(200 * 1024, 7);
+    node_a.set_group_banner(group, picture).await.unwrap();
+    bea.hold_banners = true;
+    // Bea's roster ask names no banner: Ana sends hers.
+    let roster = MemberRequest::Roster {
+        group_id: group.as_bytes().to_vec(),
+        heads: None,
+        banner: Some(serde_bytes::ByteBuf::new()),
+        picture: None,
+    };
+    bea.swarm
+        .behaviour_mut()
+        .send_request(&node_a.local_peer(), roster);
+    let came = timeout(Duration::from_secs(10), async {
+        while bea.banners.is_empty() {
+            bea.step().await;
+        }
+    })
+    .await;
+    assert!(came.is_ok(), "no banner came");
+    assert_eq!(bea.banners, [quic]);
+    bea.run_for(PAST_SUSPECT).await;
+    bea.take_signals(&node_a, group, 4).await;
+    assert_eq!(bea.signals, [quic; 4]);
+    bea.release();
+}
+
+/// When every connection to a member is suspect, its requests go on the best one, as
+/// without the guard.
+#[tokio::test(flavor = "multi_thread")]
+async fn signals_go_on_the_best_connection_when_every_one_is_suspect() {
+    let (node_a, _events_a, mut bea, group, tcp, quic) = ana_and_bea_two_ways().await;
+    bea.hold.insert(quic);
+    bea.take_signals(&node_a, group, 1).await;
+    assert_eq!(bea.signals, [quic]);
+    bea.run_for(PAST_SUSPECT).await;
+    bea.hold.insert(tcp);
+    bea.take_signals(&node_a, group, 1).await;
+    assert_eq!(bea.signals, [tcp]);
+    bea.run_for(PAST_SUSPECT).await;
+    bea.take_signals(&node_a, group, 1).await;
+    assert_eq!(bea.signals, [quic]);
+    bea.release();
 }
 
 /// A request sent on a connection that closed goes on one still open, as libp2p would

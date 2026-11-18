@@ -367,6 +367,7 @@ pub(crate) fn start_with(
         members: HashMap::new(),
         connections: HashMap::new(),
         pending: HashMap::new(),
+        quick_on_its_way: HashMap::new(),
         outbox: HashMap::new(),
         presence: presence::PresenceWays::default(),
         farewell: HashSet::new(),
@@ -1036,6 +1037,9 @@ struct Node {
     members: HashMap<PeerId, Member>,
     connections: HashMap<ConnectionId, ConnectionInfo>,
     pending: HashMap<OutboundRequestId, (PeerId, Pending)>,
+    /// Quick member requests on their way (see `outbox::is_quick`): the connection each went
+    /// on and when, until it is answered, fails or times out, or its connection closes.
+    quick_on_its_way: HashMap<OutboundRequestId, (ConnectionId, Instant)>,
     /// Member requests to each peer, sent a few at a time (see `outbox::IN_FLIGHT`).
     outbox: HashMap<PeerId, Outbox>,
     /// This device's presence on its way to each member, one at a time to each.

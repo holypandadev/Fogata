@@ -134,6 +134,7 @@ impl Node {
                     },
                 ..
             } => {
+                self.quick_on_its_way.remove(&request_id);
                 if let Some((to, kind)) = self.pending.remove(&request_id) {
                     self.request_done(to);
                     self.on_response(peer, kind, response);
@@ -145,6 +146,9 @@ impl Node {
                 error,
                 ..
             } => {
+                // Every way a request ends: failed on its way, timed out, its connection
+                // closed (the peer gone too), its dial failed.
+                self.quick_on_its_way.remove(&request_id);
                 let Some((to, kind)) = self.pending.remove(&request_id) else {
                     return;
                 };

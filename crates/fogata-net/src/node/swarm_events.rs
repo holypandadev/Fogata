@@ -322,6 +322,9 @@ impl Node {
     ) {
         let closed = self.connections.remove(&connection);
         self.closing.remove(&connection);
+        // libp2p fails what was on its way on it; this also lets go of one that went on
+        // another connection because this one had just closed.
+        self.quick_on_its_way.retain(|_, (on, _)| *on != connection);
         self.dialled_tcp.remove(&connection);
         self.dialled_public.remove(&connection);
         self.punch_dials.remove(&connection);

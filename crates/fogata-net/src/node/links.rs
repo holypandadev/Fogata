@@ -16,7 +16,7 @@ use libp2p::{
     },
 };
 
-use super::{ConnectionInfo, Member, Node};
+use super::{ConnectionInfo, Member, Node, outbox::SUSPECT_AFTER};
 use crate::{NodeEvent, Path, addr, addr::Reach};
 
 /// How often the direct connections to members are checked for silence, and how long one
@@ -62,6 +62,16 @@ fn path_in_group(
     }
 }
 
+/// How long a member's direct QUIC connections may hear nothing before they are suspect for
+/// its requests (see [`Node::request_connection`]): one keep-alive (every 5 s) missed.
+const QUIC_SUSPECT_SILENCE: Duration = Duration::from_secs(6);
+
+/// How a connection ranks among a peer's, lower first: the best path, QUIC first on the
+/// same path (media travels on QUIC), the oldest first after that, so the choice holds still.
+fn connection_rank(id: &ConnectionId, c: &ConnectionInfo) -> (u8, bool, ConnectionId) {
+    (path_rank(&c.path), !addr::is_quic(&c.address), *id)
+}
+
 /// Lower is better. Direct and hole-punched paths are equally good once open.
 fn path_rank(path: &Path) -> u8 {
     match path {
@@ -83,11 +93,41 @@ impl Node {
 
     /// Which of `peer`'s connections [`Self::best_connection`] is.
     pub(super) fn best_connection_id(&self, peer: &PeerId) -> Option<ConnectionId> {
+        self.open_connections(peer)
+            .min_by_key(|(id, c)| connection_rank(id, c))
+            .map(|(id, _)| *id)
+    }
+
+    /// The connection a member request to `peer` goes on: the best one that is not
+    /// suspect, by the same ranking as [`Self::best_connection`]; the best one when all
+    /// are. Suspect is one a quick request has waited on for [`SUSPECT_AFTER`] or more, and
+    /// a direct QUIC connection while the peer's QUIC connections heard nothing for
+    /// [`QUIC_SUSPECT_SILENCE`]: both say it may have died unnoticed.
+    pub(super) fn request_connection(&self, peer: &PeerId) -> Option<ConnectionId> {
+        let quic_silent =
+            crate::datagram::silent_for(peer).is_some_and(|d| d >= QUIC_SUSPECT_SILENCE);
+        let suspect = |id: &ConnectionId, c: &ConnectionInfo| {
+            (quic_silent
+                && addr::is_quic(&c.address)
+                && !matches!(c.path, Path::ThroughMember { .. }))
+                || self
+                    .quick_on_its_way
+                    .values()
+                    .any(|(on, since)| on == id && since.elapsed() >= SUSPECT_AFTER)
+        };
+        self.open_connections(peer)
+            .min_by_key(|(id, c)| (suspect(id, c), connection_rank(id, c)))
+            .map(|(id, _)| *id)
+    }
+
+    /// `peer`'s connections this device is not closing.
+    fn open_connections<'a>(
+        &'a self,
+        peer: &'a PeerId,
+    ) -> impl Iterator<Item = (&'a ConnectionId, &'a ConnectionInfo)> {
         self.connections
             .iter()
-            .filter(|(id, c)| c.peer == *peer && !self.closing.contains(id))
-            .min_by_key(|(id, c)| (path_rank(&c.path), !addr::is_quic(&c.address), **id))
-            .map(|(id, _)| *id)
+            .filter(move |(id, c)| c.peer == *peer && !self.closing.contains(id))
     }
 
     /// A member reached only over TCP (or through another member) cannot receive media
