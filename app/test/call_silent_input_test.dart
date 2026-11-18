@@ -58,6 +58,9 @@ class _Engine {
   Completer<void>? holdSilence;
   Completer<void>? holdSelect;
 
+  /// Held until completed: the list of devices.
+  Completer<void>? holdSources;
+
   /// Whether the silent input exists.
   bool silence = false;
 
@@ -65,6 +68,7 @@ class _Engine {
     final args = call.arguments as Map<Object?, Object?>?;
     switch (call.method) {
       case 'getSources':
+        await holdSources?.future;
         return {
           'sources': [
             if (silence)
@@ -250,6 +254,19 @@ void main() {
       input: 'usb-2',
     ).chooseInputForTests();
     expect(engine.asked, ['select usb-2']);
+  });
+
+  // A call's start chooses its input outside the input turn, with no time limit: it
+  // waits for a slow list of devices and still chooses the system's default, never
+  // leaving the device given last.
+  test('a call\'s start waits for a slow list of devices', () async {
+    engine.holdSources = Completer();
+    final call = Call(group: 'g', me: 'me', mic: false);
+    final choosing = call.chooseInputForTests();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    engine.holdSources!.complete();
+    await choosing;
+    expect(engine.asked, ['select mic-1']);
   });
 
   test('a call with the system defaults chooses them by their own ids on every '
