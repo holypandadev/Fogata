@@ -447,6 +447,27 @@ where
         request: TCodec::Request,
         addresses: Vec<Multiaddr>,
     ) -> OutboundRequestId {
+        self.send_request_to(peer, request, addresses, None)
+    }
+
+    /// Like [`Behaviour::send_request`], but on `connection` while it is one of the peer's
+    /// open connections; on the one [`Behaviour::send_request`] chooses otherwise.
+    pub fn send_request_on(
+        &mut self,
+        peer: &PeerId,
+        connection: ConnectionId,
+        request: TCodec::Request,
+    ) -> OutboundRequestId {
+        self.send_request_to(peer, request, Vec::new(), Some(connection))
+    }
+
+    fn send_request_to(
+        &mut self,
+        peer: &PeerId,
+        request: TCodec::Request,
+        addresses: Vec<Multiaddr>,
+        connection: Option<ConnectionId>,
+    ) -> OutboundRequestId {
         let request_id = self.next_outbound_request_id();
         let request = OutboundMessage {
             request_id,
@@ -454,7 +475,7 @@ where
             protocols: self.outbound_protocols.clone(),
         };
 
-        if let Some(request) = self.try_send_request(peer, request) {
+        if let Some(request) = self.try_send_request(peer, request, connection) {
             self.pending_events.push_back(ToSwarm::Dial {
                 opts: DialOpts::peer_id(*peer)
                     .addresses(addresses)
@@ -567,12 +588,15 @@ where
         &mut self,
         peer: &PeerId,
         request: OutboundMessage<TCodec>,
+        connection: Option<ConnectionId>,
     ) -> Option<OutboundMessage<TCodec>> {
         if let Some(connections) = self.connected.get_mut(peer) {
             if connections.is_empty() {
                 return Some(request);
             }
-            let ix = (request.request_id.0 as usize) % connections.len();
+            let ix = connection
+                .and_then(|id| connections.iter().position(|c| c.id == id))
+                .unwrap_or((request.request_id.0 as usize) % connections.len());
             let conn = &mut connections[ix];
             conn.pending_outbound_responses.insert(request.request_id);
             self.pending_events.push_back(ToSwarm::NotifyHandler {

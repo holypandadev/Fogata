@@ -165,7 +165,9 @@ cargo nextest run -p fogata --features lab --cargo-quiet \
 # The vendored libp2p-mdns, libp2p-identify, libp2p-quic, turn and spake2 are no workspace
 # members: their own tests run here. The vendored libp2p-stream has none of its own; fogata-net
 # tests its change (tests/bursts.rs). The vendored libp2p-kad's own tests need the rust-libp2p
-# tree (vendor/libp2p-kad/FOGATA.md); fogata-net tests its change (tests/lookups.rs).
+# tree (vendor/libp2p-kad/FOGATA.md); fogata-net tests its change (tests/lookups.rs). The
+# vendored libp2p-request-response's own tests are left out; fogata-net tests its change
+# (tests/signals.rs).
 cargo nextest run -p libp2p-mdns --lib --cargo-quiet
 cargo nextest run -p libp2p-identify --lib --cargo-quiet
 cargo nextest run -p libp2p-quic --lib --cargo-quiet
