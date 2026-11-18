@@ -370,6 +370,17 @@ jobs:
             echo "coredumpctl:"; coredumpctl --no-pager list --since "@$LAB_START" 2>&1 | head -n 40
             echo "kernel log, segfaults:"; echo "${segfaults:-none}" | head -n 40
             echo "core files:"; echo "${cores:-none}"
+            # What crashed and where: every thread's stack as systemd-coredump read it
+            # (module and offset, with names where the files have them), and the core
+            # itself among the runs' files, to open with the same commit's build.
+            if [[ -n $crashes ]]; then
+              coredumpctl --no-pager info --since "@$LAB_START" 2>&1 | head -n 600
+              for pid in $(coredumpctl --no-pager list --since "@$LAB_START" 2> /dev/null |
+                  grep -i fogata | awk '{print $5}' | sort -u | head -n 4); do
+                coredumpctl --no-pager dump "$pid" --since "@$LAB_START" \
+                  -o "$CALL_LAB_RUNS/core.$pid" > /dev/null 2>&1 || true
+              done
+            fi
             if [[ -z $crashes$segfaults$cores ]]; then
               results+=("no crash of the application|pass|")
             else
