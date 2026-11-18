@@ -1,5 +1,5 @@
 # WebRTC for macOS built by Fogata (tools/webrtc/build-macos.sh, see tools/webrtc/MACOS.md):
-# webrtc-sdk's Objective-C SDK on WebRTC M156 (branch-head 8078), VP8 and Opus as the only
+# webrtc-sdk's Objective-C SDK on WebRTC M158 (branch-head 8127), VP8 and Opus as the only
 # codecs, VP8 pictures larger than 8K refused before they are decoded. It takes the
 # place of webrtc-sdk's WebRTC-SDK pod of the same name once the Podfile names this file.
 #
@@ -10,21 +10,21 @@
 # archives are too. Wherever it comes from, it must have the SHA-256 below.
 Pod::Spec.new do |s|
   s.name = 'WebRTC-SDK'
-  s.version = '156.8078.9'
-  s.summary = 'WebRTC M156 for macOS, built by Fogata.'
+  s.version = '158.8127.1'
+  s.summary = 'WebRTC M158 for macOS, built by Fogata.'
   s.homepage = 'https://webrtc.googlesource.com/src'
   s.license = { :type => 'BSD-3-Clause', :file => 'WebRTC.xcframework/LICENSE' }
   s.author = 'The WebRTC project authors'
 
-  sha256 = 'a51df7ec6ca618c22e23bfd5883d3abd80a2dc80fd44554400685943f2898c5d'
+  sha256 = 'f06c0f9f1efbf42dc629b22add6bd6b2cb02ccbf82c21014acec147b8f3f0f64'
   local = ENV['FOGATA_WEBRTC_XCFRAMEWORK'].to_s
   if local.empty?
     store = ENV['FOGATA_LIBWEBRTC_DIR'].to_s
     store = File.join(Dir.home, 'fogata-libwebrtc') if store.empty?
-    local = File.join(store, 'fogata-libwebrtc.m156.8078.9', 'WebRTC.xcframework.zip')
+    local = File.join(store, 'fogata-libwebrtc.m158.8127.1', 'WebRTC.xcframework.zip')
   end
   published = 'https://github.com/holypandadev/fogata-libwebrtc/releases/download/' \
-              'fogata-libwebrtc.m156.8078.9/WebRTC.xcframework.zip'
+              'fogata-libwebrtc.m158.8127.1/WebRTC.xcframework.zip'
   url = File.exist?(File.expand_path(local)) ? "file://#{File.expand_path(local)}" : published
   s.source = { :http => url, :sha256 => sha256 }
 
