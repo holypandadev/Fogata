@@ -2,7 +2,7 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|unplug|late|alone|devices|media|rejoin|echo|noise|broken|alsa|hang|quit|restart>
+Usage: mic_check.py <run folder> <muted|switch|quiet-switch|unplug|late|alone|devices|media|rejoin|echo|noise|broken|alsa|hang|quit|restart>
 """
 
 import json
@@ -138,6 +138,42 @@ elif check == "switch":
         others = sources_between("a", 0, 1e12) - {"laba_mic", "laba_quiet_mic"}
         if others:
             problems.append(f"a recorded from other inputs too: {sorted(others)}")
+elif check == "quiet-switch":
+    # The microphones a could record from; its own silent input is fogata-silence-<pid>.
+    # Its shared display's sound is taken by a stream of its own that is linked to no
+    # source (recording.py shows it as "none"), left out here.
+    real = {"laba_mic", "laba_mic2", "laba_quiet_mic", "lab_default_mic"}
+    silence = f"fogata-silence-{pid('a')}"
+    allow = float(re.search(r"QUIET_ALLOW=(\S+)", (run / "settings.txt").read_text()).group(1))
+    names = []
+    while moment(f"mark-a-mute-{len(names) + 1}") is not None:
+        names.append(str(len(names) + 1))
+    names.append("last")
+    for name in names:
+        mute, unmute = moment(f"mark-a-mute-{name}"), moment(f"mark-a-unmute-{name}")
+        if None in (mute, unmute):
+            problems.append(f"a did not get through round {name}: {result('a')}")
+            break
+        heard = sources_between("a", mute + allow, unmute) - {"none"}
+        mics = sorted(heard & real)
+        if mics:
+            problems.append(
+                f"a recorded from {mics} while muted in round {name} "
+                f"(from {allow:g} s after muting until it unmuted): a muted microphone recorded"
+            )
+        if silence not in heard:
+            problems.append(f"a never recorded from its silent input while muted in round {name}: {sorted(heard) or 'nothing'}")
+        others = sorted(heard - real - {silence})
+        if others:
+            notes.append(f"round {name}: while muted a also recorded from {others}")
+        first = next((t for t, s in recordings("a") if t >= mute and silence in s), None)
+        if first is not None:
+            notes.append(f"round {name}: on the silent input {1000 * (first - mute):.0f} ms after muting")
+        want = "laba_mic" if name == "last" else "laba_mic2"
+        on = sources_at("a", unmute + 3) - {"none"}
+        if on != {want}:
+            problems.append(f"3 s after unmuting in round {name} a records from {sorted(on) or 'nothing'}, not {want}")
+    notes += re.findall(r"a's screen sound while a was muted[^\n]*", log("b"))
 elif check == "unplug":
     unplugged, replugged = moment("unplugged"), moment("replugged")
     if None in (unplugged, replugged):

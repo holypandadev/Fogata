@@ -5,6 +5,17 @@
 #   muted    b enters muted and records nothing until it unmutes, and nothing again a
 #            moment after it mutes; a hears it only meanwhile
 #   switch   a changes its input to a silent one and back; its recording follows
+#   quiet-switch
+#            a shares its display with the other applications' sound (the lab's, from
+#            pw-cat) and b watches it; QUIET_ROUNDS times (default 5) a mutes and, in the
+#            same turn of its event loop, chooses a second input with its tone
+#            (FogataMicTwo, made for this check), stays muted QUIET_MUTED s (default 10)
+#            and unmutes for 6 s; then it mutes, chooses its first input back 3 s later and
+#            unmutes. Judged (mic_check.py): while muted, past QUIET_ALLOW s after each mute
+#            (default 4: the silent input takes a moment to be chosen), a records from its
+#            own silent input (fogata-silence-<pid>) and never from a microphone; 3 s after
+#            each unmute, from the input chosen last; b hears the screen's sound throughout
+#            each muted stretch and hears a after each unmute (its own checks)
 #   unplug   a's microphone goes away in the middle of the call and comes back; a is told
 #            both, records from it again, and b hears it
 #   broken   a reaches no sound server at all, so its microphone can never open (and WebRTC's
@@ -228,6 +239,17 @@ if [ "${1:-}" = --inside ]; then
       lab_copy b 2 1 FOGATA_TEST_MIC_CASE=restart FOGATA_TEST_RESTART="${RESTART_HOW:-pulse}" \
         FOGATA_WEBRTC_LOG=info
       ;;
+    quiet-switch)
+      # A second input carrying a's tone, chosen as a mutes; and the other applications'
+      # sound, for a's shared display to take.
+      pactl load-module module-remap-source source_name=laba_mic2 master=laba_test.monitor \
+        source_properties=device.description=FogataMicTwo-laba. > /dev/null
+      lab_apps_tone
+      quiet=(FOGATA_TEST_MIC_CASE=quiet-switch FOGATA_TEST_QUIET_ROUNDS="${QUIET_ROUNDS:-5}"
+        FOGATA_TEST_QUIET_MUTED="${QUIET_MUTED:-10}")
+      lab_copy a 2 1 "${quiet[@]}" FOGATA_SCREEN_SOUND_FROM=pw-cat
+      lab_copy b 2 off "${quiet[@]}"
+      ;;
     *) lab_copy a 2 1 FOGATA_TEST_MIC_CASE="$CHECK"; lab_copy b 2 off FOGATA_TEST_MIC_CASE="$CHECK" ;;
   esac
   now() { date +%s%3N; }
@@ -306,7 +328,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch unplug late alone devices media rejoin echo noise broken alsa hang quit:0 quit:300 quit:1500 restart:pulse restart:all restart:down20 restart:gone)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch quiet-switch unplug late alone devices media rejoin echo noise broken alsa hang quit:0 quit:300 quit:1500 restart:pulse restart:all restart:down20 restart:gone)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }
@@ -344,6 +366,7 @@ for check in "${checks[@]}"; do
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
   [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_FAR_FILE=${UNMUTE_FAR_FILE:+given} UNMUTE_ROOM=${UNMUTE_ROOM:-} UNMUTE_ROOM_AFTER=${UNMUTE_ROOM_AFTER:-} UNMUTE_ROOM_AT=${UNMUTE_ROOM_AT:-} UNMUTE_UNPLUG=${UNMUTE_UNPLUG:-} UNMUTE_COPIES=${UNMUTE_COPIES:-} UNMUTE_REJOIN=${UNMUTE_REJOIN:-} UNMUTE_WORDS_START=${UNMUTE_WORDS_START:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   [ "$name" = unmute ] && echo "${UNMUTE_OFFS:-2 10 60}" > "$RUN/offs.txt"
+  [ "$name" = quiet-switch ] && echo "QUIET_ROUNDS=${QUIET_ROUNDS:-5} QUIET_MUTED=${QUIET_MUTED:-10} QUIET_ALLOW=${QUIET_ALLOW:-4} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} ECHO_STALL=${ECHO_STALL:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   alsa=""
   [ "$name" = alsa ] && alsa=1

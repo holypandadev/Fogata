@@ -61,8 +61,8 @@
 // and, with FOGATA_TEST_CAMERA=1, its camera, and with FOGATA_TEST_SCREEN on one copy, its
 // screen watched by all the others, at the quality FOGATA_TEST_SCREEN_QUALITY names if set
 // (<lines>, 540 too, or source, maybe with @<fps>); see _measureCall. FOGATA_TEST_MIC_CASE
-// checks instead one thing of the microphone (muted, switch, unplug, late, alone, broken,
-// quit, devices, noise, unmute)
+// checks instead one thing of the microphone (muted, switch, quiet-switch, unplug, late,
+// alone, broken, quit, devices, noise, unmute)
 // or of the call (rejoin, echo, restart);
 // see _micCase. Both are run by tools/call-lab. FOGATA_TEST_MIC_LATE=<seconds> has the
 // microphone open only that long after the room does, so the others connect first.
@@ -169,6 +169,9 @@ const _names = {
 /// The virtual microphones, with FOGATA_TEST_MIC=1.
 String? _tone;
 String? _quiet;
+
+/// Copy a's second input with its tone, in the quiet-switch check (tools/call-lab/mic.sh).
+String? _second;
 
 void _log(String line) => File('$_dir/$_role.log').writeAsStringSync(
   '${DateTime.now().toIso8601String()} $line\n',
@@ -540,6 +543,9 @@ Future<void> _call(WidgetTester tester) async {
     _tone = state.prefs.audioInput = pick('audioinput', 'FogataMic');
     state.prefs.audioOutput = pick('audiooutput', 'FogataTest');
     _quiet = pick('audioinput', 'FogataQuiet');
+    if (_env['FOGATA_TEST_MIC_CASE'] == 'quiet-switch' && _role == 'a') {
+      _second = pick('audioinput', 'FogataMicTwo');
+    }
     // Measuring, or judging what each copy plays (echo) or sends (noise): what the
     // others say plays into a silent output, not back into the microphone that every
     // copy shares.
@@ -4695,6 +4701,7 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 ///   mutes); copy a hears it only while unmuted.
 /// - switch: copy a changes its input to the silent one and back while b listens (mic.sh:
 ///   a's recording follows).
+/// - quiet-switch: see [_quietSwitch].
 /// - unplug: copy a's microphone goes away in the middle of the call and comes back
 ///   (mic.sh unloads and loads it); b must hear a again once it is back. What a shows
 ///   meanwhile is logged.
@@ -4835,6 +4842,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       }
     case 'switch':
       await _voiceSteps(tester, state, unplug: false);
+    case 'quiet-switch':
+      await _quietSwitch(tester, state);
     case 'unplug':
       await _voiceSteps(tester, state, unplug: true);
     case 'denied':
@@ -5694,6 +5703,124 @@ Future<void> _soundRestart(WidgetTester tester, AppState state) async {
   await _wait(tester, const Duration(seconds: 5));
   await _say(state, 'restarted');
   await _hear(tester, state, ['restarted'], seconds: 120);
+}
+
+/// tools/call-lab/mic.sh quiet-switch (Linux): copy a shares its display with the other
+/// applications' sound (the lab's, from pw-cat) while b watches it. FOGATA_TEST_QUIET_ROUNDS
+/// times (5 when left out), a mutes and, in the same turn of the event loop, chooses its
+/// second input (FogataMicTwo, the same tone) as the settings do, before the silent input
+/// can have been chosen; stays muted FOGATA_TEST_QUIET_MUTED seconds (10), unmutes and
+/// stays so FOGATA_TEST_QUIET_ON seconds (6). Then it mutes again and, 3 s later (the
+/// silent input long chosen), chooses its first input back, and unmutes as before. Each
+/// step is marked (`mute-<n>`, `unmute-<n>`, mute-last, use-first, unmute-last, end) for
+/// mic_check.py, which judges from what the sound server saw a record: while muted, only
+/// its own silent input, never a microphone; after each unmute, the input chosen last.
+/// Copy b checks that the screen's sound keeps coming while a is muted, and that it hears
+/// a after each unmute.
+Future<void> _quietSwitch(WidgetTester tester, AppState state) async {
+  final call = state.callState.call!;
+  int setting(String name, int otherwise) =>
+      int.tryParse(_env[name] ?? '') ?? otherwise;
+  final rounds = setting('FOGATA_TEST_QUIET_ROUNDS', 5);
+  final muted = setting('FOGATA_TEST_QUIET_MUTED', 10);
+  final on = setting('FOGATA_TEST_QUIET_ON', 6);
+  if (muted < 6) throw StateError('FOGATA_TEST_QUIET_MUTED must be 6 or more');
+  final names = [for (var i = 1; i <= rounds; i++) '$i', 'last'];
+  if (_role == 'a') {
+    if (!call.mic) throw StateError('the quiet-switch check needs a unmuted');
+    await _hear(tester, state, ['heard'], seconds: 120);
+    final sources = await call.screens();
+    await call.shareScreen(
+      sources.firstWhere(
+        (s) => s.type == SourceType.Screen,
+        orElse: () => throw StateError('no screen to share'),
+      ),
+    );
+    if (!call.sharingSound) {
+      throw StateError(
+        "the screen is shared without the applications' sound: ${call.problem}",
+      );
+    }
+    await _say(state, 'quiet shared');
+    await _hear(tester, state, ['quiet watching']);
+    for (final name in names) {
+      _mark('mute-$name');
+      if (name == 'last') {
+        await state.setMic(false);
+        await _wait(tester, const Duration(seconds: 3));
+        _mark('use-first');
+        await state.setAudioInput(_tone);
+        await _wait(tester, Duration(seconds: muted - 3));
+      } else {
+        // Both asked before either goes on: the mute's silent input is not chosen yet.
+        final off = state.setMic(false);
+        final chosen = state.setAudioInput(_second);
+        await off;
+        await chosen;
+        await _wait(tester, Duration(seconds: muted));
+      }
+      _mark('unmute-$name');
+      await state.setMic(true);
+      await _say(state, 'unmuted $name');
+      await _hear(tester, state, ['heard $name'], seconds: 60);
+      await _wait(tester, Duration(seconds: on));
+    }
+    _mark('end');
+    _log('at the end: mic ${call.mic}, problem ${call.problem}');
+    await _say(state, 'quiet done');
+    return;
+  }
+  final _Other other = (id: call.peers.keys.single, name: _names['a']!);
+  final peer = _peer(state, other);
+  await _until(tester, 'a heard speaking', () => peer.speaking, seconds: 60);
+  await _say(state, 'heard');
+  await _hearFrom(tester, state, other, 'quiet shared');
+  await _until(
+    tester,
+    "a's screen with sound offered",
+    () => peer.sharing && peer.sound,
+    seconds: 60,
+  );
+  call.watch(other.id);
+  await _until(
+    tester,
+    "a's screen shown",
+    () => peer.screen.videoWidth > 0,
+    seconds: 60,
+  );
+  final end = DateTime.now().add(const Duration(seconds: 30));
+  while (await _screenSoundIn(peer) < 100) {
+    if (DateTime.now().isAfter(end)) {
+      throw StateError("no sound with a's screen");
+    }
+    await _wait(tester, const Duration(milliseconds: 300));
+  }
+  await _say(state, 'quiet watching');
+  for (final name in names) {
+    await _until(tester, 'a muted ($name)', () => !peer.mic, seconds: 60);
+    // The screen's sound goes on while a is muted: counted from 4 s after the mute (the
+    // silent input chosen by then) until a unmutes.
+    await _wait(tester, const Duration(seconds: 4));
+    final before = await _screenSoundIn(peer);
+    await _until(tester, 'a unmuted ($name)', () => peer.mic, seconds: 60);
+    final packets = await _screenSoundIn(peer) - before;
+    _log("a's screen sound while a was muted ($name): $packets packets");
+    // A packet every 20 ms, over 2 s at least (FOGATA_TEST_QUIET_MUTED less 4 s).
+    if (packets < 50) {
+      throw StateError(
+        "a's screen sound stopped while a was muted ($name): $packets packets",
+      );
+    }
+    await _hearFrom(tester, state, other, 'unmuted $name');
+    await _until(
+      tester,
+      'a heard again ($name)',
+      () => peer.speaking,
+      seconds: 15,
+    );
+    await _say(state, 'heard $name');
+  }
+  await _hearFrom(tester, state, other, 'quiet done');
 }
 
 /// Copy a talks (the tone) while b listens; a then changes to the silent input and back
