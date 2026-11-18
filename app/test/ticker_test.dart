@@ -17,6 +17,6 @@ void main() {
     await tester.pump(const Duration(seconds: 1));
     expect(builds, 2);
     await tester.pump(const Duration(seconds: 3));
-    expect(builds, greaterThanOrEqualTo(3));
+    expect(builds, 3);
   });
 }

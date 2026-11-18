@@ -3525,14 +3525,12 @@ mod tests {
                 .filter(|i| dir.join(format!("new-{i}")).exists())
                 .count();
             let identity = fs::read(dir.join("identity.key")).unwrap_or_default();
-            let untouched = own == 20_000 && new == 0 && identity == b"own identity";
             let moved = own == 0 && new == 20_000 && identity == b"moved identity";
+            // It is never thrown away: being put in place, it is finished.
             assert!(
-                untouched || moved,
+                moved,
                 "round {round}: discard {discarded:?}, own {own}, new {new}"
             );
-            // It is never thrown away: being put in place, it is finished.
-            assert!(moved, "round {round}");
             fs::remove_dir_all(&dir).unwrap();
         }
     }
