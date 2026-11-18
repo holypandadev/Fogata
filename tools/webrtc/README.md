@@ -263,7 +263,10 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    `RTCVideoFrame::TooLarge`;
 4. the Linux library's exports;
 5. its tests built only where WebRTC builds its own;
-6. no frame or data packet cryptor;
+6. no frame or data packet cryptor (webrtc-sdk's); M158 links WebRTC's own SFrame
+   (`modules/sframe` and Cisco's `third_party/sframe`, in NOTICE.md), unused and never
+   offered: nothing asks for an SFrame encryptor (`CreateSframeEncryptorOrError`) and no
+   configuration requires SFrame;
 7. the desktop media list and the desktop capturer start, list and capture only with a
    capturer WebRTC made: it makes none where it cannot capture that kind of source (on
    Linux, windows in a Wayland session or anything when the X display does not open),
@@ -376,6 +379,33 @@ holds them all (wrapper patch 22). What waits there, beside what WebRTC itself d
 - on Linux without PulseAudio, ALSA's playout and recording try a busy device again
   every second, five times.
 
-With a sound server that answers and devices that start, each takes milliseconds. Builds
-of M158 are to be checked for stalls in a call while the microphone goes on and off, the
-output and input change, and PulseAudio restarts.
+With a sound server that answers and devices that start, each takes milliseconds.
+
+Measured on Linux in the call lab, 8127 against 8078.9, the runs of each interleaved: the
+14 microphone checks pass with both; a call's start with speakers and a voice let −56 dBFS
+and 0 s of it be heard with 8127, −48 dBFS and 1.2 s with 8078.9 (8 runs each, p 0.105 and
+0.054); an unmute took 0.4 s with both; stalls of the sound server let through 11 turns in
+147 against 7 in 155 with PipeWire's quantum free, 8 in 157 against 11 in 144 at 480. With
+a made-up camera on and the received RTP read every 100 ms: restarting the sound server
+(PulseAudio, all of it, down for 20 s, gone), switching devices and unplugging one
+stopped the video for 0.3 s at most with both versions, ICE unchanged; a sound server
+frozen for 15 s with the microphone open stopped the copy's video for 11 s with both, ICE
+unchanged; a sound server frozen for 15 s while the copy turns its microphone on stalled
+the copy for 14 s with both, and with 8127 only the other side's ICE went to disconnected
+for about 6.5 s (3 runs of 3) and came back when the server did. The call survived every
+time. A wait of more than about 30 s was not measured: with 8127 it would probably end
+the connection (ICE's consent to send runs out), where 8078 keeps it. The media stall is
+the same with both because in M156 the worker thread, where the audio device module
+waited, carried the call's RTP too. The audio device module keeps no thread of its own:
+one is a possible later improvement, not a condition of M158.
+
+What the application does meanwhile (`app/lib/src/call.dart`): the other side sees the
+connection disconnected after a few seconds. Its `onConnectionState` makes
+`peer.connected` false: the person's tile says they are connecting and shows their
+avatar instead of their camera, their shared screen is not offered, and if they watched
+this device's screen the others' share of the upload is computed again. Disconnected is
+not failed, so nothing is tried again; when the connection is up again their voice
+channel is set as the microphone asks and the call goes on as before. A new connection
+that is not up within `connectWithin` (15 s), as one whose start of recording or playing
+blocks the network thread for about that long, is tried again as one that failed
+(`_retry`).

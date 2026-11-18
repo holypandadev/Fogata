@@ -71,3 +71,7 @@ NOTICE.md}`, as webrtc-sdk's Windows archives are laid out. Put its SHA-256 into
 3. `windows/test/run_tests.ps1` of the plugin, and a call with the rigs (`win-call.sh`):
    sound both ways, camera and screen, the microphone kept when devices change (libwebrtc's
    own device change event, `OnDeviceChange`, comes from patch 0003 on Windows).
+4. With fogata-libwebrtc.m158.8127.1, a real camera by hand: cameras start and stop on a
+   thread of their own since that version (wrapper patch 22), where DirectShow's COM is
+   initialized while a capture lives (as read in the code); no camera has been opened on
+   Windows with it yet, the test VM having none.

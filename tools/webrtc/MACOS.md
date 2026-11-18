@@ -8,7 +8,9 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    branch-head 8127 (on top of `patches/webrtc`, which the Mac's build applies first: its
    voice engine keeps webrtc-sdk's own rule for a muted sender, beside `patches/webrtc/0008`), without Android and the tvOS/visionOS build fork, and without what
    Fogata never uses: the frame and data packet cryptor, H.265, its changes to the
-   VideoToolbox H.264 encoder and decoder, and its OpenGL view.
+   VideoToolbox H.264 encoder and decoder, and its OpenGL view. WebRTC's own SFrame
+   (M158) is built in, unused and never offered, as on Linux and Windows (`README.md`,
+   wrapper patch 6).
 2. `0002-vp8-size-gate`: every VP8 decoder of the SDK refuses keyframes larger than 8K before
    decoding them (the wrapper's `vp8_size_gate`, copied in as `//libwebrtc` by
    `prepare.sh`), and `RTCI420Buffer.refusedSize` tells the size a stand-in stands for, which

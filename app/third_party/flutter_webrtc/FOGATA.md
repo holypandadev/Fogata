@@ -258,7 +258,7 @@ came back recorded from another microphone that way.
   before. An input unplugged and plugged in again at the same place, with the same id, is
   counted, so it is asked for anew; a different input, a different place or the first
   selection always are. Whether the audio device took a selection is not known: the
-  wrapper does it later on WebRTC's worker thread and always answers 0, so a refusal there
+  wrapper does it later on WebRTC's network thread and always answers 0, so a refusal there
   goes unseen until the next selection after a change counted, or until
   `KeepRecordingDevice` finds the input at another place. With `FOGATA_WEBRTC_LOG`,
   standard error says "Fogata: input N selected", "selected again" (`KeepRecordingDevice`)
@@ -1286,8 +1286,9 @@ left libwebrtc's PulseAudio device with a dead connection for good: its lists he
 voice engine stays, "The voice engine stays", so it was never made again).
 
 - `tools/webrtc/patches/webrtc/0006` (Fogata's libwebrtc): PulseAudio's mainloop thread
-  sees the device's connection fail and posts to WebRTC's worker thread, where the voice
-  engine calls the device and where everything else happens. There the device stops
+  sees the device's connection fail and posts to WebRTC's network thread (its worker
+  thread before M158), where the voice engine calls the device and where everything else
+  happens. There the device stops
   playout and recording, keeping what the voice engine had asked for; lists no input and
   no output at all, not even the default, while no server answers; tells its observer
   (the wrapper's `OnDeviceChange`, which on Linux libwebrtc never told before); and
@@ -1305,7 +1306,7 @@ voice engine stays, "The voice engine stays", so it was never made again).
   its first connection (it waited for ever for a server that took the connection and
   never answered) and every question to it are given up after 5 s, as a stream starting
   already was after 9 s.
-- `tools/webrtc/patches/wrapper/0010`: the lists' counts are read on the worker thread
+- `tools/webrtc/patches/wrapper/0010`: the lists' counts are read on that thread
   too, the listener is set and called under a lock, and a null one stops it.
 - `common/cpp/src/flutter_webrtc_base.cc`: the plugin hears of it as of any other change
   (`KeepRecordingDevice`, then `onDeviceChange`, on the platform thread), which reads no

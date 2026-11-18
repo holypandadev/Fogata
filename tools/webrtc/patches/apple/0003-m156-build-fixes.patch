@@ -1,7 +1,8 @@
-What patch 0001 needs to build on M156, found on the Mac: the simulcast factory's
-media constants (M156 split rtc_media_base), no HAVE_NO_MEDIA branches (gone in M156),
-and the network thread in place of webrtc-sdk's worker thread, which M156 no longer has
-apart from it (the audio device module is made and driven on that thread).
+What patch 0001 needs to build on a Mac since M156, and still on M158: the simulcast
+factory's media constants (rtc_media_base is split since M156), no HAVE_NO_MEDIA branches
+(gone since M156), and the network thread in place of webrtc-sdk's worker thread, which
+WebRTC no longer had apart from it in M156 and no longer has at all in M158 (the audio
+device module is made and driven on that thread).
 
 diff --git a/sdk/BUILD.gn b/sdk/BUILD.gn
 index 238da2e7aa..1095b5810f 100644

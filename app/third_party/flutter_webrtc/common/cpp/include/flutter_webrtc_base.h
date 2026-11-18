@@ -217,7 +217,7 @@ class FlutterWebRTCBase {
   // Fogata: what the plugin last asked the audio device for: its place in the list and
   // its id ("" for the list's first entry, the system's default), which is not the
   // chosen one while that is gone and the default is asked for instead. The wrapper's
-  // SetRecordingDevice does the work later, on WebRTC's worker thread, and always
+  // SetRecordingDevice does the work later, on WebRTC's network thread, and always
   // answers 0, so whether the audio device took it is not known here.
   uint16_t recording_device_index_ = 0;
   std::string recording_device_given_id_;

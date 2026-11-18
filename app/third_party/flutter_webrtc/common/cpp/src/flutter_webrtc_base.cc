@@ -214,7 +214,7 @@ void FlutterWebRTCBase::EnsureWebRTCInitialized(bool enable_warp,
 
   audio_device_->OnDeviceChange([&] {
     // Fogata: the chosen input may have moved in the list. Not on the thread
-    // that tells, which may be WebRTC's own: on Linux its worker thread tells when
+    // that tells, which may be WebRTC's own: on Linux its network thread tells when
     // the sound server goes away (no device listed at all then) and when it is back.
     // Counted here, as it is told: an input asked for before it is asked for anew.
     input_changes_++;
@@ -267,7 +267,7 @@ void FlutterWebRTCBase::SelectRecordingDevice(uint16_t index,
     }
     return;
   }
-  // The wrapper does it later, on WebRTC's worker thread, and always answers 0. A
+  // The wrapper does it later, on WebRTC's network thread, and always answers 0. A
   // refusal there goes unseen: the input is asked for again only by the next selection
   // after a change counted, or when KeepRecordingDevice finds it at another place.
   audio_device_->SetRecordingDevice(index);
