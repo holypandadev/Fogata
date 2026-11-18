@@ -76,11 +76,18 @@ impl Node {
     /// `peer`'s best open connection: the best path, QUIC first on the same path (media
     /// travels on QUIC), the oldest first after that, so the choice holds still.
     pub(super) fn best_connection(&self, peer: &PeerId) -> Option<ConnectionInfo> {
+        self.best_connection_id(peer)
+            .and_then(|id| self.connections.get(&id))
+            .cloned()
+    }
+
+    /// Which of `peer`'s connections [`Self::best_connection`] is.
+    pub(super) fn best_connection_id(&self, peer: &PeerId) -> Option<ConnectionId> {
         self.connections
             .iter()
             .filter(|(id, c)| c.peer == *peer && !self.closing.contains(id))
             .min_by_key(|(id, c)| (path_rank(&c.path), !addr::is_quic(&c.address), **id))
-            .map(|(_, c)| c.clone())
+            .map(|(id, _)| *id)
     }
 
     /// A member reached only over TCP (or through another member) cannot receive media

@@ -498,7 +498,10 @@ impl Node {
                     if *misses >= 2 {
                         tracing::debug!("closing a connection that stopped answering: {e}");
                         self.ping_misses.remove(&connection);
-                        self.swarm.close_connection(connection);
+                        // No member request goes on it while it closes (see `request`).
+                        if self.swarm.close_connection(connection) {
+                            self.closing.insert(connection);
+                        }
                     }
                 }
             },

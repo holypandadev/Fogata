@@ -34,7 +34,7 @@ invite), since the invite names the group and its manager.
 | relay (client) | Reserve a slot at a member who can be reached. |
 | dcutr | Hole punching coordinated through a member's relay slot. |
 | stream | Fogata's own stream protocols (files, updates, typing, the media bridge, direct chats, an account's move). Up to 128 streams of one protocol that come in together wait for the task that takes them, which applies its own limits then; libp2p as published keeps one and drops the rest, so several requests at once from one member failed on a busy computer (vendor/libp2p-stream/FOGATA.md). |
-| request-response | Membership proof, roster exchange, group messages. A message is at most 4 MiB, and one with more CBOR data items than one per 32 bytes of that is refused before it is decoded: anyone can send one, and tiny items would each take far more memory decoded than on the wire. |
+| request-response | Membership proof, roster exchange, group messages, call signals. Each member request goes on the peer's best connection as it leaves (best path, QUIC first, the oldest; one this device is closing never), or as libp2p chooses when there is none or it has just closed; libp2p as published takes any of a peer's connections, a slower one or one about to close (vendor/libp2p-request-response/FOGATA.md). A message is at most 4 MiB, and one with more CBOR data items than one per 32 bytes of that is refused before it is decoded: anyone can send one, and tiny items would each take far more memory decoded than on the wire. |
 
 Not used: AutoNAT (it asks strangers to probe us) and libp2p's UPnP behaviour (MPL-2.0
 dependency). Port mapping with `rupnp` and `crab_nat` is planned for a later milestone.

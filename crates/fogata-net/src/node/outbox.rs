@@ -78,11 +78,15 @@ impl Node {
             return;
         }
         outbox.in_flight += 1;
-        let id = self
-            .swarm
-            .behaviour_mut()
-            .member
-            .send_request(&peer, request);
+        // On the peer's best connection, chosen as the request leaves: libp2p would take any
+        // of them, a slower one, or one about to close (a relayed or silent one kept a few
+        // seconds, a dead one after an outage). Without one known here, as libp2p chooses.
+        let best = self.best_connection_id(&peer);
+        let member = &mut self.swarm.behaviour_mut().member;
+        let id = match best {
+            Some(connection) => member.send_request_on(&peer, connection, request),
+            None => member.send_request(&peer, request),
+        };
         self.pending.insert(id, (peer, kind));
     }
 
