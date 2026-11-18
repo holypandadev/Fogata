@@ -136,6 +136,36 @@ void main() {
     expect(verdict(refused), isNull);
   });
 
+  test(
+    'a restart of the recording is asked only where the refusal lost it',
+    () {
+      // The numbers of two device runs: with the unmute refused the recording went on (the
+      // first reading after any unmute has no packets), with the start refused it was lost.
+      const name =
+          'the other output, the microphone on again (2), $swapRefusedForTest';
+      expect(
+        swapRecordingLost(
+          segment(
+            name,
+            [0, 88, 99, 77, 99, 100, 100, 100, 100, 102],
+            read: [1.8, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.1, 2.0],
+          ),
+        ),
+        isFalse,
+      );
+      expect(
+        swapRecordingLost(
+          segment(
+            name,
+            [0, 0, 0, 0, 73, 86, 100, 101, 101, 100],
+            read: [0.0, 0.0, 0.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
+          ),
+        ),
+        isTrue,
+      );
+    },
+  );
+
   test('devices not those chosen 6 s after a choice fail', () {
     expect(
       outputSwapVerdict(

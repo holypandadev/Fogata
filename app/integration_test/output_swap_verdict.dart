@@ -32,6 +32,15 @@ const swapSilentLevels = 5;
 const swapRefusedForTest = 'the pair refused for the test';
 const swapExcusedRefused = 4;
 
+/// Whether [segment] (one with [swapRefusedForTest]) lost the recording, so that the call
+/// had to start it again: a reading judged as any change's are (spanning [swapShortest] or
+/// more, after the first [swapExcused]) that read no sound from the microphone. The
+/// packets are not looked at: the first reading after any unmute has none.
+bool swapRecordingLost(SwapSegment segment) => segment.readings
+    .where((r) => r.took == null || r.took! >= swapShortest)
+    .skip(swapExcused)
+    .any((r) => r.read != null && !(r.read! > 0));
+
 /// FOGATA_TEST_OUTPUT_SWAP's verdict (call_test.dart's _OutputSwap): why the copy lost its
 /// microphone across the changes of output or its own off and on, or recorded with it
 /// off, or null when neither. A voice engine that loses the microphone sends no voice from
