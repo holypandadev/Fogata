@@ -136,8 +136,18 @@ void main() {
       'settings ${section.name}': () =>
           fakeRoom(people: 2)..openSettings(section),
   };
+  // What test/languages_fit_test.dart tries at 960 by 640 with twice the text size, in
+  // English: the same pages with the same data. Not the home page and the direct chat,
+  // whose data differ there, nor the voice settings, which list no device here.
+  final triedThere = {
+    'room',
+    'friends',
+    for (final section in SettingsSection.values)
+      if (section != SettingsSection.voice) 'settings ${section.name}',
+  };
   for (final size in const [Size(960, 640), Size(1280, 800)]) {
     for (final MapEntry(key: name, value: make) in pages.entries) {
+      if (size.width == 960 && triedThere.contains(name)) continue;
       testWidgets('$name fits at twice the text size, $size', (tester) async {
         expect(await _overflows(tester, make(), size, 2), isEmpty);
       });
