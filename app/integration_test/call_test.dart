@@ -3995,14 +3995,14 @@ Future<void> _measureCall(
       .map((e) => e.key)
       .firstOrNull;
   if (sharer != null) {
-    final peer = _peer(state, sharer);
+    _peer(state, sharer);
     call.watch(sharer.id);
-    await _until(
-      tester,
-      "${sharer.name}'s screen shown",
-      () => peer.sharing && peer.screen.videoWidth > 0,
-      seconds: 180,
-    );
+    // The connection as it is at each look: one the room drops and adds again meanwhile
+    // (a busy computer) comes as another peer, and the first one never shows anything.
+    await _until(tester, "${sharer.name}'s screen shown", () {
+      final peer = call.peers[sharer.id];
+      return peer != null && peer.sharing && peer.screen.videoWidth > 0;
+    }, seconds: 180);
   }
   if (_camera) {
     await _until(
