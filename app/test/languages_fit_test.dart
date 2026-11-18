@@ -1,6 +1,7 @@
 // The main screens in every language, and in a pseudo-language 40 % longer than English,
 // at the window's smallest size, with the system's text at its size, at 1.5 times and at
-// twice it: nothing overflows, and no text is cut by the control it is in.
+// twice it (in English and the pseudo-language; in the others at the largest each window
+// takes, see `_windows`): nothing overflows, and no text is cut by the control it is in.
 
 import 'dart:io';
 import 'dart:math' as math;
@@ -792,12 +793,30 @@ final _pages = <String, (AppState Function(), Widget)>{
 /// takes on a screen large enough, the smallest a screen gives it in practice (a Mac's
 /// "Larger Text", 1024 by 571 once its menu bar is off: `mainWindowSizes`), and a
 /// smaller one still, for a margin.
+///
+/// English and the pseudo-language are tried at every pair; the other languages at the
+/// largest text each window takes (see [_tried]). Within one window the largest text is the
+/// tightest, and every width stays for every language: the layout changes at 860 and at
+/// 920 points wide.
 const _windows = [
   (Size(960, 640), [1.0, 1.5, 2.0]),
   (Size(1024, 571), [1.0, 1.5]),
   (Size(900, 600), [1.0]),
   (Size(800, 560), [1.0]),
 ];
+
+/// Whether [page] cannot be tried with text [scale] times its size.
+bool _skipped(String page, double scale) =>
+    // The picker's cells keep their size, which emoji twice as large overflow.
+    scale == 2 && page == 'room, an emoji picked in its chat';
+
+/// Whether [page] is tried in language [code] at text [scale] in a window of [scales]: in
+/// English and in the pseudo-language at each, in the others at the largest the page takes
+/// there.
+bool _tried(String code, String page, double scale, List<double> scales) =>
+    code == 'en' ||
+    code == 'pseudo' ||
+    scale == scales.where((s) => !_skipped(page, s)).reduce(math.max);
 
 /// The ARB files, read once for every case (first used by the first case that reads them).
 final _arbs = readArbs();
@@ -931,8 +950,7 @@ void main() {
       for (final scale in scales) {
         for (final MapEntry(key: name, value: (make, child))
             in _pages.entries) {
-          // The picker's cells keep their size, which emoji twice as large overflow.
-          if (scale == 2 && name == 'room, an emoji picked in its chat') {
+          if (_skipped(name, scale) || !_tried(code, name, scale, scales)) {
             continue;
           }
           testWidgets('$name fits at $at in $code, text ×$scale', (
