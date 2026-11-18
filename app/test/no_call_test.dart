@@ -426,6 +426,53 @@ void main() {
     });
 
     test(
+      'a refusal at an unmute is recovered at the first reading after it',
+      () {
+        // As on a device run: muted at the reading before (no voice sent then), the start
+        // with the pair failed at the unmute and dropped the module's request.
+        final watch = RecordingWatch();
+        final muted = {
+          'recordingAsked': false,
+          'recording': false,
+          'inputUsable': true,
+          'changing': false,
+          'combinable': true,
+        };
+        expect(watch.take(muted, mic: false, sending: false), isFalse);
+        final refused = {...muted, 'combinable': false};
+        expect(watch.take(refused, mic: true, sending: false), isTrue);
+        expect(watch.take(refused, mic: true, sending: true), isFalse);
+      },
+    );
+
+    test(
+      'a refusal ends as something records, and is not taken while muted',
+      () {
+        final watch = RecordingWatch();
+        final recording = {
+          'recordingAsked': true,
+          'recording': true,
+          'inputUsable': true,
+          'changing': false,
+          'combinable': true,
+        };
+        expect(watch.take(recording, mic: true, sending: true), isFalse);
+        final refused = {...recording, 'combinable': false};
+        expect(watch.take(refused, mic: true, sending: true), isFalse);
+        // Recording through the new engine: the refusal is over, a later loss needs two.
+        final lost = {...refused, 'recording': false};
+        expect(watch.take(lost, mic: true, sending: true), isFalse);
+        expect(watch.take(lost, mic: true, sending: true), isTrue);
+        // Refused while muted: nothing, and the unmute after it waits for two readings.
+        final again = RecordingWatch();
+        expect(again.take(recording, mic: true, sending: true), isFalse);
+        expect(again.take(lost, mic: false, sending: true), isFalse);
+        expect(again.take(lost, mic: true, sending: true), isFalse);
+        expect(again.take(lost, mic: true, sending: true), isTrue);
+      },
+    );
+
+    test(
       'a start that dropped the request counts as lost while voice is sent',
       () {
         final watch = RecordingWatch();

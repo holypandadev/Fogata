@@ -482,32 +482,38 @@ class InputWatch {
 class RecordingWatch {
   int _seen = 0;
   bool _recovered = false;
+  bool _refused = false;
   Object? _combinable;
 
   bool take(Object? facts, {required bool mic, required bool sending}) {
     // The engine changed what it is since (the pair chosen now refused, R4: a new engine
     // following the system's devices): a restart of the recording may work now, and a
-    // loss seen now has that known cause, so one reading is enough.
-    var refusedNow = false;
+    // loss seen now has that known cause, so one reading is enough. It holds until
+    // something records or the microphone is off: the refusal can show a reading before
+    // the loss does. While it holds, nothing recorded with the microphone on is the loss,
+    // asked or not (a start that failed drops the request, and the voice sent is read
+    // from the reading before, with the microphone maybe still off then).
     if (facts is Map) {
       final combinable = facts['combinable'];
       if (_combinable == true && combinable == false) {
         _recovered = false;
-        refusedNow = true;
+        _refused = true;
       }
       _combinable = combinable;
     }
     if (facts is! Map || facts['recording'] == true || !mic) {
       _seen = 0;
+      _refused = false;
       if (facts is Map && facts['recording'] == true) _recovered = false;
       return false;
     }
     final lost =
         facts['changing'] != true &&
         facts['inputUsable'] == true &&
-        (facts['recordingAsked'] == true || sending);
+        (facts['recordingAsked'] == true || sending || _refused);
     _seen = lost ? _seen + 1 : 0;
-    if ((_seen < 2 && !(lost && refusedNow)) || _recovered) return false;
+    if ((_seen < 2 && !(lost && _refused)) || _recovered) return false;
+    _refused = false;
     _recovered = true;
     return true;
   }

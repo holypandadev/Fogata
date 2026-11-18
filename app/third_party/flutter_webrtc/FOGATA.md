@@ -858,7 +858,8 @@ something makes the engine again.
     "default", has an empty name then), or one that is gone, has no input channels or no
     rate. The module then plays alone and keeps WebRTC's requests to record for when the
     input is available. The input is looked at again when the system's devices or its
-    default input or output change (after 600 ms of quiet, past the module's own 500 ms), when
+    default input or output change (after 600 ms of quiet, past the module's own 500 ms; a
+    change of the list that is only its own aggregates made or destroyed is not one), when
     `getUserMedia` takes a microphone and when one is chosen (`FlutterRTCMediaStream.m`,
     both copies, identical); a microphone that became usable is opened at once.
   - As the module's observer (unless an embedding plugin registered one): when the engine
@@ -969,7 +970,8 @@ it off. The input chosen while the output was another device met the same.
     waits 100 ms at most for its streams, on the module's thread.
   - The aggregate of the pair chosen is kept while that pair is chosen, present and
     usable: made at the choice (ahead of the microphone, while the engine only plays, so
-    WebRTC has seen that change before the first unmute), kept through the mutes (the
+    WebRTC has seen that change before the first unmute; only with the microphone
+    permission granted, else at the first unmute after it is), kept through the mutes (the
     engine that only plays is given the output device itself), destroyed when the choice
     changes, a device goes or the pair is refused. Making or destroying a device tells
     WebRTC the devices changed (Apple patch 0008), and its echo canceller is then made anew
@@ -1037,7 +1039,9 @@ it off. The input chosen while the output was another device met the same.
 - R5. When the module was asked to record and nothing records, or it was not asked
   although the call sends voice (a start that failed: the module then drops WebRTC's
   request and nothing asks again), two readings in a row with the microphone on and its
-  input let in (`RecordingWatch`), the call has every voice encoding off, all of them
+  input let in (`RecordingWatch`), the call has every voice encoding off, and the
+  screen's sound's where it is sent, on every connection, up or not (one WebRTC finds up
+  before the call does runs its streams), all of them
   before any starts again (WebRTC stops recording when its last sending stream stops),
   then on again, so that WebRTC's
   AudioState asks the module to record afresh and restarts its echo canceller, as at any
@@ -1045,11 +1049,13 @@ it off. The input chosen while the output was another device met the same.
   microphone's check is not started over. Given up as soon as the person turns the
   microphone off or the call ends. Once for each loss, and again when the engine changed
   since (the pair now refused, R4). Seen 4 to 6 s after the loss (two readings in a row,
-  the voice sent read from the reading before), or at the first reading that sees both the
-  loss and the pair just refused (2 s or so). Each participant's own step is the only
-  one that sets their encoding: while the restart runs it wants it off (a step of any
-  origin meanwhile, a participant who arrives, does the same), and once no voice encoding
-  is on anywhere (3 s at most) every step runs again, turning them on with its own retries.
+  the voice sent read from the reading before), or, once the pair is seen refused, at the
+  first reading with the microphone on and nothing recorded, asked or not (2 s or so; that
+  holds until something records or the microphone is turned off). Each participant's own
+  step is the only one that sets their encoding: while the restart runs it wants it off (a
+  step of any origin meanwhile, a participant who arrives, does the same), and once no
+  encoding of sound is on anywhere (3 s at most) every step runs again, turning them on
+  with its own retries, the screen's sound as it was.
 - The call judges whether its microphone reads anything from the start again when an
   output is chosen on macOS (`Call.useOutput`, `MicCheck.reset`), as it does for another
   input: the engine is made again then and records nothing for a moment.
@@ -1090,7 +1096,8 @@ it off. The input chosen while the output was another device met the same.
   FOGATA_TEST_REFUSE=start has that unmute's start fail with the pair given, and either
   run fails unless, at the end of the other output's time, the facts say the pair cannot
   be put together and the engine follows the system and records, and, when a reading of
-  that stretch lost the voice, the call started the recording again (R4 and R5); that
+  that stretch judged as any change's (past the first two, a second or more long) read no
+  sound from the microphone, the call started the recording again (R4 and R5); that
   stretch is let take four readings.
 
 ## A received track is found as the connection that received it (all platforms)

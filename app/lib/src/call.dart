@@ -1391,12 +1391,14 @@ class Call extends ChangeNotifier {
       // A capture being replaced: its track and direction stay as they are, so that
       // nothing is agreed for the change; its encoding follows the microphone as
       // outside it, on only while the screen's sound could go out (with the microphone
-      // on, or through the silent input on Linux).
-      if (shareSound && (mic || _silent || _silenceComing)) {
+      // on, or through the silent input on Linux). While the recording is started again
+      // it is off too, as the voice: WebRTC stops recording only with no sound sent.
+      if (shareSound && (mic || _silent || _silenceComing) && !_recovering) {
         if (await _encode(connection, _screenSound, true) == false && !gone()) {
           _startLater(peer, connection, _screenSound);
         }
-      } else if (peer._upOnce && await _agreedSends(connection, _screenSound)) {
+      } else if ((peer._upOnce || _recovering) &&
+          await _agreedSends(connection, _screenSound)) {
         await _encode(connection, _screenSound, false);
       }
     }
@@ -1406,11 +1408,14 @@ class Call extends ChangeNotifier {
       );
       // Sending, the screen's sound goes with its encoding on. Not sending, a send
       // stream of it that is still agreed (until its new direction is) records nothing.
-      if (_soundInChannel) {
+      // While the recording is started again it is off ([_recoverVoice]), its track and
+      // direction as they are, and on again after it.
+      if (_soundInChannel && !_recovering) {
         if (await _encode(connection, _screenSound, true) == false && !gone()) {
           _startLater(peer, connection, _screenSound);
         }
-      } else if (peer._upOnce && await _agreedSends(connection, _screenSound)) {
+      } else if ((peer._upOnce || _recovering) &&
+          await _agreedSends(connection, _screenSound)) {
         await _encode(connection, _screenSound, false);
       }
     }
@@ -1487,10 +1492,11 @@ class Call extends ChangeNotifier {
     RTCPeerConnection connection,
   ) async {
     var stopped = false;
-    if ((!mic || _recovering) &&
-        peer._upOnce &&
-        peer.connection == connection &&
-        await _sendsVoice(connection)) {
+    if (peer.connection == connection &&
+        (mic && _recovering ||
+            !mic && peer._upOnce && await _sendsVoice(connection))) {
+      // While the recording is started again ([_recoverVoice]), off on every connection,
+      // up or not: one WebRTC finds up before the call does runs its stream already.
       stopped = await _encode(connection, _audio, false) == true;
     }
     // [mic] as it is after the wait: turned on meanwhile, the channel sends.
@@ -1516,8 +1522,11 @@ class Call extends ChangeNotifier {
     _trace('$what to ${peer.id.substring(0, 8)} not started: trying again');
     bool wanted() => channel == _audio
         ? mic && !_recovering && _track(_audio, peer) != null
-        : _soundInChannel ||
-              (_replacing && shareSound && (mic || _silent || _silenceComing));
+        : !_recovering &&
+              (_soundInChannel ||
+                  (_replacing &&
+                      shareSound &&
+                      (mic || _silent || _silenceComing)));
     unawaited(() async {
       try {
         for (final wait in voiceStartAgainAfter) {
@@ -2224,7 +2233,8 @@ class Call extends ChangeNotifier {
   bool _checkingOutput = false;
 
   /// The voice engine lost the recording the call wants ([RecordingWatch]): every voice
-  /// encoding is to be off, then on again, so that WebRTC stops recording (its last sending
+  /// encoding, and the screen's sound's where it is sent, on every connection up or not,
+  /// is to be off, then on again, so that WebRTC stops recording (its last sending
   /// stream gone) and starts it afresh its own way: AudioState asks the audio module to
   /// record and restarts its echo canceller, as at any unmute. Each participant's own step
   /// ([_voiceTo]) is the only one that sets their encoding: while [_recovering] it wants
@@ -2279,22 +2289,27 @@ class Call extends ChangeNotifier {
   @visibleForTesting
   int voiceRecoveries = 0;
 
-  /// The participants whose voice encoding is on, as their sender reads back.
+  /// The participants with an encoding of sound on, as their sender reads back: the
+  /// voice's, or the screen's sound's where it is agreed to send. Every connection, up or
+  /// not: one WebRTC finds up before the call does runs its streams already.
   Future<List<CallPeer>> _voiceOn() async {
     final on = <CallPeer>[];
+    bool active(RTCRtpSender sender) =>
+        (sender.parameters.encodings ?? const <RTCRtpEncoding>[]).any(
+          (e) => e.active,
+        );
     for (final peer in peers.values.toList()) {
       final connection = peer.connection;
-      // A connection that has never come up runs no stream, so its encoding holds no
-      // recording (WebRTC runs what is agreed to send only once up); its step leaves it
-      // as it is ([_voiceWanted]).
-      if (connection == null || !peer._upOnce) continue;
+      if (connection == null) continue;
       try {
         final channels = await _channels(connection);
         if (channels.length <= _audio) continue;
-        final encodings =
-            channels[_audio].sender.parameters.encodings ??
-            const <RTCRtpEncoding>[];
-        if (encodings.any((e) => e.active)) on.add(peer);
+        if (active(channels[_audio].sender) ||
+            (channels.length > _screenSound &&
+                active(channels[_screenSound].sender) &&
+                await _agreedSends(connection, _screenSound))) {
+          on.add(peer);
+        }
       } catch (_) {
         // A connection closed meanwhile sends nothing.
       }

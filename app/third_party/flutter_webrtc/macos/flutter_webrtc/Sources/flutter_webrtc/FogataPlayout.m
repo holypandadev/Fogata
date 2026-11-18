@@ -287,6 +287,31 @@ static BOOL Combinable(AudioObjectID output, AudioObjectID input,
 // a sound from is taken as refused, once. 0 otherwise, as always outside that test.
 static int gTestRefuse = 0;
 
+// The unique ids of the system's devices other than this process's own aggregates.
+static NSSet<NSString*>* OtherDevices(void) {
+  NSMutableSet<NSString*>* uids = [NSMutableSet set];
+  AudioObjectPropertyAddress address = {kAudioHardwarePropertyDevices,
+                                        kAudioObjectPropertyScopeGlobal,
+                                        kAudioObjectPropertyElementMain};
+  UInt32 size = 0;
+  if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, NULL, &size) !=
+          noErr ||
+      size == 0) {
+    return uids;
+  }
+  NSMutableData* data = [NSMutableData dataWithLength:size];
+  if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, NULL, &size,
+                                 data.mutableBytes) != noErr) {
+    return uids;
+  }
+  const AudioObjectID* devices = data.bytes;
+  for (UInt32 i = 0; i < size / sizeof(AudioObjectID); i++) {
+    NSString* uid = UIDOf(devices[i]);
+    if (uid != nil && ![uid hasPrefix:kOwnPrefix]) [uids addObject:uid];
+  }
+  return uids;
+}
+
 @implementation FogataPlayout {
   // Weak: the factory owns it. Used only on `_queue` and only before -stop returns, which
   // waits for the queue, so never after the factory (and its threads) went.
@@ -296,6 +321,7 @@ static int gTestRefuse = 0;
   AudioObjectPropertyListenerBlock _listener;
 
   // On `_queue` only.
+  NSSet<NSString*>* _otherDevices;  // OtherDevices() at the last change heard
   BOOL _stopped;
   BOOL _inputAvailable;  // what the module was last told
   BOOL _inputFailed;     // the input could not be opened; left out until tried again
@@ -388,7 +414,19 @@ static int gTestRefuse = 0;
   // the input it was refused before.
   __weak FogataPlayout* weakSelf = self;
   _listener = ^(UInt32 count, const AudioObjectPropertyAddress* addresses) {
-    [weakSelf devicesChanged];
+    FogataPlayout* me = weakSelf;
+    if (me == nil) return;
+    // A change of the list that is only this process's own aggregates, made or destroyed,
+    // is not a change of the devices: it would start the counts over (-startOver), and an
+    // engine whose aggregate is made anew at each remake would be made again forever.
+    BOOL listOnly = YES;
+    for (UInt32 i = 0; i < count; i++) {
+      if (addresses[i].mSelector != kAudioHardwarePropertyDevices) listOnly = NO;
+    }
+    NSSet<NSString*>* others = OtherDevices();
+    if (listOnly && [others isEqualToSet:me->_otherDevices]) return;
+    me->_otherDevices = others;
+    [me devicesChanged];
   };
   for (size_t i = 0; i < sizeof(kWatched) / sizeof(kWatched[0]); i++) {
     AudioObjectAddPropertyListenerBlock(kAudioObjectSystemObject, &kWatched[i], _queue, _listener);
@@ -396,6 +434,7 @@ static int gTestRefuse = 0;
   if (observe) module.observer = self;
 
   dispatch_async(_queue, ^{
+    self->_otherDevices = OtherDevices();
     [self refresh];
   });
   return self;
@@ -1116,6 +1155,12 @@ static int gTestRefuse = 0;
 // as before.
 - (void)makeAggregateFor:(nullable NSString*)key output:(AudioObjectID)output {
   if (key == nil || _aggregate != kAudioObjectUnknown) return;
+  // Without the permission the microphone's device is not touched: once it is granted, the
+  // first unmute makes the aggregate as before.
+  if ([AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] !=
+      AVAuthorizationStatusAuthorized) {
+    return;
+  }
   os_unfair_lock_lock(&_lock);
   NSString* chosenInput = _chosenInput;
   os_unfair_lock_unlock(&_lock);

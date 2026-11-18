@@ -1117,9 +1117,14 @@ void main() {
       bea.voiceSender.takes = const Duration(milliseconds: 150);
       final restart = call.recoverVoiceForTests();
       await until(() => !ana.voiceSender.active);
-      // A step of Ana's for another reason (her connection said up again).
-      call.comeUpForTests(call.peers[_ana]!);
+      // Every participant's step for another reason (the screen's sound's choice).
+      final steps = ana.voiceSender.replaced;
+      final asked = ana.voiceSender.asked.length;
+      call.shareSound = !call.shareSound;
+      await until(() => ana.voiceSender.replaced > steps);
       await Future<void>.delayed(const Duration(milliseconds: 60));
+      // Not turned on at any moment, before the others are off.
+      expect(ana.voiceSender.asked.skip(asked), isNot(contains(true)));
       expect(ana.voiceSender.active, isFalse);
       await restart.timeout(soon);
       await settle(call);
@@ -1136,20 +1141,25 @@ void main() {
         bea.voiceSender.takes = const Duration(milliseconds: 150);
         final restart = call.recoverVoiceForTests();
         await until(() => !ana.voiceSender.active);
+        // Their stream made with its encoding off: their step must not turn it on.
         final cee = _Connection();
+        cee.voiceSender.active = false;
         const ceeId = 'cccccccc';
         final peer = CallPeer(ceeId)
           ..connection = cee
-          ..upForTests()
           ..describedForTests();
         call.peers[ceeId] = peer;
         _adopt(call, cee);
+        // Their connection comes up: their own step runs, and leaves it off while the
+        // others are off.
         call.comeUpForTests(peer);
-        // Their step turns their encoding off too, before the others are on again.
         await until(
-          () => !cee.voiceSender.active,
+          () => cee.voiceSender.replaced > 0,
           within: const Duration(seconds: 1),
         );
+        await Future<void>.delayed(const Duration(milliseconds: 20));
+        expect(cee.voiceSender.active, isFalse);
+        expect(cee.voiceSender.asked, isNot(contains(true)));
         expect(ana.voiceSender.active, isFalse);
         await restart.timeout(soon);
         await settle(call);
@@ -1171,31 +1181,35 @@ void main() {
       expect(_records(call.peers[_bea]!), isTrue);
     });
 
-    test('a participant still connecting holds nothing up', () async {
-      final (call, _, ana, bea, busy) = twoInCall();
-      busy.complete();
-      await settle(call);
-      // Cee's connection has not come up: WebRTC runs no stream of it, whatever its
-      // encoding says, and nothing turns that off.
-      final cee = _Connection()..neverUp();
-      const ceeId = 'cccccccc';
-      call.peers[ceeId] = CallPeer(ceeId)
-        ..connection = cee
-        ..describedForTests();
-      _adopt(call, cee);
-      final before = [
-        ana.voiceSender.asked.length,
-        bea.voiceSender.asked.length,
-      ];
-      await call.recoverVoiceForTests().timeout(
-        const Duration(milliseconds: 1500),
-      );
-      await settle(call);
-      expect(ana.voiceSender.asked.skip(before[0]), [false, true]);
-      expect(bea.voiceSender.asked.skip(before[1]), [false, true]);
-      expect(_records(call.peers[_ana]!), isTrue);
-      expect(_records(call.peers[_bea]!), isTrue);
-    });
+    test(
+      'a participant still connecting is off too, and holds nothing up',
+      () async {
+        final (call, _, ana, bea, busy) = twoInCall();
+        busy.complete();
+        await settle(call);
+        // Cee's connection has not come up for the call: WebRTC may find it up first and
+        // run its stream, so its encoding is turned off too, and on again with the others.
+        final cee = _Connection()..neverUp();
+        const ceeId = 'cccccccc';
+        call.peers[ceeId] = CallPeer(ceeId)
+          ..connection = cee
+          ..describedForTests();
+        _adopt(call, cee);
+        final before = [
+          ana.voiceSender.asked.length,
+          bea.voiceSender.asked.length,
+        ];
+        await call.recoverVoiceForTests().timeout(
+          const Duration(milliseconds: 1500),
+        );
+        await settle(call);
+        expect(ana.voiceSender.asked.skip(before[0]), [false, true]);
+        expect(bea.voiceSender.asked.skip(before[1]), [false, true]);
+        expect(cee.voiceSender.asked, [false, true]);
+        expect(_records(call.peers[_ana]!), isTrue);
+        expect(_records(call.peers[_bea]!), isTrue);
+      },
+    );
 
     test('given up when the microphone is turned off', () async {
       final (call, _, ana, bea, busy) = twoInCall();
@@ -1339,6 +1353,41 @@ void main() {
     peer.watchesForTests = _offering;
     return (call, peer, connection);
   }
+
+  // A screen's sound sent keeps WebRTC recording: while the recording is started again it
+  // is off as well, and on again after, its track and direction as they were.
+  test('a recording started again with a screen shared with sound', () async {
+    pinnedHost = HostSystem.windows;
+    final (call, peer, connection) = sharing(screenSound: true);
+    await call.setShareSound(true);
+    await settle(call);
+    await answerFromAna(call);
+    await settle(call);
+    _holds(call, sound: true);
+    expect(connection.soundSender.active, isTrue);
+    final sound = connection.soundSender;
+    final voice = connection.voiceSender;
+    final track = sound.sent;
+    final directions = connection.sound.directionsSet;
+    final asked = (voice.asked.length, sound.asked.length);
+    // When the voice starts again, whether the screen's sound was off then.
+    bool? soundOff;
+    final before = voice.onStart;
+    voice.onStart = () {
+      before?.call();
+      soundOff ??= !sound.active;
+    };
+    await call.recoverVoiceForTests().timeout(soon);
+    await settle(call);
+    expect(voice.asked.skip(asked.$1), [false, true]);
+    expect(sound.asked.skip(asked.$2), [false, true]);
+    expect(soundOff, isTrue);
+    expect(sound.active, isTrue);
+    expect(sound.sent, same(track));
+    expect(connection.sound.directionsSet, directions);
+    expect(_records(peer), isTrue);
+    _holds(call, sound: true);
+  });
 
   // Windows has no silent input: the screen's sound goes out only with the microphone
   // on. Shared with sound, then muted before Ana's answer: her answer agrees on a sound
