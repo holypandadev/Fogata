@@ -19,8 +19,9 @@ network = { max-threads = 2 }
 fail-fast = false
 
 # fogata-core's and fogata-net's integration tests (but the fixtures of fogata-net's golden,
-# which start nothing), fogata-media's, the bridge's run through the screens' calls
+# which start nothing, and fogata-core's test of local changes the screens do not read, whose
+# one device dials nobody), fogata-media's, the bridge's run through the screens' calls
 # (fogata-ffi's smoke), and fogata-core's unit tests of shared files, which start devices too.
 [[profile.default.overrides]]
-filter = "(kind(test) & (package(fogata-core) | package(fogata-net) | package(fogata-media)) & !(package(fogata-net) & binary(golden))) | (package(fogata-ffi) & kind(test) & binary(smoke)) | (package(fogata-core) & kind(lib) & test(/^shares::tests::/))"
+filter = "(kind(test) & (package(fogata-core) | package(fogata-net) | package(fogata-media)) & !(package(fogata-net) & binary(golden)) & !(package(fogata-core) & binary(events) & test(=local_changes_while_the_screens_read_nothing_stay_bounded))) | (package(fogata-ffi) & kind(test) & binary(smoke)) | (package(fogata-core) & kind(lib) & test(/^shares::tests::/))"
 test-group = "network"

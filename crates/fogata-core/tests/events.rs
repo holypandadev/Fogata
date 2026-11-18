@@ -128,7 +128,7 @@ fn friends(base: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     (dir_a, dir_b)
 }
 
-/// Twenty thousand changes made here while the screens read nothing (this device away and
+/// Thousands of changes made here while the screens read nothing (this device away and
 /// back, a group renamed) leave a handful of events waiting, the last of each saying how
 /// things are now.
 #[tokio::test(flavor = "multi_thread")]
@@ -142,7 +142,9 @@ async fn local_changes_while_the_screens_read_nothing_stay_bounded() {
     let group = ana.create_group("crew", 0, &[]).await.unwrap();
     let before = resident();
     let mut away = false;
-    for n in 0..20_000 {
+    // Twice the most events the core keeps of those it never replaces (`CEILING` in
+    // src/events.rs, 4096): were these kept one by one, far more than a handful would wait.
+    for n in 0..8192 {
         away = ana.set_away(n % 2 == 0).await.unwrap();
         if n % 10 == 0 {
             ana.rename_group(group, &format!("crew {n}")).await.unwrap();
