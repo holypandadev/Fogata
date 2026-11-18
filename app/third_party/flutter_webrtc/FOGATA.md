@@ -414,16 +414,20 @@ others in a call would hear their own voices back. Instead:
   back").
   WebRTC records from its input whenever any channel of sound sends; while the
   microphone is off and a shared screen's sound goes out, the application points WebRTC
-  here so the microphone stays closed. Every choice of input during a call (this one,
-  the microphone again, another microphone chosen in the settings, on every system)
-  waits for the one before it. The calls made there have no time limit: on Linux and
-  Windows the list of devices and the selections run on the platform thread, so one that
-  does not return holds every later one there as well, and giving up on it would only
-  leave the application believing another input chosen than the one that is (a silent
-  input removed while it works, or kept while it is gone); the choices wait, and are
-  then carried out in order. Known limit, as before: a call's start chooses its input
-  outside that order, so a microphone chosen in the settings while a slow start still
-  chooses can be replaced by the start's own choice, made later.
+  here so the microphone stays closed. Three choices of input go one after the other,
+  each waiting for the one before it: this one, the way back to the microphone, and
+  another microphone chosen in the settings during a call (on every system). The calls
+  made there have no time limit: on Linux and Windows the list of devices and the
+  selections run on the platform thread, so one that does not return holds every later
+  one there as well, and giving up on it would only leave the application believing
+  another input chosen than the one that is (a silent input removed while it works, or
+  kept while it is gone); the choices wait, and are then carried out in order. Two
+  choose outside that order: a call's start, and the microphone opened again at an
+  unmute, which names its input to `getUserMedia` (`sourceId`), where the plugin selects
+  it (Linux, Windows). Known limits, as before: a microphone chosen in the settings while
+  a slow start still chooses can be replaced by the start's own choice, made later; and
+  a call's end waits for that order 5 s at most (its steps of letting go), so an ended
+  call's last choice can land after the next call has started.
 - Both connect to PipeWire's own socket, which a Flatpak gets only when given it
   (`--filesystem=xdg-run/pipewire-0`, in tools/beta/flatpak.sh): with only PulseAudio's,
   a shared screen goes without sound and the silent input is not made.
