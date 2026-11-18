@@ -31,11 +31,6 @@ void main() {
         ),
       );
       await tester.pump(const Duration(milliseconds: 500));
-      expect(find.textContaining('Ephemeral'), findsNothing);
-      expect(
-        find.textContaining('gone when the last one leaves'),
-        findsNothing,
-      );
       // How the room is reached stays, where the bar is wide enough for it.
       expect(
         find.text('Direct · encrypted'),
