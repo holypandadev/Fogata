@@ -570,7 +570,12 @@ fn wait_until_free(dir: &Path) -> Result<()> {
 }
 
 /// Longest a core that stopped, or a move, is waited for to let go of the data folder.
+#[cfg(not(test))]
 const FREE_WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+/// A second in this crate's own tests, where no core of theirs holds the folder after it
+/// stopped: only a lock the test keeps does, which the wait cannot outlast.
+#[cfg(test)]
+const FREE_WAIT: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// What changes from now on; a new call replaces the previous stream. The screens say
 /// when they took each event ([`events_taken`]): no more than [`GIVEN_AT_MOST`] are given
