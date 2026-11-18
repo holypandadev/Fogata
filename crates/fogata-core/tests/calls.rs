@@ -1222,16 +1222,23 @@ async fn idle(core: &Core, what: &str) {
 /// side answers it at once, as if Ana had pressed Accept, and the call Ana waited in ends
 /// as one she hung up. Nothing rang on Ana's side, nor shows as missed. The same when the
 /// first call was Bea's.
+///
+/// Carla, a friend of Ana's only and never in a call, keeps Ana connected to someone once
+/// Bea is gone: a device with no connection at all gives those in its rooms the two minutes'
+/// grace, while one still connected takes out of the room after 25 seconds those it
+/// has no way left to hear from. Ana waits alone just the same, sooner.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_friend_whose_application_closed_in_a_call_calls_and_is_answered_at_once() {
     let _one = ONE_AT_A_TIME.lock().await;
     let base = std::env::temp_dir().join(format!("fogata-call-reopen-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
-    let (dir_a, dir_b) = friends(&base);
-    let options = dialling(2);
-    let (ana, mut events_a) = Core::start(dir_a, options[0].clone()).unwrap();
+    let dirs = some_friends(&base, &["Ana", "Bea", "Carla"], &[(0, 1), (0, 2)]);
+    let dir_b = dirs[1].clone();
+    let options = dialling(3);
+    let (ana, mut events_a) = Core::start(dirs[0].clone(), options[0].clone()).unwrap();
     let (mut bea, mut events_b) = Core::start(dir_b.clone(), options[1].clone()).unwrap();
-    online(&ana, 1).await;
+    let (_carla, _events_c) = Core::start(dirs[2].clone(), options[2].clone()).unwrap();
+    online(&ana, 2).await;
     online(&bea, 1).await;
 
     for bea_starts in [false, true] {
@@ -1265,7 +1272,7 @@ async fn a_friend_whose_application_closed_in_a_call_calls_and_is_answered_at_on
         waits_alone(&ana, call).await;
         (bea, events_b) = start_again(&dir_b, options[1].clone()).await;
         online(&bea, 1).await;
-        online(&ana, 1).await;
+        online(&ana, 2).await;
         assert!(bea.call_returns().is_empty(), "Bea remembers the call");
         while events_a.try_recv().is_ok() {}
 
