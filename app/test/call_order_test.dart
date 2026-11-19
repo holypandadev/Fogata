@@ -115,15 +115,17 @@ void main() {
 
   group('states taken by a call alone', () {
     // The numbers are those of a clock in milliseconds, as calls send them.
-    Map<String, dynamic> told({required bool mic, int? number}) => {
-      't': 'state',
-      's': ?number,
-      'mic': mic,
-      'cam': false,
-      'screen': false,
-      'sound': false,
-      'watch': '',
-    };
+    Map<String, dynamic> told({required bool mic, int? number, String? call}) =>
+        {
+          't': 'state',
+          's': ?number,
+          'sc': ?call,
+          'mic': mic,
+          'cam': false,
+          'screen': false,
+          'sound': false,
+          'watch': '',
+        };
 
     late Call alone;
     setUp(() async {
@@ -155,6 +157,83 @@ void main() {
       await alone.handleSignal(_large, {'t': 'again', 'c': 'second'});
       await alone.handleSignal(_large, told(mic: false, number: 90000));
       expect(peer.mic, isFalse);
+    });
+
+    test(
+      'a late state of their call that ended, after their new call asked, is '
+      'dropped and does not raise the number kept',
+      () async {
+        final peer = alone.peers[_large]!;
+        await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+        await alone.handleSignal(
+          _large,
+          told(mic: true, number: 100000, call: 'first'),
+        );
+        // They started again, their clock set back a minute; their new call asks first,
+        // and a state of the one that ended arrives after.
+        await alone.handleSignal(_large, {'t': 'again', 'c': 'second'});
+        await alone.handleSignal(
+          _large,
+          told(mic: false, number: 100500, call: 'first'),
+        );
+        expect(peer.mic, isTrue);
+        await alone.handleSignal(
+          _large,
+          told(mic: false, number: 40000, call: 'second'),
+        );
+        expect(peer.mic, isFalse);
+      },
+    );
+
+    test('a state of their next call ahead of its asking is dropped; the one after '
+        'it is taken', () async {
+      final peer = alone.peers[_large]!;
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      await alone.handleSignal(
+        _large,
+        told(mic: true, number: 100000, call: 'first'),
+      );
+      await alone.handleSignal(
+        _large,
+        told(mic: false, number: 40000, call: 'second'),
+      );
+      expect(peer.mic, isTrue);
+      // Its asking comes, and its state again once their connection is up.
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'second'});
+      await alone.handleSignal(
+        _large,
+        told(mic: false, number: 40001, call: 'second'),
+      );
+      expect(peer.mic, isFalse);
+    });
+
+    test(
+      'with no call of theirs known yet, a state of another call than the one '
+      'before is taken whatever its number',
+      () async {
+        // They came in again (this side knows none of their calls), their clock set back:
+        // a late state of their call before, then one of their new call.
+        final peer = alone.peers[_large]!;
+        await alone.handleSignal(
+          _large,
+          told(mic: true, number: 100000, call: 'first'),
+        );
+        await alone.handleSignal(
+          _large,
+          told(mic: false, number: 40000, call: 'second'),
+        );
+        expect(peer.mic, isFalse);
+      },
+    );
+
+    test('a state that names no call, from a copy before it, is taken whatever '
+        'call is known', () async {
+      final peer = alone.peers[_large]!;
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      await alone.handleSignal(_large, told(mic: false));
+      expect(peer.mic, isFalse);
+      await alone.handleSignal(_large, told(mic: true));
+      expect(peer.mic, isTrue);
     });
 
     test('a state told before their clock jumped forward, arriving late, is '
