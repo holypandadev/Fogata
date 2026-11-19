@@ -249,7 +249,7 @@ void main() {
       net.calls.remove(leaves);
       await before.peers[stays]!.connection!.close();
       if (heardLeaving) await stayer.setParticipants([stays]);
-      final entered = DateTime.now();
+      final entered = callClock();
       final back = net.add(Call(group: 'g', me: leaves));
       unawaited(
         Future<void>.delayed(heard, () async {
@@ -274,45 +274,51 @@ void main() {
             back.peers[stays]?.connected == true,
         what: 'connected again',
       );
-      return DateTime.now().difference(entered);
+      return callClock().difference(entered);
     }
 
-    test('the call is back soon when the one that stays offers', () async {
-      // The smaller id offers: the one that stayed offers as it hears the other is back,
-      // while the other's call is still starting.
-      final took = await rejoin('1000000000000000', 'e000000000000000');
-      expect(took, lessThan(within));
-    });
+    test(
+      'the call is back soon when the one that stays offers',
+      () => inCallTime(() async {
+        // The smaller id offers: the one that stayed offers as it hears the other is back,
+        // while the other's call is still starting.
+        final took = await rejoin('1000000000000000', 'e000000000000000');
+        expect(took, lessThan(within));
+      }),
+    );
 
-    test('the call is back soon when the one that comes back offers', () async {
-      final took = await rejoin('e100000000000000', '1100000000000000');
-      expect(took, lessThan(within));
-    });
+    test(
+      'the call is back soon when the one that comes back offers',
+      () => inCallTime(() async {
+        final took = await rejoin('e100000000000000', '1100000000000000');
+        expect(took, lessThan(within));
+      }),
+    );
 
     test(
       'the room says nothing of the leave: the one that stays still reconnects '
       'within the first try, when it offers',
-      () async {
+      () => inCallTime(() async {
         final took = await rejoin(
           '1200000000000000',
           'e200000000000000',
           heardLeaving: false,
         );
         expect(took, lessThan(within));
-      },
+      }),
     );
 
     test(
       'the room says nothing of the leave: the one that stays still reconnects '
       'within the first try, when the other offers',
-      () async {
+      () => inCallTime(() async {
         final took = await rejoin(
           'e300000000000000',
           '1300000000000000',
           heardLeaving: false,
         );
         expect(took, lessThan(within));
-      },
+      }),
     );
   });
 
