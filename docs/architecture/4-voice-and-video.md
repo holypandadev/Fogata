@@ -229,7 +229,15 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   of the first offer a connection was made
   for (the same call and number), or of a screen's sound offer already answered, gets the
   same answer again and leaves the connection as it is (a first offer's copy is answered
-  anew when that connection failed or closed). Only the room's participants get
+  anew when that connection failed or closed). The numbers of the offers a call makes for
+  a participant only rise, from one connection to the next and when the participant is
+  back in the room (from the clock in milliseconds, or one above the last made for them,
+  remembered for the last 64 to leave), so an offer of the same call with a lower number
+  than the last that made a connection here is a late one and dropped: answered, it made
+  anew the connection that works. Only from copies that mark their signals (`w`); older
+  copies number from anywhere. A restart makes a new call, whose numbers are not compared
+  with the one before, so a clock set back does not hold its offers back. Only the room's
+  participants get
   a connection: a signal from a member that is not in the room is dropped, and one that
   arrives before the room says its sender is in it, or before this device's call has made
   its connection with the sender, waits for that (the last 4 of each sender): those

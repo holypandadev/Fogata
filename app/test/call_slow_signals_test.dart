@@ -318,4 +318,50 @@ void main() {
       expect(up(net.calls[_small]!, net.calls[_large]!), isTrue);
     }, stop: net.stop);
   });
+
+  test(
+    'a late copy of an earlier first offer, after a later one came up, leaves '
+    'the connection as it is',
+    () async {
+      net = FakeNet()..install();
+      await inCallTime(() async {
+        // The first offer arrives once more, 8 s on.
+        net.duplicate(
+          (sender, to, message) => sender == _small && message['t'] == 'offer',
+          const Duration(seconds: 8),
+        );
+        await connect();
+        final small = net.calls[_small]!;
+        final large = net.calls[_large]!;
+        // Both ends fail; the smaller side offers anew, and that comes up.
+        net.madeBy(_small).single.fail();
+        net.madeBy(_large).single.fail();
+        await until(() => up(small, large), what: 'connected again');
+        final connection = large.peers[_small]!.connection;
+        await Future<void>.delayed(const Duration(seconds: 10));
+        expect(up(small, large), isTrue);
+        expect(large.peers[_small]!.connection, same(connection));
+        expect(net.madeBy(_large), hasLength(2));
+      }, stop: net.stop);
+    },
+  );
+
+  test("a participant's first offer after it was made anew is taken", () async {
+    net = FakeNet()..install();
+    await inCallTime(() async {
+      await connect();
+      final small = net.calls[_small]!;
+      final large = net.calls[_large]!;
+      int lastOffer() =>
+          net.sent.lastWhere((s) => s.type == 'offer').message['n'] as int;
+      final before = lastOffer();
+      // The smaller side's room showed the other leave and come back; the other's did
+      // not, and keeps its participant with what it took from it.
+      await small.setParticipants([_small]);
+      await small.setParticipants([_small, _large]);
+      await until(() => up(small, large), what: 'connected again');
+      expect(lastOffer(), greaterThan(before));
+      expect(net.madeBy(_large), hasLength(2));
+    }, stop: net.stop);
+  });
 }

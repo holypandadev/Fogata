@@ -1990,6 +1990,11 @@ class Call extends ChangeNotifier {
   final Map<String, ({String? call, List<String> ended})> _left = {};
   static const leftKept = 64;
 
+  /// The number of the last offer made for each participant that left (the last
+  /// [leftKept]): the offers made for them when they are back go on above it, so that a
+  /// late copy of one before is told apart by its number (see 'offer' in [_handle]).
+  final Map<String, int> _offersTo = {};
+
   /// [letting], the letting go of a participant that left, kept in [_leaving] until done.
   Future<void> _whileLeaving(Future<void> letting) {
     late final Future<void> tracked;
@@ -2021,6 +2026,12 @@ class Call extends ChangeNotifier {
       // changes one after the other, and an earlier one may get here after a later one).
       if (peers.containsKey(id) || !_early.isParticipant(id)) continue;
       final peer = CallPeer(id)..voiceless = _voiceless.contains(id);
+      // Its offers numbered above every one made for them before in this call, whatever
+      // the clock did meanwhile.
+      peer._offerNumber = math.max(
+        (_offersTo[id] ?? 0) + 1,
+        DateTime.now().millisecondsSinceEpoch,
+      );
       if (_left.remove(id) case (:final call, :final ended)) {
         peer._callWhenLeft = call;
         peer._endedCalls.addAll(ended);
@@ -2140,6 +2151,9 @@ class Call extends ChangeNotifier {
         ended: [...peer._endedCalls],
       );
       if (_left.length > leftKept) _left.remove(_left.keys.first);
+      _offersTo.remove(peer.id);
+      _offersTo[peer.id] = peer._offerNumber;
+      if (_offersTo.length > leftKept) _offersTo.remove(_offersTo.keys.first);
     }
     // And what showed them: once they are let go of, they may be back and shown again.
     for (final gone in left.map((peer) => peer.id)) {

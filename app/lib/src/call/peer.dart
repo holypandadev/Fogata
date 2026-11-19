@@ -212,8 +212,15 @@ class CallPeer {
   /// one to an earlier offer is dropped: when two offers crossed (each side tried again
   /// after a failure), the answer to the first would otherwise be set on the connection
   /// made for the second, which then waited for minutes with the other side's closed one.
-  /// Starts anywhere, so a participant met again never matches an answer meant before.
+  /// Starts anywhere, so a participant met again never matches an answer meant before; a
+  /// call starts it above the last one it made for that participant ([Call._offersTo]),
+  /// so that the numbers it sends a participant only rise.
   int _offerNumber = math.Random().nextInt(1 << 30);
+
+  /// The offer that made [connection]'s place last, as their call and its number name it:
+  /// a late one of the same call with a lower number would make anew the connection a
+  /// later one made ([Call._handle]).
+  ({String call, int number})? _firstOfferIn;
 
   /// Their voice as last read (see [Call._flushLateVoice]).
   ({num packets, num delay, num target, num emitted})? _voiceIn;

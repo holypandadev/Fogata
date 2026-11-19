@@ -180,6 +180,23 @@ extension _Signalling on Call {
           );
           _signal(from, peer._answered!.answer);
         } else {
+          // A copy of an earlier offer of their call, late (an offer goes again as a
+          // copy), after a later one made the connection there is: answered, it would
+          // make that one anew. Their numbers only rise for this side when their signals
+          // say they answer a copy (`w`); older copies start them anywhere.
+          final call = message['c'];
+          final number = message['n'];
+          final taken = peer._firstOfferIn;
+          if (call is String && number is int && peer._answersWhich == true) {
+            if (taken != null && taken.call == call && number < taken.number) {
+              _trace(
+                'offer $number from ${_short(from)} older than ${taken.number}: '
+                'dropped',
+              );
+              return;
+            }
+            peer._firstOfferIn = (call: call, number: number);
+          }
           await _answer(peer, message);
         }
       case 'answer':
