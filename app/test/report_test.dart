@@ -249,6 +249,53 @@ void main() {
     expect(log, isNot(contains('step 0 ')));
   });
 
+  // A report made through prepareReport past reportMaxBytes would scrub megabytes of log
+  // (about ten seconds): the code that makes them is read instead.
+  test('the app makes every report at most reportMaxBytes', () {
+    String signature(String source, String of) {
+      final start = source.indexOf(of);
+      expect(start, isNot(-1), reason: of);
+      return source.substring(start, source.indexOf('})', start));
+    }
+
+    final report = File('lib/src/report.dart').readAsStringSync();
+    for (final of in [
+      'PreparedReport assembleReport({',
+      'Future<PreparedReport> prepareReport({',
+    ]) {
+      expect(
+        signature(report, of),
+        contains('int maxBytes = reportMaxBytes,'),
+        reason: of,
+      );
+    }
+    // Where the app makes a report, it gives no cap of its own; only prepareReport hands
+    // its own on to assembleReport.
+    final calls = RegExp(
+      r'(?<![\w.])(prepareReport|assembleReport|assembleReportApart)\((?!\{)',
+    );
+    final given = <String>[];
+    for (final file in Directory('lib').listSync(recursive: true)) {
+      if (file is! File || !file.path.endsWith('.dart')) continue;
+      final source = file.readAsStringSync();
+      for (final call in calls.allMatches(source)) {
+        var depth = 0, end = call.end - 1;
+        do {
+          final c = source[end++];
+          if (c == '(') depth++;
+          if (c == ')') depth--;
+        } while (depth > 0);
+        final arguments = source.substring(call.end, end - 1);
+        if (arguments.contains('maxBytes')) {
+          given.add('${file.path}: ${call[1]}(${arguments.trim()})');
+        }
+      }
+    }
+    expect(given, hasLength(1), reason: given.join('\n'));
+    expect(given.single, startsWith('lib/src/report.dart: assembleReport('));
+    expect(given.single, contains('maxBytes: maxBytes'));
+  });
+
   test('a report is never written through a link where it goes', () async {
     final dir = Directory.systemTemp.createTempSync('fogata-report-link-');
     addTearDown(() => dir.deleteSync(recursive: true));
