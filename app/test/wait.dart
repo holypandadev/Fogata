@@ -27,13 +27,21 @@ Future<void> pumpUntil(
 }
 
 /// Waits, outside a widget test, until [done] holds; fails saying [what] when it does not
-/// within [realWorkLimit].
-Future<void> until(bool Function() done, {required String what}) async {
-  final waited = Stopwatch()..start();
+/// within [limit]. The limit is counted on the time the test runs in: the real one, or
+/// fake time ([inFakeTime]), which moves only by the waits here.
+Future<void> until(
+  bool Function() done, {
+  required String what,
+  Duration limit = realWorkLimit,
+}) async {
+  final real = Stopwatch()..start();
+  const step = Duration(milliseconds: 10);
+  var waited = Duration.zero;
   while (!done()) {
-    if (waited.elapsed > realWorkLimit) {
-      fail('waited ${realWorkLimit.inSeconds} s for $what');
+    if (real.elapsed > limit || waited > limit) {
+      fail('waited ${limit.inSeconds} s for $what');
     }
-    await Future<void>.delayed(const Duration(milliseconds: 10));
+    await Future<void>.delayed(step);
+    waited += step;
   }
 }
