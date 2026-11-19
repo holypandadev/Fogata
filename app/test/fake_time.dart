@@ -53,6 +53,7 @@ Future<void> inFakeTime(
 Future<void> inCallTime(
   Future<void> Function() body, {
   Future<void> Function()? stop,
+  Duration within = const Duration(minutes: 1),
 }) => inFakeTime((time) async {
   final real = callClock;
   addTearDown(() => callClock = real);
@@ -60,4 +61,4 @@ Future<void> inCallTime(
   callClock = () => start.add(time.elapsed);
   await body();
   await stop?.call();
-});
+}, within: within);

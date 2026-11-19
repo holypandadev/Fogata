@@ -149,7 +149,14 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   offers offers again while there is no answer (after 5 s, then up to every 30 s), and the
   other side asks for an offer the same way, the first time as soon as it makes the
   connection's place (a side that kept a connection from before, with a call there that is
-  gone, offers only when asked). When the core loses its link with a participant (a
+  gone, offers only when asked). An offer still waiting for its answer, on a connection
+  made less than 15 s before that has not failed, goes again as it is (the same
+  connection, number and call), and the other side answers a copy with the answer it
+  gave: when signals take seconds each (a computer so loaded that each waits seconds to
+  be sent and handled), a new offer at each try threw away the one whose answer was on
+  its way, and a pair took 25 to 50 s, up to two minutes, to connect; now one offer and
+  its answer, however slow, as long as the answer comes within the 15 s. A copy of a lost
+  offer does what a new one did, at the same moment. When the core loses its link with a participant (a
   network change, a short outage) and has it again, a connection with it that is not up
   and whose offer or answer went while the link was down, or was still being agreed when
   it went, is tried again at once (the smaller id offers, the other asks), rather than
@@ -323,7 +330,7 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   not taken, the connection is made anew: where this device offers, it offers a new one
   at once; where the other side offers, this side closes its end and asks for a new offer
   (`again`) every few seconds for 30 s. The other side takes that only once its own end
-  is no longer up and was made more than 15 s before; how soon WebRTC finds its end no
+  is no longer up and had both descriptions more than 15 s before; how soon WebRTC finds its end no
   longer up is WebRTC's own, and at the latest that end fails after 30 s with nothing
   received, after which the other side offers anew within 2 to 6 s by itself: about 45 s
   at worst in all, with neither voice nor pictures between the two meanwhile. That is
@@ -671,7 +678,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   Fogata's window title. Under Wayland the system's dialog offers every window and
   nothing can be left out, so the card is what keeps the mirror away there.
 - A connection that fails, or that does not come up within 15 s, is tried again after a
-  pause of 4 to 6 s while both are in the room. Each offer carries a number that its
+  pause of 4 to 6 s while both are in the room. The 15 s count from the moment it has both
+  descriptions when that is later (the offering side's answer came slowly), so a
+  negotiation that goes on is not thrown away: 30 s at most in all, as the answer must
+  come within the first 15 s, and nothing the other side sends lengthens it. An asking
+  for a new offer (`again`) is let pass by the same measure. Answers slower than that
+  (signals of more than about 7 s each way) still have their offer made anew. Each offer carries a number that its
   answer sends back, and an answer to an offer replaced since is dropped: when both sides
   tried again at once, the answer to the first offer used to be set on the connection
   made for the second, which then waited minutes for the other side's closed one (older

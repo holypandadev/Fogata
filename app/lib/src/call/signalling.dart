@@ -88,7 +88,28 @@ extension _Signalling on Call {
       _trace('nothing yet from ${peer.id.substring(0, 8)}; trying again');
       try {
         if (me.compareTo(peer.id) < 0) {
-          await peer._inTurn(() => _offer(peer));
+          await peer._inTurn(() async {
+            // An offer still waiting for its answer goes again as it is: it may only be
+            // slow on its way, or its answer on theirs, and a new one would throw that
+            // negotiation away; a copy of a lost one does what a new one would. One that
+            // cannot be agreed any more is made anew.
+            final out = peer._offerOut;
+            final made = peer._madeAt;
+            if (out != null &&
+                out.on == peer.connection &&
+                peer._offering &&
+                !peer._described &&
+                !peer._blind &&
+                peer.state !=
+                    RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
+                made != null &&
+                callClock().difference(made) < Call.connectWithin) {
+              _trace('offer to ${_short(peer.id)} sent again');
+              _signal(peer.id, out.message);
+              return;
+            }
+            await _offer(peer);
+          });
         } else {
           _signal(peer.id, {'t': 'again'});
         }
@@ -307,8 +328,10 @@ extension _Signalling on Call {
         // The other side has no working connection and asks for a new offer; one made a
         // moment ago is still on its way, and another would only replace it (both sides
         // ask and offer again after a failure, and every new offer undid the last). One
-        // made while the link to them was down went nowhere, however recent.
-        final made = peer._madeAt;
+        // made while the link to them was down went nowhere, however recent. Counted from
+        // its answer, if one came: an answer slow on its way leaves it its whole time to
+        // come up, as for [Call._connect]'s own wait.
+        final made = peer._describedAt ?? peer._madeAt;
         final fresh =
             made != null &&
             !peer._blind &&
@@ -607,7 +630,11 @@ extension _Signalling on Call {
     final offer = await connection.createOffer({});
     final sdp = await _describe(peer, connection, offer, 'offer');
     await _tune(peer, connection);
-    _signal(peer.id, {'t': 'offer', 'sdp': sdp, 'n': number});
+    final message = <String, dynamic>{'t': 'offer', 'sdp': sdp, 'n': number};
+    if (peer.connection == connection) {
+      peer._offerOut = (on: connection, message: message);
+    }
+    _signal(peer.id, message);
     _sentWhileGone(peer);
   }
 
@@ -807,6 +834,7 @@ extension _Signalling on Call {
 
   Future<void> _described(CallPeer peer) async {
     peer._described = true;
+    peer._describedAt ??= callClock();
     for (final candidate in peer._early) {
       await peer.connection?.addCandidate(candidate);
     }

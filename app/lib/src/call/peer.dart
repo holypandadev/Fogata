@@ -84,8 +84,13 @@ class CallPeer {
   bool _described = false;
   int _attempt = 0;
 
-  /// When [connection] was made.
+  /// When [connection] was made, and when it first had both descriptions.
   DateTime? _madeAt;
+  DateTime? _describedAt;
+
+  /// The first offer made for [connection], sent again as it is while it waits for its
+  /// answer ([Call._watch]).
+  ({RTCPeerConnection on, Map<String, dynamic> message})? _offerOut;
 
   /// The call of theirs this connection is with, as their signals name it, and the ones
   /// of theirs that ended since this participant came in (see [Call._theirCall]).
@@ -331,6 +336,8 @@ class CallPeer {
     _shown.clear();
     _voice = null;
     _answered = null;
+    _offerOut = null;
+    _describedAt = null;
     _pictures = VideoFlood();
     _described = false;
     _candidates = 0;

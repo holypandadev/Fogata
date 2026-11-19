@@ -2617,8 +2617,10 @@ class Call extends ChangeNotifier {
     // descriptions do not match (offers that crossed, a signal lost on the way) may take
     // minutes to give up by itself.
     // One made before is no longer [connection]: its own wait would do nothing.
-    peer._connectWait?.cancel();
-    peer._connectWait = Timer(connectWithin, () {
+    // Counted again from the moment it has both descriptions, if that is later: an
+    // answer that took seconds on its way leaves it its whole time to come up. Twice
+    // [connectWithin] at most in all, as the answer must come within the first.
+    void notUp() {
       if (_closed ||
           peers[peer.id] != peer ||
           peer.connection != connection ||
@@ -2626,9 +2628,20 @@ class Call extends ChangeNotifier {
           failed) {
         return;
       }
+      final described = peer._describedAt;
+      final left = described == null
+          ? Duration.zero
+          : connectWithin - callClock().difference(described);
+      if (left > Duration.zero) {
+        peer._connectWait = Timer(left, notUp);
+        return;
+      }
       _trace('connection ${peer.id.substring(0, 8)}: not up in time');
       _retry(peer);
-    });
+    }
+
+    peer._connectWait?.cancel();
+    peer._connectWait = Timer(connectWithin, notUp);
     return connection;
   }
 
