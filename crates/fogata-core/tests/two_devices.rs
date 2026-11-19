@@ -147,16 +147,26 @@ async fn invite_join_and_talk() {
     assert_eq!(room.participants.len(), 2);
     assert!(room.participants.iter().any(|(p, _)| p.name == "Ana"));
 
-    // The group was kept on disk; what was said was not.
-    let stored: Vec<String> = std::fs::read_dir(base.join("bea").join("logs"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
-        .collect();
+    // The group was kept on disk; what was said was not. A file being written is under
+    // another name for a moment (it is written beside its place and moved there), so the
+    // folder is looked at until it holds only finished files, for a few seconds at most.
     let id = hex::encode(group.as_bytes());
     let mut kept = vec![format!("{id}.log"), format!("{id}.log.judged")];
-    let mut stored = stored;
-    stored.sort();
     kept.sort();
+    let logs = base.join("bea").join("logs");
+    let mut stored = Vec::new();
+    for _ in 0..100 {
+        stored = std::fs::read_dir(&logs)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<String>>();
+        stored.sort();
+        if stored == kept {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     assert_eq!(stored, kept);
     let _ = std::fs::remove_dir_all(&base);
 }
