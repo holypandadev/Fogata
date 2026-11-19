@@ -2635,9 +2635,9 @@ class Call extends ChangeNotifier {
     // descriptions do not match (offers that crossed, a signal lost on the way) may take
     // minutes to give up by itself.
     // One made before is no longer [connection]: its own wait would do nothing.
-    // Counted again from the moment it has both descriptions, if that is later: an
-    // answer that took seconds on its way leaves it its whole time to come up. Twice
-    // [connectWithin] at most in all, as the answer must come within the first.
+    // Counted from the last step of its negotiation ([_timeLeft]), not from its making:
+    // on a loaded computer an offer took seconds to make, its answer tens of seconds to
+    // come, and each try given up on just before its answer came began the next.
     void notUp() {
       if (_closed ||
           peers[peer.id] != peer ||
@@ -2646,10 +2646,7 @@ class Call extends ChangeNotifier {
           failed) {
         return;
       }
-      final described = peer._describedAt;
-      final left = described == null
-          ? Duration.zero
-          : connectWithin - callClock().difference(described);
+      final left = _timeLeft(peer);
       if (left > Duration.zero) {
         peer._connectWait = Timer(left, notUp);
         return;
@@ -2658,6 +2655,7 @@ class Call extends ChangeNotifier {
       _retry(peer);
     }
 
+    peer._checkUp = notUp;
     peer._connectWait?.cancel();
     peer._connectWait = Timer(connectWithin, notUp);
     return connection;
@@ -2665,6 +2663,28 @@ class Call extends ChangeNotifier {
 
   /// How long a new connection has to come up before it is tried again.
   static const connectWithin = Duration(seconds: 15);
+
+  /// How long this side's first offer waits for its answer, with copies of it going
+  /// meanwhile ([_watch]): the answers of a loaded computer took up to 35 s.
+  static const answerWithin = Duration(seconds: 45);
+
+  /// The time [peer]'s connection still has to be agreed and come up, from the last step
+  /// of its negotiation: [connectWithin] once it has both descriptions; before, while
+  /// this side's offer waits for its answer, [answerWithin] from that offer; else
+  /// [connectWithin] from its making. In all, its making, then [answerWithin] and
+  /// [connectWithin] at most: nothing the other side sends lengthens it.
+  Duration _timeLeft(CallPeer peer) {
+    final described = peer._describedAt;
+    final offered = peer._offeredAt;
+    final made = peer._madeAt;
+    final (since, within) = described != null
+        ? (described, connectWithin)
+        : offered != null
+        ? (offered, answerWithin)
+        : (made, connectWithin);
+    if (since == null) return Duration.zero;
+    return within - callClock().difference(since);
+  }
 
   /// A `which` with no answer is asked again this often, as many times in all as
   /// [whichTries] ([_askWhich]): an answer may come in the [connectWithin] after the first.

@@ -3,6 +3,8 @@
 // and begun anew while its offer or answer is still on its way, and one whose offer was
 // lost is still tried again as soon as before.
 
+import 'dart:math' as math;
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/call.dart';
@@ -364,4 +366,46 @@ void main() {
       expect(net.madeBy(_large), hasLength(2));
     }, stop: net.stop);
   });
+
+  // As the call lab's copies on a computer too loaded to keep up: each signal takes 2 to
+  // 15 s to be sent and handled, each step of a connection 2 s, and a connection 2 s
+  // to come up once both descriptions are set.
+  for (var seed = 1; seed <= 8; seed++) {
+    test('a computer too loaded to keep up ($seed): connected within two '
+        'negotiations at their slowest, and kept', () async {
+      final random = math.Random(seed);
+      const work = Duration(seconds: 2);
+      const slowest = Duration(seconds: 15);
+      net = FakeNet(
+        delays: () => Duration(milliseconds: 2000 + random.nextInt(13001)),
+        work: work,
+        connecting: const Duration(seconds: 2),
+      )..install();
+      await inCallTime(
+        () async {
+          final r = await connect();
+          // ignore: avoid_print
+          print(
+            'loaded ($seed): connected after ${r.took.inMilliseconds} ms, '
+            '${r.offers} offers sent (${r.numbers} negotiations), '
+            '${r.agains} askings, ${r.made} connections made',
+          );
+          // One negotiation at its slowest: the offer made (the connection, the offer,
+          // its description: three steps) and its candidates gathered, its way there,
+          // the answer made (four steps) and gathered, its way back, set (one step),
+          // and the connection coming up.
+          final negotiation =
+              work * 8 + net.gathering * 2 + slowest * 2 + net.connecting;
+          expect(r.took, lessThanOrEqualTo(negotiation * 2));
+          // And it stays: nothing made anew once up.
+          final made = r.made;
+          await Future<void>.delayed(const Duration(minutes: 1));
+          expect(up(net.calls[_small]!, net.calls[_large]!), isTrue);
+          expect(net.madeBy(_small).length + net.madeBy(_large).length, made);
+        },
+        stop: net.stop,
+        within: const Duration(minutes: 6),
+      );
+    });
+  }
 }

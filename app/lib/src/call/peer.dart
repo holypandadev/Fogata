@@ -88,6 +88,9 @@ class CallPeer {
   DateTime? _madeAt;
   DateTime? _describedAt;
 
+  /// When this side's first offer for [connection] went (not its copies).
+  DateTime? _offeredAt;
+
   /// The first offer made for [connection], sent again as it is while it waits for its
   /// answer ([Call._watch]).
   ({RTCPeerConnection on, Map<String, dynamic> message})? _offerOut;
@@ -185,6 +188,10 @@ class CallPeer {
   /// waits on after they left or the call ended.
   Timer? _watchWait;
   Timer? _connectWait;
+
+  /// What [_connectWait] runs for [connection], to wait again on a try put off
+  /// ([Call._retry]).
+  void Function()? _checkUp;
 
   /// The connection has its network candidates.
   Completer<void> _gathered = Completer<void>();
@@ -369,6 +376,7 @@ class CallPeer {
     _answered = null;
     _offerOut = null;
     _describedAt = null;
+    _offeredAt = null;
     _pictures = VideoFlood();
     _described = false;
     _candidates = 0;

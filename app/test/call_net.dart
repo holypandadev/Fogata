@@ -26,6 +26,8 @@ class FakeNet {
     this.latency = const Duration(milliseconds: 50),
     this.gathering = const Duration(milliseconds: 300),
     this.connecting = const Duration(milliseconds: 300),
+    this.delays,
+    this.work = Duration.zero,
   });
 
   /// How long a signal takes, a connection's candidates take to gather, and two
@@ -33,6 +35,14 @@ class FakeNet {
   final Duration latency;
   final Duration gathering;
   final Duration connecting;
+
+  /// If set, how long each signal takes instead of [latency] (one value for each signal
+  /// sent, as a loaded computer sends and handles them).
+  final Duration Function()? delays;
+
+  /// How long each step of a connection takes (making it, an offer or answer, each
+  /// description set), as on a computer too loaded to do them at once.
+  final Duration work;
 
   /// The call of each device, by its id; a device without one drops what comes to it (as
   /// the core of a device in no room does).
@@ -116,7 +126,10 @@ class FakeNet {
   Call add(Call call) {
     calls[call.me] = call;
     _everyCall.add(call);
-    call.connectionsForTests = () async => FakeConnection._(this, call.me);
+    call.connectionsForTests = () async {
+      if (work > Duration.zero) await Future<void>.delayed(work);
+      return FakeConnection._(this, call.me);
+    };
     return call;
   }
 
@@ -159,7 +172,7 @@ class FakeNet {
     if (older.contains(to) && message['t'] == 'which') return;
     if (older.contains(from)) message = {...message}..remove('w');
     final text = jsonEncode(message);
-    var wait = latency;
+    var wait = delays?.call() ?? latency;
     Duration? copy;
     for (final rule in _rules) {
       if (rule.times > 0 && rule.which(from, to, message)) {
@@ -301,7 +314,27 @@ class FakeConnection implements RTCPeerConnection {
   @override
   dynamic noSuchMethod(Invocation invocation) {
     final args = invocation.positionalArguments;
-    switch (invocation.memberName) {
+    // A loaded computer takes its time over each step ([FakeNet.work]).
+    if (net.work > Duration.zero &&
+        const {
+          #createOffer,
+          #createAnswer,
+          #setLocalDescription,
+          #setRemoteDescription,
+        }.contains(invocation.memberName)) {
+      final later = Future<void>.delayed(net.work);
+      final member = invocation.memberName;
+      return member == #createOffer || member == #createAnswer
+          ? later.then<RTCSessionDescription>(
+              (_) => _now(member, args) as Future<RTCSessionDescription>,
+            )
+          : later.then<void>((_) => _now(member, args) as Future<void>);
+    }
+    return _now(invocation.memberName, args) ?? super.noSuchMethod(invocation);
+  }
+
+  dynamic _now(Symbol member, List<dynamic> args) {
+    switch (member) {
       case #createOffer:
         return Future.value(RTCSessionDescription(_description, 'offer'));
       case #createAnswer:
@@ -352,7 +385,7 @@ class FakeConnection implements RTCPeerConnection {
       case #getStats:
         return Future.value(<StatsReport>[]);
     }
-    return super.noSuchMethod(invocation);
+    return null;
   }
 }
 

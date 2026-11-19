@@ -73,6 +73,8 @@ extension _Signalling on Call {
     // it would do nothing.
     if (_closed || peer._gone) return;
     final wait = Duration(seconds: 5 + 5 * peer._waits.clamp(0, 5));
+    // An offer from them since this round began is on its way to being answered here.
+    final offersBefore = peer._offersIn;
     // A round before this one would do nothing once due.
     peer._watchWait?.cancel();
     peer._watchWait = Timer(wait, () async {
@@ -84,11 +86,25 @@ extension _Signalling on Call {
           peer.voiceless) {
         return;
       }
+      // Their offer came meanwhile, and waits its turn or is being answered (on a
+      // loaded computer, for seconds): asking for another would only replace it.
+      if (me.compareTo(peer.id) > 0 && peer._offersIn != offersBefore) {
+        _watch(peer);
+        return;
+      }
       peer._waits++;
       _trace('nothing yet from ${peer.id.substring(0, 8)}; trying again');
       try {
         if (me.compareTo(peer.id) < 0) {
           await peer._inTurn(() async {
+            // Decided before its turn came, which may be seconds later: an answer taken
+            // meanwhile leaves nothing to do.
+            if (_closed ||
+                peers[peer.id] != peer ||
+                peer._watching != round ||
+                peer._described) {
+              return;
+            }
             // An offer still waiting for its answer goes again as it is: it may only be
             // slow on its way, or its answer on theirs, and a new one would throw that
             // negotiation away; a copy of a lost one does what a new one would. One that
@@ -98,7 +114,6 @@ extension _Signalling on Call {
             // this one). With nothing heard from them yet it goes as a copy: the offer
             // most likely went before they could take it, or is slow on its way.
             final out = peer._offerOut;
-            final made = peer._madeAt;
             if (peer._answersWhich != false &&
                 out != null &&
                 out.on == peer.connection &&
@@ -107,8 +122,7 @@ extension _Signalling on Call {
                 !peer._blind &&
                 peer.state !=
                     RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
-                made != null &&
-                callClock().difference(made) < Call.connectWithin) {
+                _timeLeft(peer) > Duration.zero) {
               _trace('offer to ${_short(peer.id)} sent again');
               _signal(peer.id, out.message);
               return;
@@ -351,13 +365,13 @@ extension _Signalling on Call {
         // moment ago is still on its way, and another would only replace it (both sides
         // ask and offer again after a failure, and every new offer undid the last). One
         // made while the link to them was down went nowhere, however recent. Counted from
-        // its answer, if one came: an answer slow on its way leaves it its whole time to
-        // come up, as for [Call._connect]'s own wait.
-        final made = peer._describedAt ?? peer._madeAt;
+        // the last step of its negotiation, as [Call._connect]'s own wait ([_timeLeft]).
+        // Handled in its turn, after what came before it: a connection up by then is
+        // left as it is, whenever the asking was sent.
         final fresh =
-            made != null &&
+            peer.connection != null &&
             !peer._blind &&
-            callClock().difference(made) < Call.connectWithin &&
+            _timeLeft(peer) > Duration.zero &&
             peer.state != RTCPeerConnectionState.RTCPeerConnectionStateFailed;
         if (me.compareTo(from) < 0 && !peer.connected && !fresh) {
           await _offer(peer);
@@ -698,7 +712,30 @@ extension _Signalling on Call {
         }
         try {
           if (me.compareTo(peer.id) < 0) {
-            await peer._inTurn(() => _offer(peer));
+            await peer._inTurn(() async {
+              // Decided before its turn came, which on a loaded computer was seconds
+              // later: a connection that came up meanwhile, or was replaced, is left as
+              // it is, and one whose answer came meanwhile is given its time to come up.
+              if (_closed ||
+                  peers[peer.id] != peer ||
+                  peer.connected ||
+                  peer._keptOut ||
+                  peer.connection != failed) {
+                return;
+              }
+              final left = _timeLeft(peer);
+              if (peer.state !=
+                      RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
+                  left > Duration.zero) {
+                final checkUp = peer._checkUp;
+                if (checkUp != null) {
+                  peer._connectWait?.cancel();
+                  peer._connectWait = Timer(left, checkUp);
+                }
+                return;
+              }
+              await _offer(peer);
+            });
           } else {
             _signal(peer.id, {'t': 'again'});
           }
@@ -738,6 +775,7 @@ extension _Signalling on Call {
     final message = <String, dynamic>{'t': 'offer', 'sdp': sdp, 'n': number};
     if (peer.connection == connection) {
       peer._offerOut = (on: connection, message: message);
+      peer._offeredAt = callClock();
     }
     _signal(peer.id, message);
     _sentWhileGone(peer);
