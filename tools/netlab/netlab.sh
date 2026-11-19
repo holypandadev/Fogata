@@ -1763,7 +1763,9 @@ EOF2
         PIDS+=($!)
         sleep 87
         echo "=== $SCENARIO"
-        ms() { date -u -d "$1" +%s%3N; }
+        # %N's nine digits cut to three: `+%s%3N` is not the first three of them with every
+        # `date` (uutils' 0.10 leaves out leading zeros).
+        ms() { date -u -d "$1" +%s%N | cut -c1-13; }
         found=$(grep -m1 'dialling a peer mDNS found' "$WORK/A.out" | awk '{print $1}' || true)
         connected=$(grep 'Connection established' "$WORK/A.out" | grep -m1 '192\.168\.60\.2' |
             awk '{print $1}' || true)

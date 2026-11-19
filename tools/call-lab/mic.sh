@@ -252,7 +252,7 @@ if [ "${1:-}" = --inside ]; then
       ;;
     *) lab_copy a 2 1 FOGATA_TEST_MIC_CASE="$CHECK"; lab_copy b 2 off FOGATA_TEST_MIC_CASE="$CHECK" ;;
   esac
-  now() { date +%s%3N; }
+  now() { lab_ms; }
   # Waits for a file the test writes to meet/; gives up with the copies gone or after $2 s.
   wait_mark() {
     local end=$((SECONDS + $2))

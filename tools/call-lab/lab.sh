@@ -12,6 +12,10 @@ LAB_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 X=${LAB_DISPLAY:-171}
 M=$RUN/meet
 ROLES=(a b c d e f g h)
+# Now, in milliseconds since the epoch, from bash itself (5.0 on; its decimal point may be a
+# comma): `date +%s%3N` is not the first three digits of the second's fraction with every
+# `date` (uutils' 0.10 leaves out leading zeros).
+lab_ms() { local t=${EPOCHREALTIME/[.,]/}; echo "${t:0:13}"; }
 
 # Each copy has devices of its own, which it picks by their names' end
 # (FOGATA_TEST_DEVICES=-lab<role>.): an output lab<role>_test whose monitor is its microphone
@@ -595,7 +599,7 @@ lab_unmute_sound() {
       for after in $UNMUTE_WORDS_START; do
         python3 -I -c "import time; time.sleep(max(0, ($at + $after) / 1000 - time.time()))"
         paplay --device=laba_test "$RUN/sound/words.wav" 2> /dev/null &
-        echo "0 $after $(date +%s%3N)" >> "$RUN/words.log"
+        echo "0 $after $(lab_ms)" >> "$RUN/words.log"
       done
     fi
     n=1
@@ -605,7 +609,7 @@ lab_unmute_sound() {
         for after in ${UNMUTE_WORDS_AT:-500 3500 6500}; do
           python3 -I -c "import time; time.sleep(max(0, ($at + $after) / 1000 - time.time()))"
           paplay --device=laba_test "$RUN/sound/words.wav" 2> /dev/null &
-          echo "$n $after $(date +%s%3N)" >> "$RUN/words.log"
+          echo "$n $after $(lab_ms)" >> "$RUN/words.log"
         done
         n=$((n + 1))
       fi
@@ -618,7 +622,7 @@ lab_unmute_sound() {
       until [ -e "$M/mark-a-mute-$UNMUTE_ROOM_AFTER" ]; do sleep 0.05; done
       pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
         source_dont_move=true sink_dont_move=true > /dev/null
-      echo "the room's echo from $(date +%s%3N)" >> "$RUN/lab.log"
+      echo "the room's echo from $(lab_ms)" >> "$RUN/lab.log"
     ) &
     echo $! > "$RUN/room-after.pid"
   elif [ "$room" = 1 ] && [ -n "${UNMUTE_ROOM_AT:-}" ]; then
@@ -628,7 +632,7 @@ lab_unmute_sound() {
       python3 -I -c "import time; time.sleep(max(0, ($at + $UNMUTE_ROOM_AT) / 1000 - time.time()))"
       pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
         source_dont_move=true sink_dont_move=true > /dev/null
-      date +%s%3N > "$M/lab-room-on"
+      lab_ms > "$M/lab-room-on"
     ) &
     echo $! > "$RUN/room-after.pid"
   elif [ "$room" = 1 ]; then
@@ -643,7 +647,7 @@ lab_unmute_sound() {
     (
       until [ -e "$M/mark-a-mute-$UNMUTE_UNPLUG" ]; do sleep 0.05; done
       pactl unload-module "$(pactl list short modules | awk '/sink_name=laba_quiet( |$)/ {print $1}')"
-      echo "a's output taken away at $(date +%s%3N)" >> "$RUN/lab.log"
+      echo "a's output taken away at $(lab_ms)" >> "$RUN/lab.log"
     ) &
     echo $! > "$RUN/room-move.pid"
   fi
