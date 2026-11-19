@@ -208,7 +208,11 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   questions are gone unanswered, a held signal that says nothing of answering is taken
   as its copy's signals are, about 15 s later than before, and it is asked no more. A late
   signal of an older copy whose device has been updated since loses to the answer of the
-  copy it runs. Still not covered: a
+  copy it runs. As an offer goes again as a copy, two calls of theirs may each answer it:
+  an answer of another call to this side's latest offer is taken at once only while its
+  connection has no answer yet; once it has one, the participant is asked as for an
+  offer, and when that other call is theirs now the connection, which holds the answer of
+  their ended call, is made anew at once. Still not covered: a
   participant who goes out and back with the same call and whose first signal naming a
   call after it came back is a late one of an older call not remembered (that one is
   taken, and the call they have is taken for ended); a late signal of an older copy whose
@@ -218,7 +222,8 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   with no order between two, and may come twice: a copy of the first offer a connection
   was made
   for (the same call and number), or of a screen's sound offer already answered, gets the
-  same answer again and leaves the connection as it is. Only the room's participants get
+  same answer again and leaves the connection as it is (a first offer's copy is answered
+  anew when that connection failed or closed). Only the room's participants get
   a connection: a signal from a member that is not in the room is dropped, and one that
   arrives before the room says its sender is in it, or before this device's call has made
   its connection with the sender, waits for that (the last 4 of each sender): those

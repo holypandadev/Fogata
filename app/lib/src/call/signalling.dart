@@ -393,9 +393,12 @@ extension _Signalling on Call {
       return true;
     }
     final before = peer._theirCall;
+    // An answer to the latest offer once one was set on its connection is not taken as
+    // their call now either: an offer goes again as a copy, and two calls of theirs may
+    // each have answered it, the older one's answer arriving last.
     if (before != null &&
         before != theirs &&
-        message['t'] != 'answer' &&
+        (message['t'] != 'answer' || peer._described) &&
         peer._answersWhich == true) {
       _askWhich(peer, theirs, message);
       return false;
@@ -427,8 +430,10 @@ extension _Signalling on Call {
     peer._stateIn = null;
     _trace('${from.substring(0, 8)} has a new call; connecting anew');
     // An answer of their new call answers an offer of this side made since it started:
-    // its connection is the right one.
-    if (type == 'answer') return;
+    // its connection is the right one, unless an answer of the call that ended was set
+    // on it already (both had that offer, or a copy of it), which leaves it with their
+    // closed end: then it is made anew.
+    if (type == 'answer' && !peer._described) return;
     await peer._close();
     peer._madeAt = null;
     peer._attempt = 0;
@@ -700,13 +705,16 @@ extension _Signalling on Call {
 
   /// [offer] is a copy of the first offer [peer]'s connection was made for (the same call
   /// of theirs, the same number), which a signal can be: answered again, it would make
-  /// the connection anew and drop the one that works.
+  /// the connection anew and drop the one that works. Not once that connection failed or
+  /// closed: the same answer would pair their end with one that cannot come up.
   bool _answeredAlready(CallPeer peer, Map<String, dynamic> offer) {
     final answered = peer._answered;
     return answered != null &&
         answered.on == peer.connection &&
         answered.call == offer['c'] &&
-        answered.number == offer['n'];
+        answered.number == offer['n'] &&
+        peer.state != RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
+        peer.state != RTCPeerConnectionState.RTCPeerConnectionStateClosed;
   }
 
   /// Answers the offer just set on [connection], sending what is on here, and returns the

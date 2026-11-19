@@ -257,4 +257,65 @@ void main() {
       );
     }, stop: net.stop);
   });
+
+  test(
+    'a copy of an offer that reaches an end that failed is answered on a new '
+    'one',
+    () async {
+      net = FakeNet()..install();
+      await inCallTime(() async {
+        final small = net.add(
+          Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+        );
+        final large = net.add(
+          Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+        );
+        // The answer is lost, and the end that gave it fails.
+        net.lose((sender, to, message) => message['t'] == 'answer');
+        final start = callClock();
+        await Future.wait([
+          small.setParticipants([_small, _large]),
+          large.setParticipants([_small, _large]),
+        ]);
+        await until(
+          () =>
+              net.madeBy(_large).isNotEmpty &&
+              net.madeBy(_large).first.local != null,
+          what: 'the answer made',
+        );
+        net.madeBy(_large).first.fail();
+        await until(
+          () => up(small, large),
+          what: 'connected',
+          limit: const Duration(seconds: 40),
+        );
+        // The first try's copy, 5 s on, answered on a new end.
+        expect(
+          callClock().difference(start),
+          lessThanOrEqualTo(const Duration(seconds: 7)),
+        );
+        expect(net.madeBy(_large), hasLength(2));
+        // The other side's asking after its failure may still be on its way.
+        await Future<void>.delayed(const Duration(seconds: 6));
+      }, stop: net.stop);
+    },
+  );
+
+  test('an answer that arrives twice is refused the second time, as WebRTC '
+      'refuses it, and changes nothing', () async {
+    net = FakeNet()..install();
+    await inCallTime(() async {
+      net.duplicate(
+        (sender, to, message) => message['t'] == 'answer',
+        const Duration(milliseconds: 500),
+      );
+      final r = await connect();
+      await Future<void>.delayed(const Duration(seconds: 2));
+      expect(r.made, 2);
+      expect(net.madeBy(_small), hasLength(1));
+      expect(net.madeBy(_large), hasLength(1));
+      expect(net.madeBy(_small).single.closed, isFalse);
+      expect(up(net.calls[_small]!, net.calls[_large]!), isTrue);
+    }, stop: net.stop);
+  });
 }

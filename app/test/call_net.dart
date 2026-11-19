@@ -244,6 +244,14 @@ class FakeConnection implements RTCPeerConnection {
   /// Once failed, it never comes up again, as a real one.
   bool _failed = false;
 
+  /// Its descriptions as WebRTC's signalling state has them: an answer is taken only
+  /// while its own offer waits for one, and refused, as WebRTC refuses it, once both are
+  /// set ("stable").
+  String _signalling = 'stable';
+
+  /// Fails, as one whose network checks found no way to the other end.
+  void fail() => _tell(RTCPeerConnectionState.RTCPeerConnectionStateFailed);
+
   /// The connection whose description this one holds.
   FakeConnection? get _partner {
     final match = _fakeId.firstMatch(remote ?? '');
@@ -299,7 +307,11 @@ class FakeConnection implements RTCPeerConnection {
       case #createAnswer:
         return Future.value(RTCSessionDescription(_description, 'answer'));
       case #setLocalDescription:
-        local = (args.first as RTCSessionDescription).sdp;
+        final description = args.first as RTCSessionDescription;
+        _signalling = description.type == 'offer'
+            ? 'have-local-offer'
+            : 'stable';
+        local = description.sdp;
         net._later(net.gathering, () {
           onIceGatheringState?.call(
             RTCIceGatheringState.RTCIceGatheringStateComplete,
@@ -314,7 +326,21 @@ class FakeConnection implements RTCPeerConnection {
           local == null ? null : RTCSessionDescription(local, 'offer'),
         );
       case #setRemoteDescription:
-        remote = (args.first as RTCSessionDescription).sdp;
+        final description = args.first as RTCSessionDescription;
+        if (description.type == 'answer') {
+          if (_signalling != 'have-local-offer') {
+            return Future<void>.error(
+              Exception(
+                'Failed to set remote answer sdp: Called in wrong state: '
+                '$_signalling',
+              ),
+            );
+          }
+          _signalling = 'stable';
+        } else {
+          _signalling = 'have-remote-offer';
+        }
+        remote = description.sdp;
         net._check(this);
         return Future<void>.value();
       case #addTransceiver:

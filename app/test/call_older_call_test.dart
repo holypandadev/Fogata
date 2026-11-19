@@ -474,4 +474,97 @@ void main() {
       }),
     );
   }
+
+  test(
+    "an answer of their new call to this side's offer, after their ended call's "
+    'answer was set on its connection, has a connection made anew at once',
+    () {
+      // Connections take long to come up: the answer of their call before is set, and
+      // the connection not up yet, when that call ends.
+      net.uninstall();
+      net = FakeNet(connecting: const Duration(seconds: 10))..install();
+      return inNetTime(() async {
+        final small = net.add(
+          Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+        );
+        final large1 = net.add(
+          Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+        );
+        await Future.wait([
+          small.setParticipants([_small, _large]),
+          large1.setParticipants([_small, _large]),
+        ]);
+        await until(
+          () => net.madeBy(_small).single.remote != null,
+          what: 'the answer set',
+        );
+        await large1.stop();
+        // Their new call's asking is lost; a copy of this side's offer reaches it.
+        net.lose(
+          (from, to, message) => from == _large && message['t'] == 'again',
+        );
+        final large = net.add(
+          Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+        );
+        await large.setParticipants([_small, _large]);
+        final offer = net.sent
+            .lastWhere((s) => s.from == _small && s.type == 'offer')
+            .message;
+        await large.onSignal(_small, jsonEncode(offer));
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(net.madeBy(_small), hasLength(2));
+        await until(() => up(small, large), what: 'connected again');
+        expect(small.peers[_large]!.theirCall, callOf(large));
+      });
+    },
+  );
+
+  test(
+    "an answer of their ended call to this side's offer, arriving after their new "
+    "call's answer to a copy of it, does not end the new call",
+    () => inNetTime(() async {
+      // Nothing of their call before is known here: its asking is lost, and its answer
+      // held up on its way.
+      net.lose(
+        (from, to, message) => from == _large && message['t'] == 'again',
+      );
+      net.delay(
+        (from, to, message) => from == _large && message['t'] == 'answer',
+        const Duration(seconds: 3),
+      );
+      final small = net.add(
+        Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+      );
+      final large1 = net.add(
+        Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+      );
+      await Future.wait([
+        small.setParticipants([_small, _large]),
+        large1.setParticipants([_small, _large]),
+      ]);
+      await until(
+        () => net.sent.any((s) => s.from == _large && s.type == 'answer'),
+        what: 'the answer sent',
+      );
+      await large1.stop();
+      // Their new call's asking is lost; a copy of this side's offer reaches it, and its
+      // answer arrives first.
+      net.lose(
+        (from, to, message) => from == _large && message['t'] == 'again',
+      );
+      final large = net.add(
+        Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+      );
+      await large.setParticipants([_small, _large]);
+      final offer = net.sent
+          .lastWhere((s) => s.from == _small && s.type == 'offer')
+          .message;
+      await large.onSignal(_small, jsonEncode(offer));
+      await until(() => up(small, large), what: 'connected to the new call');
+      // The late answer arrives, and well past it.
+      await Future<void>.delayed(const Duration(seconds: 10));
+      expect(up(small, large), isTrue);
+      expect(small.peers[_large]!.theirCall, callOf(large));
+    }),
+  );
 }
