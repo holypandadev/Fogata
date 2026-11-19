@@ -1782,6 +1782,120 @@ mod tests {
         on_its_way + waiting
     }
 
+    /// The group's picture records sent to `peer`, by digest.
+    fn pictures_sent(n: &Node, peer: PeerId) -> Vec<[u8; 32]> {
+        n.pending
+            .values()
+            .filter(|(p, _)| *p == peer)
+            .filter_map(|(_, k)| match k {
+                Pending::Picture(_, digest) => Some(*digest),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The group's banners sent to `peer`, by digest.
+    fn banners_sent(n: &Node, peer: PeerId) -> Vec<[u8; 32]> {
+        n.pending
+            .values()
+            .filter(|(p, _)| *p == peer)
+            .filter_map(|(_, k)| match k {
+                Pending::Banner(_, digest) => Some(*digest),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A picture record chosen while the one before is on its way to a member is held back
+    /// (see `RecordSent::may_send`), and goes once that one is answered, not at the member's
+    /// next roster; its own answer sends nothing more.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newer_picture_goes_once_the_one_on_its_way_is_answered() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            let key = |n: &Node| {
+                super::super::group_changes::banner_key(&n.groups[&group].ctx.picture_digest())
+            };
+            let png = |fill: u8| {
+                let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+                png.resize(500, fill);
+                png
+            };
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.picture_peers.insert(bea);
+            slot.ctx.set_picture(png(1), now_ms()).unwrap();
+            let first = key(n);
+            n.send_picture_to(group, &[bea]);
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_picture(png(2), now_ms()).unwrap();
+            let second = key(n);
+            n.send_picture_to(group, &[bea]);
+            let held = pictures_sent(n, bea);
+            n.on_response(bea, Pending::Picture(group, first), MemberResponse::Ack);
+            let after_first = pictures_sent(n, bea);
+            n.on_response(bea, Pending::Picture(group, second), MemberResponse::Ack);
+            let after_second = pictures_sent(n, bea);
+            (first, second, held, after_first, after_second)
+        })
+        .await;
+        let (first, second, held, mut after_first, mut after_second) = found;
+        assert_ne!(first, second);
+        assert_eq!(held, vec![first]);
+        after_first.sort_unstable();
+        let mut both = vec![first, second];
+        both.sort_unstable();
+        assert_eq!(after_first, both);
+        after_second.sort_unstable();
+        assert_eq!(after_second, both);
+        node.shutdown().await.unwrap();
+    }
+
+    /// The same for the group's banner.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newer_banner_goes_once_the_one_on_its_way_is_answered() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            let key = |n: &Node| {
+                super::super::group_changes::banner_key(&n.groups[&group].ctx.banner_digest())
+            };
+            let png = |fill: u8| {
+                let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+                png.resize(500, fill);
+                png
+            };
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.banner_peers.insert(bea);
+            slot.ctx.set_banner(png(1), now_ms()).unwrap();
+            let first = key(n);
+            n.send_banner_to(group, &[bea]);
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_banner(png(2), now_ms()).unwrap();
+            let second = key(n);
+            n.send_banner_to(group, &[bea]);
+            let held = banners_sent(n, bea);
+            n.on_response(bea, Pending::Banner(group, first), MemberResponse::Ack);
+            let after_first = banners_sent(n, bea);
+            n.on_response(bea, Pending::Banner(group, second), MemberResponse::Ack);
+            let after_second = banners_sent(n, bea);
+            (first, second, held, after_first, after_second)
+        })
+        .await;
+        let (first, second, held, mut after_first, mut after_second) = found;
+        assert_ne!(first, second);
+        assert_eq!(held, vec![first]);
+        after_first.sort_unstable();
+        let mut both = vec![first, second];
+        both.sort_unstable();
+        assert_eq!(after_first, both);
+        after_second.sort_unstable();
+        assert_eq!(after_second, both);
+        node.shutdown().await.unwrap();
+    }
+
     /// A member that asks for rosters again and again, each time naming a banner, a picture
     /// record and heads other than this device's, is sent the banner and the picture once
     /// and one sync at a time, not one of each per ask: each banner is up to a few hundred
