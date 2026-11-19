@@ -204,7 +204,9 @@ extension _Signalling on Call {
         if (shares != shared) {
           onSound?.call(shares ? UiSound.shareStart : UiSound.shareStop);
         }
-        if (!peer.sharing && watching == peer.id) watching = null;
+        if (!peer.sharing && watching == peer.id) {
+          _watchingTo(null, 'its sharer\'s state says its screen is off');
+        }
         if (!peer.cam && focused == peer.id) focused = null;
         _showBack(peer);
         final watch = message['watch'];

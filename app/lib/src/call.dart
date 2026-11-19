@@ -128,6 +128,10 @@ void _trace(String line) {
   stderr.writeln('call $time: $line');
 }
 
+/// A device id as the call's log shortens it; "nobody" for none.
+String _short(String? id) =>
+    id == null ? 'nobody' : id.substring(0, math.min(8, id.length));
+
 /// Whether the video library captures the screen through the system's dialog (the portal
 /// and PipeWire), with no list of screens and windows to pick from: a Wayland session, as
 /// the video library decides it from the display GTK draws on ([_askWayland]); until it
@@ -328,6 +332,9 @@ class Call extends ChangeNotifier {
   /// to them only while they watch it.
   void _setWatches(CallPeer peer, String? id) {
     if (id == peer._watchesNow) return;
+    _trace(
+      '${_short(peer.id)} watches ${_short(peer._watchesNow)} -> ${_short(id)}',
+    );
     peer._watchesNow = id;
     _queueVoice(peer);
   }
@@ -366,9 +373,13 @@ class Call extends ChangeNotifier {
   /// The participant whose shared screen this device watches. Until someone watches a
   /// screen, it is not sent to them, and its sound is not played here.
   String? get watching => _watching;
-  set watching(String? id) {
+  set watching(String? id) => _watchingTo(id, 'set');
+
+  /// Sets [watching], and with the call's log on says what changed it and why.
+  void _watchingTo(String? id, String why) {
     if (id == _watching) return;
     final before = _watching;
+    _trace('watching ${_short(before)} -> ${_short(id)}: $why');
     _watching = id;
     // A screen watched anew waits for its first picture from the start.
     _pictureWait = null;
@@ -1135,7 +1146,7 @@ class Call extends ChangeNotifier {
     if (screen != null && screen.id == peer.id) {
       _watchBack = null;
       if (!shown && peer.sharing && now.isBefore(screen.until)) {
-        watching = peer.id;
+        _watchingTo(peer.id, 'its sharer came back sharing');
         _focusBack = null;
         _sendState();
         return;
@@ -1148,11 +1159,11 @@ class Call extends ChangeNotifier {
     }
   }
 
-  void watch(String? id) {
+  void watch(String? id, {String why = 'chosen'}) {
     _watchBack = null;
     _focusBack = null;
     if (watching == id) return;
-    watching = id;
+    _watchingTo(id, why);
     if (id != null) {
       focused = null;
       ownScreen = false;
@@ -2100,7 +2111,7 @@ class Call extends ChangeNotifier {
       _showScreenOut(gone, null);
       final until = DateTime.now().add(_backWithin);
       if (watching == gone) {
-        watching = null;
+        _watchingTo(null, 'its sharer left');
         _watchBack = (id: gone, until: until);
       }
       if (focused == gone) {
@@ -2862,7 +2873,9 @@ class Call extends ChangeNotifier {
     final stream = failed.srcObject;
     if (!current()) return;
     if (stream == null || ++peer._renewed > maxRenewals) {
-      if (mid == _screen && watching == peer.id) watch(null);
+      if (mid == _screen && watching == peer.id) {
+        watch(null, why: 'its picture failed too often');
+      }
       if (mid == _camera && focused == peer.id) focus(null);
       notifyListeners();
       return;
