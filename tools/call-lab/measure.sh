@@ -51,7 +51,8 @@
 # allocation with its call stack: heaptrack-<role>.zst (the whole run) and
 # heaptrack-<role>-early.zst (up to MEASURE_EARLY seconds, default 1800);
 # heap-report.sh makes reports of them. That copy runs slower: its other figures are not
-# those of a call.
+# those of a call. A copy with no result in time leaves stuck-<role>.txt for every copy still
+# running: its threads' state, processor time and stacks before it is ended (lab.sh's lab_stuck).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" = --inside ]; then

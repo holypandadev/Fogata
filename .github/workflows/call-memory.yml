@@ -86,7 +86,8 @@ jobs:
           key: apt-call-memory-ubuntu-24.04
           restore-keys: apt-call-memory-ubuntu-24.04-
 
-      # As ci.yml's Linux jobs, and heaptrack with zstd.
+      # As ci.yml's Linux jobs, heaptrack with zstd, and gdb for the stacks of a copy that
+      # leaves no result in time (stuck-<role>.txt).
       - name: Install the system packages
         timeout-minutes: 20
         env:
@@ -96,7 +97,7 @@ jobs:
           tools/ci-apt.sh \
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb dbus-x11 pipewire pipewire-pulse \
-            wireplumber pulseaudio-utils pipewire-alsa libasound2-plugins heaptrack zstd
+            wireplumber pulseaudio-utils pipewire-alsa libasound2-plugins heaptrack zstd gdb
           # The lab's sound sessions are unprivileged user namespaces, which Ubuntu's
           # AppArmor refuses by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0

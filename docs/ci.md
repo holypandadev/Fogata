@@ -114,7 +114,12 @@ output (`CALL_LAB_LOOPBACK=1`: a's log must say `passed on, not linked` and neve
 `pipewire-pulse`), calls of 4 copies with a camera and with a shared screen for 60 s on the
 debug build, and of 4 copies three times and 6 copies twice with a shared screen for 90 s
 on the profile build. A call passes when every copy wrote a result, none says `failed` and
-no copy's log says it was kept out. The run fails when any part failed or did not run, or
+no copy's log says it was kept out. When a copy leaves no result in time, before the copies
+are ended the lab writes `stuck-<role>.txt` into the run folder for each one still running
+(`lab_stuck` of `tools/call-lab/lab.sh`): its threads' state, processor time over 5 s and
+what each waits in, and their stacks where gdb or eu-stack is installed (`call-memory.yml`
+installs gdb, this workflow does not); a result written after that is put aside as
+`<role>-result-late.txt`. The run fails when any part failed or did not run, or
 when the application crashed meanwhile (`coredumpctl`, the kernel log, a core file). The
 run's summary has every part's result and the tables of `tools/call-lab/sum.py`; the run
 folders, without the copies' data folders, are the run's artifact, kept 30 days. One job,

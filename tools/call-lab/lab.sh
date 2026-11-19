@@ -405,18 +405,75 @@ lab_upload_ports() { # role
 }
 
 # Waits until each of the roles wrote its result (or its process ended); at most $2 s. One
-# that failed ends the wait at once: the others would only wait for it to the end.
+# that failed ends the wait at once: the others would only wait for it to the end. When the
+# time runs out, lab_stuck writes down what the copies do, and a result written meanwhile by
+# a copy that had none is put aside as <role>-result-late.txt: the wait still failed.
 lab_wait() { # "a b c" seconds
-  local r end=$((SECONDS + $2))
+  local r q late end=$((SECONDS + $2))
   for r in $1; do
     while [ ! -s "$M/$r-result.txt" ] && kill -0 "$(cat "$RUN/$r.pid")" 2>/dev/null; do
-      [ $SECONDS -gt $end ] && { echo "$r: no result in time" >> "$RUN/lab.log"; return 1; }
+      if [ $SECONDS -gt $end ]; then
+        echo "$r: no result in time" >> "$RUN/lab.log"
+        late=()
+        for q in $1; do [ -s "$M/$q-result.txt" ] || late+=("$q"); done
+        lab_stuck "$1"
+        for q in "${late[@]}"; do
+          [ -e "$M/$q-result.txt" ] || continue
+          mv "$M/$q-result.txt" "$M/$q-result-late.txt"
+          echo "$q: a result after the wait ran out, put aside as $q-result-late.txt" >> "$RUN/lab.log"
+        done
+        return 1
+      fi
       if grep -lq '^failed' "$M"/?-result.txt 2> /dev/null; then
         echo "a copy failed: $(grep -l '^failed' "$M"/?-result.txt | tr '\n' ' ')" >> "$RUN/lab.log"
         return 1
       fi
       sleep 1
     done
+  done
+}
+
+# What each of the roles' copies still running does, written before they are ended, to
+# $RUN/stuck-<role>.txt: its threads, the busiest first, as "<thread id> <state> <clock ticks
+# of processor time in 5 s, 100 a second> <kernel function it waits in, 0 when running>
+# <system call number, or running> <name>", then every thread's native stack from gdb (or
+# eu-stack; no debug symbols are fetched). Run from inside the session, whose root may trace
+# the copies there with kernel.yama.ptrace_scope at 0, 1 or 2 (at 3 nothing may: the attach
+# fails at once and the file says so); the copies in parallel, at most about 2 minutes.
+lab_stuck() { # "a b c"
+  local r p dumps=()
+  for r in $1; do
+    p=$(cat "$RUN/$r.pid" 2> /dev/null) && [ -d "/proc/$p/task" ] || continue
+    (
+      out=$RUN/stuck-$r.txt
+      before=$(lab_threads "$p")
+      sleep 5
+      echo "copy $r, pid $p, $(date -Is):" > "$out"
+      awk 'NR == FNR { t[$1] = $3; next } { $3 -= ($1 in t) ? t[$1] : 0; print }' \
+        <(echo "$before") <(lab_threads "$p") | sort -k3,3nr >> "$out"
+      echo >> "$out"
+      if command -v gdb > /dev/null; then
+        env -u DEBUGINFOD_URLS timeout -k 5 110 gdb -p "$p" -batch -nx -iex 'set debuginfod enabled off' \
+          -ex 'set print frame-arguments none' -ex 'info threads' -ex 'thread apply all bt 40' >> "$out" 2>&1
+      elif command -v eu-stack > /dev/null; then
+        env -u DEBUGINFOD_URLS timeout -k 5 110 eu-stack -p "$p" -n 40 >> "$out" 2>&1
+      else
+        echo "no gdb or eu-stack for the stacks" >> "$out"
+      fi
+    ) &
+    dumps+=($!)
+  done
+  [ ${#dumps[@]} -gt 0 ] && wait "${dumps[@]}"
+}
+
+# One line for each thread of process $1, as lab_stuck says, with its processor time so far.
+lab_threads() { # pid
+  local t s w c
+  for t in /proc/"$1"/task/*; do
+    # What follows the name in parentheses: its state, then utime and stime at 12 and 13.
+    read -r -a s 2> /dev/null < <(sed 's/.*) //' "$t/stat" 2> /dev/null) && [ ${#s[@]} -gt 12 ] || continue
+    w=$(cat "$t/wchan" 2> /dev/null) c=$(cut -d' ' -f1 "$t/syscall" 2> /dev/null)
+    echo "${t##*/} ${s[0]} $((s[11] + s[12])) ${w:-?} ${c:-?} $(cat "$t/comm" 2> /dev/null)"
   done
 }
 
