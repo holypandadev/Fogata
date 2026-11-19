@@ -458,6 +458,8 @@ extension _Signalling on Call {
   /// taken (a new call of theirs that is real goes on offering or asking, which asks the
   /// same again).
   void _askWhich(CallPeer peer, String theirs, Map<String, dynamic> message) {
+    // The call ended, or they left, while the signal waited its turn: nobody to ask.
+    if (_closed || peer._gone) return;
     final asked = peer._asked;
     if (asked != null && asked.call == theirs) {
       asked.message = message;
@@ -477,19 +479,44 @@ extension _Signalling on Call {
   }
 
   void _askWhichNow(CallPeer peer, _Asked question) {
+    if (_closed || peer._gone) return;
     question.tries++;
     _signal(peer.id, {'t': 'which', 'k': question.token});
     question.wait = Timer(Call.whichEvery, () {
       if (_closed || peers[peer.id] != peer || peer._asked != question) return;
-      if (question.tries >= Call.whichTries) {
-        _trace(
-          'no answer yet from ${_short(peer.id)} on which call is theirs: '
-          'the one known kept',
-        );
-        question.wait = null;
+      if (question.tries < Call.whichTries) {
+        _askWhichNow(peer, question);
         return;
       }
-      _askWhichNow(peer, question);
+      question.wait = null;
+      // A signal held that says nothing of answering is of a copy before this one,
+      // which takes no question: their device runs it now (it started again with it, or
+      // its late signal would have lost to the answer of the copy they run), and it is
+      // taken as such a copy's signals are.
+      if (question.message['w'] != 1) {
+        _trace(
+          'no answer from ${_short(peer.id)} on which call is theirs, and their '
+          'copy does not answer: their call ${_short(question.call)} taken',
+        );
+        peer._answersWhich = false;
+        unawaited(
+          peer._inTurn(() async {
+            if (_closed || peers[peer.id] != peer || peer._asked != question) {
+              return;
+            }
+            try {
+              await _theirCallNow(peer, peer.id, question, question.call);
+            } catch (e) {
+              _trace('${question.message['t']} from ${_short(peer.id)}: $e');
+            }
+          }),
+        );
+        return;
+      }
+      _trace(
+        'no answer yet from ${_short(peer.id)} on which call is theirs: '
+        'the one known kept',
+      );
     });
   }
 

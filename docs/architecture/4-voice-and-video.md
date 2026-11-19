@@ -203,11 +203,20 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   that do mark their offers, answers and askings (`w`, which also says they answer a copy
   of an offer with the answer it had), and a participant whose signals never did
   (0.1.0-beta.11 and before) has a signal of another call taken at once as before, with
-  the same weakness, until it is updated. Still not covered: a participant who goes out
-  and back with the same call and whose first signal naming a call after it came back is a
-  late one of an older call not remembered (that one is taken, and the call they have is
-  taken for ended). Each signal goes on its own, with no order between two, and may come
-  twice: a copy of the first offer a connection was made
+  the same weakness, until it is updated. A participant that came back with such an older
+  copy, the room showing nothing, is asked all the same and never answers: once the five
+  questions are gone unanswered, a held signal that says nothing of answering is taken
+  as its copy's signals are, about 15 s later than before, and it is asked no more. A late
+  signal of an older copy whose device has been updated since loses to the answer of the
+  copy it runs. Still not covered: a
+  participant who goes out and back with the same call and whose first signal naming a
+  call after it came back is a late one of an older call not remembered (that one is
+  taken, and the call they have is taken for ended); a late signal of an older copy whose
+  updated device's five answers are all lost (taken after 15 s, and the call it has is
+  taken for ended); and a `which` to a device whose room has not named this one yet takes
+  one of the four places its signals wait in, until it does. Each signal goes on its own,
+  with no order between two, and may come twice: a copy of the first offer a connection
+  was made
   for (the same call and number), or of a screen's sound offer already answered, gets the
   same answer again and leaves the connection as it is. Only the room's participants get
   a connection: a signal from a member that is not in the room is dropped, and one that

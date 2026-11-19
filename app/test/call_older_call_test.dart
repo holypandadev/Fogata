@@ -131,7 +131,14 @@ void main() {
 
   /// A late signal of [type] from [from]'s call [stale], which neither side remembers,
   /// arrives at the other device's call [to] now.
-  Future<void> late(Call to, String from, String type, String stale) {
+  /// Unless [answers], it comes from a copy before this one (no `w`).
+  Future<void> late(
+    Call to,
+    String from,
+    String type,
+    String stale, {
+    bool answers = true,
+  }) {
     final first = net.sent.firstWhere((s) => s.type == 'offer').message;
     return to.onSignal(
       from,
@@ -139,7 +146,7 @@ void main() {
         't': type,
         if (type == 'offer') ...{'sdp': first['sdp'], 'n': first['n']},
         'c': stale,
-        'w': 1,
+        if (answers) 'w': 1,
       }),
     );
   }
@@ -382,4 +389,89 @@ void main() {
       expect(net.madeBy(_small).length, made + 1);
     }),
   );
+
+  test(
+    'a participant that comes back as a copy before this one, the room showing '
+    'nothing, is connected to once its questions go unanswered',
+    () => inNetTime(() async {
+      final (small1, large) = await connected();
+      await small1.stop();
+      // Its new call says nothing of answering, and takes no question.
+      net.older.add(_small);
+      final small = net.add(
+        Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+      );
+      final started = callClock();
+      await small.setParticipants([_small, _large]);
+      await until(
+        () => up(small, large),
+        what: 'connected to the older copy',
+        limit: const Duration(seconds: 40),
+      );
+      // The questions' time, and the offer answered.
+      expect(
+        callClock().difference(started),
+        lessThanOrEqualTo(
+          Call.whichEvery * Call.whichTries + const Duration(seconds: 2),
+        ),
+      );
+      expect(large.peers[_small]!.theirCall, callOf(small));
+      // Its own try after its connection was not up in time finds it up.
+      await Future<void>.delayed(const Duration(seconds: 6));
+      expect(up(small, large), isTrue);
+    }),
+  );
+
+  test(
+    'a late signal of a copy before this one, after its device was updated, does '
+    'not end the call of the update',
+    () => inNetTime(() async {
+      final (small, large) = await connected();
+      final peer = large.peers[_small]!;
+      final (known, connection) = (peer.theirCall, peer.connection);
+      await late(large, _small, 'offer', '0123456789abcdef', answers: false);
+      await Future<void>.delayed(Call.whichEvery * (Call.whichTries + 1));
+      expect(up(small, large), isTrue);
+      expect(peer.theirCall, known);
+      expect(peer.connection, same(connection));
+      expect(peer.endedCalls, contains('0123456789abcdef'));
+    }),
+  );
+
+  test(
+    'a late signal of a copy before this one that arrives before the updated '
+    "device's new call is heard does not keep that call out",
+    () => inNetTime(() async {
+      final (small1, large) = await connected();
+      await small1.stop();
+      await late(large, _small, 'offer', '0123456789abcdef', answers: false);
+      final small = net.add(
+        Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+      );
+      await small.setParticipants([_small, _large]);
+      await until(() => up(small, large), what: 'connected to the update');
+      await Future<void>.delayed(Call.whichEvery * (Call.whichTries + 1));
+      expect(up(small, large), isTrue);
+      expect(large.peers[_small]!.theirCall, callOf(small));
+    }),
+  );
+
+  for (final stopped in [true, false]) {
+    test(
+      'a signal of another call that waited its turn while '
+      '${stopped ? 'the call stopped' : 'its sender left'} asks nothing',
+      () => inNetTime(() async {
+        final (_, large) = await connected();
+        final asked = questions(_large).length;
+        final waiting = late(large, _small, 'offer', '0123456789abcdef');
+        if (stopped) {
+          await large.stop();
+        } else {
+          await large.setParticipants([_large]);
+        }
+        await waiting;
+        expect(questions(_large), hasLength(asked));
+      }),
+    );
+  }
 }

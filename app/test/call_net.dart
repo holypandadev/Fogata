@@ -74,6 +74,10 @@ class FakeNet {
   void lose(SignalMatch which, {int times = 1}) =>
       _rules.add(_Rule(which, times, lost: true));
 
+  /// Devices whose calls stand for copies before this one: their signals do not say they
+  /// answer a `which` (`w`), and a `which` to them is not taken.
+  final Set<String> older = {};
+
   final Map<int, FakeConnection> _connections = {};
   int _next = 0;
 
@@ -151,6 +155,9 @@ class FakeNet {
       message: message,
     ));
     if (!linked(from, to)) return;
+    // A copy before this one says nothing of answering a `which`, and takes none.
+    if (older.contains(to) && message['t'] == 'which') return;
+    if (older.contains(from)) message = {...message}..remove('w');
     final text = jsonEncode(message);
     var wait = latency;
     Duration? copy;
