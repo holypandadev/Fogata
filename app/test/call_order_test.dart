@@ -2,6 +2,8 @@
 // it, or twice. A state that arrives late does not undo a newer one, and a copy of an
 // offer already answered gets the same answer and leaves the connection as it is.
 
+import 'dart:async';
+
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/call.dart';
@@ -246,53 +248,62 @@ void main() {
     });
   });
 
-  test('a late offer of the call someone had before leaving and coming back '
-      'leaves their new call connected, and its signals taken', () async {
-    final (small, large) = await connected();
-    final first = small.peers[_large]!.theirCall!;
-    // She leaves the room: her call ends, and the room says so.
-    net.calls.remove(_large);
-    await large.stop();
-    await small.setParticipants([_small]);
-    // She comes back with a new call.
-    final back = net.add(call(_large));
-    await Future.wait([
-      small.setParticipants([_small, _large]),
-      back.setParticipants([_small, _large]),
-    ]);
-    await until(
-      () =>
-          small.peers[_large]?.connected == true &&
-          back.peers[_small]?.connected == true,
-      what: 'connected again',
-    );
-    final peer = small.peers[_large]!;
-    final second = peer.theirCall!;
-    expect(second, isNot(first));
-    final connection = peer.connection;
-    // An offer of the call that ended, held up on its way.
-    await small.handleSignal(_large, {
-      't': 'offer',
-      'sdp': 'v=0',
-      'n': 1,
-      'c': first,
+  for (final atOnce in [false, true]) {
+    test('a late offer of the call someone had before leaving and coming back '
+        'leaves their new call connected, and its signals taken'
+        '${atOnce ? ', when she is back before her leaving is done with' : ''}', () async {
+      final (small, large) = await connected();
+      final first = small.peers[_large]!.theirCall!;
+      // She leaves the room: her call ends, and the room says so.
+      net.calls.remove(_large);
+      await large.stop();
+      final back = net.add(call(_large));
+      if (atOnce) {
+        // As the room's events have it: her leaving is not waited for, and her coming back
+        // follows at once, while her connection here is still being let go of.
+        unawaited(small.participantLeft(_large));
+      } else {
+        await small.setParticipants([_small]);
+      }
+      // She comes back with a new call.
+      await Future.wait([
+        small.setParticipants([_small, _large]),
+        back.setParticipants([_small, _large]),
+      ]);
+      await until(
+        () =>
+            small.peers[_large]?.connected == true &&
+            back.peers[_small]?.connected == true,
+        what: 'connected again',
+      );
+      final peer = small.peers[_large]!;
+      final second = peer.theirCall!;
+      expect(second, isNot(first));
+      final connection = peer.connection;
+      // An offer of the call that ended, held up on its way.
+      await small.handleSignal(_large, {
+        't': 'offer',
+        'sdp': 'v=0',
+        'n': 1,
+        'c': first,
+      });
+      expect(peer.connection, same(connection));
+      expect(peer.connected, isTrue);
+      expect(peer.theirCall, second);
+      // What her new call says is still taken.
+      await small.handleSignal(_large, {
+        't': 'state',
+        'sc': second,
+        's': DateTime.now().millisecondsSinceEpoch + 60000,
+        'mic': false,
+        'cam': false,
+        'screen': false,
+        'sound': false,
+        'watch': '',
+      });
+      expect(peer.mic, isFalse);
     });
-    expect(peer.connection, same(connection));
-    expect(peer.connected, isTrue);
-    expect(peer.theirCall, second);
-    // What her new call says is still taken.
-    await small.handleSignal(_large, {
-      't': 'state',
-      'sc': second,
-      's': DateTime.now().millisecondsSinceEpoch + 60000,
-      'mic': false,
-      'cam': false,
-      'screen': false,
-      'sound': false,
-      'watch': '',
-    });
-    expect(peer.mic, isFalse);
-  });
+  }
 
   test(
     'a copy of a first offer already answered gets the same answer and leaves '
