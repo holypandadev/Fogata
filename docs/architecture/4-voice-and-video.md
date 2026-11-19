@@ -156,7 +156,11 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   be sent and handled), a new offer at each try threw away the one whose answer was on
   its way, and a pair took 25 to 50 s, up to two minutes, to connect; now one offer and
   its answer, however slow, as long as the answer comes within the 45 s. A copy of a lost
-  offer does what a new one did, at the same moment. Copies before this one (0.1.0-beta.11
+  offer does what a new one did, at the same moment. An asking for an offer (`again`)
+  while this side's offer waits for its answer gets a copy too, unless it came within 2 s
+  of the offer or of the copy before (it then most likely crossed them): it says the
+  offer did not reach them, and offers lost in a row are tried again as they ask rather
+  than at this side's next round (1 to 4 lost: connected in 6, 6, 16 and 16 s). Copies before this one (0.1.0-beta.11
   and before) answer a copy anew, on a new end of theirs, and the first answer would then
   be set on a connection whose other end is closed: a participant whose signals say
   nothing of copies (see `w` below) gets a new offer at each try as before. One heard from

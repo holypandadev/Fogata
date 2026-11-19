@@ -105,26 +105,11 @@ extension _Signalling on Call {
                 peer._described) {
               return;
             }
-            // An offer still waiting for its answer goes again as it is: it may only be
-            // slow on its way, or its answer on theirs, and a new one would throw that
-            // negotiation away; a copy of a lost one does what a new one would. One that
-            // cannot be agreed any more is made anew, and so is one to a copy whose
-            // signals say nothing of answering a copy with the answer it gave (copies
-            // before it make their end anew, and the offer's first answer would be set on
-            // this one). With nothing heard from them yet it goes as a copy: the offer
-            // most likely went before they could take it, or is slow on its way.
-            final out = peer._offerOut;
-            if (peer._answersWhich != false &&
-                out != null &&
-                out.on == peer.connection &&
-                peer._offering &&
-                !peer._described &&
-                !peer._blind &&
-                peer.state !=
-                    RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
-                _timeLeft(peer) > Duration.zero) {
+            final out = _offerToCopy(peer);
+            if (out != null) {
               _trace('offer to ${_short(peer.id)} sent again');
-              _signal(peer.id, out.message);
+              peer._copiedAt = callClock();
+              _signal(peer.id, out);
               return;
             }
             await _offer(peer);
@@ -139,6 +124,29 @@ extension _Signalling on Call {
       if (peer._watching != round) return;
       _watch(peer);
     });
+  }
+
+  /// This side's first offer to [peer], to send again as it is, or null when it is to be
+  /// made anew. An offer still waiting for its answer goes again as it is: it may only be
+  /// slow on its way, or its answer on theirs, and a new one would throw that negotiation
+  /// away; a copy of a lost one does what a new one would. One that cannot be agreed any
+  /// more is made anew, and so is one to a copy whose signals say nothing of answering a
+  /// copy with the answer it gave (copies before it make their end anew, and the offer's
+  /// first answer would be set on this one). With nothing heard from them yet it goes as
+  /// a copy: the offer most likely went before they could take it, or is slow on its way.
+  Map<String, dynamic>? _offerToCopy(CallPeer peer) {
+    final out = peer._offerOut;
+    if (peer._answersWhich != false &&
+        out != null &&
+        out.on == peer.connection &&
+        peer._offering &&
+        !peer._described &&
+        !peer._blind &&
+        peer.state != RTCPeerConnectionState.RTCPeerConnectionStateFailed &&
+        _timeLeft(peer) > Duration.zero) {
+      return out.message;
+    }
+    return null;
   }
 
   /// Waits until [CallPeer.offerEvery] has passed since an offer of [peer] was last taken
@@ -375,6 +383,21 @@ extension _Signalling on Call {
             peer.state != RTCPeerConnectionState.RTCPeerConnectionStateFailed;
         if (me.compareTo(from) < 0 && !peer.connected && !fresh) {
           await _offer(peer);
+        } else if (me.compareTo(from) < 0 && !peer.connected) {
+          // Asked while this side's offer still waits for its answer: unless the asking
+          // crossed it (it came within [Call.copyEvery] of the offer), most likely the
+          // offer never reached them. A copy of it goes, which costs nothing if it did
+          // (they answer a copy with the answer they gave); one every [Call.copyEvery]
+          // at most, whatever they send.
+          final last = peer._copiedAt ?? peer._offeredAt;
+          final out = _offerToCopy(peer);
+          if (out != null &&
+              last != null &&
+              callClock().difference(last) >= Call.copyEvery) {
+            peer._copiedAt = callClock();
+            _trace('offer to ${_short(from)} sent again, as asked');
+            _signal(from, out);
+          }
         }
     }
   }

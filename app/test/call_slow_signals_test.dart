@@ -57,14 +57,14 @@ void main() {
   /// [latency]: how long until both are connected, what was sent, and the connections
   /// each side made.
   Future<({Duration took, int offers, int numbers, int agains, int made})>
-  connect({SignalMatch? lost}) async {
+  connect({SignalMatch? lost, int times = 1}) async {
     final small = net.add(
       Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
     );
     final large = net.add(
       Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
     );
-    if (lost != null) net.lose(lost);
+    if (lost != null) net.lose(lost, times: times);
     final start = callClock();
     await Future.wait([
       small.setParticipants([_small, _large]),
@@ -173,10 +173,16 @@ void main() {
                 const Duration(seconds: 1),
           ),
         );
-        // Its copy did it, on the connections made for it.
-        expect(r.offers, 2);
+        // Its copies did it, on the connections made for it: the first try's, and for a
+        // lost offer one more as the other side's own first try asks for one (both fall
+        // due 5 s on).
+        expect(r.offers, type == 'offer' ? 3 : 2);
         expect(r.numbers, 1);
         expect(r.made, 2);
+        // The later copy, still waiting its turn there (one offer a second), is
+        // answered as the first was, and changes nothing.
+        await Future<void>.delayed(const Duration(seconds: 2));
+        expect(r.made, net.madeBy(_small).length + net.madeBy(_large).length);
       }, stop: net.stop);
     });
   }
@@ -536,4 +542,33 @@ void main() {
       await Future<void>.delayed(const Duration(seconds: 30));
     }, stop: () => net.stop());
   });
+
+  // Several first offers lost in a row while the link is up (the other side asking for
+  // one meanwhile): connected as soon as when the windows counted from the making (6,
+  // 16, 16 and 31 s), or sooner.
+  for (final (lost, before) in [(1, 6), (2, 16), (3, 16), (4, 31)]) {
+    test(
+      '$lost first offers lost in a row: connected within ${before}s',
+      () async {
+        net = FakeNet()..install();
+        await inCallTime(() async {
+          final r = await connect(
+            lost: (sender, to, message) =>
+                sender == _small && message['t'] == 'offer',
+            times: lost,
+          );
+          // ignore: avoid_print
+          print(
+            '$lost lost: connected after ${r.took.inMilliseconds} ms, '
+            '${r.offers} offers sent (${r.numbers} negotiations), '
+            '${r.agains} askings, ${r.made} connections made',
+          );
+          expect(r.took, lessThanOrEqualTo(Duration(seconds: before)));
+          // What is still due: tries decided before the connection came up.
+          await Future<void>.delayed(const Duration(seconds: 10));
+          expect(net.madeBy(_small).length + net.madeBy(_large).length, r.made);
+        }, stop: net.stop);
+      },
+    );
+  }
 }

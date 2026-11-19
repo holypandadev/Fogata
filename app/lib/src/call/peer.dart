@@ -88,8 +88,10 @@ class CallPeer {
   DateTime? _madeAt;
   DateTime? _describedAt;
 
-  /// When this side's first offer for [connection] went (not its copies).
+  /// When this side's first offer for [connection] went (not its copies), and when a
+  /// copy of it last went because they asked for an offer ([Call._handle]'s `again`).
   DateTime? _offeredAt;
+  DateTime? _copiedAt;
 
   /// The first offer made for [connection], sent again as it is while it waits for its
   /// answer ([Call._watch]).
@@ -381,6 +383,7 @@ class CallPeer {
     _offerOut = null;
     _describedAt = null;
     _offeredAt = null;
+    _copiedAt = null;
     _pictures = VideoFlood();
     _described = false;
     _candidates = 0;

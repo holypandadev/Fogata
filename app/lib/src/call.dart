@@ -2675,6 +2675,10 @@ class Call extends ChangeNotifier {
   /// meanwhile ([_watch]): the answers of a loaded computer took up to 35 s.
   static const answerWithin = Duration(seconds: 45);
 
+  /// An offer waiting for its answer goes again as a copy when they ask for one, this
+  /// often at most.
+  static const copyEvery = Duration(seconds: 2);
+
   /// The time [peer]'s connection still has to be agreed and come up, from the last step
   /// of its negotiation: [connectWithin] once it has both descriptions; before, while
   /// this side's offer waits for its answer, [answerWithin] from that offer; else
