@@ -2,8 +2,6 @@
 // it, or twice. A state that arrives late does not undo a newer one, and a copy of an
 // offer already answered gets the same answer and leaves the connection as it is.
 
-import 'dart:async';
-
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/call.dart';
