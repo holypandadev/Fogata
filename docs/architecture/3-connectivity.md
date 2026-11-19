@@ -840,10 +840,16 @@ A group message goes once to each member, not to everyone from everyone:
   leaving, a taking out) are kept until each request carrying one is answered by the member
   (taken or refused), failed, or dropped unsent (`node::own`). One that fails on its way
   goes again once, while the member is still connected, on its best connection but the one
-  the first failed on; a member takes the copy that comes again as any copy, by its id, and
-  a room does not list a file again for a share older than its holder's unshare. Quitting
-  waits until none is waiting or on its way, for at most 2 s (`OWN_GOING_WAIT`), the node
-  turning as ever meanwhile, then closes the connections. Still lost: an event still on its
+  the first failed on; when that is its only one, on it all the same, and then usually lost
+  too. A member takes the copy that comes again as any copy, by its id, and a room does not
+  list a file again for a share dated no later than its holder's unshare: a share made after
+  a restart with the clock set back to or before the unshare's time is dropped until the
+  clock passes it, as a join is after a leave. Quitting waits until none is waiting or on
+  its way, for at most 2 s (`OWN_GOING_WAIT`), the node turning as ever meanwhile, then
+  closes the connections; the core's other steps follow (the media bridge up to 2 s,
+  closing connections 0.8 s, the node's tasks up to 2 s, 0.2 s for the closes to leave,
+  the application's events drained up to 10 s), and the application gives all of it 6 s
+  before it exits regardless. Still lost: an event still on its
   way when the 2 s run out; one that failed twice, or was dropped from a full queue (not
   sent again: it would push out the next); one to a member whose every connection closed
   before it got there; one that reached no participant before its author's node stopped;

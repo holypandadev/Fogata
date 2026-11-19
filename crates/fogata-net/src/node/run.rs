@@ -263,7 +263,7 @@ impl Node {
                                  network library in a minute: {what}",
                                 swarm_panics.len()
                             );
-                            break None;
+                            break Vec::new();
                         }
                     }
                     let answer = match (in_swarm, answer) {
@@ -338,7 +338,7 @@ impl Node {
                                  again soon after starting afresh: {what}",
                                 panics.len()
                             );
-                            break None;
+                            break Vec::new();
                         }
                         tracing::error!(
                             "the network node starts afresh after {} internal errors in a \
@@ -360,8 +360,10 @@ impl Node {
         let tasks = self.tasks.clone();
         drop(self);
         tasks.stop(TASKS_WAIT).await;
-        if let Some(reply) = stopped {
+        if !stopped.is_empty() {
             tokio::time::sleep(CLOSE_FLUSH).await;
+        }
+        for reply in stopped {
             let _ = reply.send(());
         }
     }
@@ -380,12 +382,12 @@ impl Node {
     }
 
     /// Waits for the next thing to do and does it. Returns whether the node stops, with the
-    /// reply to a shutdown when it was asked to.
+    /// replies to the shutdowns it was asked for (none when its handles went).
     async fn turn(
         &mut self,
         slot: &mut std::pin::Pin<&mut tokio::time::Sleep>,
         links: &mut tokio::time::Interval,
-    ) -> Option<Option<tokio::sync::oneshot::Sender<()>>> {
+    ) -> Option<Vec<tokio::sync::oneshot::Sender<()>>> {
         #[cfg(debug_assertions)]
         if let Some(test) = &self.test_panic {
             test.check();
@@ -396,13 +398,13 @@ impl Node {
         let stop_at = self.stopping.as_ref().map(|(_, until)| *until);
         if let Some(until) = stop_at
             && (self.own_going.is_empty() || tokio::time::Instant::now() >= until)
-            && let Some((reply, _)) = self.stopping.take()
+            && let Some((replies, _)) = self.stopping.take()
         {
             if !self.own_going.is_empty() {
                 tracing::debug!("quitting with room events of this device's on their way");
             }
             self.close_all().await;
-            return Some(Some(reply));
+            return Some(replies);
         }
         tokio::select! {
             () = async {
@@ -433,12 +435,12 @@ impl Node {
                 Some(Command::Shutdown(reply)) => {
                     // What this device just said in a room (a last line, its leave) goes
                     // first, for a moment at most, the node turning as ever meanwhile
-                    // (see above). A second shutdown keeps the first one's bound.
-                    let until = self.stopping.take().map_or_else(
-                        || tokio::time::Instant::now() + own::OWN_GOING_WAIT,
-                        |(_, until)| until,
-                    );
-                    self.stopping = Some((reply, until));
+                    // (see above). A second shutdown keeps the first one's bound, and each is
+                    // answered once the node stopped.
+                    let (replies, _) = self.stopping.get_or_insert_with(|| {
+                        (Vec::new(), tokio::time::Instant::now() + own::OWN_GOING_WAIT)
+                    });
+                    replies.push(reply);
                 }
                 #[cfg(test)]
                 Some(Command::Panic) => panic!("a test asked the node to panic"),
@@ -500,7 +502,7 @@ impl Node {
                     let _ = reply.send(());
                 }
                 Some(command) => self.on_command(command),
-                None => return Some(None),
+                None => return Some(Vec::new()),
             },
             () = slot.as_mut() => {
                 self.on_slot();

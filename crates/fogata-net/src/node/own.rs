@@ -375,6 +375,87 @@ mod tests {
         assert!(took < OWN_GOING_WAIT * 3, "stopped after {took:?}");
     }
 
+    /// A second shutdown while the first waits keeps the first one's bound, and both are
+    /// answered once the node stopped, not before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_shutdowns_are_both_answered_once_the_node_stopped() {
+        let (node, group) = lone_member();
+        inspect(&node, move |n| {
+            let (id, wire) = own_line(n, group);
+            let going = Going {
+                wire,
+                reached: Vec::new(),
+                requests: 1,
+            };
+            n.own_going.0.insert(id, going);
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let shutdown = || {
+            let node = node.clone();
+            tokio::spawn(async move {
+                let stopped = node.shutdown().await;
+                (stopped, std::time::Instant::now())
+            })
+        };
+        let first = shutdown();
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let second = shutdown();
+        let (first, second) = (first.await.unwrap(), second.await.unwrap());
+        assert!(first.0.is_ok() && second.0.is_ok(), "{first:?} {second:?}");
+        for (_, at) in [first, second] {
+            let took = at.duration_since(started);
+            assert!(took >= OWN_GOING_WAIT, "answered after {took:?}");
+            assert!(took < OWN_GOING_WAIT * 3, "answered after {took:?}");
+        }
+    }
+
+    /// A shutdown with nothing of this device's on its way does not wait for anything.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_shutdown_with_nothing_of_its_own_going_does_not_wait() {
+        let (node, _) = lone_member();
+        let started = std::time::Instant::now();
+        node.shutdown().await.unwrap();
+        let took = started.elapsed();
+        assert!(took < Duration::from_secs(1), "stopped after {took:?}");
+    }
+
+    /// A room event of this device's that failed on the member's only connection goes again
+    /// on it all the same, once, and is let go after that one fails too.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_own_room_event_lost_on_the_only_connection_goes_again_on_it_once() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            through_relay(n, bea, PeerId::random(), 1);
+            let only = ConnectionId::new_unchecked(1);
+            let (id, wire) = own_line(n, group);
+            n.send_own(group, id, &[bea], wire, Vec::new());
+            let Pending::Own(group, id, again) = take_own(n, bea) else {
+                unreachable!("taken as one");
+            };
+            n.own_lost(bea, group, id, again, only);
+            let resent = n
+                .pending
+                .iter()
+                .find(|(_, (_, kind))| matches!(kind, Pending::Own(_, _, Some(_))))
+                .and_then(|(request, _)| n.quick_on_its_way.get(request))
+                .map(|(connection, _)| *connection);
+            let Pending::Own(group, id, again) = take_own(n, bea) else {
+                unreachable!("taken as one");
+            };
+            n.own_lost(bea, group, id, again, only);
+            (resent, own_requests(n, bea), n.own_going.is_empty())
+        })
+        .await;
+        assert_eq!(
+            found,
+            (Some(ConnectionId::new_unchecked(1)), Vec::new(), true)
+        );
+        node.shutdown().await.unwrap();
+    }
+
     /// A node of `log`'s group, its events kept.
     fn member(identity: Arc<DeviceIdentity>, log: GroupLog) -> (NodeHandle, NodeEvents) {
         start(NodeConfig {

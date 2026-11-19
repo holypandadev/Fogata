@@ -1049,9 +1049,9 @@ struct Node {
     quick_on_its_way: HashMap<OutboundRequestId, (ConnectionId, Instant)>,
     /// This device's room events on their way to members (see own.rs).
     own_going: own::OwnGoing,
-    /// Asked to stop: the reply, and when to stop at the latest, for those to go first
+    /// Asked to stop: the replies, and when to stop at the latest, for those to go first
     /// (see `Node::turn`).
-    stopping: Option<(tokio::sync::oneshot::Sender<()>, tokio::time::Instant)>,
+    stopping: Option<(Vec<tokio::sync::oneshot::Sender<()>>, tokio::time::Instant)>,
     /// Member requests to each peer, sent a few at a time (see `outbox::IN_FLIGHT`).
     outbox: HashMap<PeerId, Outbox>,
     /// This device's presence on its way to each member, one at a time to each.
