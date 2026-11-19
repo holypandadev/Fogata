@@ -178,10 +178,9 @@ impl Node {
                         self.request_dropped(to, kind);
                         self.challenge_with(peer, group, None);
                     }
-                    // A room event of this device's goes again once, on another connection
-                    // if there is one (see own.rs).
+                    // A room event of this device's goes again once (see own.rs).
                     Pending::Own(group, id, again) => {
-                        self.own_lost(to, group, id, again, Some(connection_id))
+                        self.own_lost(to, group, id, again, connection_id)
                     }
                     // Lost on the way (its connection closed while another stays, or no
                     // answer in time): let go as one that never went, so that an invite is

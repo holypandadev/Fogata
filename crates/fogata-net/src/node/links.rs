@@ -103,8 +103,8 @@ impl Node {
     /// are. Suspect is one a quick request has waited on for [`SUSPECT_AFTER`] or more, and
     /// a direct QUIC connection while the peer's QUIC connections heard nothing for
     /// [`QUIC_SUSPECT_SILENCE`]: both say it may have died unnoticed. `besides` counts worse
-    /// than any other: a request just failed on it (its stream ended, or the connection is
-    /// closing, which may be heard of after the failure).
+    /// than any other: a request just failed on it, which libp2p may report before the
+    /// connection's close (a stream ended by the peer closing it).
     pub(super) fn request_connection(
         &self,
         peer: &PeerId,

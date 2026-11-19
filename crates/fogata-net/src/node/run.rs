@@ -390,7 +390,27 @@ impl Node {
         if let Some(test) = &self.test_panic {
             test.check();
         }
+        // Asked to stop: once none of this device's room events is waiting or on its way
+        // (answered or failed, see own.rs), or at the bound, every connection closes. A
+        // panic meanwhile loses a turn as ever, and the next one gets here again.
+        let stop_at = self.stopping.as_ref().map(|(_, until)| *until);
+        if let Some(until) = stop_at
+            && (self.own_going.is_empty() || tokio::time::Instant::now() >= until)
+            && let Some((reply, _)) = self.stopping.take()
+        {
+            if !self.own_going.is_empty() {
+                tracing::debug!("quitting with room events of this device's on their way");
+            }
+            self.close_all().await;
+            return Some(Some(reply));
+        }
         tokio::select! {
+            () = async {
+                match stop_at {
+                    Some(until) => tokio::time::sleep_until(until).await,
+                    None => std::future::pending().await,
+                }
+            } => {}
             event = {
                 let (swarm, polling) = (&mut self.swarm, &mut self.polling_swarm);
                 #[cfg(test)]
@@ -412,10 +432,13 @@ impl Node {
             command = self.commands.recv() => match command {
                 Some(Command::Shutdown(reply)) => {
                     // What this device just said in a room (a last line, its leave) goes
-                    // first, for a moment at most.
-                    self.let_own_go().await;
-                    self.close_all().await;
-                    return Some(Some(reply));
+                    // first, for a moment at most, the node turning as ever meanwhile
+                    // (see above). A second shutdown keeps the first one's bound.
+                    let until = self.stopping.take().map_or_else(
+                        || tokio::time::Instant::now() + own::OWN_GOING_WAIT,
+                        |(_, until)| until,
+                    );
+                    self.stopping = Some((reply, until));
                 }
                 #[cfg(test)]
                 Some(Command::Panic) => panic!("a test asked the node to panic"),
@@ -504,26 +527,6 @@ impl Node {
             }
         }
         None
-    }
-
-    /// Before the node stops: drives the swarm until none of this device's room events is
-    /// waiting or on its way (answered or failed, see own.rs), for at most
-    /// [`own::OWN_GOING_WAIT`]. With none, it returns at once.
-    async fn let_own_go(&mut self) {
-        if self.own_going.is_empty() {
-            return;
-        }
-        let deadline = tokio::time::sleep(own::OWN_GOING_WAIT);
-        tokio::pin!(deadline);
-        while !self.own_going.is_empty() {
-            tokio::select! {
-                event = self.swarm.select_next_some() => self.on_swarm_event(event),
-                _ = &mut deadline => {
-                    tracing::debug!("quitting with room events of this device's on their way");
-                    break;
-                }
-            }
-        }
     }
 
     /// Closes every connection and drives the swarm until they are closed, for at most

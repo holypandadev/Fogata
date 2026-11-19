@@ -838,13 +838,18 @@ A group message goes once to each member, not to everyone from everyone:
   has nothing.
 - A device's own room events but its `Here` (lines, files shared or no longer, entering,
   leaving, a taking out) are kept until each request carrying one is answered by the member
-  (taken or refused) or failed (`node::own`). One that fails on its way, or is dropped from
-  a full queue, goes again once, on the member's best connection then, while the member is
-  still connected; a member takes the copy that comes again as any copy, by its id. Quitting
-  waits until none is waiting or on its way, for at most 2 s (`OWN_GOING_WAIT`), then closes
-  the connections. Still lost: an event to a member whose every connection closed before it
-  got there (none goes again then), and one that reached no participant before its
-  author's node stopped. The author's own room shows its line either way.
+  (taken or refused), failed, or dropped unsent (`node::own`). One that fails on its way
+  goes again once, while the member is still connected, on its best connection but the one
+  the first failed on; a member takes the copy that comes again as any copy, by its id, and
+  a room does not list a file again for a share older than its holder's unshare. Quitting
+  waits until none is waiting or on its way, for at most 2 s (`OWN_GOING_WAIT`), the node
+  turning as ever meanwhile, then closes the connections. Still lost: an event still on its
+  way when the 2 s run out; one that failed twice, or was dropped from a full queue (not
+  sent again: it would push out the next); one to a member whose every connection closed
+  before it got there; one that reached no participant before its author's node stopped;
+  and whatever is on its way when the application is ended by a signal (nothing handles
+  SIGTERM: a Flatpak closed, a logout) or its own limit on quitting cuts the shutdown short.
+  The author's own room shows its line either way.
 
 Every message and request to a member is a request of the member protocol, on a stream of its
 own. A connection takes 16 such streams at once, both ways together, and drops any stream

@@ -370,6 +370,7 @@ pub(crate) fn start_with(
         pending: HashMap::new(),
         quick_on_its_way: HashMap::new(),
         own_going: own::OwnGoing::default(),
+        stopping: None,
         outbox: HashMap::new(),
         presence: presence::PresenceWays::default(),
         farewell: HashSet::new(),
@@ -527,8 +528,8 @@ enum Pending {
     /// A group message passed on, or a presence of this device's in a room.
     Deliver,
     /// A room event of this device's (see `own::OwnGoing`): its group, its message id, and
-    /// whether it is the one sending again after the first failed.
-    Own(GroupId, [u8; 16], bool),
+    /// for the one sent again after the first failed, the connection that one failed on.
+    Own(GroupId, [u8; 16], Option<ConnectionId>),
     Roster(GroupId),
     /// A group's banner, with its digest: a member that refuses it is not sent it again.
     Banner(GroupId, [u8; 32]),
@@ -1048,6 +1049,9 @@ struct Node {
     quick_on_its_way: HashMap<OutboundRequestId, (ConnectionId, Instant)>,
     /// This device's room events on their way to members (see own.rs).
     own_going: own::OwnGoing,
+    /// Asked to stop: the reply, and when to stop at the latest, for those to go first
+    /// (see `Node::turn`).
+    stopping: Option<(tokio::sync::oneshot::Sender<()>, tokio::time::Instant)>,
     /// Member requests to each peer, sent a few at a time (see `outbox::IN_FLIGHT`).
     outbox: HashMap<PeerId, Outbox>,
     /// This device's presence on its way to each member, one at a time to each.

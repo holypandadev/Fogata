@@ -1,8 +1,8 @@
 //! This device's room events on their way to the members it sent them to: each is kept
 //! until every request carrying it is gone, answered by the member or failed, so that one
-//! that failed on its way, or was dropped from a full queue, goes again once, and quitting
-//! waits a moment for them (see [`OWN_GOING_WAIT`]). Nothing of it is on the wire: a member
-//! takes the copy sent again as any copy of a message it has, by its id.
+//! that failed on its way goes again once, and quitting waits a moment for them (see
+//! [`OWN_GOING_WAIT`]). Nothing of it is on the wire: a member takes the copy sent again as
+//! any copy of a message it has, by its id.
 //!
 //! A presence (`RoomHere`) is not kept: another goes at the next heartbeat. Every other room
 //! event of this device's is: a line, a file shared or no longer, entering, leaving, a
@@ -18,7 +18,7 @@ use libp2p::{PeerId, swarm::ConnectionId};
 use super::{Node, Pending};
 
 /// Most time quitting waits for this device's room events still on their way to go (see
-/// `Node::let_own_go` in run.rs):a line said just before quitting, and the leave, are otherwise
+/// `Node::turn` in run.rs): a line said just before quitting, and the leave, are otherwise
 /// dropped with the connections when the node stops. A request and its answer take about
 /// two round trips, under 1.5 s even through a member's relay over a slow link; a member
 /// that does not answer within this has a connection that died unnoticed, and its events
@@ -69,19 +69,18 @@ impl Node {
             },
         );
         for &peer in peers {
-            self.own_request(peer, group, id, false, None);
+            self.own_request(peer, group, id, None);
         }
     }
 
-    /// Sends kept event `id` to `peer`, the first time or `again`, on another connection
-    /// than `besides` if it has one.
+    /// Sends kept event `id` to `peer`: the first time, or again after the first failed on
+    /// connection `failed_on`.
     fn own_request(
         &mut self,
         peer: PeerId,
         group: GroupId,
         id: [u8; 16],
-        again: bool,
-        besides: Option<ConnectionId>,
+        failed_on: Option<ConnectionId>,
     ) {
         let spread = self.takes_spread(&peer);
         let Some(going) = self.own_going.0.get_mut(&id) else {
@@ -96,11 +95,11 @@ impl Node {
         } else {
             MemberRequest::Deliver(going.wire.clone())
         };
-        self.request_besides(peer, request, Pending::Own(group, id, again), besides);
+        self.request(peer, request, Pending::Own(group, id, failed_on));
     }
 
-    /// A request carrying event `id` is gone: answered, whatever the answer, or failed and
-    /// dealt with. The event is let go with the last.
+    /// A request carrying event `id` is gone: answered, whatever the answer, failed, or
+    /// dropped unsent (see `request_dropped`). The event is let go with the last.
     pub(super) fn own_answered(&mut self, id: [u8; 16]) {
         if let Some(going) = self.own_going.0.get_mut(&id) {
             going.requests = going.requests.saturating_sub(1);
@@ -110,31 +109,31 @@ impl Node {
         }
     }
 
-    /// The request carrying event `id` of `group` to `peer` failed on its way or was
-    /// dropped unsent: the first goes again once, on the connection the member is best
-    /// reached by now, but `besides`, the one it failed on, while it has another: the
-    /// failure may come before that one is known to close. Only while `peer` is still a
-    /// connected member of the group. A refusal is an answer, not this: the member took the
-    /// request and said no (behind, it asks for the room again later; not counting this
-    /// device in, it would refuse again).
+    /// The request carrying event `id` of `group` to `peer` failed on its way, on
+    /// connection `on` (an `OutboundFailure`); `again` says whether it was itself sent
+    /// again. The first goes again once, while `peer` is still a connected member of the
+    /// group, on another connection than `on` if it has one when it leaves, also after
+    /// waiting its turn (see `request`): libp2p may report the failure of a stream ended by
+    /// the connection's close before the close itself, and the connection would be chosen
+    /// again. A refusal is an answer, not this: the member took the request and said no
+    /// (behind, it asks for the room again later; not counting this device in, it would
+    /// refuse again).
     pub(super) fn own_lost(
         &mut self,
         peer: PeerId,
         group: GroupId,
         id: [u8; 16],
-        again: bool,
-        besides: Option<ConnectionId>,
+        again: Option<ConnectionId>,
+        on: ConnectionId,
     ) {
-        // Its last connection gone, the requests waiting for it are dropped before it stops
-        // counting as a member (see `on_connection_closed`): it is not dialled again here.
         let member = self
             .groups
             .get(&group)
             .is_some_and(|slot| slot.members.contains(&peer));
         let connected = self.connections.values().any(|c| c.peer == peer);
-        if !again && member && connected {
+        if again.is_none() && member && connected {
             tracing::debug!("a room event of this device's failed on its way; sending it again");
-            self.own_request(peer, group, id, true, besides);
+            self.own_request(peer, group, id, Some(on));
         }
         self.own_answered(id);
     }
@@ -150,11 +149,12 @@ mod tests {
 
     use super::*;
     use crate::{
-        GroupSetup, NodeConfig, NodeEvent, NodeEvents, NodeHandle,
+        Command, GroupSetup, NodeConfig, NodeEvent, NodeEvents, NodeHandle,
         node::{
             now_ms,
+            outbox::{IN_FLIGHT, MAX_WAITING},
             spread::Forward,
-            tests::{add_member, inspect, lone_member, through_relay},
+            tests::{add_member, empty_push, inspect, lone_member, through_relay},
         },
         start,
     };
@@ -187,7 +187,7 @@ mod tests {
             .flat_map(|o| o.waiting.iter().map(|(_, kind)| *kind));
         sent.chain(waiting)
             .filter_map(|kind| match kind {
-                Pending::Own(_, _, again) => Some(again),
+                Pending::Own(_, _, again) => Some(again.is_some()),
                 _ => None,
             })
             .collect()
@@ -209,8 +209,100 @@ mod tests {
 
     /// Fails the node's own room event on its way to `peer` as an `OutboundFailure` does.
     fn fail_own(n: &mut Node, peer: PeerId) {
-        let kind = take_own(n, peer);
-        n.request_dropped(peer, kind);
+        let Pending::Own(group, id, again) = take_own(n, peer) else {
+            unreachable!("taken as one");
+        };
+        n.own_lost(peer, group, id, again, ConnectionId::new_unchecked(99));
+    }
+
+    /// A room event of this device's sent again leaves on another connection than the one
+    /// the first failed on, also after waiting its turn behind other requests.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_own_room_event_sent_again_avoids_the_connection_it_failed_on() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            // Two connections, the first the best (the oldest of two alike).
+            through_relay(n, bea, PeerId::random(), 1);
+            through_relay(n, bea, PeerId::random(), 2);
+            let first = ConnectionId::new_unchecked(1);
+            for _ in 1..IN_FLIGHT {
+                n.request(bea, empty_push(group), Pending::Push);
+            }
+            let (id, wire) = own_line(n, group);
+            n.send_own(group, id, &[bea], wire, Vec::new());
+            let went_on = |n: &Node, again: bool| {
+                n.pending
+                    .iter()
+                    .find(|(_, (_, kind))| {
+                        matches!(kind, Pending::Own(_, _, a) if a.is_some() == again)
+                    })
+                    .and_then(|(request, _)| n.quick_on_its_way.get(request))
+                    .map(|(connection, _)| *connection)
+            };
+            let first_on = went_on(n, false);
+            // One more waits its turn; the line fails on the first connection, and the one
+            // sent again waits behind it.
+            n.request(bea, empty_push(group), Pending::Push);
+            let Pending::Own(group, id, again) = take_own(n, bea) else {
+                unreachable!("taken as one");
+            };
+            n.own_lost(bea, group, id, again, first);
+            let waiting = went_on(n, true);
+            // A push is answered: the line leaves.
+            let push = n
+                .pending
+                .iter()
+                .find(|(_, (_, kind))| matches!(kind, Pending::Push))
+                .map(|(request, _)| *request)
+                .unwrap();
+            n.pending.remove(&push);
+            n.request_done(bea);
+            (first_on, waiting, went_on(n, true))
+        })
+        .await;
+        let (first_on, waiting, again_on) = found;
+        assert_eq!(first_on, Some(ConnectionId::new_unchecked(1)));
+        assert_eq!(waiting, None);
+        assert_eq!(again_on, Some(ConnectionId::new_unchecked(2)));
+        node.shutdown().await.unwrap();
+    }
+
+    /// Room events of this device's dropped from a full queue to a member that reads
+    /// nothing count as gone and are not sent again: one more pushes out only the oldest,
+    /// which pushes out nothing else.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn own_room_events_dropped_from_a_full_queue_are_not_sent_again() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = PeerId::random();
+            add_member(n, group, bea);
+            through_relay(n, bea, PeerId::random(), 1);
+            for _ in 0..IN_FLIGHT {
+                n.request(bea, empty_push(group), Pending::Push);
+            }
+            let mut ids = Vec::new();
+            for _ in 0..=MAX_WAITING {
+                let (id, wire) = own_line(n, group);
+                ids.push(id);
+                n.send_own(group, id, &[bea], wire, Vec::new());
+            }
+            let requests = own_requests(n, bea);
+            let kept = ids
+                .iter()
+                .filter(|id| n.own_going.0.contains_key(*id))
+                .count();
+            (
+                requests.len(),
+                requests.iter().any(|again| *again),
+                n.own_going.0.contains_key(&ids[0]),
+                kept,
+            )
+        })
+        .await;
+        assert_eq!(found, (MAX_WAITING, false, false, MAX_WAITING));
+        node.shutdown().await.unwrap();
     }
 
     /// A room event of this device's that fails on its way to a member still connected goes
@@ -248,6 +340,39 @@ mod tests {
         assert_eq!(left, [Vec::<bool>::new(), Vec::new()]);
         assert!(let_go);
         node.shutdown().await.unwrap();
+    }
+
+    /// Quitting with a room event of this device's that never goes waits for it up to
+    /// [`OWN_GOING_WAIT`], the node turning as ever: a panic meanwhile loses a turn, and the
+    /// node still closes its connections and says it stopped.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_panic_while_quitting_waits_still_stops_the_node() {
+        let (node, group) = lone_member();
+        inspect(&node, move |n| {
+            let (id, wire) = own_line(n, group);
+            let going = Going {
+                wire,
+                reached: Vec::new(),
+                requests: 1,
+            };
+            n.own_going.0.insert(id, going);
+        })
+        .await;
+        let started = std::time::Instant::now();
+        let stopping = {
+            let node = node.clone();
+            tokio::spawn(async move { node.shutdown().await })
+        };
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        node.commands.send(Command::Panic).await.unwrap();
+        let stopped = tokio::time::timeout(Duration::from_secs(10), stopping).await;
+        let took = started.elapsed();
+        assert!(
+            matches!(stopped, Ok(Ok(Ok(())))),
+            "{stopped:?} after {took:?}"
+        );
+        assert!(took >= OWN_GOING_WAIT, "stopped after {took:?}");
+        assert!(took < OWN_GOING_WAIT * 3, "stopped after {took:?}");
     }
 
     /// A node of `log`'s group, its events kept.

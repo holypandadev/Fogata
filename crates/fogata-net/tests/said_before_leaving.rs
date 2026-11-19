@@ -387,9 +387,9 @@ async fn a_last_line_before_leaving_reaches_everyone() {
     assert_eq!(tally.lost, [0, 0], "{tally:?}");
 }
 
-/// Scenario (ii): as (i), and Ana's node stops 400 ms after she left, as the application
-/// does when it quits; her next session starts for the next round. `delay_ms` is each way
-/// of her links to the others.
+/// Scenario (ii): as (i), and Ana's node stops as soon as she left, as the application does
+/// when it quits (it waited 400 ms before, measured below with that wait); her next session
+/// starts for the next round. `delay_ms` is each way of her links to the others.
 async fn quit_after_the_last_line(delay_ms: u64, rounds: usize) -> Tally {
     let three = Three::new().await;
     three.to_bea.delay_ms.store(delay_ms, Ordering::SeqCst);
@@ -402,7 +402,6 @@ async fn quit_after_the_last_line(delay_ms: u64, rounds: usize) -> Tally {
         let said = Instant::now();
         ana.room_chat(three.group, text.clone()).await.unwrap();
         ana.leave_room(three.group).await.unwrap();
-        tokio::time::sleep(Duration::from_millis(400)).await;
         ana.shutdown().await.unwrap();
         drop(ana);
         let got = three.arrivals(&text, said, true).await;
@@ -730,7 +729,9 @@ impl Bea {
 /// Scenario (iii) on its own: the line to Bea is lost on its way, its connection closed
 /// while another one stays and Bea stays a member, and Ana sends it again at once on the
 /// one left, rather than leaving it to a presence of someone else's 20 s on (when there is
-/// anyone else). Measured: it came again on the other connection within a second.
+/// anyone else). Ana hears of the line's failure before the connection's close: sent again
+/// as any request, it went on the closing connection and was lost in 8 of 8 runs; avoiding
+/// the connection the first failed on, it came on the other within 3 ms in 8 of 8.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_line_lost_with_its_connection_goes_again_on_another() {
     let _one = ONE_AT_A_TIME.lock().await;
@@ -772,11 +773,23 @@ async fn a_line_lost_with_its_connection_goes_again_on_another() {
     assert!(bea.until(10, |b| !b.lines.is_empty()).await, "no line came");
     let (id, on) = bea.lines[0];
     let other = if on == first { second } else { first };
-    // The connection the line came on closes before Bea answers it.
+    // The connection the line came on closes with the line still unanswered (its answer is
+    // held, not dropped, until the connection closed).
     bea.hold = false;
-    bea.held.clear();
     assert!(bea.swarm.close_connection(on));
     let closed = Instant::now();
+    let gone = timeout(Duration::from_secs(10), async {
+        loop {
+            if let Some(SwarmEvent::ConnectionClosed { connection_id, .. }) = bea.step().await
+                && connection_id == on
+            {
+                return;
+            }
+        }
+    })
+    .await;
+    assert!(gone.is_ok(), "the connection did not close");
+    bea.held.clear();
     let again = bea.until(10, |b| b.lines.len() > 1).await;
     let took = closed.elapsed();
     eprintln!("lines: {:?}, again after {took:?}", bea.lines);
@@ -786,4 +799,5 @@ async fn a_line_lost_with_its_connection_goes_again_on_another() {
     // Once, however long Bea's side keeps going.
     bea.until(3, |_| false).await;
     assert_eq!(bea.lines.len(), 2, "{:?}", bea.lines);
+    node_a.shutdown().await.unwrap();
 }
