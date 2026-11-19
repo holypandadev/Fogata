@@ -668,9 +668,15 @@ void FlutterPeerConnection::AddTransceiver(
       has_init ? mapToRtpTransceiverInit(transceiverInit)
                : scoped_refptr<RTCRtpTransceiverInit>();
 
+  // Fogata: held for the call, which may run on a thread of its own (below): the
+  // application can close and dispose of the connection meanwhile, and the map
+  // entry that kept it was its last hold.
+  scoped_refptr<RTCPeerConnection> held(pc);
+
   // The actual libwebrtc call + result completion. pc->AddTransceiver() is a
   // proxy that BLOCKS the caller until the signaling thread finishes it.
-  auto do_add = [pc, track, type, has_init, init, result_ptr]() {
+  auto do_add = [held, track, type, has_init, init, result_ptr]() {
+    RTCPeerConnection* pc = held.get();
     if (has_init) {
       auto transceiver = track.get() != nullptr
                              ? pc->AddTransceiver(track.get(), init)
@@ -703,7 +709,10 @@ void FlutterPeerConnection::AddTransceiver(
   // (house style, see CreateOffer). The proxy is thread-safe (it marshals to the
   // signaling thread regardless of caller), and LiveKit awaits this result
   // before it negotiates (createOffer/setLocalDescription), so ordering holds.
-  // pc outlives the in-flight publish (Dart awaits this before any teardown).
+  // A close is not ordered with it: Fogata closes a connection whose participant
+  // left while an offer to them is being made, so `held` keeps the connection's
+  // object, and libwebrtc answers a call that comes after its close with nothing
+  // (the error in do_add), never one on the connection it is destroying.
   std::thread(std::move(do_add)).detach();
 #else
   do_add();
@@ -1202,7 +1211,10 @@ void FlutterPeerConnection::AddTrack(
   // The actual libwebrtc call + result completion. pc->AddTrack() is a proxy
   // that BLOCKS the caller until the signaling thread finishes it (which, for a
   // first audio track, includes the cold RTP-sender/encoder/APM init).
-  auto do_add = [pc, track, streamIds, result_ptr]() {
+  // Fogata: held for the call, as in AddTransceiver.
+  scoped_refptr<RTCPeerConnection> held(pc);
+  auto do_add = [held, track, streamIds, result_ptr]() {
+    RTCPeerConnection* pc = held.get();
     std::string kind = track->kind().std_string();
     if (0 == kind.compare("audio")) {
       auto sender =

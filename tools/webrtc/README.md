@@ -82,8 +82,9 @@ first time.
 Rust and sysroot its hooks fetch) and the wrapper, each at its pinned commit.
 `build-linux.sh` resets the tree (`prepare.sh`), applies the patches, builds, runs the
 wrapper's tests of the size check, of the microphone's channels, of the voice engine's
-muted state, of the echo controller made anew, of the arrays it hands across and of the
-shared screen encoder, and writes into `<work>/dist`:
+muted state, of the echo controller made anew, of the arrays it hands across, of the
+shared screen encoder and of a connection closed while another thread calls it, and writes
+into `<work>/dist`:
 
     fogata-libwebrtc.m158.8127.1/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
@@ -362,6 +363,18 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     WebRTC's worker thread since M158 (the factory made a worker thread of its own and
     handed it to WebRTC), and cameras start and stop on a thread of their own
     (`capture_thread`).
+23. a connection's calls from more than one thread (the plugin adds transceivers and
+    tracks on threads of its own on Windows): `Close()` takes WebRTC's connection out
+    under a lock before it lets it go, and every call holds it to its end or finds it
+    closed and answers with nothing or its failure. Letting it go waits for the signaling
+    thread to destroy it, and until then the member still pointed at it: an
+    `AddTransceiver` made meanwhile was queued behind the destruction and made a video
+    channel on the destroyed `PeerConnection` with its `Call` freed (an access violation
+    in `WebRtcVideoSendChannel`'s constructor at a hang-up on Windows). A close waits for
+    WebRTC's own close (`PeerConnectionInterface::Close()`, outside the lock): the
+    connection reports itself closed (ICE connection, connection and signaling states)
+    and no callback comes after it returns, also when another call still holds it. With
+    its tests (`test/closed_connection.test.cc`, in processes of their own).
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

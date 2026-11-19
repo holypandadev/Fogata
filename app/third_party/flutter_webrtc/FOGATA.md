@@ -1689,6 +1689,36 @@ freed until the application quit.
   (`FlutterPeerConnectionObserver::peerconnection`), so the observer is detached and both
   go. macOS keeps a closed connection listed until its dispose, and needed no change.
 
+## A transceiver added while its connection closes (Windows)
+
+On Windows `addTransceiver` and `addTrack` run on a thread of their own (the first audio
+sender's set-up kept the platform thread, the window's message loop, for about 600 ms),
+and the application closes a connection whose participant left while an offer to them is
+being made: the close came while one of the offer's transceivers was being added. The
+thread had the connection by a plain pointer, which the close and dispose let go of, and
+libwebrtc's connection, being let go of by the close, still took the call: it ran on the
+destroyed `PeerConnection` and made a video channel with its `Call` already freed (an
+access violation in `WebRtcVideoSendChannel`'s constructor, once in some 30 calls).
+
+- `common/cpp/src/flutter_peerconnection.cc` (`AddTransceiver`, `AddTrack`): the thread
+  holds the connection's object (`scoped_refptr`) until its call is done.
+- `tools/webrtc/patches/wrapper/0023`: libwebrtc's connection is taken out under a lock
+  before it is let go of, and every call holds it to its end or finds it closed; a call
+  that comes after the close is answered with nothing (no transceiver, which the plugin
+  answers with an error; no sender; the descriptions' and offers' failure). The
+  application's call code takes it as it takes a call made after the close
+  ("peerConnection is null"): the step fails and a line goes in the call's log.
+- The same patch makes a close wait for WebRTC's own close: the plugin frees its observer
+  after `close()`, and a connection still held by such a call went on calling it. The
+  close now reports the connection closed, as on macOS: `iceConnectionState`,
+  `peerConnectionState` and `signalingState` events with `closed` reach the application
+  after `close()`. The call code ignores them for a connection it no longer has (the
+  connection state) or writes a line in the call's verbose log (`ice …: closed`, `screen
+  sound to/from …: closed`); nothing else follows from them.
+
+Linux and macOS call the connection on the platform thread only, where a close cannot
+come in the middle of a call.
+
 ## The voice engine stays (all platforms)
 
 WebRTC M156 starts its voice engine with the first connection and stops it when the last

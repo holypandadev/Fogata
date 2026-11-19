@@ -1,0 +1,759 @@
+Hold a connection for each call, and take it out before a close lets it go
+
+A connection is called from more than one thread: on Windows the plugin adds
+transceivers and tracks on threads of its own, and the application may close the
+connection meanwhile (a participant who left while an offer to them was being made).
+Close() let WebRTC's connection go by setting the member to null, and scoped_refptr lets
+the old one go before it stores the null: letting go of the proxy waits for the
+signaling thread to destroy the PeerConnection, and all that time the member still
+pointed at it. An AddTransceiver made then took that connection and was queued on the
+signaling thread behind its destruction, so it ran on the destroyed PeerConnection and
+made a video channel with its Call already freed: an access violation in
+WebRtcVideoSendChannel's constructor at a hang-up on Windows.
+
+The connection is now read under a lock and held by each call to its end (connection());
+Close() takes it out under the lock, then, outside it, closes it with WebRTC's own
+Close() before it lets go of it, so a call finds it either whole or null. WebRTC's
+Close() waits for the signaling thread: there the connection reports itself closed (its
+ICE connection, connection and signaling states, which a destruction alone never told)
+and lets go of the observer; once it returns no callback of the connection comes, and a
+call already holding it on another thread finds it closed. Letting go of it alone, when
+another call still held it, left it running, with its callbacks, until that call let go
+too, and the plugin frees its observer after a close. A call on a closed connection
+answers with nothing: no transceiver, no sender, no data channel, an empty list, its
+failure callback (a description set or read, an offer, an answer, statistics), and the
+states closed (the ICE gathering state complete). Of the observer's callbacks, which run
+on the signaling thread, only OnIceCandidate asks whether it is open (open()); none holds
+it: the last hold let go of there would destroy the connection within its own callback.
+
+Tested by test/closed_connection.test.cc, in processes of their own. The signaling
+thread held, a close on one thread and an AddTransceiver on another, which is answered
+at once with no transceiver; before, it waited behind the destruction and the process
+ended with SIGSEGV on the signaling thread, in the proxy's queued AddTransceiver call
+(Linux, with freed memory overwritten). And an AddTransceiver holding the connection,
+waiting for the signaling thread, when the close comes: no callback comes after Close()
+returns; without WebRTC's own close the renegotiation the add asked for came after it.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 9f6c4a2..57fabaa 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -380,6 +380,7 @@ if (rtc_include_tests) {
+        "test/echo_restart.test.cc",
+        "test/echo_room.test.cc",
+        "test/echo_call.test.cc",
++       "test/closed_connection.test.cc",
+        "src/rtc_audio_device_impl.cc",
+        "src/rtc_audio_device_impl.h",
+ 
+diff --git a/src/rtc_peerconnection_impl.cc b/src/rtc_peerconnection_impl.cc
+index 40fcdda..42fe01e 100644
+--- a/src/rtc_peerconnection_impl.cc
++++ b/src/rtc_peerconnection_impl.cc
+@@ -228,6 +228,17 @@ RTCPeerConnectionImpl::~RTCPeerConnectionImpl() {
+   RTC_LOG(LS_INFO) << __FUNCTION__ << ": dtor";
+ }
+ 
++webrtc::scoped_refptr<webrtc::PeerConnectionInterface>
++RTCPeerConnectionImpl::connection() const {
++  webrtc::MutexLock lock(&connection_lock_);
++  return rtc_peerconnection_;
++}
++
++bool RTCPeerConnectionImpl::open() const {
++  webrtc::MutexLock lock(&connection_lock_);
++  return rtc_peerconnection_.get() != nullptr;
++}
++
+ void RTCPeerConnectionImpl::OnAddTrack(
+     webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+     const std::vector<webrtc::scoped_refptr<webrtc::MediaStreamInterface>>&
+@@ -341,12 +352,13 @@ void RTCPeerConnectionImpl::AddCandidate(const string mid, int mid_mline_index,
+   webrtc::SdpParseError error;
+   webrtc::IceCandidateInterface* candidate = webrtc::CreateIceCandidate(
+       to_std_string(mid), mid_mline_index, to_std_string(cand_sdp), &error);
+-  if (candidate != nullptr) rtc_peerconnection_->AddIceCandidate(candidate);
++  auto pc = connection();
++  if (candidate != nullptr && pc) pc->AddIceCandidate(candidate);
+ }
+ 
+ void RTCPeerConnectionImpl::OnIceCandidate(
+     const webrtc::IceCandidateInterface* candidate) {
+-  if (!rtc_peerconnection_) return;
++  if (!open()) return;
+ 
+ #if 0
+     if (candidate->candidate().protocol() != "tcp")
+@@ -461,7 +473,10 @@ bool RTCPeerConnectionImpl::Initialize() {
+     return false;
+   }
+ 
+-  rtc_peerconnection_ = result.MoveValue();
++  {
++    webrtc::MutexLock lock(&connection_lock_);
++    rtc_peerconnection_ = result.MoveValue();
++  }
+   return true;
+ }
+ 
+@@ -476,8 +491,10 @@ scoped_refptr<RTCDataChannel> RTCPeerConnectionImpl::CreateDataChannel(
+   init.protocol = to_std_string(dataChannelDict->protocol);
+   init.reliable = dataChannelDict->reliable;
+ 
++  auto pc = connection();
++  if (!pc) return nullptr;
+   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::DataChannelInterface>>
+-      result = rtc_peerconnection_->CreateDataChannelOrError(
++      result = pc->CreateDataChannelOrError(
+           to_std_string(label), &init);
+ 
+   if (!result.ok()) {
+@@ -517,10 +534,15 @@ void RTCPeerConnectionImpl::SetLocalDescription(const string sdp,
+     failure(ss.str().c_str());
+     return;
+   }
++  auto pc = connection();
++  if (!pc) {
++    failure("SetLocalDescription: the connection is closed");
++    return;
++  }
+   webrtc::scoped_refptr<webrtc::SetLocalDescriptionObserverInterface> observer =
+       webrtc::make_ref_counted<SetSessionDescriptionObserverProxy>(success,
+                                                                    failure);
+-  rtc_peerconnection_->SetLocalDescription(std::move(session_description),
++  pc->SetLocalDescription(std::move(session_description),
+                                            observer);
+ }
+ 
+@@ -557,10 +579,15 @@ void RTCPeerConnectionImpl::SetRemoteDescription(const string sdp,
+   if (media_content_desc && configuration_.local_video_bandwidth > 0)
+     media_content_desc->set_bandwidth(configuration_.local_video_bandwidth *
+                                       1000);
++  auto pc = connection();
++  if (!pc) {
++    failure("SetRemoteDescription: the connection is closed");
++    return;
++  }
+   webrtc::scoped_refptr<webrtc::SetRemoteDescriptionObserverInterface>
+       observer = webrtc::make_ref_counted<SetSessionDescriptionObserverProxy>(
+           success, failure);
+-  rtc_peerconnection_->SetRemoteDescription(std::move(session_description),
++  pc->SetRemoteDescription(std::move(session_description),
+                                             observer);
+ 
+   return;
+@@ -568,7 +595,14 @@ void RTCPeerConnectionImpl::SetRemoteDescription(const string sdp,
+ 
+ void RTCPeerConnectionImpl::GetLocalDescription(OnGetSdpSuccess success,
+                                                 OnGetSdpFailure failure) {
+-  auto local_description = rtc_peerconnection_->local_description();
++  auto pc = connection();
++  if (!pc) {
++    if (failure) {
++      failure("the connection is closed");
++    }
++    return;
++  }
++  auto local_description = pc->local_description();
+   if (!local_description) {
+     if (failure) {
+       failure("not local description");
+@@ -585,7 +619,14 @@ void RTCPeerConnectionImpl::GetLocalDescription(OnGetSdpSuccess success,
+ 
+ void RTCPeerConnectionImpl::GetRemoteDescription(OnGetSdpSuccess success,
+                                                  OnGetSdpFailure failure) {
+-  auto remote_description = rtc_peerconnection_->remote_description();
++  auto pc = connection();
++  if (!pc) {
++    if (failure) {
++      failure("the connection is closed");
++    }
++    return;
++  }
++  auto remote_description = pc->remote_description();
+   if (!remote_description) {
+     if (failure) {
+       failure("not remote description");
+@@ -604,7 +645,8 @@ void RTCPeerConnectionImpl::GetRemoteDescription(OnGetSdpSuccess success,
+ void RTCPeerConnectionImpl::CreateOffer(
+     OnSdpCreateSuccess success, OnSdpCreateFailure failure,
+     scoped_refptr<RTCMediaConstraints> constraints) {
+-  if (!rtc_peerconnection_.get() || !rtc_peerconnection_factory_.get()) {
++  auto pc = connection();
++  if (!pc.get() || !rtc_peerconnection_factory_.get()) {
+     webrtc::MutexLock cs(callback_crt_sec_.get());
+     failure("Failed to initialize PeerConnection");
+     return;
+@@ -620,7 +662,7 @@ void RTCPeerConnectionImpl::CreateOffer(
+     offer_answer_options = offer_answer_options_;
+   }
+ 
+-  rtc_peerconnection_->CreateOffer(
++  pc->CreateOffer(
+       CreateSessionDescriptionObserverProxy::Create(success, failure),
+       offer_answer_options);
+ }
+@@ -628,7 +670,8 @@ void RTCPeerConnectionImpl::CreateOffer(
+ void RTCPeerConnectionImpl::CreateAnswer(
+     OnSdpCreateSuccess success, OnSdpCreateFailure failure,
+     scoped_refptr<RTCMediaConstraints> constraints) {
+-  if (!rtc_peerconnection_.get() || !rtc_peerconnection_factory_.get()) {
++  auto pc = connection();
++  if (!pc.get() || !rtc_peerconnection_factory_.get()) {
+     webrtc::MutexLock cs(callback_crt_sec_.get());
+     failure("Failed to initialize PeerConnection");
+     return;
+@@ -642,22 +685,38 @@ void RTCPeerConnectionImpl::CreateAnswer(
+                                             &offer_answer_options) == false) {
+     offer_answer_options = offer_answer_options_;
+   }
+-  rtc_peerconnection_->CreateAnswer(
++  pc->CreateAnswer(
+       CreateSessionDescriptionObserverProxy::Create(success, failure),
+       offer_answer_options);
+ }
+ 
+ void RTCPeerConnectionImpl::RestartIce() {
+   RTC_LOG(LS_INFO) << __FUNCTION__;
+-  if (rtc_peerconnection_.get()) {
+-    rtc_peerconnection_->RestartIce();
++  if (auto pc = connection()) {
++    pc->RestartIce();
+   }
+ }
+ 
+ void RTCPeerConnectionImpl::Close() {
+   RTC_LOG(LS_INFO) << __FUNCTION__;
+-  if (rtc_peerconnection_.get()) {
+-    rtc_peerconnection_ = nullptr;
++  // Taken out under the lock before it is let go of: a call on another thread
++  // either holds it to its end or finds it null, and none is queued on a connection
++  // being destroyed (letting go of it waits for the signaling thread, and until
++  // then the member still pointed at it).
++  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> closing;
++  {
++    webrtc::MutexLock lock(&connection_lock_);
++    closing = std::move(rtc_peerconnection_);
++  }
++  if (closing.get()) {
++    // WebRTC's own close, outside the lock (a callback on the signaling thread
++    // asks open() meanwhile): it waits for the signaling thread, where the
++    // connection reports itself closed and lets go of this observer; once it
++    // returns no callback comes, and a call already queued behind it (holding the
++    // connection on another thread) finds it closed. Letting go of it alone left
++    // it running, with its callbacks, until that call let go too.
++    closing->Close();
++    closing = nullptr;
+     data_channel_ = nullptr;
+     local_streams_.clear();
+     for (auto stream : remote_streams_) {
+@@ -688,7 +747,8 @@ int RTCPeerConnectionImpl::AddStream(scoped_refptr<RTCMediaStream> stream) {
+       local_streams_.end())
+     return -1;  // Already added.
+ 
+-  if (!rtc_peerconnection_->AddStream(rtc_media_stream.get())) {
++  auto pc = connection();
++  if (!pc || !pc->AddStream(rtc_media_stream.get())) {
+     RTC_LOG(LS_ERROR) << "Adding stream to PeerConnection failed";
+   }
+ 
+@@ -706,7 +766,7 @@ int RTCPeerConnectionImpl::RemoveStream(scoped_refptr<RTCMediaStream> stream) {
+       local_streams_.end())
+     return -1;  // Not found.
+ 
+-  rtc_peerconnection_->RemoveStream(rtc_media_stream.get());
++  if (auto pc = connection()) pc->RemoveStream(rtc_media_stream.get());
+ 
+   local_streams_.erase(
+       std::find(local_streams_.begin(), local_streams_.end(), stream));
+@@ -730,13 +790,14 @@ bool RTCPeerConnectionImpl::GetStats(scoped_refptr<RTCRtpSender> sender,
+                                      OnStatsCollectorFailure failure) {
+   webrtc::scoped_refptr<WebRTCStatsCollectorCallback> rtc_callback =
+       WebRTCStatsCollectorCallback::Create(success, failure);
+-  if (!rtc_peerconnection_.get() || !rtc_peerconnection_factory_.get()) {
++  auto pc = connection();
++  if (!pc.get() || !rtc_peerconnection_factory_.get()) {
+     webrtc::MutexLock cs(callback_crt_sec_.get());
+     failure("Failed to initialize PeerConnection");
+     return false;
+   }
+   RTCRtpSenderImpl* impl = static_cast<RTCRtpSenderImpl*>(sender.get());
+-  rtc_peerconnection_->GetStats(impl->rtc_rtp_sender(), rtc_callback);
++  pc->GetStats(impl->rtc_rtp_sender(), rtc_callback);
+   return true;
+ }
+ 
+@@ -745,13 +806,14 @@ bool RTCPeerConnectionImpl::GetStats(scoped_refptr<RTCRtpReceiver> receiver,
+                                      OnStatsCollectorFailure failure) {
+   webrtc::scoped_refptr<WebRTCStatsCollectorCallback> rtc_callback =
+       WebRTCStatsCollectorCallback::Create(success, failure);
+-  if (!rtc_peerconnection_.get() || !rtc_peerconnection_factory_.get()) {
++  auto pc = connection();
++  if (!pc.get() || !rtc_peerconnection_factory_.get()) {
+     webrtc::MutexLock cs(callback_crt_sec_.get());
+     failure("Failed to initialize PeerConnection");
+     return false;
+   }
+   RTCRtpReceiverImpl* impl = static_cast<RTCRtpReceiverImpl*>(receiver.get());
+-  rtc_peerconnection_->GetStats(impl->rtp_receiver(), rtc_callback);
++  pc->GetStats(impl->rtp_receiver(), rtc_callback);
+   return true;
+ }
+ 
+@@ -759,17 +821,20 @@ void RTCPeerConnectionImpl::GetStats(OnStatsCollectorSuccess success,
+                                      OnStatsCollectorFailure failure) {
+   webrtc::scoped_refptr<WebRTCStatsCollectorCallback> rtc_callback =
+       WebRTCStatsCollectorCallback::Create(success, failure);
+-  if (!rtc_peerconnection_.get() || !rtc_peerconnection_factory_.get()) {
++  auto pc = connection();
++  if (!pc.get() || !rtc_peerconnection_factory_.get()) {
+     webrtc::MutexLock cs(callback_crt_sec_.get());
+     failure("Failed to initialize PeerConnection");
+     return;
+   }
+-  rtc_peerconnection_->GetStats(rtc_callback.get());
++  pc->GetStats(rtc_callback.get());
+ }
+ 
+ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+     scoped_refptr<RTCMediaTrack> track,
+     scoped_refptr<RTCRtpTransceiverInit> init) {
++  auto pc = connection();
++  if (!pc) return scoped_refptr<RTCRtpTransceiver>();
+   RTCRtpTransceiverInitImpl* initImpl =
+       static_cast<RTCRtpTransceiverInitImpl*>(init.get());
+ 
+@@ -778,11 +843,11 @@ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+   std::string kind = to_std_string(track->kind());
+   if (0 == kind.compare(webrtc::MediaStreamTrackInterface::kVideoKind)) {
+     VideoTrackImpl* impl = static_cast<VideoTrackImpl*>(track.get());
+-    errorOr = rtc_peerconnection_->AddTransceiver(
++    errorOr = pc->AddTransceiver(
+         impl->rtc_track(), initImpl->rtp_transceiver_init());
+   } else if (0 == kind.compare(webrtc::MediaStreamTrackInterface::kAudioKind)) {
+     AudioTrackImpl* impl = static_cast<AudioTrackImpl*>(track.get());
+-    errorOr = rtc_peerconnection_->AddTransceiver(
++    errorOr = pc->AddTransceiver(
+         impl->rtc_track(), initImpl->rtp_transceiver_init());
+   }
+ 
+@@ -795,15 +860,17 @@ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+ 
+ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+     scoped_refptr<RTCMediaTrack> track) {
++  auto pc = connection();
++  if (!pc) return scoped_refptr<RTCRtpTransceiver>();
+   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>>
+       errorOr;
+   std::string kind = to_std_string(track->kind());
+   if (0 == kind.compare(webrtc::MediaStreamTrackInterface::kVideoKind)) {
+     VideoTrackImpl* impl = static_cast<VideoTrackImpl*>(track.get());
+-    errorOr = rtc_peerconnection_->AddTransceiver(impl->rtc_track());
++    errorOr = pc->AddTransceiver(impl->rtc_track());
+   } else if (0 == kind.compare(webrtc::MediaStreamTrackInterface::kAudioKind)) {
+     AudioTrackImpl* impl = static_cast<AudioTrackImpl*>(track.get());
+-    errorOr = rtc_peerconnection_->AddTransceiver(impl->rtc_track());
++    errorOr = pc->AddTransceiver(impl->rtc_track());
+   }
+ 
+   if (errorOr.ok()) {
+@@ -815,12 +882,14 @@ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+ 
+ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+     RTCMediaType media_type) {
++  auto pc = connection();
++  if (!pc) return scoped_refptr<RTCRtpTransceiver>();
+   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>>
+       errorOr;
+   if (media_type == RTCMediaType::AUDIO) {
+-    errorOr = rtc_peerconnection_->AddTransceiver(webrtc::MediaType::AUDIO);
++    errorOr = pc->AddTransceiver(webrtc::MediaType::AUDIO);
+   } else if (media_type == RTCMediaType::VIDEO) {
+-    errorOr = rtc_peerconnection_->AddTransceiver(webrtc::MediaType::VIDEO);
++    errorOr = pc->AddTransceiver(webrtc::MediaType::VIDEO);
+   }
+   if (errorOr.ok()) {
+     return new RefCountedObject<RTCRtpTransceiverImpl>(errorOr.value());
+@@ -831,15 +900,17 @@ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+ 
+ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+     RTCMediaType media_type, scoped_refptr<RTCRtpTransceiverInit> init) {
++  auto pc = connection();
++  if (!pc) return scoped_refptr<RTCRtpTransceiver>();
+   RTCRtpTransceiverInitImpl* initImpl =
+       static_cast<RTCRtpTransceiverInitImpl*>(init.get());
+   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::RtpTransceiverInterface>>
+       errorOr;
+   if (media_type == RTCMediaType::AUDIO) {
+-    errorOr = rtc_peerconnection_->AddTransceiver(
++    errorOr = pc->AddTransceiver(
+         webrtc::MediaType::AUDIO, initImpl->rtp_transceiver_init());
+   } else if (media_type == RTCMediaType::VIDEO) {
+-    errorOr = rtc_peerconnection_->AddTransceiver(
++    errorOr = pc->AddTransceiver(
+         webrtc::MediaType::VIDEO, initImpl->rtp_transceiver_init());
+   }
+   if (errorOr.ok()) {
+@@ -851,6 +922,8 @@ scoped_refptr<RTCRtpTransceiver> RTCPeerConnectionImpl::AddTransceiver(
+ 
+ scoped_refptr<RTCRtpSender> RTCPeerConnectionImpl::AddTrack(
+     scoped_refptr<RTCMediaTrack> track, vector<string> streamIds) {
++  auto pc = connection();
++  if (!pc) return scoped_refptr<RTCRtpSender>();
+   webrtc::RTCErrorOr<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> errorOr;
+ 
+   std::vector<std::string> stream_ids;
+@@ -860,10 +933,10 @@ scoped_refptr<RTCRtpSender> RTCPeerConnectionImpl::AddTrack(
+   std::string kind = to_std_string(track->kind());
+   if (0 == kind.compare(webrtc::MediaStreamTrackInterface::kVideoKind)) {
+     VideoTrackImpl* impl = static_cast<VideoTrackImpl*>(track.get());
+-    errorOr = rtc_peerconnection_->AddTrack(impl->rtc_track(), stream_ids);
++    errorOr = pc->AddTrack(impl->rtc_track(), stream_ids);
+   } else if (0 == kind.compare(webrtc::MediaStreamTrackInterface::kAudioKind)) {
+     AudioTrackImpl* impl = static_cast<AudioTrackImpl*>(track.get());
+-    errorOr = rtc_peerconnection_->AddTrack(impl->rtc_track(), stream_ids);
++    errorOr = pc->AddTrack(impl->rtc_track(), stream_ids);
+   }
+ 
+   if (errorOr.ok()) {
+@@ -876,8 +949,10 @@ scoped_refptr<RTCRtpSender> RTCPeerConnectionImpl::AddTrack(
+ 
+ bool RTCPeerConnectionImpl::RemoveTrack(scoped_refptr<RTCRtpSender> render) {
+   RTCRtpSenderImpl* impl = static_cast<RTCRtpSenderImpl*>(render.get());
++  auto pc = connection();
++  if (!pc) return false;
+   webrtc::RTCError err =
+-      rtc_peerconnection_->RemoveTrackOrError(impl->rtc_rtp_sender());
++      pc->RemoveTrackOrError(impl->rtc_rtp_sender());
+   if (err.ok()) {
+     return true;
+   }
+@@ -886,7 +961,9 @@ bool RTCPeerConnectionImpl::RemoveTrack(scoped_refptr<RTCRtpSender> render) {
+ 
+ vector<scoped_refptr<RTCRtpSender>> RTCPeerConnectionImpl::senders() {
+   std::vector<scoped_refptr<RTCRtpSender>> vec;
+-  for (auto item : rtc_peerconnection_->GetSenders()) {
++  auto pc = connection();
++  if (!pc) return vec;
++  for (auto item : pc->GetSenders()) {
+     vec.push_back(new RefCountedObject<RTCRtpSenderImpl>(item));
+   }
+   return vec;
+@@ -894,7 +971,9 @@ vector<scoped_refptr<RTCRtpSender>> RTCPeerConnectionImpl::senders() {
+ 
+ vector<scoped_refptr<RTCRtpTransceiver>> RTCPeerConnectionImpl::transceivers() {
+   std::vector<scoped_refptr<RTCRtpTransceiver>> vec;
+-  for (auto item : rtc_peerconnection_->GetTransceivers()) {
++  auto pc = connection();
++  if (!pc) return vec;
++  for (auto item : pc->GetTransceivers()) {
+     vec.push_back(new RefCountedObject<RTCRtpTransceiverImpl>(item));
+   }
+   return vec;
+@@ -902,33 +981,43 @@ vector<scoped_refptr<RTCRtpTransceiver>> RTCPeerConnectionImpl::transceivers() {
+ 
+ vector<scoped_refptr<RTCRtpReceiver>> RTCPeerConnectionImpl::receivers() {
+   std::vector<scoped_refptr<RTCRtpReceiver>> vec;
+-  for (auto item : rtc_peerconnection_->GetReceivers()) {
++  auto pc = connection();
++  if (!pc) return vec;
++  for (auto item : pc->GetReceivers()) {
+     vec.push_back(new RefCountedObject<RTCRtpReceiverImpl>(item));
+   }
+   return vec;
+ }
+ 
+ RTCSignalingState RTCPeerConnectionImpl::signaling_state() {
+-  return signaling_state_map[rtc_peerconnection_->signaling_state()];
++  auto pc = connection();
++  if (!pc) return RTCSignalingStateClosed;
++  return signaling_state_map[pc->signaling_state()];
+ }
+ 
+ RTCIceConnectionState RTCPeerConnectionImpl::ice_connection_state() {
+-  return ice_connection_state_map[rtc_peerconnection_->ice_connection_state()];
++  auto pc = connection();
++  if (!pc) return RTCIceConnectionStateClosed;
++  return ice_connection_state_map[pc->ice_connection_state()];
+ }
+ 
+ RTCIceConnectionState
+ RTCPeerConnectionImpl::standardized_ice_connection_state() {
+-  return ice_connection_state_map[rtc_peerconnection_
+-                                      ->standardized_ice_connection_state()];
++  auto pc = connection();
++  if (!pc) return RTCIceConnectionStateClosed;
++  return ice_connection_state_map[pc->standardized_ice_connection_state()];
+ }
+ 
+ RTCPeerConnectionState RTCPeerConnectionImpl::peer_connection_state() {
+-  return peer_connection_state_map[rtc_peerconnection_
+-                                       ->peer_connection_state()];
++  auto pc = connection();
++  if (!pc) return RTCPeerConnectionStateClosed;
++  return peer_connection_state_map[pc->peer_connection_state()];
+ }
+ 
+ RTCIceGatheringState RTCPeerConnectionImpl::ice_gathering_state() {
+-  return ice_gathering_state_map[rtc_peerconnection_->ice_gathering_state()];
++  auto pc = connection();
++  if (!pc) return RTCIceGatheringStateComplete;
++  return ice_gathering_state_map[pc->ice_gathering_state()];
+ }
+ 
+ void WebRTCStatsCollectorCallback::OnStatsDelivered(
+diff --git a/src/rtc_peerconnection_impl.h b/src/rtc_peerconnection_impl.h
+index c9c5d72..b89bbe1 100644
+--- a/src/rtc_peerconnection_impl.h
++++ b/src/rtc_peerconnection_impl.h
+@@ -186,6 +186,15 @@ class RTCPeerConnectionImpl : public RTCPeerConnection,
+   webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface>
+       rtc_peerconnection_factory_;
+   webrtc::scoped_refptr<webrtc::PeerConnectionInterface> rtc_peerconnection_;
++  // The connection for one call, held to its end; null once closed. Calls come
++  // from more than one thread (the plugin adds transceivers and tracks on threads
++  // of its own on Windows), and Close() may run meanwhile.
++  webrtc::scoped_refptr<webrtc::PeerConnectionInterface> connection() const;
++  // Whether it is still open, for the observer's callbacks, which run on the
++  // signaling thread and must not hold it: the last hold let go of there would
++  // destroy the connection within its own callback.
++  bool open() const;
++  mutable webrtc::Mutex connection_lock_;
+   const RTCConfiguration& configuration_;
+   scoped_refptr<RTCMediaConstraints> constraints_;
+   webrtc::PeerConnectionInterface::RTCOfferAnswerOptions offer_answer_options_;
+diff --git a/test/closed_connection.test.cc b/test/closed_connection.test.cc
+new file mode 100644
+index 0000000..a471059
+--- /dev/null
++++ b/test/closed_connection.test.cc
+@@ -0,0 +1,229 @@
++#include <atomic>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <thread>
++
++#if defined(__GLIBC__)
++#include <malloc.h>
++#endif
++
++#include "api/units/time_delta.h"
++#include "libwebrtc.h"
++#include "rtc_base/event.h"
++#include "rtc_mediaconstraints.h"
++#include "rtc_peerconnection.h"
++#include "rtc_peerconnection_factory.h"
++#include "rtc_rtp_transceiver.h"
++#include "test/gtest.h"
++
++using libwebrtc::LibWebRTC;
++using libwebrtc::scoped_refptr;
++
++namespace {
++
++// A connection closed on one thread while another adds a transceiver to it: as on
++// Windows, where the plugin adds transceivers on a thread of its own and the application
++// can close the connection meanwhile (a participant who left while an offer to them was
++// being made). Close() lets the connection go, which waits for the signaling thread to
++// destroy it; an AddTransceiver issued in that time found the connection still set and
++// was queued on the signaling thread behind its destruction, so it ran on a destroyed
++// PeerConnection and made a video channel with the Call already freed (an access
++// violation in WebRtcVideoSendChannel's constructor). Now it is answered at once, with
++// no transceiver.
++//
++// Returns 0 when the call is answered at once with nothing, 2 when it waited behind the
++// close, 3 when it made a transceiver, 1 when the set-up failed.
++int AddWhileClosing() {
++#if defined(__GLIBC__)
++  // Memory freed is overwritten, so that a use of it fails here as it did on Windows,
++  // instead of reading what was left there.
++  mallopt(M_PERTURB, 0xa5);
++#endif
++  if (!LibWebRTC::Initialize()) return 1;
++  scoped_refptr<libwebrtc::RTCPeerConnectionFactory> factory =
++      LibWebRTC::CreateRTCPeerConnectionFactory();
++  if (!factory.get() || !factory->Initialize()) return 1;
++  libwebrtc::RTCConfiguration config{};
++  scoped_refptr<libwebrtc::RTCMediaConstraints> constraints =
++      libwebrtc::RTCMediaConstraints::Create();
++  scoped_refptr<libwebrtc::RTCPeerConnection> pc =
++      factory->Create(config, constraints);
++  if (!pc.get()) return 1;
++
++  // The signaling thread is held in the answer to an offer until released, so that the
++  // close below stays where the connection is being let go of.
++  webrtc::Event holding;
++  webrtc::Event release;
++  webrtc::Event* held = &holding;
++  webrtc::Event* go = &release;
++  pc->CreateOffer(
++      [held, go](const libwebrtc::string, const libwebrtc::string) {
++        held->Set();
++        go->Wait(webrtc::Event::kForever);
++      },
++      [held, go](const char*) {
++        held->Set();
++        go->Wait(webrtc::Event::kForever);
++      },
++      constraints);
++  if (!holding.Wait(webrtc::TimeDelta::Seconds(10))) {
++    std::fprintf(stderr, "the offer never came\n");
++    return 1;
++  }
++
++  std::thread closer([pc] { pc->Close(); });
++  // The close is now letting the connection go, waiting for the signaling thread.
++  std::this_thread::sleep_for(std::chrono::milliseconds(300));
++
++  std::atomic<bool> answered{false};
++  scoped_refptr<libwebrtc::RTCRtpTransceiver> added;
++  std::thread adder([pc, &answered, &added] {
++    added = pc->AddTransceiver(libwebrtc::RTCMediaType::VIDEO);
++    answered = true;
++  });
++  std::this_thread::sleep_for(std::chrono::milliseconds(300));
++  const bool at_once = answered;
++
++  release.Set();
++  closer.join();
++  adder.join();
++  const bool made = added.get() != nullptr;
++  std::fprintf(stderr, "AddTransceiver answered %s, with %s\n",
++               at_once ? "at once" : "only after the close",
++               made ? "a transceiver" : "nothing");
++
++  added = nullptr;
++  factory->Delete(pc);
++  pc = nullptr;
++  factory->Terminate();
++  factory = nullptr;
++  LibWebRTC::Terminate();
++  if (!at_once) return 2;
++  if (made) return 3;
++  return 0;
++}
++
++// Counts the callbacks that come after `closed` is set.
++class LateCallbacks : public libwebrtc::RTCPeerConnectionObserver {
++ public:
++  std::atomic<bool> closed{false};
++  std::atomic<int> late{0};
++  std::atomic<int> before{0};
++
++  void Note() { (closed ? late : before)++; }
++  void OnSignalingState(libwebrtc::RTCSignalingState) override { Note(); }
++  void OnPeerConnectionState(libwebrtc::RTCPeerConnectionState) override {
++    Note();
++  }
++  void OnIceGatheringState(libwebrtc::RTCIceGatheringState) override { Note(); }
++  void OnIceConnectionState(libwebrtc::RTCIceConnectionState) override {
++    Note();
++  }
++  void OnIceCandidate(scoped_refptr<libwebrtc::RTCIceCandidate>) override {
++    Note();
++  }
++  void OnAddStream(scoped_refptr<libwebrtc::RTCMediaStream>) override { Note(); }
++  void OnRemoveStream(scoped_refptr<libwebrtc::RTCMediaStream>) override {
++    Note();
++  }
++  void OnDataChannel(scoped_refptr<libwebrtc::RTCDataChannel>) override {
++    Note();
++  }
++  void OnRenegotiationNeeded() override { Note(); }
++  void OnTrack(scoped_refptr<libwebrtc::RTCRtpTransceiver>) override { Note(); }
++  void OnAddTrack(libwebrtc::vector<scoped_refptr<libwebrtc::RTCMediaStream>>,
++                  scoped_refptr<libwebrtc::RTCRtpReceiver>) override {
++    Note();
++  }
++  void OnRemoveTrack(scoped_refptr<libwebrtc::RTCRtpReceiver>) override {
++    Note();
++  }
++};
++
++// A transceiver added on one thread just before another closes the connection: the add
++// holds the connection while it waits for the signaling thread. Close() returns only
++// once WebRTC's connection is closed: no callback of its observer comes after it, so
++// that the plugin may free its observer then. Before, Close() returned at once, the
++// connection went on while the add held it, and its callbacks (the renegotiation the add
++// asked for) came after the close, to an observer the plugin frees after a close.
++//
++// Returns 0 when no callback came after Close() returned, 4 when one did, 1 when the
++// set-up failed.
++int CallbacksAfterClose() {
++  if (!LibWebRTC::Initialize()) return 1;
++  scoped_refptr<libwebrtc::RTCPeerConnectionFactory> factory =
++      LibWebRTC::CreateRTCPeerConnectionFactory();
++  if (!factory.get() || !factory->Initialize()) return 1;
++  libwebrtc::RTCConfiguration config{};
++  scoped_refptr<libwebrtc::RTCMediaConstraints> constraints =
++      libwebrtc::RTCMediaConstraints::Create();
++  scoped_refptr<libwebrtc::RTCPeerConnection> pc =
++      factory->Create(config, constraints);
++  if (!pc.get()) return 1;
++  LateCallbacks observer;
++  pc->RegisterRTCPeerConnectionObserver(&observer);
++
++  webrtc::Event holding;
++  webrtc::Event release;
++  webrtc::Event* held = &holding;
++  webrtc::Event* go = &release;
++  pc->CreateOffer(
++      [held, go](const libwebrtc::string, const libwebrtc::string) {
++        held->Set();
++        go->Wait(webrtc::Event::kForever);
++      },
++      [held, go](const char*) {
++        held->Set();
++        go->Wait(webrtc::Event::kForever);
++      },
++      constraints);
++  if (!holding.Wait(webrtc::TimeDelta::Seconds(10))) {
++    std::fprintf(stderr, "the offer never came\n");
++    return 1;
++  }
++
++  // The add holds the connection, waiting for the signaling thread; then the close.
++  scoped_refptr<libwebrtc::RTCRtpTransceiver> added;
++  std::thread adder([pc, &added] {
++    added = pc->AddTransceiver(libwebrtc::RTCMediaType::VIDEO);
++  });
++  std::this_thread::sleep_for(std::chrono::milliseconds(300));
++  std::thread closer([pc, &observer] {
++    pc->Close();
++    observer.closed = true;
++  });
++  std::this_thread::sleep_for(std::chrono::milliseconds(300));
++
++  release.Set();
++  closer.join();
++  adder.join();
++  added = nullptr;
++  // Whatever the connection still had queued.
++  std::this_thread::sleep_for(std::chrono::milliseconds(500));
++  const int late = observer.late;
++  std::fprintf(stderr, "callbacks before Close() returned: %d, after: %d\n",
++               observer.before.load(), late);
++
++  pc->DeRegisterRTCPeerConnectionObserver();
++  factory->Delete(pc);
++  pc = nullptr;
++  factory->Terminate();
++  factory = nullptr;
++  LibWebRTC::Terminate();
++  return late == 0 ? 0 : 4;
++}
++
++}  // namespace
++
++// In a process of its own: before the fix the call ran on freed memory and the process
++// crashed, or went on with whatever it read there.
++TEST(ClosedConnection, AddTransceiverWhileClosingIsRefused) {
++  GTEST_FLAG_SET(death_test_style, "threadsafe");
++  EXPECT_EXIT(std::_Exit(AddWhileClosing()), ::testing::ExitedWithCode(0), "");
++}
++
++TEST(ClosedConnection, NoCallbackAfterCloseReturns) {
++  GTEST_FLAG_SET(death_test_style, "threadsafe");
++  EXPECT_EXIT(std::_Exit(CallbacksAfterClose()), ::testing::ExitedWithCode(0), "");
++}
