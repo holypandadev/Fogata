@@ -142,8 +142,14 @@ extension _Signalling on Call {
             RTCSessionDescription(peerBitrates(sdp), 'offer'),
           );
           await _reply(peer, connection, message['n']);
+        } else if (_answeredAlready(peer, message)) {
+          _trace(
+            'offer ${message['n']} from ${_short(from)} answered already: '
+            'its answer sent again',
+          );
+          _signal(from, peer._answered!.answer);
         } else {
-          await _answer(peer, message['sdp'] as String, message['n']);
+          await _answer(peer, message);
         }
       case 'answer':
         final connection = peer.connection;
@@ -460,18 +466,40 @@ extension _Signalling on Call {
     _sentWhileGone(peer);
   }
 
-  Future<void> _answer(CallPeer peer, String sdp, Object? number) async {
+  Future<void> _answer(CallPeer peer, Map<String, dynamic> offer) async {
     final connection = await _connect(peer);
     await connection.setRemoteDescription(
-      RTCSessionDescription(peerBitrates(sdp), 'offer'),
+      RTCSessionDescription(peerBitrates(offer['sdp'] as String), 'offer'),
     );
-    await _reply(peer, connection, number);
+    final number = offer['n'];
+    final answer = await _reply(peer, connection, number);
+    final theirs = offer['c'];
+    if (theirs is String && number is int && peer.connection == connection) {
+      peer._answered = (
+        call: theirs,
+        number: number,
+        on: connection,
+        answer: answer,
+      );
+    }
     await _described(peer);
   }
 
-  /// Answers the offer just set on [connection], sending what is on here.
-  /// [number] is the offer's, sent back with the answer (copies before it send none).
-  Future<void> _reply(
+  /// [offer] is a copy of the first offer [peer]'s connection was made for (the same call
+  /// of theirs, the same number), which a signal can be: answered again, it would make
+  /// the connection anew and drop the one that works.
+  bool _answeredAlready(CallPeer peer, Map<String, dynamic> offer) {
+    final answered = peer._answered;
+    return answered != null &&
+        answered.on == peer.connection &&
+        answered.call == offer['c'] &&
+        answered.number == offer['n'];
+  }
+
+  /// Answers the offer just set on [connection], sending what is on here, and returns the
+  /// answer sent. [number] is the offer's, sent back with the answer (copies before it
+  /// send none).
+  Future<Map<String, dynamic>> _reply(
     CallPeer peer,
     RTCPeerConnection connection,
     Object? number,
@@ -491,7 +519,8 @@ extension _Signalling on Call {
     final answer = await connection.createAnswer({});
     final sdp = await _describe(peer, connection, answer, 'answer');
     await _tune(peer, connection);
-    _signal(peer.id, {'t': 'answer', 'sdp': sdp, 'n': ?number});
+    final message = <String, dynamic>{'t': 'answer', 'sdp': sdp, 'n': ?number};
+    _signal(peer.id, message);
     _sentWhileGone(peer);
     // The voice channel as the microphone asks, now that this is agreed: a send stream
     // made by it starts with its encoding on, or off as set while it had none.
@@ -499,6 +528,7 @@ extension _Signalling on Call {
       peer._agreed?.complete();
       peer._agreed = null;
     }
+    return message;
   }
 
   /// Sets this side's description and returns it with its network candidates inside, once

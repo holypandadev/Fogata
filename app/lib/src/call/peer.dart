@@ -81,6 +81,17 @@ class CallPeer {
   /// 'state' in [Call._handle]).
   int? _stateIn;
 
+  /// The first offer [connection] was made for, as their call and its number name it, and
+  /// the answer sent to it: a copy of that offer gets the same answer again (see
+  /// [Call._answeredAlready]). Kept while [connection] is that one.
+  ({
+    String call,
+    int number,
+    RTCPeerConnection on,
+    Map<String, dynamic> answer,
+  })?
+  _answered;
+
   /// Their call, as their signals name it, for tests.
   @visibleForTesting
   String? get theirCall => _theirCall;
@@ -268,6 +279,7 @@ class CallPeer {
     final shown = [..._shown];
     _shown.clear();
     _voice = null;
+    _answered = null;
     _pictures = VideoFlood();
     _described = false;
     _candidates = 0;
