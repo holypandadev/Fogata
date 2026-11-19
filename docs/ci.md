@@ -145,12 +145,13 @@ too, stay near a load of 10.
 --ref <branch or tag>`), drags files onto Fogata running as a Flatpak with a real drag, in
 about 45 minutes (docs/architecture/5d-desktop-application.md says what a drop does
 there). It builds the commit's copy of `app/integration_test/drop_portal_test.dart`, a room's
-drop zone that writes down what each drop handed over, took and said, and one of an
-earlier commit's drop plugin and check of private places beside it (`-f before=<commit>`;
-by default the last commit before the application took the FileTransfer portal; `-f
-before=` for none), runs `test/private_drop_test.dart`, whose drops through the plugin's
-channel only Linux runs, and makes both copies Flatpaks with the application's own
-permissions (`tools/beta/flatpak.sh --unsigned --test-bundle`). Then, in a container of
+drop zone that writes down what each drop handed over, took and said, and, when asked
+(`-f before=<commit>`), one of an earlier commit's drop plugin, check of private places and
+words beside it (none by default: such a copy builds only while the rest of the application
+still does with that commit's files), runs `test/private_drop_test.dart`, whose drops
+through the plugin's channel only Linux runs, and makes the copies Flatpaks with the
+application's own permissions (`tools/beta/flatpak.sh --unsigned --test-bundle`). Then, in a
+container of
 Ubuntu 26.04 (GitHub's Ubuntu 24.04 has neither KDE Plasma 6 nor an xdg-desktop-portal with
 the Documents portal's `GetHostPaths`, 1.19 and later), `tools/smoke-wayland/drop.sh` runs
 the session of `tools/smoke-wayland/session.sh` with `/dev/fuse` for the document portal

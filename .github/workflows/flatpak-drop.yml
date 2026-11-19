@@ -3,9 +3,11 @@
 #
 #   gh workflow run flatpak-drop.yml --ref <branch or tag> [-f before=<commit>]
 #
-# It builds the copy of the commit run, and one of `before` (by default the last commit
-# before the application took the FileTransfer portal; empty, none) with that commit's drop
-# plugin and check of private places: both debug builds of
+# It builds the copy of the commit run, and, when `before` names a commit, one more with that
+# commit's drop plugin, check of private places and words (the last commit before the
+# application took the FileTransfer portal is 89c9730216a94bb61fa7db10d0a2f8afd0dd2623; a
+# copy of it builds only while the rest of the application still does with its files, which
+# stopped once the interface got words that commit does not have): debug builds of
 # app/integration_test/drop_portal_test.dart, made into Flatpaks by tools/beta/flatpak.sh
 # with the application's own permissions. The session runs in a container of Ubuntu 26.04,
 # whose KDE Plasma 6 and xdg-desktop-portal 1.21 (the Documents portal's GetHostPaths)
@@ -19,7 +21,7 @@ on:
       before:
         description: The commit whose drop plugin and check of private places a second copy takes (empty, no second copy)
         required: false
-        default: 89c9730216a94bb61fa7db10d0a2f8afd0dd2623
+        default: ""
 
 permissions:
   contents: read
@@ -28,10 +30,8 @@ env:
   FLUTTER_VERSION: 3.47.8
   CARGO_TERM_COLOR: never
   FOGATA_UPDATE_WEB: "off"
-  # Started by hand, the input as given (empty: no earlier copy); on a push (a branch that
-  # tries this workflow), the default. (In GitHub's expressions an empty value is false, so
-  # `inputs.before || default` would never give an empty one.)
-  BEFORE: ${{ github.event_name == 'workflow_dispatch' && inputs.before || github.event_name != 'workflow_dispatch' && '89c9730216a94bb61fa7db10d0a2f8afd0dd2623' || '' }}
+  # The earlier commit asked for, or none.
+  BEFORE: ${{ inputs.before || '' }}
   # The session's system, pinned by its digest as the actions are by their commits. What
   # its apt and Flathub install in it is not pinned: the newest of Ubuntu 26.04 and of the
   # 26.08 runtime, as a person's computer would have.
