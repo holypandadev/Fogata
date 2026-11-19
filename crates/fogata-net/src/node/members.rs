@@ -16,6 +16,7 @@ use fogata_state::{Entry, EntryHash, Ticket};
 use libp2p::{PeerId, request_response};
 
 use super::early::early_profile;
+use super::group_changes::banner_key;
 use super::member_reach::lan_quic;
 use super::proofs::MAX_TAGS;
 use super::spread::Forward;
@@ -1371,6 +1372,16 @@ impl Node {
                 slot.banner_refused.remove(&peer);
             }
         }
+        // A newer one chosen while this one was on its way did not go then (see
+        // `RecordSent::may_send`): it goes now, not at the member's next roster.
+        let newer = self.groups.get(&group).is_some_and(|s| {
+            banner_key(&s.ctx.banner_digest()) != digest
+                && s.members.contains(&peer)
+                && s.banner_peers.contains(&peer)
+        });
+        if newer {
+            self.send_banner_to(group, &[peer]);
+        }
     }
 
     /// Takes a member's answer to the group's picture record sent to it.
@@ -1389,6 +1400,15 @@ impl Node {
             } else {
                 slot.picture_refused.remove(&peer);
             }
+        }
+        // As a newer banner is (see `on_banner_answer`).
+        let newer = self.groups.get(&group).is_some_and(|s| {
+            banner_key(&s.ctx.picture_digest()) != digest
+                && s.members.contains(&peer)
+                && s.picture_peers.contains(&peer)
+        });
+        if newer {
+            self.send_picture_to(group, &[peer]);
         }
     }
 }

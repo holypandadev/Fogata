@@ -45,6 +45,16 @@ fn node(
     .unwrap()
 }
 
+/// Now by this computer's clock: a log dated at the start of time holds a key years past
+/// its week, which both managers replace at the first heartbeat (`rotate_if_old`), in
+/// entries that are no picture's.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
 fn png(len: usize, fill: u8) -> Vec<u8> {
     let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
     png.resize(len, fill);
@@ -96,12 +106,13 @@ async fn a_managers_picture_reaches_the_members_and_only_the_newest_a_newcomer()
     let ana = Arc::new(DeviceIdentity::generate().unwrap());
     let bea = Arc::new(DeviceIdentity::generate().unwrap());
     let cid = Arc::new(DeviceIdentity::generate().unwrap());
-    let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+    let now = now_ms();
+    let mut log = GroupLog::create(&ana, "g", now).unwrap();
     // Only Ana manages.
     let first = fogata_state::Body::SetManagers { first: Some(1) };
-    log.append(&ana, first, 1).unwrap();
-    log.add(&ana, bea.public_key(), "bea", 2).unwrap();
-    log.add(&ana, cid.public_key(), "cid", 3).unwrap();
+    log.append(&ana, first, now).unwrap();
+    log.add(&ana, bea.public_key(), "bea", now + 1).unwrap();
+    log.add(&ana, cid.public_key(), "cid", now + 2).unwrap();
     let group = log.group_id();
     let port_a = free_port();
     let (node_a, _events_a) = node(ana.clone(), log.clone(), port_a, Vec::new());
@@ -196,15 +207,16 @@ async fn a_picture_set_with_an_entry_goes_with_one_entry_without_a_picture() {
     let _one = ONE_AT_A_TIME.lock().await;
     let ana = Arc::new(DeviceIdentity::generate().unwrap());
     let bea = Arc::new(DeviceIdentity::generate().unwrap());
-    let mut log = GroupLog::create(&ana, "g", 1).unwrap();
-    log.add(&ana, bea.public_key(), "bea", 2).unwrap();
+    let now = now_ms();
+    let mut log = GroupLog::create(&ana, "g", now).unwrap();
+    log.add(&ana, bea.public_key(), "bea", now + 1).unwrap();
     let old = png(2000, 9);
     log.append(
         &ana,
         Body::SetPicture {
             picture: Some(old.clone()),
         },
-        3,
+        now + 2,
     )
     .unwrap();
     let group = log.group_id();
@@ -243,4 +255,48 @@ async fn a_picture_set_with_an_entry_goes_with_one_entry_without_a_picture() {
         .collect();
     assert_eq!(added.len(), 1);
     assert_eq!(added[0].body, Body::SetPicture { picture: None });
+}
+
+/// A picture chosen while the one before is still on its way to a member (not answered
+/// yet) goes once that one is answered, not at the member's next roster, up to 20 s later.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_picture_chosen_while_the_last_is_on_its_way_follows_it_at_once() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let ana = Arc::new(DeviceIdentity::generate().unwrap());
+    let bea = Arc::new(DeviceIdentity::generate().unwrap());
+    let now = now_ms();
+    let mut log = GroupLog::create(&ana, "g", now).unwrap();
+    log.add(&ana, bea.public_key(), "bea", now + 1).unwrap();
+    let group = log.group_id();
+    let port_a = free_port();
+    let (node_a, _events_a) = node(ana.clone(), log.clone(), port_a, Vec::new());
+    let (node_b, _events_b) = node(
+        bea.clone(),
+        log.clone(),
+        free_port(),
+        vec![address(&node_a, port_a)],
+    );
+    let first = png(3000, 1);
+    node_a
+        .set_group_picture(group, first.clone())
+        .await
+        .unwrap();
+    until(&node_b, &log, "the first picture", |l| {
+        l.picture() == Some(first.clone())
+    })
+    .await;
+    // One right after the other: the second goes while the first is on its way.
+    node_a.set_group_picture(group, png(2000, 2)).await.unwrap();
+    let last = png(1000, 3);
+    node_a.set_group_picture(group, last.clone()).await.unwrap();
+    // The first heartbeat, and with it the first roster, comes 10.5 s or more after the
+    // nodes start.
+    let came = timeout(
+        Duration::from_secs(5),
+        until(&node_b, &log, "the last picture", |l| {
+            l.picture() == Some(last.clone())
+        }),
+    )
+    .await;
+    assert!(came.is_ok(), "the last picture waited for a roster");
 }
