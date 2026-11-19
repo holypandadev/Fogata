@@ -2531,12 +2531,19 @@ class Call extends ChangeNotifier {
     // one taken.
     if (message['t'] == 'offer') {
       final mine = ++peer._offersIn;
-      await _offerTurn(peer, peer._offerTaken);
-      if (mine != peer._offersIn) return;
-      peer._offerTaken = callClock();
-      await peer._inTurn(() async {
-        if (mine == peer._offersIn) await _handleSafely(peer, from, message);
-      });
+      // Waiting its turn, or being answered, until its step is over: the side that asks
+      // for offers does not ask meanwhile ([_watch]).
+      peer._offersWaiting++;
+      try {
+        await _offerTurn(peer, peer._offerTaken);
+        if (mine != peer._offersIn) return;
+        peer._offerTaken = callClock();
+        await peer._inTurn(() async {
+          if (mine == peer._offersIn) await _handleSafely(peer, from, message);
+        });
+      } finally {
+        peer._offersWaiting--;
+      }
     } else if (message['t'] == 'sound') {
       final mine = ++peer._soundOffersIn;
       await _offerTurn(peer, peer._soundOfferTaken);

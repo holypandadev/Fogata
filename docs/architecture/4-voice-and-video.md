@@ -731,8 +731,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   connection that came up meanwhile is left as it is (one was replaced 20 s after it came
   up), and one whose answer came meanwhile is given its time. An asking for a new offer
   (`again`) is let pass by the same measure, and handled in its turn after what came
-  before it; the side that asks does not ask while an offer of the other's that came
-  since its last asking waits its turn or is being answered. Answers slower than 45 s
+  before it; the side that asks does not ask while an offer of the other's waits its turn
+  or is being answered (from its arrival until its step is done; one dropped instead, not
+  fit, of an ended call, older than one taken, or held while they are asked which call
+  is theirs, counts no longer, and the asking goes as due). Answers slower than 45 s
   still have their offer made anew. Each offer carries a number that its
   answer sends back, and an answer to an offer replaced since is dropped: when both sides
   tried again at once, the answer to the first offer used to be set on the connection

@@ -3,6 +3,8 @@
 // and begun anew while its offer or answer is still on its way, and one whose offer was
 // lost is still tried again as soon as before.
 
+import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/services.dart';
@@ -408,4 +410,130 @@ void main() {
       );
     });
   }
+
+  /// Two calls entering the room together, the offer from the smaller arriving [offerIn]
+  /// and the answer [answerIn] late, connections coming up [connecting] after both
+  /// descriptions are set.
+  Future<(Call, Call)> enter({
+    Duration offerIn = Duration.zero,
+    Duration answerIn = Duration.zero,
+    Duration connecting = const Duration(milliseconds: 300),
+  }) async {
+    net = FakeNet(connecting: connecting)..install();
+    net
+      ..delay((from, to, m) => m['t'] == 'offer', offerIn)
+      ..delay((from, to, m) => m['t'] == 'answer', answerIn);
+    final small = net.add(
+      Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+    );
+    final large = net.add(
+      Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+    );
+    await Future.wait([
+      small.setParticipants([_small, _large]),
+      large.setParticipants([_small, _large]),
+    ]);
+    return (small, large);
+  }
+
+  /// Keeps [call]'s turn with [other] busy for [long], as slow work on a loaded
+  /// computer does: what comes meanwhile waits behind it.
+  void busy(Call call, String other, Duration long) => unawaited(
+    call.peers[other]!.inTurnForTests(() => Future<void>.delayed(long)),
+  );
+
+  test('a round of tries that waited its turn while the answer came leaves the '
+      'connection as it is', () async {
+    await inCallTime(() async {
+      // The answer arrives just before the first round of tries (5 s after the offer),
+      // and waits behind slow work until after it.
+      final (small, large) = await enter(
+        answerIn: const Duration(milliseconds: 4500),
+      );
+      await Future<void>.delayed(const Duration(seconds: 4));
+      busy(small, _large, const Duration(seconds: 2));
+      await until(() => up(small, large), what: 'connected');
+      await Future<void>.delayed(const Duration(seconds: 10));
+      expect(up(small, large), isTrue);
+      expect(net.madeBy(_small), hasLength(1));
+    }, stop: () => net.stop());
+  });
+
+  test('a try after the time ran out that waited its turn while the connection '
+      'came up leaves it as it is', () async {
+    await inCallTime(() async {
+      // Up 20 s after both descriptions are set: the time runs out at 15 s, and its try
+      // (4 s on) waits behind slow work until after the connection came up.
+      final (small, large) = await enter(
+        connecting: const Duration(seconds: 20),
+      );
+      await until(
+        () => net.madeBy(_small).single.remote != null,
+        what: 'the answer set',
+      );
+      await Future<void>.delayed(const Duration(seconds: 18));
+      busy(small, _large, const Duration(seconds: 4));
+      await until(() => up(small, large), what: 'connected');
+      await Future<void>.delayed(const Duration(seconds: 10));
+      expect(up(small, large), isTrue);
+      expect(net.madeBy(_small), hasLength(1));
+    }, stop: () => net.stop());
+  });
+
+  test('the side that asks for offers does not ask while one of theirs waits to be '
+      'answered', () async {
+    await inCallTime(() async {
+      // The offer arrives just before the first round of tries, and waits behind slow
+      // work until after it.
+      final (_, large) = await enter(
+        offerIn: const Duration(milliseconds: 4500),
+      );
+      await Future<void>.delayed(const Duration(seconds: 4));
+      busy(large, _small, const Duration(seconds: 2));
+      await Future<void>.delayed(const Duration(seconds: 4));
+      // Its asking as it came in, and none after.
+      expect(
+        net.sent.where((s) => s.from == _large && s.type == 'again'),
+        hasLength(1),
+      );
+    }, stop: () => net.stop());
+  });
+
+  test('an offer that is dropped rather than answered does not hold the asking '
+      'back', () async {
+    await inCallTime(() async {
+      final (_, large) = await enter(offerIn: const Duration(seconds: 30));
+      // Before the first round of tries, an offer in codecs a call does not take,
+      // dropped in its turn.
+      await Future<void>.delayed(const Duration(milliseconds: 4500));
+      final h264 = [
+        'v=0',
+        for (final (i, kind) in [
+          'audio',
+          'video',
+          'video',
+          'audio',
+        ].indexed) ...[
+          'm=$kind 9 UDP/TLS/RTP/SAVPF 96',
+          kind == 'audio'
+              ? 'a=rtpmap:96 opus/48000/2'
+              : 'a=rtpmap:96 H264/90000',
+          'a=mid:$i',
+        ],
+        '',
+      ].join('\r\n');
+      await large.onSignal(
+        _small,
+        jsonEncode({'t': 'offer', 'sdp': h264, 'n': 1}),
+      );
+      await Future<void>.delayed(const Duration(seconds: 1));
+      // Its asking as it came in, and the round's.
+      expect(
+        net.sent.where((s) => s.from == _large && s.type == 'again'),
+        hasLength(2),
+      );
+      // The offer held up on its way arrives; let it.
+      await Future<void>.delayed(const Duration(seconds: 30));
+    }, stop: () => net.stop());
+  });
 }

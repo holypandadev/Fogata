@@ -215,6 +215,10 @@ class CallPeer {
   /// Offers (of the call, or of their screen's sound) received from them: only the newest
   /// waiting is taken, as it replaces those before it.
   int _offersIn = 0;
+
+  /// Offers of theirs received and not yet answered or dropped: waiting their turn, or
+  /// being answered.
+  int _offersWaiting = 0;
   int _soundOffersIn = 0;
 
   /// When an offer of each kind was last taken. Each makes a new connection, or agrees

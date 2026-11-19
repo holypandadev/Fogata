@@ -73,8 +73,6 @@ extension _Signalling on Call {
     // it would do nothing.
     if (_closed || peer._gone) return;
     final wait = Duration(seconds: 5 + 5 * peer._waits.clamp(0, 5));
-    // An offer from them since this round began is on its way to being answered here.
-    final offersBefore = peer._offersIn;
     // A round before this one would do nothing once due.
     peer._watchWait?.cancel();
     peer._watchWait = Timer(wait, () async {
@@ -86,9 +84,11 @@ extension _Signalling on Call {
           peer.voiceless) {
         return;
       }
-      // Their offer came meanwhile, and waits its turn or is being answered (on a
-      // loaded computer, for seconds): asking for another would only replace it.
-      if (me.compareTo(peer.id) > 0 && peer._offersIn != offersBefore) {
+      // An offer of theirs waits its turn or is being answered (on a loaded computer,
+      // for seconds): asking for another would only replace it. One dropped instead (not
+      // fit, of an ended call, older than one taken, held while they are asked which
+      // call is theirs) no longer counts, and the asking goes as due.
+      if (me.compareTo(peer.id) > 0 && peer._offersWaiting > 0) {
         _watch(peer);
         return;
       }
