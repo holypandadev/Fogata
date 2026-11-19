@@ -5,7 +5,8 @@
 #
 # On a clean checkout it makes a release build of the application and checks it as
 # tools/beta/release.py does, runs the video plugin's native tests, builds the call test
-# twice (profile and debug), and then, in the call lab (tools/call-lab), the microphone
+# twice (profile and debug), and then, in the call lab (tools/call-lab), six copies'
+# starts watched for changes to their environment off the main thread, the microphone
 # checks (late once more with PipeWire's quantum left free), rejoining on the profile
 # build, a shared screen's sound beside a loopback and a combined output, and calls of 4
 # and 6 copies with a camera and a shared screen. Each part is a step of its own and says
@@ -229,6 +230,24 @@ jobs:
           # Crashes are looked for from here on.
           echo "LAB_START=$(date +%s)" >> "$GITHUB_ENV"
 
+      # Six copies of the profile build started together, 3 rounds of 8 s, each writing down
+      # every change it makes to its own environment (tools/call-lab/starts.sh,
+      # STARTS_ENV_WATCH): none may come from a thread other than its main one, nor from the
+      # main one once other threads run (GTK's own two excepted), and no copy may end by
+      # itself. glibc's getenv reads the environment with no lock: a start crashed in getenv
+      # on the raster thread as a worker set RUST_BACKTRACE (2026-11-18).
+      - name: The environment at the start, on the profile build
+        if: ${{ !cancelled() && steps.profile.outcome == 'success' }}
+        timeout-minutes: 10
+        run: |
+          if STARTS_ENV_WATCH=1 BUNDLE=$PROFILE tools/call-lab/starts.sh 6 3 8 | tee "$RUNNER_TEMP/starts.out"; then
+            echo "environment at the start (profile)|pass|" >> "$PARTS"
+          else
+            why=$(grep -m 1 -E '^environment changed: |ended by itself within' "$RUNNER_TEMP/starts.out" | sed 's/|/:/g' | cut -c1-200 || true)
+            echo "environment at the start (profile)|fail|${why:-$(tail -n 2 "$RUNNER_TEMP/starts.out" | head -n 1 | sed 's/|/:/g' | cut -c1-200)}" >> "$PARTS"
+            exit 1
+          fi
+
       # On the debug build (media needs its made-up camera). Each check says PASS or FAIL
       # and why (tools/call-lab/mic_check.py).
       - name: Microphone checks
@@ -369,6 +388,8 @@ jobs:
             [[ -d $run ]] || continue
             run=${run%/}
             name=$(basename "$run")
+            # The starts' copies never get to a call: their part says pass or fail itself.
+            [[ $name == starts-* ]] && continue
             copies=2
             [[ $name =~ ^measure-([0-9])- ]] && copies=${BASH_REMATCH[1]}
             problems=()
@@ -417,7 +438,8 @@ jobs:
           fi
           # Every part that should have been there.
           expected=("release build" "release checks of the bundle" "native tests"
-            "profile build of the call test" "debug build of the call test")
+            "profile build of the call test" "debug build of the call test"
+            "environment at the start (profile)")
           for check in media devices alone late muted unplug switch broken hang noise term:1500; do
             expected+=("mic $check")
           done

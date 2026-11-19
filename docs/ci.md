@@ -99,7 +99,13 @@ what docs/releasing-beta.md asks of Linux in calls ("Checks before a release", 2
 job of about 40 minutes: a clean release build checked as `tools/beta/release.py` checks it
 (`tools/beta/ci_builds.py check-build linux`), the video plugin's native tests, the call
 test built as a profile and as a debug build, and then, in the call lab
-(`tools/call-lab`, with `LOAD_MAX=9` and its own display `:172`), the microphone checks
+(`tools/call-lab`, with `LOAD_MAX=9` and its own display `:172`), six copies of the profile
+build started together for 3 rounds (`tools/call-lab/starts.sh` with `STARTS_ENV_WATCH=1`),
+which fails when a copy ends by itself or changes its own environment from a thread other
+than its main one, or from the main one once other threads run (GTK's own unsetenv of
+`DESKTOP_STARTUP_ID` and `DESKTOP_AUTOSTART_ID` excepted): glibc's `getenv` reads the
+environment with no lock, and on 2026-11-18 a start crashed in `getenv` on Flutter's raster
+thread as the Rust bridge's start set `RUST_BACKTRACE` on a worker; the microphone checks
 `media devices alone late muted unplug switch broken hang noise term:1500` on the debug
 build (`term`: a SIGTERM must make the copy leave the room in order and end by itself) and
 `late` again with PipeWire's quantum left free (`LAB_FIXED_QUANTUM=0`, a part of its own),
