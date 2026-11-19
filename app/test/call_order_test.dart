@@ -365,6 +365,32 @@ void main() {
     });
   }
 
+  for (final watched in [true, false]) {
+    test(
+      'someone who comes back before her leaving is done with, and is '
+      '${watched ? 'watched' : 'enlarged'} again, stays so once it is done',
+      () async {
+        // Her pictures are let go of slowly.
+        final freeing = Completer<void>();
+        platform((call) async {
+          if (call.method == 'videoRendererDispose') await freeing.future;
+          return null;
+        });
+        final alone = net.add(call(_small));
+        await alone.setParticipants([_small, _large]);
+        void show() => watched ? alone.watch(_large) : alone.focus(_large);
+        show();
+        final leaving = alone.participantLeft(_large);
+        await alone.setParticipants([_small, _large]);
+        show();
+        freeing.complete();
+        await leaving;
+        expect(alone.watching, watched ? _large : null);
+        expect(alone.focused, watched ? null : _large);
+      },
+    );
+  }
+
   test(
     'a copy of a first offer already answered gets the same answer and leaves '
     'the connection up',
