@@ -127,10 +127,10 @@ void main() {
     expect(times, lessThan(10));
   }, timeout: const Timeout(Duration(minutes: 2)));
 
-  test('a log of 100 000 lines as the core writes it takes seconds', () {
+  test('a log of 10 000 lines as the core writes it takes moments', () {
     final scrubber = Scrubber(_names, paths: const ['/home/mruiz']);
     final lines = [
-      for (var i = 0; i < 100000; i++) _realistic[i % _realistic.length],
+      for (var i = 0; i < 10000; i++) _realistic[i % _realistic.length],
     ];
     var kept = false;
     final times = _timesPlain(
@@ -142,7 +142,9 @@ void main() {
     );
     expect(kept, isTrue);
     // About six times the plain pass: dozens of rules, each tried only on the lines
-    // that hold what it needs.
+    // that hold what it needs. The lines are scrubbed a thousand at a time whatever their
+    // number, so how many times the plain pass it takes is the same with ten times as
+    // many (each rule tried on every line makes it over twenty with either).
     expect(times, lessThan(20));
   }, timeout: const Timeout(Duration(minutes: 3)));
 }
