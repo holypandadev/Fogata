@@ -228,6 +228,31 @@ void main() {
       },
     );
 
+    test('a late answer of their call that ended, to an earlier offer, leaves '
+        'their new call known and its signals taken', () async {
+      final peer = alone.peers[_large]!;
+      final earlier = alone.offerNumberTo(_large)! - 1;
+      // Their new call is known and connected.
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'second'});
+      peer.upForTests();
+      final connection = peer.connection;
+      // The answer of their call before, to an offer of this side made before, comes late.
+      await alone.handleSignal(_large, {
+        't': 'answer',
+        'sdp': 'v=0',
+        'n': earlier,
+        'c': 'first',
+      });
+      expect(peer.theirCall, 'second');
+      expect(peer.connection, same(connection));
+      expect(peer.connected, isTrue);
+      await alone.handleSignal(
+        _large,
+        told(mic: false, number: 100000, call: 'second'),
+      );
+      expect(peer.mic, isFalse);
+    });
+
     test('a state that names no call, from a copy before it, is taken whatever '
         'call is known', () async {
       final peer = alone.peers[_large]!;
