@@ -164,7 +164,11 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   ended call still sends is dropped. The call a participant had when it left the room is
   kept while this call goes on (the last 64 to leave), so that a late signal of it, after
   the participant came back with another, is dropped too rather than taken for a newer
-  call. Each signal goes on its own, with no order between
+  call; only an answer to this side's latest offer names a new call. Two cases still slip
+  through: a participant who goes out and back with the same call and whose first signal
+  naming a call is a late one of an older call not remembered (that one is taken, and the
+  call they have is taken for ended), and both sides making their calls anew within
+  seconds (this side's memory of who left starts empty with its new call). Each signal goes on its own, with no order between
   two, and may come twice: a copy of the first offer a connection was made for (the same
   call and number), or of a screen's sound offer already answered, gets the same answer
   again and leaves the connection as it is. Only the room's participants get a connection: a signal
