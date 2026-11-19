@@ -486,6 +486,76 @@ void main() {
     }, stop: () => net.stop());
   });
 
+  for (final comesUp in [true, false]) {
+    test(
+      'a try after the time ran out, whose answer came before its turn, gives '
+      'the connection its time${comesUp ? '' : ', and tries again after it'}',
+      () async {
+        // Every answer takes 46.5 s on its way: the offer's time (45 s) runs out first,
+        // its try is due 4 s later, and the answer comes between the two.
+        net = FakeNet(
+          connecting: comesUp
+              ? const Duration(seconds: 10)
+              : const Duration(hours: 1),
+        )..install();
+        net.delay(
+          (from, to, m) => m['t'] == 'answer',
+          const Duration(milliseconds: 46500),
+          times: 100,
+        );
+        await inCallTime(
+          () async {
+            final small = net.add(
+              Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+            );
+            final large = net.add(
+              Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+            );
+            final start = callClock();
+            await Future.wait([
+              small.setParticipants([_small, _large]),
+              large.setParticipants([_small, _large]),
+            ]);
+            await until(
+              () => net.madeBy(_small).single.remote != null,
+              what: 'the answer set',
+              limit: const Duration(minutes: 1),
+            );
+            final answered = callClock();
+            if (comesUp) {
+              // Up 10 s after its answer: left as it is.
+              await until(() => up(small, large), what: 'connected');
+              await Future<void>.delayed(const Duration(seconds: 10));
+              expect(up(small, large), isTrue);
+              expect(net.madeBy(_small), hasLength(1));
+            } else {
+              // Never up: tried again once its time from the answer ran out (15 s, and the
+              // pause of a second try, 6 s), not before, and not never.
+              await until(
+                () => net.madeBy(_small).length > 1,
+                what: 'a new offer',
+                limit: const Duration(seconds: 30),
+              );
+              final anew = callClock().difference(answered);
+              expect(anew, greaterThanOrEqualTo(Call.connectWithin));
+              expect(
+                anew,
+                lessThanOrEqualTo(
+                  Call.connectWithin + const Duration(seconds: 7),
+                ),
+              );
+            }
+            expect(answered.difference(start), greaterThan(Call.answerWithin));
+            // What is still due once it ended: the tries already decided.
+            await Future<void>.delayed(const Duration(minutes: 1));
+          },
+          stop: net.stop,
+          within: const Duration(minutes: 4),
+        );
+      },
+    );
+  }
+
   test('the side that asks for offers does not ask while one of theirs waits to be '
       'answered', () async {
     await inCallTime(() async {
