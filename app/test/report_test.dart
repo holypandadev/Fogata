@@ -38,6 +38,24 @@ const _log =
 2026-10-30T09:12:14.000Z  WARN libp2p_mdns: found bea-laptop.local with fogata:friend:AQIDBAUG and 'Sofía and Ana'
 ''';
 
+/// The lines of the log in the test of a report's size: several times its cap once packed.
+const _lines = 3000;
+
+/// [count] lines that hardly compress, as the core writes them, the last just before
+/// [now].
+String _hardToCompress(DateTime now, int count) {
+  final random = Random(7);
+  final big = StringBuffer();
+  for (var i = 0; i < count; i++) {
+    final start = now.subtract(Duration(milliseconds: (count - i) * 500));
+    final noise = String.fromCharCodes([
+      for (var k = 0; k < 40; k++) 97 + random.nextInt(26),
+    ]);
+    big.writeln('${start.toIso8601String()}  INFO a: step $i $noise');
+  }
+  return '$big';
+}
+
 void main() {
   setUpAll(writePrivatelyInTests);
   final scrubber = Scrubber(['Leo', 'Marta', 'Gaming', "Marta's Friends", 'X']);
@@ -160,65 +178,76 @@ void main() {
     expect(unzip(zip.bytes()), files);
   });
 
-  test(
-    'a report stays under its size, its newest lines kept',
-    timeout: const Timeout(Duration(minutes: 3)),
-    () async {
-      final dir = await Directory.systemTemp.createTemp('fogata-report-');
-      addTearDown(() => dir.delete(recursive: true));
-      final data = Directory('${dir.path}/data/$logFolder')
-        ..createSync(recursive: true);
-      final now = DateTime.utc(2026, 10, 30, 12);
-      // Lines that hardly compress.
-      final random = Random(7);
-      final big = StringBuffer();
-      for (var i = 0; i < 300000; i++) {
-        final start = now.subtract(Duration(milliseconds: (300000 - i) * 500));
-        final noise = String.fromCharCodes([
-          for (var k = 0; k < 40; k++) 97 + random.nextInt(26),
-        ]);
-        big.writeln('${start.toIso8601String()}  INFO a: step $i $noise');
-      }
-      File('${data.path}/fogata-2026-10-30.log').writeAsStringSync('$big');
-      File('${data.path}/fogata-2026-10-20.log').writeAsStringSync('$big');
-      final report = await prepareReport(
+  test('a report stays under its size, its newest lines kept', () async {
+    final dir = await Directory.systemTemp.createTemp('fogata-report-');
+    addTearDown(() => dir.delete(recursive: true));
+    final data = Directory('${dir.path}/data/$logFolder')
+      ..createSync(recursive: true);
+    final now = DateTime.utc(2026, 10, 30, 12);
+    // A cap far under that of the app ([reportMaxBytes], below), and a log several
+    // times its size.
+    const maxBytes = 32 * 1024;
+    final big = _hardToCompress(now, _lines);
+    File('${data.path}/fogata-2026-10-30.log').writeAsStringSync(big);
+    File('${data.path}/fogata-2026-10-20.log').writeAsStringSync(big);
+    final report = await prepareReport(
+      dataDir: '${dir.path}/data',
+      what: 'It froze.',
+      withLog: true,
+      facts: ReportFacts(build: 3, language: 'es', at: now),
+      maxBytes: maxBytes,
+    );
+    final path = await writeReport(folder: '${dir.path}/out', report: report);
+    expect(path, endsWith('fogata-report-2026-10-30.zip'));
+    final bytes = File(path).readAsBytesSync();
+    expect(bytes.length, lessThanOrEqualTo(maxBytes));
+    final files = unzip(bytes);
+    expect(files.keys, ['report.txt', 'log/fogata-2026-10-30.log']);
+    // What the page shows is what the archive holds, byte for byte.
+    expect({
+      for (final MapEntry(:key, :value) in files.entries)
+        key: utf8.decode(value),
+    }, report.files);
+    final text = utf8.decode(files['report.txt']!);
+    expect(text, contains('Version: '));
+    expect(text, contains('(build 3)'));
+    expect(text, contains('It froze.'));
+    final log = utf8.decode(files['log/fogata-2026-10-30.log']!);
+    expect(log, contains('step ${_lines - 1} '));
+    expect(log, isNot(contains('step 0 ')));
+    // A second report the same day takes a name of its own.
+    final again = await writeReport(
+      folder: '${dir.path}/out',
+      report: await prepareReport(
         dataDir: '${dir.path}/data',
-        what: 'It froze.',
-        withLog: true,
-        facts: ReportFacts(build: 3, language: 'es', at: now),
-      );
-      final path = await writeReport(folder: '${dir.path}/out', report: report);
-      expect(path, endsWith('fogata-report-2026-10-30.zip'));
-      final bytes = File(path).readAsBytesSync();
-      expect(bytes.length, lessThanOrEqualTo(reportMaxBytes));
-      final files = unzip(bytes);
-      expect(files.keys, ['report.txt', 'log/fogata-2026-10-30.log']);
-      // What the page shows is what the archive holds, byte for byte.
-      expect({
-        for (final MapEntry(:key, :value) in files.entries)
-          key: utf8.decode(value),
-      }, report.files);
-      final text = utf8.decode(files['report.txt']!);
-      expect(text, contains('Version: '));
-      expect(text, contains('(build 3)'));
-      expect(text, contains('It froze.'));
-      final log = utf8.decode(files['log/fogata-2026-10-30.log']!);
-      expect(log, contains('step 299999 '));
-      expect(log, isNot(contains('step 0 ')));
-      // A second report the same day takes a name of its own.
-      final again = await writeReport(
-        folder: '${dir.path}/out',
-        report: await prepareReport(
-          dataDir: '${dir.path}/data',
-          what: 'Again.',
-          withLog: false,
-          facts: ReportFacts(build: null, language: 'en', at: now),
-        ),
-      );
-      expect(again, endsWith('fogata-report-2026-10-30-2.zip'));
-      expect(unzip(File(again).readAsBytesSync()).keys, ['report.txt']);
-    },
-  );
+        what: 'Again.',
+        withLog: false,
+        facts: ReportFacts(build: null, language: 'en', at: now),
+      ),
+    );
+    expect(again, endsWith('fogata-report-2026-10-30-2.zip'));
+    expect(unzip(File(again).readAsBytesSync()).keys, ['report.txt']);
+  });
+
+  test('the report the app makes stays under reportMaxBytes', () async {
+    final now = DateTime.utc(2026, 10, 30, 12);
+    // Just past the cap once packed.
+    const lines = 175000;
+    final report = await assembleReportApart(
+      facts: ReportFacts(build: 3, language: 'es', at: now),
+      what: 'It froze.',
+      parts: ReportParts(
+        system: '',
+        logs: {'fogata-2026-10-30.log': _hardToCompress(now, lines)},
+      ),
+    ).future;
+    expect(report.bytes.length, lessThanOrEqualTo(reportMaxBytes));
+    // Cut to about that size, not far under it.
+    expect(report.bytes.length, greaterThan(reportMaxBytes * .7));
+    final log = report.files['log/fogata-2026-10-30.log']!;
+    expect(log, contains('step ${lines - 1} '));
+    expect(log, isNot(contains('step 0 ')));
+  });
 
   test('a report is never written through a link where it goes', () async {
     final dir = Directory.systemTemp.createTempSync('fogata-report-link-');

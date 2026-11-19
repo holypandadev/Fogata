@@ -138,12 +138,13 @@ Future<ReportParts> scrubReportParts({
 }
 
 /// The report of what the person wrote, [what], and [parts], as files and as the archive
-/// of exactly those, at most [reportMaxBytes]: past that, the oldest part of each log goes
-/// first.
+/// of exactly those, at most [maxBytes] ([reportMaxBytes], smaller in tests): past that,
+/// the oldest part of each log goes first.
 PreparedReport assembleReport({
   required ReportFacts facts,
   required String what,
   required ReportParts parts,
+  int maxBytes = reportMaxBytes,
 }) {
   final text = facts.text(what, withLog: parts.withLog, system: parts.system);
   final logs = parts.logs ?? const <String, String>{};
@@ -161,7 +162,7 @@ PreparedReport assembleReport({
       (name, text) => zip.add(name, utf8.encode(text), time: facts.at),
     );
     final bytes = zip.bytes();
-    if (bytes.length <= reportMaxBytes || keep < .01) {
+    if (bytes.length <= maxBytes || keep < .01) {
       return PreparedReport(
         facts: facts,
         what: what,
@@ -170,18 +171,19 @@ PreparedReport assembleReport({
         bytes: bytes,
       );
     }
-    keep *= (reportMaxBytes / bytes.length) * .9;
+    keep *= (maxBytes / bytes.length) * .9;
   }
 }
 
 /// The report of [what], [facts] and, [withLog], the log of [dataDir], made at once off
-/// the window's thread ([scrubReportParts], [assembleReport]).
+/// the window's thread ([scrubReportParts], [assembleReport]), at most [maxBytes].
 Future<PreparedReport> prepareReport({
   required String dataDir,
   required String what,
   required bool withLog,
   required ReportFacts facts,
   Iterable<String> names = const [],
+  int maxBytes = reportMaxBytes,
 }) {
   final known = names.toList();
   return Isolate.run(
@@ -194,6 +196,7 @@ Future<PreparedReport> prepareReport({
         now: facts.at,
         names: known,
       ),
+      maxBytes: maxBytes,
     ),
   );
 }
