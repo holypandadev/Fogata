@@ -2,7 +2,9 @@
 // what one call signals reaches the other's [Call.onSignal] while the two have a link, as
 // the core carries it, and two connections come up once each holds the other's description
 // and the link between their devices is up. Enough of a connection for a call to agree on
-// one; nothing is sent on it.
+// one; nothing is sent on it. Signals arrive in order, each [FakeNet.latency] after it was
+// sent, unless the test makes chosen ones late or arrive twice ([FakeNet.delay],
+// [FakeNet.duplicate]).
 
 import 'dart:async';
 import 'dart:convert';
@@ -39,8 +41,31 @@ class FakeNet {
   /// The pairs of devices whose link is down.
   final Set<String> _down = {};
 
-  /// Every signal sent between the calls here: from, to, its type, when.
-  final sent = <({String from, String to, String type, DateTime at})>[];
+  /// Every signal sent between the calls here: from, to, its type, when, and itself.
+  final sent =
+      <
+        ({
+          String from,
+          String to,
+          String type,
+          DateTime at,
+          Map<String, dynamic> message,
+        })
+      >[];
+
+  /// Signals that go otherwise than in order after [latency], as the core may carry them:
+  /// each signal sent is changed by the first rule that matches it while it has uses left.
+  final _rules = <_Rule>[];
+
+  /// The next [times] signals [which] matches take [by] more than [latency]: those sent
+  /// after them meanwhile arrive first.
+  void delay(SignalMatch which, Duration by, {int times = 1}) =>
+      _rules.add(_Rule(which, times, by: by));
+
+  /// The next [times] signals [which] matches arrive twice, the second copy [after] the
+  /// first.
+  void duplicate(SignalMatch which, Duration after, {int times = 1}) =>
+      _rules.add(_Rule(which, times, copyAfter: after));
 
   final Map<int, FakeConnection> _connections = {};
   int _next = 0;
@@ -87,12 +112,30 @@ class FakeNet {
 
   void _deliver(String from, String to, Map<String, dynamic> message) {
     if (!calls.containsKey(from)) return;
-    sent.add((from: from, to: to, type: '${message['t']}', at: DateTime.now()));
+    sent.add((
+      from: from,
+      to: to,
+      type: '${message['t']}',
+      at: DateTime.now(),
+      message: message,
+    ));
     if (!linked(from, to)) return;
     final text = jsonEncode(message);
-    Future<void>.delayed(latency, () {
-      if (linked(from, to)) unawaited(calls[to]?.onSignal(from, text));
-    });
+    var wait = latency;
+    Duration? copy;
+    for (final rule in _rules) {
+      if (rule.times > 0 && rule.which(from, to, message)) {
+        rule.times--;
+        wait += rule.by;
+        copy = rule.copyAfter;
+        break;
+      }
+    }
+    for (final after in [wait, if (copy != null) wait + copy]) {
+      Future<void>.delayed(after, () {
+        if (linked(from, to)) unawaited(calls[to]?.onSignal(from, text));
+      });
+    }
   }
 
   /// Comes up with its partner when each holds the other's description.
@@ -118,6 +161,22 @@ class FakeNet {
       partner._tell(RTCPeerConnectionState.RTCPeerConnectionStateConnected);
     });
   }
+}
+
+/// Which signals a rule of [FakeNet] changes.
+typedef SignalMatch = bool Function(
+  String from,
+  String to,
+  Map<String, dynamic> message,
+);
+
+class _Rule {
+  _Rule(this.which, this.times, {this.by = Duration.zero, this.copyAfter});
+
+  final SignalMatch which;
+  int times;
+  final Duration by;
+  final Duration? copyAfter;
 }
 
 final _fakeId = RegExp(r'a=fake:(\d+)');
