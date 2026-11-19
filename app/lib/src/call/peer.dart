@@ -102,9 +102,11 @@ class CallPeer {
   })?
   _answered;
 
-  /// Their call, as their signals name it, for tests.
+  /// Their call, as their signals name it, and those of theirs that ended, for tests.
   @visibleForTesting
   String? get theirCall => _theirCall;
+  @visibleForTesting
+  List<String> get endedCalls => List.unmodifiable(_endedCalls);
 
   /// [connection]'s offer or answer went while the link to them was down, or it was left
   /// waiting to be agreed when the link went ([Call.memberGone]): its signals went nowhere,

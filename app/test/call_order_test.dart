@@ -3,6 +3,7 @@
 // offer already answered gets the same answer and leaves the connection as it is.
 
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -197,14 +198,14 @@ void main() {
       );
       await alone.handleSignal(
         _large,
-        told(mic: false, number: 40000, call: 'second'),
+        told(mic: false, number: 200000, call: 'second'),
       );
       expect(peer.mic, isTrue);
       // Its asking comes, and its state again once their connection is up.
       await alone.handleSignal(_large, {'t': 'again', 'c': 'second'});
       await alone.handleSignal(
         _large,
-        told(mic: false, number: 40001, call: 'second'),
+        told(mic: false, number: 200001, call: 'second'),
       );
       expect(peer.mic, isFalse);
     });
@@ -253,13 +254,47 @@ void main() {
       expect(peer.mic, isFalse);
     });
 
+    test('someone who comes back and leaves again before naming a call is still '
+        'known by the call they left with', () async {
+      // Their call 'older' ended while they were here; they left with 'first'.
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'older'});
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      for (var i = 0; i < 2; i++) {
+        await alone.setParticipants([_small]);
+        await alone.setParticipants([_small, _large]);
+      }
+      final peer = alone.peers[_large]!;
+      // Back with a new call; late signals of the one it left with, and of one before.
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'second'});
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'older'});
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      expect(peer.theirCall, 'second');
+    });
+
+    test('someone who comes back with the same call has nothing ended, and its '
+        'signals are taken', () async {
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      await alone.setParticipants([_small]);
+      await alone.setParticipants([_small, _large]);
+      final peer = alone.peers[_large]!;
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      await alone.handleSignal(
+        _large,
+        told(mic: false, number: 100000, call: 'first'),
+      );
+      expect(peer.theirCall, 'first');
+      expect(peer.endedCalls, isEmpty);
+      expect(peer.mic, isFalse);
+    });
+
     test('a state that names no call, from a copy before it, is taken whatever '
         'call is known', () async {
       final peer = alone.peers[_large]!;
       await alone.handleSignal(_large, {'t': 'again', 'c': 'first'});
-      await alone.handleSignal(_large, told(mic: false));
+      // As it comes, through what every signal goes through.
+      await alone.onSignal(_large, jsonEncode(told(mic: false)));
       expect(peer.mic, isFalse);
-      await alone.handleSignal(_large, told(mic: true));
+      await alone.onSignal(_large, jsonEncode(told(mic: true)));
       expect(peer.mic, isTrue);
     });
 

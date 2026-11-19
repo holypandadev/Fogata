@@ -63,6 +63,16 @@ void main() {
     expect(fairSignal({'t': 'answer', 'sdp': 7}), isFalse);
   });
 
+  test('a state naming its call other than by a short text is dropped', () {
+    expect(fairSignal({'t': 'state', 'sc': '0123456789abcdef'}), isTrue);
+    expect(fairSignal({'t': 'state', 'sc': 'a' * maxCallIdChars}), isTrue);
+    expect(fairSignal({'t': 'state', 'sc': 7}), isFalse);
+    expect(
+      fairSignal({'t': 'state', 'sc': 'a' * (maxCallIdChars + 1)}),
+      isFalse,
+    );
+  });
+
   test('a state numbered other than by a whole number from 0 below 2^53 is '
       'dropped', () {
     expect(fairSignal({'t': 'state', 's': 0}), isTrue);
