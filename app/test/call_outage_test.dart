@@ -88,7 +88,7 @@ void main() {
       () => net.sent.every(
         (s) =>
             s.type != 'offer' ||
-            DateTime.now().difference(s.at) > const Duration(seconds: 2),
+            callClock().difference(s.at) > const Duration(seconds: 2),
       ),
       what: 'no try for a while',
     );
@@ -97,61 +97,67 @@ void main() {
   bool up(Call small, Call large) =>
       small.peers[_large]!.connected && large.peers[_small]!.connected;
 
-  test('a member that reconnects after a short outage is back within the first '
-      'try', () async {
-    final (small, large) = await connected();
-    await outage(small, large);
-    net.mend(_small, _large);
-    final back = DateTime.now();
-    final sentBefore = net.sent.length;
-    small.memberBack(_large);
-    large.memberBack(_small);
-    await until(() => up(small, large), what: 'connected again');
-    // One offer and its answer: about what a first connection takes, not the seconds a
-    // connection that never came up waits before it is tried again.
-    expect(
-      DateTime.now().difference(back),
-      lessThan(const Duration(seconds: 2)),
-    );
-    expect(offersSince(sentBefore), lessThanOrEqualTo(1));
-  });
-
-  for (final asksFirst in [true, false]) {
-    test('two sides trying at once end with one connection'
-        '${asksFirst ? ', the asking arriving first' : ''}', () async {
+  test(
+    'a member that reconnects after a short outage is back within the first '
+    'try',
+    () => inCallTime(() async {
       final (small, large) = await connected();
       await outage(small, large);
-      final answers = net.madeBy(_large).length;
       net.mend(_small, _large);
-      final back = net.sent.length;
-      if (asksFirst) {
-        // The larger side hears of the link first, and its asking reaches the other
-        // before the core tells the other of the link.
-        large.memberBack(_small);
-        await until(
-          () => net.sent
-              .skip(back)
-              .any((s) => s.from == _large && s.type == 'again'),
-          what: 'the asking',
-        );
-        await Future<void>.delayed(net.latency * 2);
-        small.memberBack(_large);
-      } else {
-        small.memberBack(_large);
-        large.memberBack(_small);
-      }
+      final back = callClock();
+      final sentBefore = net.sent.length;
+      small.memberBack(_large);
+      large.memberBack(_small);
       await until(() => up(small, large), what: 'connected again');
-      // A moment more: a second offer would replace the connection that came up.
-      await Future<void>.delayed(const Duration(seconds: 1));
-      expect(up(small, large), isTrue);
-      expect(offersSince(back), lessThanOrEqualTo(1), reason: 'offers sent');
-      expect(net.madeBy(_large).length, answers + 1, reason: 'answers made');
-    });
+      // One offer and its answer: about what a first connection takes, not the seconds a
+      // connection that never came up waits before it is tried again.
+      expect(
+        callClock().difference(back),
+        lessThan(const Duration(seconds: 2)),
+      );
+      expect(offersSince(sentBefore), lessThanOrEqualTo(1));
+    }),
+  );
+
+  for (final asksFirst in [true, false]) {
+    test(
+      'two sides trying at once end with one connection'
+      '${asksFirst ? ', the asking arriving first' : ''}',
+      () => inCallTime(() async {
+        final (small, large) = await connected();
+        await outage(small, large);
+        final answers = net.madeBy(_large).length;
+        net.mend(_small, _large);
+        final back = net.sent.length;
+        if (asksFirst) {
+          // The larger side hears of the link first, and its asking reaches the other
+          // before the core tells the other of the link.
+          large.memberBack(_small);
+          await until(
+            () => net.sent
+                .skip(back)
+                .any((s) => s.from == _large && s.type == 'again'),
+            what: 'the asking',
+          );
+          await Future<void>.delayed(net.latency * 2);
+          small.memberBack(_large);
+        } else {
+          small.memberBack(_large);
+          large.memberBack(_small);
+        }
+        await until(() => up(small, large), what: 'connected again');
+        // A moment more: a second offer would replace the connection that came up.
+        await Future<void>.delayed(const Duration(seconds: 1));
+        expect(up(small, large), isTrue);
+        expect(offersSince(back), lessThanOrEqualTo(1), reason: 'offers sent');
+        expect(net.madeBy(_large).length, answers + 1, reason: 'answers made');
+      }),
+    );
   }
 
   test(
     'ten members reconnecting together do not each try more than once',
-    () async {
+    () => inCallTime(() async {
       // This device's network changed: every link went down and comes back at once. Half
       // the others have smaller ids (this device asks them for an offer), half larger (it
       // offers to them).
@@ -183,12 +189,12 @@ void main() {
             );
         expect(tries.length, 1, reason: 'tries to $id');
       }
-    },
+    }),
   );
 
   test(
     "the core telling of the link reaches the call, a direct call's too",
-    () async {
+    () => inCallTime(() async {
       // A direct call's room is not among the groups: what reaches its call is told the same
       // way, by the call's group.
       for (final group in ['g', 'direct call']) {
@@ -219,6 +225,6 @@ void main() {
         await events.close();
         net.calls.remove(_small);
       }
-    },
+    }),
   );
 }

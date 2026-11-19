@@ -9,9 +9,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter_test/flutter_test.dart' show addTearDown;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:fogata/src/call.dart';
 import 'package:fogata/src/rust/api/types.dart';
+
+import 'fake_time.dart';
 
 const fakeBridge = UiMediaBridge(
   host: '127.0.0.1',
@@ -19,6 +22,16 @@ const fakeBridge = UiMediaBridge(
   username: 'u',
   password: 'p',
 );
+
+/// Runs [body] in fake time, the calls' clock with it: their waits of seconds, and the
+/// signals' and connections' own, take none.
+void inCallTime(Future<void> Function() body) => inFakeTime((time) {
+  final real = callClock;
+  addTearDown(() => callClock = real);
+  final start = DateTime(2026, 11, 19, 9);
+  callClock = () => start.add(time.elapsed);
+  return body();
+});
 
 /// The devices' calls, the links between them and the connections they made.
 class FakeNet {
@@ -116,7 +129,7 @@ class FakeNet {
       from: from,
       to: to,
       type: '${message['t']}',
-      at: DateTime.now(),
+      at: callClock(),
       message: message,
     ));
     if (!linked(from, to)) return;
