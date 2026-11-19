@@ -21,8 +21,11 @@ word (12.5 s), which a settled echo canceller lets through as it does mid-call:
   first turn, before a says anything: from a's first sound at b (0.25 s after the unmute
   at the earliest) until a's first word reaches b. That is where an echo canceller that
   kept a room without echo (a headset taken off for speakers, no device change seen) lets
-  the tone through. A word's last syllable ends WORD_END into it, and reaches b 0.10 to
-  0.18 s later in this lab and on GitHub's runners (DELAY: the least).
+  the tone through. That window ends DELAY after the first word was said, the least it
+  takes to reach b, so it never holds the word. A word's last syllable ends WORD_END into
+  it; with b's tone playing the words reached b 0.10 to 0.75 s after a said them, so each
+  is found in b's recording by its syllables (arrival) and what follows it is judged from
+  its end there and up to where the next one was found (DELAY for one not found, noted).
   After a's words b's steady tone comes back for moments, and that is WebRTC's own, left
   as WebRTC has it: AEC3 holds a gentler suppression for 200 ms after the near end stops
   talking (its dominant near-end detector, dominant_nearend_detection.hold_duration, 50
@@ -83,7 +86,21 @@ FLOOR_DEEP = 10.0
 TONE_UNDER = 20.0
 TAIL_UNDER = 5.0  # dB: the bar after each of a's words, where WebRTC lets the tone through
 WORD_END = 2.0  # s into each word that its last syllable ends (unmute-sound.sh)
-DELAY = 0.10  # s from a's microphone to b at the least (0.10 to 0.18 measured)
+DELAY = 0.10  # s from a's microphone to b at the least (0.10 measured: below)
+# a's words as unmute-sound.sh makes them: each syllable's start and length (s).
+SYLLABLES = [(0.00, 0.18), (0.20, 0.22), (0.65, 0.15), (0.82, 0.25), (1.35, 0.16), (1.53, 0.14), (1.70, 0.30)]
+# With speakers each word is found where it reached b, and what follows it is judged from
+# its end there. With b's tone playing it reached b 0.10 to 0.75 s after a said it (median
+# 0.28, 95 % by 0.50; 478 of 495 words found, 33 runs on GitHub's runners, 2026-11-17 to
+# 11-19), its way to b and the time b's recording lost or gained, where DELAY put the
+# window after it on the word's last syllable, whose pitch falls through the tone's 220 Hz:
+# the tone after a word read 24 dB under a's words there (median; 25 or less in 280 of
+# 495), 45 from the word's end at b (25 or less in 26).
+HOP = 0.01  # s: the envelope's step
+SEEK = 1.0  # s after a word is said that its start is looked for at b
+FOUND = 6.0  # dB: a word's syllables over its pauses at the match, at the least
+LAST_FROM = 1.30  # s into a word: its last syllables, matched again for its end
+AGREE = 0.10  # s: how far the last syllables may sit from where the whole word put them
 RATE = 48000
 F = RATE // 20
 GAPS = [(0.25, 0.5), (2.65, 3.5), (5.65, 6.5), (8.65, 9.5), (11.65, 12.5), (14.65, 15.5)]
@@ -133,6 +150,57 @@ def tone_db(at, a, b, hertz=220):
     re = sum(v * math.cos(w * k) for k, v in enumerate(seg))
     im = sum(v * math.sin(w * k) for k, v in enumerate(seg))
     return db(2 * math.sqrt(re * re + im * im) / len(seg) / math.sqrt(2))
+
+
+def envelope(at, a, b):
+    """b's output from a to b s after `at`, as 10 ms levels (dB) of its second difference:
+    the tone (220 and 660 Hz) and the fan's noise weak there, a's words' formants strong."""
+    i0, step = int((at - t0 + a) * RATE), int(RATE * HOP)
+    out = []
+    for i in range(max(2, i0), min(len(pcm) - step, int((at - t0 + b) * RATE)), step):
+        s = 0
+        for k in range(i, i + step):
+            d = pcm[k] - 2 * pcm[k - 1] + pcm[k - 2]
+            s += d * d
+        out.append(10 * math.log10(max(s / step, 1e-6)))
+    return [0.0] * max(0, (2 - i0 + step - 1) // step) + out  # before the recording: silence
+
+
+def match(e, pattern, lags):
+    """(lag in hops, dB) where the syllables of `pattern` stand highest above its pauses in
+    e (levels under the span's 20th percentile raised to it: the silence before a's first
+    sound weighs as the room does)."""
+    heard = sorted(x for x in e if x > 0)
+    floor = heard[len(heard) // 5] if heard else 0.0
+    best = (None, -math.inf)
+    for lag in lags:
+        seg = [max(x, floor) for x in e[lag : lag + len(pattern)]]
+        if len(seg) < len(pattern):
+            break
+        on = [x for x, p in zip(seg, pattern) if p]
+        off = [x for x, p in zip(seg, pattern) if not p]
+        c = sum(on) / len(on) - sum(off) / len(off)
+        if c > best[1]:
+            best = (lag, c)
+    return best
+
+
+def arrival(at, w):
+    """(start, end) in s: how much later than said a's word at w began and ended at b, or
+    None when not found. The whole word's syllables are matched over SEEK s, then its last
+    ones alone near there; both must stand FOUND dB above the pauses and agree within AGREE."""
+    pattern = [any(s <= k * HOP < s + d for s, d in SYLLABLES) for k in range(int(2.1 / HOP))]
+    last = pattern[int(LAST_FROM / HOP) :]
+    e = envelope(at, w, w + SEEK + 2.1)
+    lag, c = match(e, pattern, range(int(SEEK / HOP) + 1))
+    if lag is None or c < FOUND:
+        return None
+    near = int(AGREE / HOP)
+    tail = e[int(LAST_FROM / HOP) :]
+    end, c2 = match(tail, last, range(max(0, lag - near), lag + near + 1))
+    if end is None or c2 < FOUND:
+        return None
+    return lag * HOP, end * HOP
 
 
 meet = run / "meet"
@@ -243,8 +311,22 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
         # After each word, to the next one reaching b (the last: to 15.5 s): WebRTC's double
         # talk, judged at its loudest only by TAIL_UNDER; and throughout, by TONE_UNDER: an
         # echo let through all the way from one word to the next is no moment of double talk.
-        ends = [w + WORD_END + DELAY for w in WORDS]
-        spans = [tones(e, b) for e, b in zip(ends, [w + DELAY for w in WORDS[1:]] + [GAPS[-1][1]])]
+        # Each from where the word was found at b (DELAY when it was not).
+        found = [arrival(at, w) for w in WORDS]
+        lost = [w for w, x in zip(WORDS, found) if x is None]
+        if lost:
+            notes.append(
+                f"unmute {n}: a's word at " + ", ".join(f"{w:.1f}" for w in lost) + " s not found at "
+                f"b: taken to reach it {DELAY:.2f} s later"
+            )
+        reach = [w + (DELAY if x is None else x[0]) for w, x in zip(WORDS, found)]
+        ends = [w + WORD_END + (DELAY if x is None else x[1]) for w, x in zip(WORDS, found)]
+        notes.append(
+            f"unmute {n}: a's words reached b "
+            + " ".join("?" if x is None else f"{x[0]:.2f}" for x in found)
+            + " s after they were said"
+        )
+        spans = [tones(e, b) for e, b in zip(ends, reach[1:] + [GAPS[-1][1]])]
         tails = [max(x) for x in spans]
         for w, x in zip(WORDS, spans):
             low, t = min(x)
@@ -258,8 +340,8 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
             f"unmute {n}: b's tone after each of a's words (WebRTC's double talk, at least "
             f"{TAIL_UNDER:.0f} dB under) " + " ".join(f"{own - x:.0f}" for x, _ in tails)
             + " dB under a's words, at "
-            + " ".join(f"{t - w - WORD_END:.2f}" for (_, t), w in zip(tails, WORDS))
-            + " s after each word's end at a"
+            + " ".join(f"{t - e:.2f}" for (_, t), e in zip(tails, ends))
+            + " s after each word's end at b"
         )
         for w, (x, t) in zip(WORDS, tails):
             if x > own - TAIL_UNDER:

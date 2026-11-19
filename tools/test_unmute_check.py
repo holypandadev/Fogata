@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Tests of the call lab's unmute judge with a headset (tools/call-lab/unmute_check.py): the
+"""Tests of the call lab's unmute judge (tools/call-lab/unmute_check.py). With a headset: the
 room's noise between a's words held down from the unmute on fails it, a later pause's dip
-is noted, and only a deep one fails. Each runs the real judge on a run folder made for the
-test: b's output as one unmute, steady tones at the levels asked, no WebRTC log.
+is noted, and only a deep one fails. With speakers: b's tone after each word is measured
+from where the word ended at b, however late it came, not on the word's last syllable.
+Each runs the real judge on a run folder made for the test: b's output as one unmute,
+tones at the levels asked, no WebRTC log.
 
     python3 -I tools/test_unmute_check.py
 """
@@ -53,6 +55,88 @@ def folder(tmp, under):
     (run / "meet" / "mark-a-mute-1").write_text(f"{int((START - 10) * 1000)}\n")
     (run / "meet" / "mark-a-unmute-1").write_text(f"{int((START + UNMUTE) * 1000)}\n")
     return run
+
+
+SYLLABLES = [(0.00, 0.18), (0.20, 0.22), (0.65, 0.15), (0.82, 0.25), (1.35, 0.16), (1.53, 0.14), (1.70, 0.30)]
+
+
+def speakers_folder(tmp, late, shaped=True):
+    """A run folder of unmute:speakers: b's tone (220 Hz) back at b 50 dB under a's words,
+    which reach b `late` s after they were said: syllables of 1300 Hz, the last one 220 Hz
+    as loud as the words (a pitch falling through the tone's), or with `shaped` false one
+    steady sound of 2.1 s."""
+    run = tmp / "run"
+    (run / "meet").mkdir(parents=True)
+    amp = lambda dbfs: 32768 * math.sqrt(2) * 10 ** (dbfs / 20)
+    word, tone, voice, quiet = amp(-16), amp(-66), amp(-16), amp(-30)
+    frames = bytearray()
+    for i in range(int((UNMUTE + 16.0) * RATE)):
+        t = i / RATE - UNMUTE
+        v = 0.0
+        if t >= 0:
+            v = tone * math.sin(2 * math.pi * 220 * i / RATE)
+            u = next((t - w - late for w in WORDS if 0 <= t - w - late < 2.1), None)
+            if u is not None and not shaped:
+                v += word * math.sin(2 * math.pi * 1300 * i / RATE)
+            elif u is not None:
+                for k, (s, d) in enumerate(SYLLABLES):
+                    if s <= u < s + d:
+                        env = math.sin(math.pi * (u - s) / d) ** 2
+                        last = k == len(SYLLABLES) - 1
+                        v += (quiet if last else word) * env * math.sin(2 * math.pi * 1300 * i / RATE)
+                        v += voice * env * math.sin(2 * math.pi * 220 * i / RATE) if last else 0.0
+        frames += max(-32768, min(32767, int(v))).to_bytes(2, "little", signed=True)
+    with wave.open(str(run / "played-b.wav"), "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(RATE)
+        w.writeframes(bytes(frames))
+    (run / "played-b.start").write_text(f"{START}\n")
+    (run / "meet" / "mark-a-mute-1").write_text(f"{int((START - 10) * 1000)}\n")
+    (run / "meet" / "mark-a-unmute-1").write_text(f"{int((START + UNMUTE) * 1000)}\n")
+    return run
+
+
+class TailAfterWords(unittest.TestCase):
+    """With speakers, what follows each word is judged from where the word ended at b."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="fogata-unmute-test-"))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp)
+
+    def judge(self, late, shaped=True):
+        res = subprocess.run([sys.executable, "-I", str(JUDGE), str(speakers_folder(self.tmp, late, shaped)), "speakers"],
+                             capture_output=True, text=True)
+        self.assertIn(res.returncode, (0, 1), res.stderr)
+        return [l.strip() for l in res.stdout.splitlines()]
+
+    def tails(self, lines):
+        line = next(l for l in lines if "b's tone after each of a's words" in l)
+        under = line.split(") ", 1)[1].split(" dB under")[0]
+        return [int(x) for x in under.split()]
+
+    def test_words_late_are_judged_from_their_end_at_b(self):
+        lines = self.judge(0.25)
+        self.assertEqual(lines[0], "PASS unmute:speakers", lines)
+        line = next(l for l in lines if "a's words reached b" in l)
+        found = [float(x) for x in line.split("reached b ")[1].split(" s after")[0].split()]
+        self.assertTrue(all(abs(x - 0.25) <= 0.02 for x in found), line)
+        # From the end the tone is as far under as b's tone itself (50 dB), not the word's
+        # last syllable read at 220 Hz (a few dB under, from DELAY).
+        self.assertTrue(all(x >= 45 for x in self.tails(lines)), lines)
+
+    def test_a_last_syllable_is_not_taken_for_the_tone(self):
+        lines = self.judge(0.40)
+        self.assertEqual(lines[0], "PASS unmute:speakers", lines)
+        self.assertFalse([l for l in lines if "problem:" in l], lines)
+
+    def test_a_word_not_found_is_taken_at_the_least_delay(self):
+        lines = self.judge(0.10, shaped=False)
+        self.assertIn("unmute 1: a's word at 0.5, 3.5, 6.5, 9.5, 12.5 s not found at b: taken to reach it "
+                      "0.10 s later", lines)
+        self.assertIn("unmute 1: a's words reached b ? ? ? ? ? s after they were said", lines)
 
 
 class FloorAfterUnmute(unittest.TestCase):
