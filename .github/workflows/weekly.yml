@@ -81,13 +81,39 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-weekly-fuzz-ubuntu-24.04
+          restore-keys: apt-weekly-fuzz-ubuntu-24.04-
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
             clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
             libpipewire-0.3-dev libdbus-1-dev
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
       - name: Install the Rust tools
         run: |
           rustup show active-toolchain || rustup toolchain install
@@ -146,13 +172,39 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-weekly-previous-release-ubuntu-24.04
+          restore-keys: apt-weekly-previous-release-ubuntu-24.04-
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
             clang cmake ninja-build pkg-config libasound2-dev libpulse-dev \
             libpipewire-0.3-dev libdbus-1-dev
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
       - name: Install the Rust of rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install
       # The last release tag before this commit (on a release's own commit, the one before

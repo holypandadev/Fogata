@@ -66,9 +66,20 @@ jobs:
             /usr/share/swift /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-call-checks-ubuntu-24.04
+          restore-keys: apt-call-checks-ubuntu-24.04-
+
       # As ci.yml's Linux jobs, and systemd-coredump, which notes every crash.
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
@@ -82,6 +93,23 @@ jobs:
           echo "core_pattern: $(cat /proc/sys/kernel/core_pattern)"
           grep -q systemd-coredump /proc/sys/kernel/core_pattern ||
             { echo "::error::crashes would not reach systemd-coredump"; exit 1; }
+
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
 
       # Before half an hour of builds: in a sound session of the lab's (session.sh), a
       # recording from a virtual microphone must be linked to it, as every check needs.

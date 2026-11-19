@@ -57,13 +57,41 @@ jobs:
             /usr/share/swift /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-flatpak-drop-ubuntu-24.04
+          restore-keys: apt-flatpak-drop-ubuntu-24.04-
+
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
             clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
             libasound2-dev libpulse-dev libpipewire-0.3-dev
+
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
 
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:

@@ -63,6 +63,22 @@ per job), saved only by runs of pushes to `main`, so a pull request reads them a
 writes them. That is what keeps them honest: Cargo checks each crate's source against
 `Cargo.lock`, not the compiled builds it finds in the target folder. The release builds
 (`release-build.yml`) use no cache at all.
+Every Linux job but the release build installs its Ubuntu packages with `tools/ci-apt.sh`,
+which gives the fetching a time of its own and asks another mirror when one stalls: some
+evenings every mirror gives a few hundred kB/s, and the 128 MB of packages did not come in
+the step's 20 minutes. So each job keeps the packages' archives (`.deb`) it fetched in a
+cache of its own (`CI_APT_ARCHIVES`, `/tmp/fogata-apt`), restored before the install from
+the newest of its branch or else of `main`, and saved, under a key named by the archives it
+holds, whenever that is not the one restored, even when the install failed: a run fetches
+only what Ubuntu updated since. The package lists are always fetched; apt takes an archive
+it finds in its cache by its size alone, so `ci-apt.sh` first keeps only the plain files
+whose SHA-256 the lists just fetched, which Ubuntu signs, give for that file's own name, and
+deletes everything else, the versions the lists no longer give among them (a release's own
+version stays in the lists beside its update, so at most one more version of a package may
+be kept). Unlike the Rust builds, a branch saves these too: a branch's cache is read by that
+branch's runs and by pull requests into it. The check guards against stale or damaged
+archives, and only runs on the default branch can write what the default branch's runs
+restore.
 `.github/workflows/weekly.yml` runs once a week (and by hand) what no push waits for: see
 "Every week" below. `.github/workflows/release-build.yml` builds a pre-release's three
 applications, by hand, and has GitHub attest them; it signs nothing

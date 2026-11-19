@@ -74,8 +74,19 @@ jobs:
         with:
           persist-credentials: false
 
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-netlab-ubuntu-24.04
+          restore-keys: apt-netlab-ubuntu-24.04-
+
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
@@ -89,6 +100,23 @@ jobs:
           sudo sysctl -w net.core.wmem_max=212992
           # The rules of the routers (masquerade, with random ports for the symmetric kind).
           sudo modprobe -a nf_tables nft_chain_nat nft_masq nf_nat nf_conntrack || true
+
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key && matrix.id == 'scenarios-1'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
 
       - name: Install the Rust of rust-toolchain.toml
         run: rustup show active-toolchain || rustup toolchain install

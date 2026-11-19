@@ -84,8 +84,25 @@ jobs:
             /usr/share/swift /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # The packages' archives (.deb) of earlier runs, so that a run fetches from Ubuntu's
+      # mirrors only what is new since (tools/ci-apt.sh, CI_APT_ARCHIVES): the newest this job
+      # kept, on this branch or else on main. In /tmp, where apt's unprivileged fetcher (_apt)
+      # can reach them and the runner's user, whom the cache actions run as, can keep them.
+      # apt itself checks only the size of an archive it finds there: ci-apt.sh first keeps
+      # only the files whose SHA-256 the lists it has just fetched give for that file's name,
+      # and deletes the rest (old versions among them). The lists are always fetched.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-ci-linux-ubuntu-24.04
+          restore-keys: apt-ci-linux-ubuntu-24.04-
+
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
@@ -99,6 +116,29 @@ jobs:
           # The sound sessions of tools/call-lab/session.sh are unprivileged user namespaces,
           # which Ubuntu's AppArmor refuses by default.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Kept under a key named by the archives the folder now holds (their names carry their
+      # versions) whenever it is not the one restored: a run that fetched nothing new saves
+      # nothing, and GitHub lets go of keys no run reads. Kept after a failed or timed-out
+      # install too: what was fetched need not be fetched again. On any branch: a branch's
+      # cache is read by its own runs and by pull requests into it. The check guards against
+      # stale or damaged archives; only runs on main can write what main's runs restore.
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
 
       # The integration and pair tests make their null sinks and virtual microphones on the
       # sound server pactl reaches: one of the job's own, with nothing real behind it.
@@ -219,8 +259,19 @@ jobs:
             /usr/share/swift /opt/hostedtoolcache/CodeQL
           df -h /
 
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-ci-linux-checks-ubuntu-24.04
+          restore-keys: apt-ci-linux-checks-ubuntu-24.04-
+
       - name: Install the system packages
         timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
         run: |
           # Fetched with a time of its own, from another mirror when one stalls (see the script).
           tools/ci-apt.sh \
@@ -230,6 +281,23 @@ jobs:
             gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
             gstreamer1.0-plugins-bad gstreamer1.0-libav
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
 
       # As in the linux job: the Rust tests run beside a sound server of the job's own, as
       # they did when one job ran everything.
