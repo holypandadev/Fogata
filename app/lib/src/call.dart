@@ -2136,7 +2136,7 @@ class Call extends ChangeNotifier {
       );
       if (_left.length > leftKept) _left.remove(_left.keys.first);
     }
-    await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
+    // And what showed them: once they are let go of, they may be back and shown again.
     for (final gone in left.map((peer) => peer.id)) {
       _showScreenOut(gone, null);
       final until = DateTime.now().add(_backWithin);
@@ -2149,6 +2149,7 @@ class Call extends ChangeNotifier {
         _focusBack = (id: gone, until: until);
       }
     }
+    await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
   }
 
   /// The room says [id] left, by its own event: its connection goes now, before the
