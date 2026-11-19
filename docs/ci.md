@@ -187,7 +187,13 @@ mapping each minute (`tools/call-lab/smaps.py`, in the run's `smaps.log`), and, 
 whose notes `tools/call-lab/heap-report.sh` says what was allocated after the call settled
 and never freed, by call stack. The whole run folder is the run's artifact, kept 30 days. It
 checks nothing and blocks nothing: it is how a slow growth is looked for, before and after a
-change. The same runs on any Linux computer with `heaptrack` and `zstd` installed.
+change. The same runs on any Linux computer with `heaptrack`, `zstd` and a C compiler
+installed. In the copy under heaptrack `dlclose` does nothing (a library built in the run
+folder and preloaded ahead of heaptrack's): heaptrack reads the loader's list of libraries
+holding its own lock, the loader frees memory holding its lock while it unloads one, and the
+copy stopped for good when both happened at once, as ALSA's PipeWire plugin unloads
+PipeWire's modules each time the copy looks at its output. Libraries stay loaded there, a
+constant part of its memory.
 
 It measures a release build unless told otherwise (`-f build=profile`), because a profile
 build grows by itself while a call is on screen: the engine writes a timeline event with a

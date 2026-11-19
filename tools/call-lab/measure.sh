@@ -51,7 +51,7 @@
 # allocation with its call stack: heaptrack-<role>.zst (the whole run) and
 # heaptrack-<role>-early.zst (up to MEASURE_EARLY seconds, default 1800);
 # heap-report.sh makes reports of them. That copy runs slower: its other figures are not
-# those of a call. A copy with no result in time leaves stuck-<role>.txt for every copy still
+# those of a call, and it never unloads a library (below; it needs a C compiler, CC). A copy with no result in time leaves stuck-<role>.txt for every copy still
 # running: its threads' state, processor time and stacks before it is ended (lab.sh's lab_stuck).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -84,10 +84,20 @@ if [ "${1:-}" = --inside ]; then
         zstd -q -3 > "$RUN/heaptrack-$r-early.zst") < "$RUN/heap-$r.fifo" |
         "$interpret" 2> "$RUN/heap-$r-interpret.log" | zstd -q -3 > "$RUN/heaptrack-$r.zst" &
       heap=$!
-      # The sound libraries the call opens by name when it starts come in with it: opened
-      # then, on one thread while others allocate, the library's lock and the loader's
-      # were taken in both orders now and then, and the copy stopped for good.
-      extra+=(LD_PRELOAD="$lib libpulse.so.0 libasound.so.2 libpipewire-0.3.so.0"
+      # The library and the loader each have a lock, and the copy stops for good when two
+      # threads take them in both orders. The library takes the loader's (dl_iterate_phdr,
+      # for the list of what is loaded) holding its own; the loader frees memory holding
+      # its own while it unloads a library, and the free waits for the library's lock.
+      # Unloading happens each time the copy looks at its output: ALSA's PipeWire plugin
+      # makes a PipeWire context and destroys it, and PipeWire's modules and plugins go
+      # with it (dlclose). So here dlclose does nothing (no-dlclose.so, ahead of the
+      # library): a library once loaded stays loaded, its mapping a constant part of the
+      # copy's memory, never a growth, as loading it again only counts it again. The
+      # sound libraries the call opens by name come in with it too, as before.
+      printf 'int dlclose(void *handle) { (void)handle; return 0; }\n' |
+        "${CC:-cc}" -shared -fPIC -O2 -x c -o "$RUN/no-dlclose.so" - ||
+        { echo "cannot build no-dlclose.so (CC)" | tee -a "$RUN/lab.log" >&2; lab_stop; exit 1; }
+      extra+=(LD_PRELOAD="$RUN/no-dlclose.so $lib libpulse.so.0 libasound.so.2 libpipewire-0.3.so.0"
         DUMP_HEAPTRACK_OUTPUT="$RUN/heap-$r.fifo"
         LD_LIBRARY_PATH="$(dirname "$BUNDLE")/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
     fi

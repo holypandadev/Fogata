@@ -2,7 +2,7 @@
 # call test (a release build, as the application is shipped, or a profile one) in the call lab
 # (tools/call-lab/measure.sh), every copy's memory by kind of mapping each minute
 # (smaps.log), and one copy under heaptrack, which notes every allocation with its call
-# stack; tools/call-lab/heap-report.sh then says what was allocated after the call settled
+# stack (that copy never unloads a library: measure.sh says why); tools/call-lab/heap-report.sh then says what was allocated after the call settled
 # and never freed. The run folder and the reports are kept as the run's artifact.
 #
 # Started by hand only (Actions, "Call memory", or `gh workflow run call-memory.yml -f
