@@ -195,6 +195,22 @@ extension _Signalling on Call {
           peer._early.add(candidate);
         }
       case 'state':
+        // Their states in the order they told them: each signal goes on its own, and an
+        // older one that arrives late would undo a newer (a screen shown as off, and no
+        // longer watched here). One that names no number (from a copy before it) is taken.
+        final number = message['s'];
+        if (number is int) {
+          final last = peer._stateIn;
+          if (last != null &&
+              number < last &&
+              last - number < Call.stateOrderWithin.inMilliseconds) {
+            _trace(
+              'state $number from ${_short(from)} older than $last: dropped',
+            );
+            return;
+          }
+          peer._stateIn = number;
+        }
         final shared = peer.cam || peer.sharing;
         peer.mic = message['mic'] == true;
         peer.cam = message['cam'] == true;
@@ -294,6 +310,8 @@ extension _Signalling on Call {
     if (peer._endedCalls.length > CallPeer.endedCallsKept) {
       peer._endedCalls.removeAt(0);
     }
+    // Their new call numbers its states anew (see [Call._stateNumber]).
+    peer._stateIn = null;
     _trace('${from.substring(0, 8)} has a new call; connecting anew');
     // An answer of their new call answers an offer of this side made since it started:
     // its connection is the right one.
@@ -339,8 +357,14 @@ extension _Signalling on Call {
         .catchError((_) {});
   }
 
+  /// This device's state, numbered after every state it told before (see 'state' in
+  /// [_handle]).
   Map<String, dynamic> get _state => {
     't': 'state',
+    's': _stateNumber = math.max(
+      _stateNumber + 1,
+      DateTime.now().millisecondsSinceEpoch,
+    ),
     'mic': mic,
     'cam': camera,
     'screen': sharing,
@@ -349,8 +373,9 @@ extension _Signalling on Call {
   };
 
   void _sendState() {
+    final state = _state;
     for (final id in peers.keys) {
-      _signal(id, _state);
+      _signal(id, state);
     }
   }
 

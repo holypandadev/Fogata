@@ -489,6 +489,18 @@ class Call extends ChangeNotifier {
   /// entered again or started again, has another.
   final String _callId = _newCallId();
 
+  /// The number of the latest state this call told (see [_state]): the time it was told,
+  /// in milliseconds, or one more than the one before if that is larger. A call made
+  /// anew, after leaving the room or starting again, goes on from the clock, above the
+  /// numbers of the call before it.
+  int _stateNumber = 0;
+
+  /// How far behind the newest state taken from a participant one can be and still be an
+  /// older one of theirs that came late, not one of a call of theirs that started anew
+  /// after their clock went back: a signal is given up on 20 s after it was sent.
+  @visibleForTesting
+  static const stateOrderWithin = Duration(minutes: 1);
+
   static String _newCallId() {
     final random = math.Random.secure();
     return [

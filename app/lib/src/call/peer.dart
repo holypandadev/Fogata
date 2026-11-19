@@ -76,6 +76,11 @@ class CallPeer {
   final List<String> _endedCalls = [];
   static const endedCallsKept = 8;
 
+  /// The number of the newest state taken from them; null before one, after their signals
+  /// named a new call of theirs ([Call._theirCall]), or from a copy that numbers none (see
+  /// 'state' in [Call._handle]).
+  int? _stateIn;
+
   /// Their call, as their signals name it, for tests.
   @visibleForTesting
   String? get theirCall => _theirCall;
