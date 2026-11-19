@@ -77,7 +77,7 @@ void main() {
 
   test(
     'coming and going without a call leaves one round of tries',
-    () => inFakeTime((_) async {
+    () => inCallTime(() async {
       // This device has the larger id here, so its tries are "again" signals, not offers.
       const late = 'f000000000000000';
       final sent = <String>[];
@@ -108,6 +108,7 @@ void main() {
       // Only the last round tries, once, 5 s on.
       await Future<void>.delayed(const Duration(milliseconds: 5600));
       expect(sent.where((t) => t == 'again'), hasLength(1));
+      await c.stop();
     }),
   );
 
@@ -599,9 +600,7 @@ void main() {
 
     test(
       'the call tells it once gone 5 s, reading the list again',
-      () => inFakeTime((time) async {
-        callClock = () => start.add(time.elapsed);
-        addTearDown(() => callClock = DateTime.now);
+      () => inCallTime(() async {
         final c = Call(group: 'g', me: me, input: 'headset');
         final told = <String>[];
         c.onNotice = told.add;
@@ -611,6 +610,7 @@ void main() {
         expect(told, [l10n.callSoundSystemLost]);
         c.takeDevices([mic, speaker]);
         expect(told, [l10n.callSoundSystemLost, l10n.callSoundSystemBack]);
+        await c.stop();
       }),
     );
   });

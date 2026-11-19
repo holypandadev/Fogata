@@ -9,12 +9,9 @@
 import 'dart:async';
 import 'dart:convert';
 
-import 'package:flutter_test/flutter_test.dart' show addTearDown;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:fogata/src/call.dart';
 import 'package:fogata/src/rust/api/types.dart';
-
-import 'fake_time.dart';
 
 const fakeBridge = UiMediaBridge(
   host: '127.0.0.1',
@@ -22,16 +19,6 @@ const fakeBridge = UiMediaBridge(
   username: 'u',
   password: 'p',
 );
-
-/// Runs [body] in fake time, the calls' clock with it: their waits of seconds, and the
-/// signals' and connections' own, take none.
-void inCallTime(Future<void> Function() body) => inFakeTime((time) {
-  final real = callClock;
-  addTearDown(() => callClock = real);
-  final start = DateTime(2026, 11, 19, 9);
-  callClock = () => start.add(time.elapsed);
-  return body();
-});
 
 /// The devices' calls, the links between them and the connections they made.
 class FakeNet {
@@ -50,6 +37,9 @@ class FakeNet {
   /// The call of each device, by its id; a device without one drops what comes to it (as
   /// the core of a device in no room does).
   final Map<String, Call> calls = {};
+
+  /// Every call [add]ed, those gone from [calls] too: what a test stops once it ended.
+  final _everyCall = <Call>[];
 
   /// The pairs of devices whose link is down.
   final Set<String> _down = {};
@@ -91,9 +81,33 @@ class FakeNet {
 
   void uninstall() => signalsBetweenForTests = null;
 
+  /// Signals on their way and connections coming up: [stop] drops them.
+  final _going = <Timer>{};
+
+  void _later(Duration after, void Function() then) {
+    late final Timer timer;
+    timer = Timer(after, () {
+      _going.remove(timer);
+      then();
+    });
+    _going.add(timer);
+  }
+
+  /// Stops every call [add]ed, then drops what is still on its way between them.
+  Future<void> stop() async {
+    for (final call in _everyCall) {
+      await call.stop();
+    }
+    for (final timer in _going) {
+      timer.cancel();
+    }
+    _going.clear();
+  }
+
   /// [call] takes part, as its device's call, with made-up connections.
   Call add(Call call) {
     calls[call.me] = call;
+    _everyCall.add(call);
     call.connectionsForTests = () async => FakeConnection._(this, call.me);
     return call;
   }
@@ -145,7 +159,7 @@ class FakeNet {
       }
     }
     for (final after in [wait, if (copy != null) wait + copy]) {
-      Future<void>.delayed(after, () {
+      _later(after, () {
         if (linked(from, to)) unawaited(calls[to]?.onSignal(from, text));
       });
     }
@@ -166,7 +180,7 @@ class FakeNet {
         c._up) {
       return;
     }
-    Future<void>.delayed(connecting, () {
+    _later(connecting, () {
       if (c._up || c.closed || partner.closed || c._failed) return;
       if (partner._failed) return;
       if (!linked(c.owner, partner.owner)) return;
@@ -267,7 +281,7 @@ class FakeConnection implements RTCPeerConnection {
         return Future.value(RTCSessionDescription(_description, 'answer'));
       case #setLocalDescription:
         local = (args.first as RTCSessionDescription).sdp;
-        Future<void>.delayed(net.gathering, () {
+        net._later(net.gathering, () {
           onIceGatheringState?.call(
             RTCIceGatheringState.RTCIceGatheringStateComplete,
           );

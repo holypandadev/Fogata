@@ -12,6 +12,7 @@ import 'package:fogata/src/call.dart';
 import 'package:fogata/src/rust/api/types.dart';
 
 import 'call_net.dart';
+import 'fake_time.dart';
 import 'fake_room.dart';
 import 'wait.dart';
 
@@ -79,9 +80,17 @@ void main() {
     // The pictures of a participant, made ready as it comes.
     messenger.setMockMethodCallHandler(
       const MethodChannel('FlutterWebRTC.Method'),
-      (call) async => call.method == 'createVideoRenderer'
-          ? <String, dynamic>{'textureId': ++textures}
-          : <String, dynamic>{},
+      (call) async {
+        if (call.method != 'createVideoRenderer') return <String, dynamic>{};
+        // Its pictures' events, which a renderer stops listening to when let go of.
+        final events = EventChannel('FlutterWebRTC/Texture${++textures}');
+        messenger.setMockStreamHandler(
+          events,
+          MockStreamHandler.inline(onListen: (_, _) {}),
+        );
+        addTearDown(() => messenger.setMockStreamHandler(events, null));
+        return <String, dynamic>{'textureId': textures};
+      },
     );
     sent.clear();
     signalsForTests = (to, message) => sent.add((to, '${message['t']}'));
@@ -215,6 +224,10 @@ void main() {
     const starting = Duration(seconds: 2);
     const heard = Duration(milliseconds: 300);
     late FakeNet net;
+
+    /// [inCallTime] with every call of [net] stopped once the test ended ([FakeNet.stop]).
+    Future<void> inNetTime(Future<void> Function() body) =>
+        inCallTime(body, stop: net.stop);
     setUp(() => net = FakeNet()..install());
     tearDown(() => net.uninstall());
 
@@ -279,7 +292,7 @@ void main() {
 
     test(
       'the call is back soon when the one that stays offers',
-      () => inCallTime(() async {
+      () => inNetTime(() async {
         // The smaller id offers: the one that stayed offers as it hears the other is back,
         // while the other's call is still starting.
         final took = await rejoin('1000000000000000', 'e000000000000000');
@@ -289,7 +302,7 @@ void main() {
 
     test(
       'the call is back soon when the one that comes back offers',
-      () => inCallTime(() async {
+      () => inNetTime(() async {
         final took = await rejoin('e100000000000000', '1100000000000000');
         expect(took, lessThan(within));
       }),
@@ -298,7 +311,7 @@ void main() {
     test(
       'the room says nothing of the leave: the one that stays still reconnects '
       'within the first try, when it offers',
-      () => inCallTime(() async {
+      () => inNetTime(() async {
         final took = await rejoin(
           '1200000000000000',
           'e200000000000000',
@@ -311,7 +324,7 @@ void main() {
     test(
       'the room says nothing of the leave: the one that stays still reconnects '
       'within the first try, when the other offers',
-      () => inCallTime(() async {
+      () => inNetTime(() async {
         final took = await rejoin(
           'e300000000000000',
           '1300000000000000',

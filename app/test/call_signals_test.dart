@@ -421,10 +421,7 @@ void main() {
 
   test(
     'a failure of a connection that was replaced is not the live one\'s',
-    () => inFakeTime((time) async {
-      final start = DateTime(2026, 11, 19, 9);
-      callClock = () => start.add(time.elapsed);
-      addTearDown(() => callClock = DateTime.now);
+    () => inCallTime(() async {
       // Ana has the smaller id and offers; this device answers on a new connection, twice.
       final call = Call(group: 'g', me: zoe);
       final made = <_Connection>[];
@@ -470,6 +467,7 @@ void main() {
       expect(made, hasLength(2));
       expect(peer.connection, live);
       expect(live.closed, isFalse);
+      await call.stop();
     }),
   );
 

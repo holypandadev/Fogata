@@ -55,7 +55,7 @@ void main() {
   tearDown(() => splashClock = realSplashClock);
 
   /// Runs [body] in fake time, the splash's clock with it.
-  void inSplashTime(Future<void> Function() body) => inFakeTime((time) {
+  Future<void> inSplashTime(Future<void> Function() body) => inFakeTime((time) {
     final start = DateTime(2026, 11, 19, 9);
     splashClock = () => start.add(time.elapsed);
     return body();

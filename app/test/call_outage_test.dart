@@ -11,6 +11,7 @@ import 'package:fogata/src/call.dart';
 import 'package:fogata/src/rust/api/types.dart';
 
 import 'call_net.dart';
+import 'fake_time.dart';
 import 'wait.dart';
 
 // The smaller id offers, the larger asks for offers.
@@ -23,13 +24,25 @@ void main() {
   var textures = 0;
   late FakeNet net;
 
+  /// [inCallTime] with every call of [net] stopped once the test ended ([FakeNet.stop]).
+  Future<void> inNetTime(Future<void> Function() body) =>
+      inCallTime(body, stop: net.stop);
+
   setUp(() {
     // The pictures of a participant, made ready as it comes.
     messenger.setMockMethodCallHandler(
       const MethodChannel('FlutterWebRTC.Method'),
-      (call) async => call.method == 'createVideoRenderer'
-          ? <String, dynamic>{'textureId': ++textures}
-          : <String, dynamic>{},
+      (call) async {
+        if (call.method != 'createVideoRenderer') return <String, dynamic>{};
+        // Its pictures' events, which a renderer stops listening to when let go of.
+        final events = EventChannel('FlutterWebRTC/Texture${++textures}');
+        messenger.setMockStreamHandler(
+          events,
+          MockStreamHandler.inline(onListen: (_, _) {}),
+        );
+        addTearDown(() => messenger.setMockStreamHandler(events, null));
+        return <String, dynamic>{'textureId': textures};
+      },
     );
     net = FakeNet()..install();
   });
@@ -100,7 +113,7 @@ void main() {
   test(
     'a member that reconnects after a short outage is back within the first '
     'try',
-    () => inCallTime(() async {
+    () => inNetTime(() async {
       final (small, large) = await connected();
       await outage(small, large);
       net.mend(_small, _large);
@@ -123,7 +136,7 @@ void main() {
     test(
       'two sides trying at once end with one connection'
       '${asksFirst ? ', the asking arriving first' : ''}',
-      () => inCallTime(() async {
+      () => inNetTime(() async {
         final (small, large) = await connected();
         await outage(small, large);
         final answers = net.madeBy(_large).length;
@@ -157,7 +170,7 @@ void main() {
 
   test(
     'ten members reconnecting together do not each try more than once',
-    () => inCallTime(() async {
+    () => inNetTime(() async {
       // This device's network changed: every link went down and comes back at once. Half
       // the others have smaller ids (this device asks them for an offer), half larger (it
       // offers to them).
@@ -194,7 +207,7 @@ void main() {
 
   test(
     "the core telling of the link reaches the call, a direct call's too",
-    () => inCallTime(() async {
+    () => inNetTime(() async {
       // A direct call's room is not among the groups: what reaches its call is told the same
       // way, by the call's group.
       for (final group in ['g', 'direct call']) {
@@ -203,7 +216,7 @@ void main() {
         );
         await call.setParticipants([_small, _large]);
         final events = StreamController<UiEvent>();
-        AppState('/nonexistent/fogata-outage-test')
+        final state = AppState('/nonexistent/fogata-outage-test')
           ..callState.call = call
           ..listenTo(events.stream);
         final made = net.madeBy(_small).length;
@@ -222,6 +235,8 @@ void main() {
           () => net.madeBy(_small).length > made,
           what: 'tried again in $group',
         );
+        // Let go of first: its events ending would say the network part stopped.
+        state.dispose();
         await events.close();
         net.calls.remove(_small);
       }
