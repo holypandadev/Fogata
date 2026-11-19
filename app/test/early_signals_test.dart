@@ -63,6 +63,17 @@ void main() {
     expect(fairSignal({'t': 'answer', 'sdp': 7}), isFalse);
   });
 
+  test('a state numbered other than by a whole number from 0 below 2^53 is '
+      'dropped', () {
+    expect(fairSignal({'t': 'state', 's': 0}), isTrue);
+    expect(fairSignal({'t': 'state', 's': 1763500000000}), isTrue);
+    expect(fairSignal({'t': 'state', 's': maxStateNumber - 1}), isTrue);
+    expect(fairSignal({'t': 'state', 's': 1.5}), isFalse);
+    expect(fairSignal({'t': 'state', 's': '1763500000000'}), isFalse);
+    expect(fairSignal({'t': 'state', 's': -1}), isFalse);
+    expect(fairSignal({'t': 'state', 's': maxStateNumber}), isFalse);
+  });
+
   test('candidates too long or for no channel of a call are dropped', () {
     const line =
         'candidate:842163049 1 udp 1677729535 192.0.2.7 50000 typ srflx raddr 0.0.0.0 '

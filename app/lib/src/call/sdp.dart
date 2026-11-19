@@ -398,6 +398,13 @@ bool fairSignal(Map<String, dynamic> message) {
   if (call != null && (call is! String || call.length > maxCallIdChars)) {
     return false;
   }
+  // The number of a state (see Call's `_stateNumber`): a time in milliseconds, which every
+  // copy reads exactly.
+  final number = message['s'];
+  if (number != null &&
+      (number is! int || number < 0 || number >= maxStateNumber)) {
+    return false;
+  }
   if (message['t'] == 'ice') return _fairCandidate(message);
   final sdp = message['sdp'];
   if (sdp == null) return true;
@@ -407,6 +414,10 @@ bool fairSignal(Map<String, dynamic> message) {
   return '\nm='.allMatches(sdp).length + (sdp.startsWith('m=') ? 1 : 0) <=
       maxSdpSections;
 }
+
+/// Above the largest number of a state taken in a signal: 2^53, the largest integer a
+/// double holds exactly.
+const maxStateNumber = 1 << 53;
 
 /// Longest call id taken in a signal.
 const maxCallIdChars = 32;
