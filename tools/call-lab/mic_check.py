@@ -133,8 +133,16 @@ elif check == "switch":
             problems.append(f"a records from {sorted(sources_at('a', quiet - 0.5))} before the switch")
         if sources_at("a", quiet + 2) != {"laba_quiet_mic"}:
             problems.append(f"a records from {sorted(sources_at('a', quiet + 2))} after switching to the quiet input")
-        if sources_at("a", tone + 2) != {"laba_mic"}:
-            problems.append(f"a records from {sorted(sources_at('a', tone + 2))} after switching back")
+        # 2 s after switching back, or, when the call ended and a's recording with it
+        # before that (b hears a again within half a second, and the copies then end),
+        # as its recording was just before it ended.
+        back_at = tone + 2
+        ended = next((t for t, s in recordings("a") if tone < t <= back_at and not s), None)
+        if ended is not None:
+            back_at = ended - 0.05
+            notes.append(f"a's recording ended {ended - tone:.2f} s after switching back: judged just before")
+        if sources_at("a", back_at) != {"laba_mic"}:
+            problems.append(f"a records from {sorted(sources_at('a', back_at))} after switching back")
         others = sources_between("a", 0, 1e12) - {"laba_mic", "laba_quiet_mic"}
         if others:
             problems.append(f"a recorded from other inputs too: {sorted(others)}")
