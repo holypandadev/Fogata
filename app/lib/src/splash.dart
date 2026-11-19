@@ -72,6 +72,11 @@ const _longDownload = Duration(minutes: 3);
 /// A download that stops moving for this long is left to go on behind the main window.
 const _stalled = Duration(seconds: 15);
 
+/// The time of day the splash goes by; tests put fake time in its place, with that of
+/// their timers.
+@visibleForTesting
+DateTime Function() splashClock = DateTime.now;
+
 /// After Fogata started (or found nothing to start): asks friends and the releases page
 /// for a newer version a few seconds at most, and installs one that is here or comes,
 /// which restarts Fogata; otherwise, once the splash showed long enough, it becomes the
@@ -95,7 +100,7 @@ Future<bool> finishSplash({
     if (failed == null) return false;
     if (failed.isNotEmpty) say(l10n.updateFailed(failed), error: true);
   }
-  final shown = DateTime.now().difference(shownAt);
+  final shown = splashClock().difference(shownAt);
   if (shown < _shortest) await Future<void>.delayed(_shortest - shown);
   splash
     ..leaving = true
@@ -140,17 +145,17 @@ Future<String?> _updateAtStart(
   // Friends answer as they connect, and the releases page in a moment: until a newer
   // version is found, or those asked said there is none, a few seconds at most.
   if (!on(coming)) {
-    final start = DateTime.now();
+    final start = splashClock();
     final until = start.add(_askFor);
     var asked = on({api.UiUpdateState.checking});
-    while (DateTime.now().isBefore(until)) {
+    while (splashClock().isBefore(until)) {
       await Future<void>.delayed(const Duration(milliseconds: 200));
       await updates.refresh();
       if (on({api.UiUpdateState.checking})) asked = true;
       if (on(coming) || (asked && on({api.UiUpdateState.upToDate}))) break;
       if (!asked &&
           !askFriends &&
-          DateTime.now().difference(start) > _checkStarts) {
+          splashClock().difference(start) > _checkStarts) {
         break;
       }
     }
@@ -159,7 +164,7 @@ Future<String?> _updateAtStart(
   // must update.
   if (on({api.UiUpdateState.downloading, api.UiUpdateState.verifying})) {
     splash.show(SplashStep.downloading);
-    final start = DateTime.now();
+    final start = splashClock();
     var progressAt = start;
     var last = -1;
     while (on({api.UiUpdateState.downloading, api.UiUpdateState.verifying})) {
@@ -173,7 +178,7 @@ Future<String?> _updateAtStart(
           null => null,
         }
         ..changed();
-      final now = DateTime.now();
+      final now = splashClock();
       if (done != last) {
         last = done;
         progressAt = now;

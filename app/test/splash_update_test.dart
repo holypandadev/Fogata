@@ -6,6 +6,8 @@ import 'package:fogata/src/splash.dart';
 import 'package:fogata/src/update.dart';
 import 'package:fogata/src/window.dart';
 
+import 'fake_time.dart';
+
 /// A core whose updater goes through [script]: the state it says at each moment since the
 /// splash asked it to check.
 class _Core implements RustLibApi {
@@ -15,12 +17,12 @@ class _Core implements RustLibApi {
 
   @override
   Future<void> crateApiUpdateCheckForUpdate() async {
-    asked = DateTime.now();
+    asked = splashClock();
   }
 
   @override
   Future<UiUpdate?> crateApiUpdateUpdateStatus() async {
-    final since = DateTime.now().difference(asked ?? DateTime.now());
+    final since = splashClock().difference(asked ?? splashClock());
     final state = script(since);
     final coming =
         state != UiUpdateState.upToDate && state != UiUpdateState.checking;
@@ -49,6 +51,16 @@ class _Core implements RustLibApi {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  final realSplashClock = splashClock;
+  tearDown(() => splashClock = realSplashClock);
+
+  /// Runs [body] in fake time, the splash's clock with it.
+  void inSplashTime(Future<void> Function() body) => inFakeTime((time) {
+    final start = DateTime(2026, 11, 19, 9);
+    splashClock = () => start.add(time.elapsed);
+    return body();
+  });
+
   final core = _Core();
   setUpAll(() => RustLib.initMock(api: core));
   var quits = 0;
@@ -73,7 +85,7 @@ void main() {
     updates: Updates(),
     started: true,
     askFriends: askFriends,
-    shownAt: DateTime.now(),
+    shownAt: splashClock(),
     say: (_, {error = false}) {},
     nameOf: (_) => null,
   );
@@ -90,7 +102,7 @@ void main() {
   // checked: the splash installs it and Fogata restarts into it.
   test(
     'a newer version found while checking is installed by the splash',
-    () async {
+    () => inSplashTime(() async {
       core.script = (since) => at(since, [
         (0, UiUpdateState.checking),
         (2500, UiUpdateState.downloading),
@@ -100,7 +112,7 @@ void main() {
       expect(core.installs, 1);
       await Future<void>.delayed(const Duration(milliseconds: 700));
       expect(quits, 1);
-    },
+    }),
   );
 
   // A newer version downloaded before (while Fogata ran) is found once what is kept on
@@ -128,17 +140,20 @@ void main() {
   });
 
   // A download that stops moving is left to go on behind the main window.
-  test('a download that stalls is not waited for', () async {
-    core.script = (since) => at(since, [
-      (0, UiUpdateState.checking),
-      (500, UiUpdateState.verifying),
-    ]);
-    final start = DateTime.now();
-    expect(await splash(), isTrue);
-    expect(core.installs, 0);
-    expect(
-      DateTime.now().difference(start),
-      lessThan(const Duration(seconds: 20)),
-    );
-  }, timeout: const Timeout(Duration(seconds: 40)));
+  test(
+    'a download that stalls is not waited for',
+    () => inSplashTime(() async {
+      core.script = (since) => at(since, [
+        (0, UiUpdateState.checking),
+        (500, UiUpdateState.verifying),
+      ]);
+      final start = splashClock();
+      expect(await splash(), isTrue);
+      expect(core.installs, 0);
+      expect(
+        splashClock().difference(start),
+        lessThan(const Duration(seconds: 20)),
+      );
+    }),
+  );
 }
