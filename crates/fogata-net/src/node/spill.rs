@@ -624,7 +624,8 @@ mod tests {
             assert_eq!(spill.kept.len(), live.len(), "{at}");
             assert!(
                 live.iter()
-                    .all(|(number, ..)| spill.kept.contains_key(number))
+                    .all(|(number, ..)| spill.kept.contains_key(number)),
+                "{at}: a message not let go is gone"
             );
         }
         for (number, id, size) in &live {
