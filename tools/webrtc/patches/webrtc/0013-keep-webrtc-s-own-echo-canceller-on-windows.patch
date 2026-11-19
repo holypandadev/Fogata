@@ -48,22 +48,45 @@ for any device: wrapper patch 0024's test records the first capture device so.
 InitPlayout has the same search and no such fallback, as before this patch: a render
 device that takes none of its formats still fails to start playout.
 
-Windows' own capture effects of a device (its driver's or Windows' "voice" processing)
-are not touched: they apply to a WASAPI stream as to any other application's.
+The fallback's format names its speakers (KSAUDIO_SPEAKER_MONO or _STEREO) for Windows'
+channel matrixer, which mixes a device with more channels down to them; the exact formats
+keep the mask 0 they had.
 
-Known and not settled: in the call rigs' check (tools of the PC-Windows call) the VM plays
-a steady tone on the cable that is also the Windows copy's microphone (the shared screen's
-sound). With the DMO that tone went out weakened and with the other side's voice coming
-back; with AEC3 it goes out alone and steady, and the Linux copy (AEC3 too) then held its
-own microphone down at a call's start or after an unmute: with the same 440 Hz tone on both
-sides 2 calls of 3 failed; with a 600 Hz tone in the VM 3 of 12 failed ("too little audio
-from Ana", its voice out 102 to 145 packets in 6 s instead of about 320) and an unmute took
-up to 20 s to be heard; with a speech-like signal as the Linux copy's microphone and the
-tone in the VM, 2 of 5 failed the same way; with a recorded voice played in the VM instead
-of a tone, 5 of 5 passed, every unmute heard within 0.3 s. The published library passed
-all 16 calls of those kinds. One call of 28 with this patch ended with the Windows copy
-crashing as a direct call hung up (a peer connection's Call used after its close, which
-wrapper patch 0023 fixes). No real Windows hardware was tried.
+The plain capture thread differs from the DMO's in two more ways, made as the DMO's:
+- It read the keyboard: KeyPressed() polls every key with GetAsyncKeyState every 10 ms
+  for a typing flag, a pattern security tools take for a key logger. The flag is now
+  false; in this branch the audio processing only writes it into its debug recordings
+  (AudioProcessingImpl's key_pressed reaches the AEC dump alone: no typing detection or
+  transient suppression uses it).
+- It ended the recording for good after 0.5 s without a capture event. It now waits on,
+  saying so in the log (at the first half second and every 10 s), and still ends at
+  once on the shutdown event; a stream that no longer works after a stall fails in
+  GetBuffer. The DMO's thread polled every 5 ms and never ended on a stall.
+A stream that fails (AUDCLNT_E_DEVICE_INVALIDATED: the device unplugged, its format
+changed in the Sound settings, the audio service restarted) still ends the capture
+thread, as a failing ProcessOutput ended the DMO's: the microphone stays silent (the
+application says it cannot use it after 8 s) until it is turned off and on again or
+another input is chosen; an input chosen by name that comes back elsewhere in the list is
+chosen again by the plugin (KeepRecordingDevice), the system's default is not. The same
+as with the DMO.
+
+Windows' capture effects (the driver's audio processing for the stream's category) apply
+to this stream as to any other default-category stream; the DMO opened the device in its
+own way. How a device's effects differ between the two is not known here: a laptop's
+built-in microphone, for one, may sound different. That is for the test on real
+hardware. And AEC3 removes only what this application plays: other applications' sound
+on the speakers is no longer taken out of the microphone (the DMO used the whole output
+mix as its reference), as on Linux and macOS.
+
+Known: in the PC-Windows call check the VM plays a steady tone on the cable that is also
+the Windows copy's microphone (the shared screen's sound). With a pure tone as the Windows
+copy's microphone the far side's echo canceller (AEC3 on Linux too) holds its own voice
+down at times, at a call's start or after an unmute: with a tone of another frequency
+than the far side's, 12 of 17 calls passed ("too little audio from Ana" the failure;
+unmutes heard up to 20 s late); with the same 440 Hz tone on both sides, 1 of 3. With a
+recorded voice in the VM instead, 31 of 31 calls passed, every unmute heard within 1 s.
+The published library passed all 16 calls with a tone. No real Windows hardware was
+tried.
 
 --- a/modules/audio_device/win/audio_device_core_win.cc
 +++ b/modules/audio_device/win/audio_device_core_win.cc
@@ -82,7 +105,7 @@ wrapper patch 0023 fixes). No real Windows hardware was tried.
  typedef struct tagTHREADNAME_INFO {
    DWORD dwType;      // must be 0x1000
    LPCSTR szName;     // pointer to name (in user addr space)
-@@ -2227,6 +2235,31 @@
+@@ -2227,6 +2235,35 @@
        break;
    }
  
@@ -96,6 +119,10 @@ wrapper patch 0023 fixes). No real Windows hardware was tried.
 +  if (hr != S_OK || _recConversionForTesting) {
 +    convert = true;
 +    Wfx.Format.nChannels = (pWfxIn && pWfxIn->nChannels == 1) ? 1 : 2;
++    // The speakers the channels are, which Windows' channel matrixer needs to
++    // mix a device with more channels down to these.
++    Wfx.dwChannelMask = Wfx.Format.nChannels == 1 ? KSAUDIO_SPEAKER_MONO
++                                                  : KSAUDIO_SPEAKER_STEREO;
 +    Wfx.Format.nSamplesPerSec = 48000;
 +    Wfx.Format.nBlockAlign =
 +        Wfx.Format.nChannels * Wfx.Format.wBitsPerSample / 8;
@@ -114,7 +141,7 @@ wrapper patch 0023 fixes). No real Windows hardware was tried.
    if (hr == S_OK) {
      _recAudioFrameSize = Wfx.Format.nBlockAlign;
      _recSampleRate = Wfx.Format.nSamplesPerSec;
-@@ -2254,9 +2287,12 @@
+@@ -2254,9 +2291,12 @@
        AUDCLNT_SHAREMODE_SHARED,  // share Audio Engine with other applications
        AUDCLNT_STREAMFLAGS_EVENTCALLBACK |  // processing of the audio buffer by
                                             // the client will be event driven
@@ -128,7 +155,7 @@ wrapper patch 0023 fixes). No real Windows hardware was tried.
        0,                    // required for event-driven shared mode
        0,                    // periodicity
        (WAVEFORMATEX*)&Wfx,  // selected wave format
-@@ -2601,8 +2637,28 @@
+@@ -2601,8 +2641,28 @@
    return 0;
  }
  
@@ -158,6 +185,54 @@ wrapper patch 0023 fixes). No real Windows hardware was tried.
  }
  
  // ----------------------------------------------------------------------------
+@@ -3078,6 +3138,8 @@
+ 
+ DWORD AudioDeviceWindowsCore::DoCaptureThread() {
+   bool keepRecording = true;
++  // Fogata: half seconds without a capture event since the last one.
++  int timeouts = 0;
+   HANDLE waitArray[2] = {_hShutdownCaptureEvent, _hCaptureSamplesReadyEvent};
+   HRESULT hr = S_OK;
+ 
+@@ -3178,10 +3240,24 @@
+         keepRecording = false;
+         break;
+       case WAIT_OBJECT_0 + 1:  // _hCaptureSamplesReadyEvent
++        if (timeouts > 0) {
++          RTC_LOG(LS_WARNING) << "capture events again after "
++                              << timeouts * 0.5 << " seconds without";
++          timeouts = 0;
++        }
+         break;
+       case WAIT_TIMEOUT:  // timeout notification
+-        RTC_LOG(LS_WARNING) << "capture event timed out after 0.5 seconds";
+-        goto Exit;
++        // Fogata: a device that stops delivering for a while (a Bluetooth
++        // headset's microphone starting, the computer suspended and resumed)
++        // is waited for, as the DMO's polling thread did, instead of ending the
++        // recording for good; the shutdown event still ends it at once, and a
++        // stream that no longer works fails in GetBuffer below.
++        timeouts++;
++        if (timeouts == 1 || timeouts % 20 == 0) {
++          RTC_LOG(LS_WARNING) << "no capture event for " << timeouts * 0.5
++                              << " seconds; still waiting";
++        }
++        continue;
+       default:  // unexpected error
+         RTC_LOG(LS_WARNING) << "unknown wait termination on capture side";
+         goto Exit;
+@@ -3265,7 +3341,10 @@
+                                                _recBlockSize);
+             _ptrAudioBuffer->SetVQEData(sndCardPlayDelay, sndCardRecDelay);
+ 
+-            _ptrAudioBuffer->SetTypingStatus(KeyPressed());
++            // Fogata: the keyboard is not read (KeyPressed() polls every key
++            // with GetAsyncKeyState); the audio processing only writes the flag
++            // into its debug recordings.
++            _ptrAudioBuffer->SetTypingStatus(false);
+ 
+             _UnLock();  // release lock while making the callback
+             _ptrAudioBuffer->DeliverRecordedData();
 --- a/modules/audio_device/win/audio_device_core_win.h
 +++ b/modules/audio_device/win/audio_device_core_win.h
 @@ -176,6 +176,13 @@
