@@ -76,10 +76,11 @@ class CallPeer {
   final List<String> _endedCalls = [];
   static const endedCallsKept = 8;
 
-  /// The number of the newest state taken from them; null before one, after their signals
-  /// named a new call of theirs ([Call._theirCall]), or from a copy that numbers none (see
-  /// 'state' in [Call._handle]).
-  int? _stateIn;
+  /// The newest state taken from them: the call of theirs it named (null from a copy that
+  /// names none) and its number. Null before one, after their signals named a new call of
+  /// theirs ([Call._theirCall]), or from a copy that numbers none (see 'state' in
+  /// [Call._handle]).
+  ({String? call, int number})? _stateIn;
 
   /// The first offer [connection] was made for, as their call and its number name it, and
   /// the answer sent to it: a copy of that offer gets the same answer again (see

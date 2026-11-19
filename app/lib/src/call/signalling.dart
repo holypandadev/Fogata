@@ -204,16 +204,27 @@ extension _Signalling on Call {
         // Their states in the order they told them: each signal goes on its own, and an
         // older one that arrives late would undo a newer (a screen shown as off, and no
         // longer watched here). One that names no number (from a copy before it) is taken.
+        // A state names the call of theirs it is from (`sc`): one from another call than
+        // the one their offers, answers and askings named is a late one of a call that
+        // ended, or one of their next call ahead of its offer (whose connection, once up,
+        // brings its state again). Numbers go on only within one call of theirs.
+        final call = message['sc'] is String ? message['sc'] as String : null;
+        final known = peer._theirCall;
+        if (call != null && known != null && call != known) {
+          _trace('state from another call of ${_short(from)}: dropped');
+          return;
+        }
         final number = message['s'];
         if (number is int) {
           final last = peer._stateIn;
-          if (last != null && number < last) {
+          if (last != null && last.call == call && number < last.number) {
             _trace(
-              'state $number from ${_short(from)} older than $last: dropped',
+              'state $number from ${_short(from)} older than ${last.number}: '
+              'dropped',
             );
             return;
           }
-          peer._stateIn = number;
+          peer._stateIn = (call: call, number: number);
         }
         final shared = peer.cam || peer.sharing;
         peer.mic = message['mic'] == true;
@@ -361,10 +372,11 @@ extension _Signalling on Call {
         .catchError((_) {});
   }
 
-  /// This device's state, numbered after every state it told before (see 'state' in
-  /// [_handle]).
+  /// This device's state, numbered after every state it told before and naming this call
+  /// (see 'state' in [_handle]); copies that do not know these fields leave them.
   Map<String, dynamic> get _state => {
     't': 'state',
+    'sc': _callId,
     's': _stateNumber = math.max(
       _stateNumber + 1,
       DateTime.now().millisecondsSinceEpoch,
