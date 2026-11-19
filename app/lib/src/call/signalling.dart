@@ -320,11 +320,12 @@ extension _Signalling on Call {
     }
     final before = peer._theirCall;
     peer._theirCall = theirs;
+    // The call they had when they last left the room, if this one is another: it ended.
+    final left = peer._callWhenLeft;
+    peer._callWhenLeft = null;
+    if (before == null && left != null && left != theirs) peer._ended(left);
     if (before == null || before == theirs) return true;
-    peer._endedCalls.add(before);
-    if (peer._endedCalls.length > CallPeer.endedCallsKept) {
-      peer._endedCalls.removeAt(0);
-    }
+    peer._ended(before);
     // Their new call numbers its states anew (see [Call._stateNumber]).
     peer._stateIn = null;
     _trace('${from.substring(0, 8)} has a new call; connecting anew');

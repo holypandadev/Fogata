@@ -76,6 +76,15 @@ class CallPeer {
   final List<String> _endedCalls = [];
   static const endedCallsKept = 8;
 
+  void _ended(String call) {
+    _endedCalls.add(call);
+    if (_endedCalls.length > endedCallsKept) _endedCalls.removeAt(0);
+  }
+
+  /// Their call when they last left the room during this call ([Call._left]): a signal of
+  /// another call of theirs says it ended, and a late one of it is then dropped.
+  String? _callWhenLeft;
+
   /// The newest state taken from them: the call of theirs it named (null from a copy that
   /// names none) and its number. Null before one, after their signals named a new call of
   /// theirs ([Call._theirCall]), or from a copy that numbers none (see 'state' in

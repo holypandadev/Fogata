@@ -1977,6 +1977,14 @@ class Call extends ChangeNotifier {
 
   // ----- Participants and signals -----
 
+  /// The calls of each participant that left the room while this call went on, as their
+  /// signals named them: the one they had then and those that ended before it. Someone who
+  /// comes back with another call has that one ended, and a late signal of it (an offer, an
+  /// answer, an asking) is dropped rather than taken for a newer call that ends theirs. The
+  /// last [leftKept] to leave; a new call of this device starts with none.
+  final Map<String, ({String? call, List<String> ended})> _left = {};
+  static const leftKept = 64;
+
   /// [letting], the letting go of a participant that left, kept in [_leaving] until done.
   Future<void> _whileLeaving(Future<void> letting) {
     late final Future<void> tracked;
@@ -2008,6 +2016,10 @@ class Call extends ChangeNotifier {
       // changes one after the other, and an earlier one may get here after a later one).
       if (peers.containsKey(id) || !_early.isParticipant(id)) continue;
       final peer = CallPeer(id)..voiceless = _voiceless.contains(id);
+      if (_left.remove(id) case (:final call, :final ended)) {
+        peer._callWhenLeft = call;
+        peer._endedCalls.addAll(ended);
+      }
       peers[id] = peer;
       await peer._prepare();
       // The call ended, or the participant left, while its pictures were made ready: what
@@ -2113,6 +2125,11 @@ class Call extends ChangeNotifier {
   /// waits for them.
   Future<void> _letGoOf(List<CallPeer> left) async {
     await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
+    for (final peer in left) {
+      _left.remove(peer.id);
+      _left[peer.id] = (call: peer._theirCall, ended: [...peer._endedCalls]);
+      if (_left.length > leftKept) _left.remove(_left.keys.first);
+    }
     for (final gone in left.map((peer) => peer.id)) {
       _showScreenOut(gone, null);
       final until = DateTime.now().add(_backWithin);
