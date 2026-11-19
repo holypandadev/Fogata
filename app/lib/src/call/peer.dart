@@ -12,8 +12,8 @@ class _Asked {
   String call;
   Map<String, dynamic> message;
 
-  /// Times asked, and the wait before the next time.
-  int tries = 1;
+  /// Times asked, and the wait before the next time; none once the tries are over.
+  int tries = 0;
   Timer? wait;
 }
 
@@ -107,7 +107,8 @@ class CallPeer {
   /// say nothing, and their signals of another call are taken as they come.
   bool _answersWhich = false;
 
-  /// The question asked of them, while its answer is awaited ([Call._askWhich]).
+  /// The question asked of them, while its answer is awaited ([Call._askWhich]); kept once
+  /// no longer asked, as its answer is still taken, until the call known changes.
   _Asked? _asked;
 
   /// Their call when they last left the room during this call ([Call._left]): a signal of
@@ -137,9 +138,9 @@ class CallPeer {
   @visibleForTesting
   List<String> get endedCalls => List.unmodifiable(_endedCalls);
 
-  /// A `which` asked of them waits for its answer, for tests.
+  /// A `which` is being asked of them, for tests.
   @visibleForTesting
-  bool get asking => _asked != null;
+  bool get asking => _asked?.wait != null;
 
   /// [connection]'s offer or answer went while the link to them was down, or it was left
   /// waiting to be agreed when the link went ([Call.memberGone]): its signals went nowhere,

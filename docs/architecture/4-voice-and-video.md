@@ -184,13 +184,15 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   token made after it was sent, so only that answer decides: the call held is taken (and
   its signal handled as it came) when the answer names it; when it names the call known,
   the one held is older and ended; another, and that is their call now, connected to
-  anew. Every change of the call known drops the question, so an answer made before the
-  change cannot undo it. This costs a call that is really new one question and its
+  anew. Every change of the call known drops the question, and a signal of yet another
+  call held meanwhile gets a question of its own, so an answer made before that call or
+  that change cannot undo it. This costs a call that is really new one question and its
   answer (two signals' time) when a call of theirs is known; nothing is asked when none
   is (the room showed them gone, or this side just started). One question at a time per
-  participant, asked again every 3 s with the same token, five times at most: with no
-  answer the call known is kept and the signal held dropped (a new call goes on offering
-  or asking, which asks again); the participant is shown as it was meanwhile. Signals
+  participant (one held signal, the latest), asked every 3 s with the same token, five
+  times: with no answer meanwhile the call known is kept, and an answer that comes later
+  is still taken (a new call goes on offering or asking, which asks the same again); the
+  participant is shown as it was meanwhile. Signals
   come from the device they name (the network layer takes the sender from the member
   connection that brought them), so a member can make others ask, or answer, only about
   its own calls. Copies that do not answer say nothing of it: those that do mark their

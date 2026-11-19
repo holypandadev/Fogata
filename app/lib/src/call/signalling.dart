@@ -440,42 +440,46 @@ extension _Signalling on Call {
   /// Asks [peer] which call of theirs is the one now (`which`, with a token made for the
   /// question), holding [message], which named their call [theirs] and not the one known.
   /// A late signal cannot carry the token, and their answer (`this`) names the call they
-  /// have once they read the question. One question at a time: a signal of another call
-  /// meanwhile is held in place of the one before. Asked again every [Call.whichEvery], up
-  /// to [Call.whichTries] times; with no answer at all the call known is kept, and the
-  /// signal held is dropped (a new call of theirs that is real goes on offering or asking,
-  /// which asks again).
+  /// have once they read the question. One question at a time: a later signal of the same
+  /// call is held in place of the one before, under the same question; one of another
+  /// call gets a question of its own, as an answer to the one before may have been made
+  /// before that call began. Asked every [Call.whichEvery], [Call.whichTries] times; with
+  /// no answer meanwhile the call known is kept, and an answer that comes later is still
+  /// taken (a new call of theirs that is real goes on offering or asking, which asks the
+  /// same again).
   void _askWhich(CallPeer peer, String theirs, Map<String, dynamic> message) {
     final asked = peer._asked;
-    if (asked != null) {
-      asked
-        ..call = theirs
-        ..message = message;
+    if (asked != null && asked.call == theirs) {
+      asked.message = message;
+      if (asked.wait == null) {
+        asked.tries = 0;
+        _askWhichNow(peer, asked);
+      }
       return;
     }
+    asked?.wait?.cancel();
     final question = peer._asked = _Asked(Call._newCallId(), theirs, message);
     _trace(
       '${message['t']} from another call of ${_short(peer.id)}: '
       'asking which is theirs now',
     );
-    _signal(peer.id, {'t': 'which', 'k': question.token});
-    _askWhichAgain(peer, question);
+    _askWhichNow(peer, question);
   }
 
-  void _askWhichAgain(CallPeer peer, _Asked question) {
+  void _askWhichNow(CallPeer peer, _Asked question) {
+    question.tries++;
+    _signal(peer.id, {'t': 'which', 'k': question.token});
     question.wait = Timer(Call.whichEvery, () {
       if (_closed || peers[peer.id] != peer || peer._asked != question) return;
       if (question.tries >= Call.whichTries) {
         _trace(
-          'no answer from ${_short(peer.id)} on which call is theirs: '
+          'no answer yet from ${_short(peer.id)} on which call is theirs: '
           'the one known kept',
         );
-        peer._asked = null;
+        question.wait = null;
         return;
       }
-      question.tries++;
-      _signal(peer.id, {'t': 'which', 'k': question.token});
-      _askWhichAgain(peer, question);
+      _askWhichNow(peer, question);
     });
   }
 

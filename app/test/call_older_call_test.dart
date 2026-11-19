@@ -233,6 +233,53 @@ void main() {
   );
 
   test(
+    'an answer made before a newer call of theirs was held does not end that '
+    'call',
+    () => inNetTime(() async {
+      final (small, large) = await connected();
+      // Answers are held up on their way.
+      net.delay(
+        (from, to, message) => message['t'] == 'this',
+        const Duration(seconds: 4),
+        times: 100,
+      );
+      await late(small, _large, 'again', '0123456789abcdef');
+      await until(
+        () => net.sent.any((s) => s.type == 'this'),
+        what: 'the answer sent',
+      );
+      // Then their device starts again: its new call's asking is held in place of the
+      // late one, and the answer on its way names the call that just ended.
+      await large.stop();
+      final back = net.add(
+        Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+      );
+      await back.setParticipants([_small, _large]);
+      await until(() => up(small, back), what: 'connected to the new call');
+      await Future<void>.delayed(const Duration(seconds: 10));
+      expect(up(small, back), isTrue);
+      final peer = small.peers[_large]!;
+      expect(peer.theirCall, callOf(back));
+      expect(peer.endedCalls, isNot(contains(callOf(back))));
+    }),
+  );
+
+  test(
+    'an answer that comes after the questions stopped is still taken',
+    () => inNetTime(() async {
+      final (small, _) = await connected();
+      // Each answer takes longer than all the questions together.
+      net.delay(
+        (from, to, message) => message['t'] == 'this',
+        Call.whichEvery * Call.whichTries + const Duration(seconds: 2),
+        times: 100,
+      );
+      final (back, _) = await comesBack(small, heardLeaving: false);
+      expect(small.peers[_large]!.theirCall, callOf(back));
+    }),
+  );
+
+  test(
     'both sides asking at once each answer, and both stay connected',
     () => inNetTime(() async {
       final (small, large) = await connected();
