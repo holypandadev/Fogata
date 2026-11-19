@@ -184,6 +184,20 @@ extension _ScreenSound on Call {
       );
       return;
     }
+    // A copy of the offer [peer._soundIn] answered (the sharer offers it again while its
+    // answer is on the way): answered anew, the connection the sharer agrees on would be
+    // closed here.
+    final answered = peer._soundAnswered;
+    if (answered != null &&
+        answered.on == peer._soundIn &&
+        answered.offer == sdp) {
+      _trace(
+        'screen sound from ${_short(peer.id)} answered already: '
+        'its answer sent again',
+      );
+      _signal(peer.id, {'t': 'sound-answer', 'sdp': answered.answer});
+      return;
+    }
     await peer._closeSoundIn();
     final connection = await createPeerConnection(_network(peer.id));
     if (_closed || peers[peer.id] != peer || peer._keptOut) {
@@ -215,6 +229,7 @@ extension _ScreenSound on Call {
       ),
     );
     if (peer._soundIn == connection) {
+      peer._soundAnswered = (offer: sdp, on: connection, answer: mine);
       _signal(peer.id, {'t': 'sound-answer', 'sdp': mine});
     }
   }

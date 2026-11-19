@@ -237,9 +237,14 @@ class CallPeer {
   @visibleForTesting
   set soundConnection(RTCPeerConnection? connection) => _soundIn = connection;
 
+  /// The offer [_soundIn] was made for and the answer sent to it: a copy of that offer
+  /// gets the same answer again. Kept while [_soundIn] is that connection.
+  ({String offer, RTCPeerConnection on, String answer})? _soundAnswered;
+
   Future<void> _closeSoundIn() async {
     final c = _soundIn;
     _soundIn = null;
+    _soundAnswered = null;
     if (c != null) await closeConnection(c);
   }
 
