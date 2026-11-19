@@ -223,8 +223,13 @@ Future<void> beforeQuitting(
 }) async {
   Future<void>? leaving;
   Future<void> leave() => leaving ??= () async {
+    // Gone from the screen at once; the network may take a moment more to let go of what
+    // this device just said in a room (up to 2 s, then its connections close).
     try {
-      await before().timeout(const Duration(seconds: 3));
+      await windowManager.hide();
+    } catch (_) {}
+    try {
+      await before().timeout(const Duration(seconds: 5));
     } catch (_) {}
     // The window's errors of the last second wait to be noted: on the disk before it goes.
     try {

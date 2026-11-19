@@ -1770,9 +1770,9 @@ class AppState extends ChangeNotifier {
   }
 
   /// Leaves the room shown and goes home.
-  /// Before the application quits: ends the call and leaves the room, gives the message a
-  /// moment to go out, and closes every connection, so the others see this device go at
-  /// once.
+  /// Before the application quits: ends the call and leaves the room, and closes every
+  /// connection, so the others see this device go at once. The network lets what this
+  /// device just said in the room (the leave too) go out first, for a moment at most.
   Future<void> leaveBeforeQuit() async {
     final group = contacts.joinedGroup?.id;
     final direct = callState.activeCall?.groupId;
@@ -1782,9 +1782,6 @@ class AppState extends ChangeNotifier {
       // A direct call hangs up, which also leaves its room.
       if (direct != null) await api.endCall(groupId: direct);
       if (group != null) await api.leaveRoom(groupId: group);
-      if (direct != null || group != null) {
-        await Future<void>.delayed(const Duration(milliseconds: 400));
-      }
       await api.shutdown();
     } catch (_) {}
   }
