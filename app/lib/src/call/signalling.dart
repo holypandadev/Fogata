@@ -318,6 +318,14 @@ extension _Signalling on Call {
       );
       return false;
     }
+    // An answer to an earlier offer of this side says nothing of the call they have now (a
+    // call of theirs that answered it late may have ended since); it is dropped below.
+    final number = message['n'];
+    if (message['t'] == 'answer' &&
+        number is int &&
+        number != peer._offerNumber) {
+      return true;
+    }
     final before = peer._theirCall;
     peer._theirCall = theirs;
     // The call they had when they last left the room, if this one is another: it ended.
