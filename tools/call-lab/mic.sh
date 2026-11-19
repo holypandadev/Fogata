@@ -34,6 +34,14 @@
 #            loop of its own meanwhile); b must hear it without a muting and unmuting
 #   quit     a quits the application as it enters the room with its microphone on, after
 #            QUIT_AFTER ms (default 0); it must end by itself within 15 s, without a crash
+#   term     a enters the room with its microphone on, b listens; TERM_AFTER ms (default
+#            0) after a is in the call and b has seen it there (0: as soon as a enters)
+#            mic.sh sends a's process the signal SIGNAL (TERM unless set, as
+#            `SIGNAL=INT mic.sh term:1500`). Judged (mic_check.py): a ends by itself
+#            within 12 s of it, with status 0; nothing of it records after; and b
+#            (which logs every change of what it sees of the room, b-sees.log) sees it leave
+#            the room within 5 s, as at its own leaving, not only once its presence runs
+#            out, and never loses sight of it before the signal
 #   devices  a lists its sound devices as the settings do around the settings' microphone
 #            test, before a call and after it ends, 20 tests and its microphone unplugged
 #            and plugged in again: its own must stay listed; and after the 20 tests the
@@ -152,7 +160,7 @@
 #            (with down20 or gone): a's microphone is off as the server goes and turned on
 #            while it is away; it must record once the server is back all the same
 # Usage: tools/call-lab/mic.sh <check>...   (default: all of them but unmute; quit with QUIT_AFTER=0,
-#        300 and 1500, restart as pulse, all, down20 and gone). Build first as for
+#        300 and 1500, term with TERM_AFTER=1500, restart as pulse, all, down20 and gone). Build first as for
 #        measure.sh. Prints PASS or FAIL for each and the run folders; exits non-zero when
 #        one failed.
 set -uo pipefail
@@ -316,6 +324,34 @@ if [ "${1:-}" = --inside ]; then
         echo "ended with status $? at $(now)" > "$RUN/quit.txt"
       fi
       ;;
+    term)
+      # To the application's own process (lab_copy's env runs it in its place).
+      apid=$(cat "$RUN/a.pid")
+      signal=${SIGNAL:-TERM}
+      mark=mark-a-in-call
+      [ "${TERM_AFTER:-0}" = 0 ] && mark=mark-a-entering
+      if ! wait_mark "$mark" 900; then
+        echo "a never got to $mark" > "$RUN/term.txt"
+      # Not before b has seen a in the room, or its leaving could not be told.
+      elif [ "${TERM_AFTER:-0}" != 0 ] && ! wait_mark mark-b-a-there 120; then
+        echo "b never saw a in the room within 120 s of a's in-call" > "$RUN/term.txt"
+      else
+        sleep "$(awk -v ms="${TERM_AFTER:-0}" 'BEGIN { print ms / 1000 }')"
+        signalled=$(now)
+        echo "$signalled" > "$M/signalled"
+        kill -"$signal" "$apid" 2>/dev/null
+        while kill -0 "$apid" 2>/dev/null && [ "$(now)" -lt $((signalled + 12000)) ]; do sleep 0.1; done
+        if kill -0 "$apid" 2>/dev/null; then
+          echo "still running 12 s after SIG$signal" > "$RUN/term.txt"
+          lab_kill "$apid" "$BUNDLE" KILL
+        else
+          wait "$apid"
+          echo "ended with status $? at $(now)" > "$RUN/term.txt"
+        fi
+        # What b saw of it, a moment after.
+        for _ in $(seq 60); do tail -n 1 "$M/b-sees.log" 2>/dev/null | grep -q ' gone ' && break; sleep 0.1; done
+      fi
+      ;;
     unmute)
       if [ "$copies" = 3 ]; then lab_wait "a b c" 1800; else lab_wait "a b" 1800; fi
       lab_unmute_stop
@@ -328,7 +364,7 @@ if [ "${1:-}" = --inside ]; then
 fi
 
 checks=("$@")
-[ ${#checks[@]} -gt 0 ] || checks=(muted switch quiet-switch unplug late alone devices media rejoin echo noise broken alsa hang quit:0 quit:300 quit:1500 restart:pulse restart:all restart:down20 restart:gone)
+[ ${#checks[@]} -gt 0 ] || checks=(muted switch quiet-switch unplug late alone devices media rejoin echo noise broken alsa hang quit:0 quit:300 quit:1500 term:1500 restart:pulse restart:all restart:down20 restart:gone)
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 [ -x "$BUNDLE" ] || { echo "no build at $BUNDLE" >&2; exit 1; }
@@ -338,6 +374,7 @@ for check in "${checks[@]}"; do
   if [ "$name" != "$check" ]; then
     case "$name" in
       quit) export QUIT_AFTER=${check#*:} ;;
+      term) export TERM_AFTER=${check#*:} ;;
       restart) export RESTART_HOW=${check#*:} ;;
       unmute)
         # The judged forms: b holds a tone, a's words 0.5 to 12.5 s after each unmute.
@@ -363,6 +400,7 @@ for check in "${checks[@]}"; do
   mkdir -p "$RUN"
   echo "mic $check, $(git -C "$REPO" describe --always --dirty), started $(date -Is)" > "$RUN/settings.txt"
   [ "${LAB_FIXED_QUANTUM:-1}" = 0 ] && echo "LAB_FIXED_QUANTUM=0" >> "$RUN/settings.txt"
+  [ "$name" = term ] && echo "TERM_AFTER=${TERM_AFTER:-0} SIGNAL=${SIGNAL:-TERM}" >> "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
   [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_FAR_FILE=${UNMUTE_FAR_FILE:+given} UNMUTE_ROOM=${UNMUTE_ROOM:-} UNMUTE_ROOM_AFTER=${UNMUTE_ROOM_AFTER:-} UNMUTE_ROOM_AT=${UNMUTE_ROOM_AT:-} UNMUTE_UNPLUG=${UNMUTE_UNPLUG:-} UNMUTE_COPIES=${UNMUTE_COPIES:-} UNMUTE_REJOIN=${UNMUTE_REJOIN:-} UNMUTE_WORDS_START=${UNMUTE_WORDS_START:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   [ "$name" = unmute ] && echo "${UNMUTE_OFFS:-2 10 60}" > "$RUN/offs.txt"

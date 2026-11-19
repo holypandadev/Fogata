@@ -2,11 +2,12 @@
 (recordings.log), the moments the copies and mic.sh wrote to meet/, and the copies'
 results. Prints PASS or FAIL with the reasons; exits 1 on a failure.
 
-Usage: mic_check.py <run folder> <muted|switch|quiet-switch|unplug|late|alone|devices|media|rejoin|echo|noise|broken|alsa|hang|quit|restart>
+Usage: mic_check.py <run folder> <muted|switch|quiet-switch|unplug|late|alone|devices|media|rejoin|echo|noise|broken|alsa|hang|quit|term|restart>
 """
 
 import json
 import math
+import os
 import pathlib
 import re
 import struct
@@ -1135,8 +1136,65 @@ elif check == "quit":
             problems.append(f"something of a records after it ended: {sorted(late)}")
         recorded = sources_between("a", 0, 1e12)
         notes.append(f"a recorded from {sorted(recorded) or 'nothing'} before it ended")
+elif check == "term":
+    signalled = moment("signalled")
+    text = (run / "term.txt").read_text().strip() if (run / "term.txt").exists() else "no signal"
+    notes.append(text)
+    # Counted from where mic.sh started its wait (TERM_AFTER, from in-call; 0, from entering).
+    since = "entering" if os.environ.get("TERM_AFTER", "0") == "0" else "in-call"
+    if signalled is not None and moment(f"mark-a-{since}") is not None:
+        notes.append(f"signalled {1000 * (signalled - moment(f'mark-a-{since}')):.0f} ms after a's {since}")
+    if signalled is None:
+        problems.append(f"a was never signalled: {text}: {result('a')}")
+    elif not text.startswith("ended with status 0 "):
+        problems.append(text)
+    else:
+        ended = int(text.split()[-1]) / 1000
+        notes.append(f"ended {1000 * (ended - signalled):.0f} ms after the signal")
+        late = sources_between("a", ended + 0.5, 1e12, unlinked=True)
+        if late:
+            problems.append(f"something of a records after it ended: {sorted(late)}")
+        recorded = sources_between("a", 0, 1e12)
+        notes.append(f"a recorded from {sorted(recorded) or 'nothing'} before it ended")
+    # A copy that leaves in order is gone from b's room at once; one that died, only once
+    # its presence runs out, well past this. b logs every change of what it sees.
+    path = meet / "b-sees.log"
+    seen = []  # (seconds, there, the line)
+    for line in path.read_text().splitlines() if path.exists() else []:
+        fields = line.split()
+        if len(fields) >= 2 and fields[0].isdigit():
+            seen.append((int(fields[0]) / 1000, fields[1] == "there", line))
+    first = next((i for i, (_, there, _) in enumerate(seen) if there), None)
+    if signalled is not None:
+        if first is None or seen[first][0] > signalled:
+            why = "b had not seen a in the room when it was signalled: its leaving is not judged"
+            # Signalled as it enters (term:0), it may not be there yet.
+            (notes if os.environ.get("TERM_AFTER", "0") == "0" else problems).append(why)
+        else:
+            # Each time b lost sight of a before the signal: what b sees is what is judged.
+            for i in range(first + 1, len(seen)):
+                at, there, _ = seen[i]
+                if there or at >= signalled or seen[i - 1][1] is False:
+                    continue
+                back = next((t for t, again, _ in seen[i + 1:] if again), None)
+                how_long = f"for {1000 * (back - at):.0f} ms" if back is not None else "for good"
+                problems.append(
+                    f"b lost sight of a in the room {1000 * (signalled - at):.0f} ms before the signal, {how_long}:\n"
+                    + "\n".join(f"    {line}" for _, _, line in seen[max(0, i - 2):i + 3])
+                )
+            # The leave judged: the first of the last changes to gone, none there after it.
+            last = max(i for i, (_, there, _) in enumerate(seen) if there)
+            at = seen[last + 1][0] if last + 1 < len(seen) else None
+            if at is None:
+                problems.append("b never saw a leave the room")
+            elif at < signalled:
+                pass  # told above, as lost before the signal for good
+            elif at - signalled > 5:
+                problems.append(f"b saw a leave {1000 * (at - signalled):.0f} ms after the signal (over 5 s): not in order")
+            else:
+                notes.append(f"b saw a leave {1000 * (at - signalled):.0f} ms after the signal")
 
-if check != "quit":
+if check not in ("quit", "term"):
     for role in ("a", "b"):
         if result(role) != "passed":
             problems.append(f"{role}: {result(role)}")

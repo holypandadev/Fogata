@@ -208,7 +208,7 @@ jobs:
         timeout-minutes: 120
         run: |
           failed=0
-          for check in media devices alone late muted unplug switch broken hang noise; do
+          for check in media devices alone late muted unplug switch broken hang noise term:1500; do
             echo "::group::mic.sh $check"
             if tools/call-lab/mic.sh "$check" | tee "$RUNNER_TEMP/mic.out"; then
               echo "mic $check|pass|" >> "$PARTS"
@@ -390,7 +390,7 @@ jobs:
           # Every part that should have been there.
           expected=("release build" "release checks of the bundle" "native tests"
             "profile build of the call test" "debug build of the call test")
-          for check in media devices alone late muted unplug switch broken hang noise; do
+          for check in media devices alone late muted unplug switch broken hang noise term:1500; do
             expected+=("mic $check")
           done
           expected+=("mic late (quantum free)" "mic rejoin (profile)" "screen sound with a loopback"

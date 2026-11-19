@@ -84,7 +84,8 @@ job of about 40 minutes: a clean release build checked as `tools/beta/release.py
 (`tools/beta/ci_builds.py check-build linux`), the video plugin's native tests, the call
 test built as a profile and as a debug build, and then, in the call lab
 (`tools/call-lab`, with `LOAD_MAX=9` and its own display `:172`), the microphone checks
-`media devices alone late muted unplug switch broken hang noise` on the debug build and
+`media devices alone late muted unplug switch broken hang noise term:1500` on the debug
+build (`term`: a SIGTERM must make the copy leave the room in order and end by itself) and
 `late` again with PipeWire's quantum left free (`LAB_FIXED_QUANTUM=0`, a part of its own),
 `unmute:headset` and `unmute:speakers` (a part of their own, with ffmpeg making the room's
 sound: the other side holds a tone while the microphone is turned off and on; with a headset

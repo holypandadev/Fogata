@@ -444,7 +444,11 @@ void main() {
       await _call(tester);
       File('$_dir/$_role-result.txt').writeAsStringSync('passed\n');
     } catch (e, trace) {
-      File('$_dir/$_role-result.txt').writeAsStringSync('failed: $e\n$trace\n');
+      // mic.sh term: the signal sent to copy a quits the application under its test.
+      if (_env['FOGATA_TEST_MIC_CASE'] != 'term' || _role != 'a') {
+        File('$_dir/$_role-result.txt')
+            .writeAsStringSync('failed: $e\n$trace\n');
+      }
       rethrow;
     }
   });
@@ -602,12 +606,21 @@ Future<void> _call(WidgetTester tester) async {
       seconds: 300,
     );
   }
+  // mic.sh term: a is signalled from the moment it enters, or once in the call, and b
+  // notes what it sees of the room throughout. mic.sh judges both and ends them, so each
+  // result says only that it took part; a's is not turned into a failure as the signal
+  // ends it under its test (see main).
+  final term = _env['FOGATA_TEST_MIC_CASE'] == 'term';
+  if (term) File('$_dir/$_role-result.txt').writeAsStringSync('term\n');
+  if (term && _role == 'a') _mark('entering');
+  if (term && _role == 'b') unawaited(_seeLeaving(state));
   await state.openRoom(state.contacts.groups.first.id);
   if (const ['broken', 'alsa', 'hang'].contains(_env['FOGATA_TEST_MIC_CASE'])) {
     await _noSoundServer(tester, state, _env['FOGATA_TEST_MIC_CASE']!);
     return;
   }
   await _until(tester, 'in the call', () => state.callState.call != null);
+  if (term && _role == 'a') _mark('in-call');
   if (_env['FOGATA_TEST_MIC_CASE'] == 'alone' && _role == 'a') {
     // Alone in the call a while, as when the others join later: the call reads this
     // device's own level through a loop of its own meanwhile (AloneLevel). Copy b enters
@@ -4684,6 +4697,41 @@ void _mark(String event) {
   _log('mark $event');
 }
 
+/// Copy b in mic.sh term: notes in b-sees.log every change of what it sees of the room,
+/// until the copy ends, one line each: the time in ms, there or gone, `room=` null or its
+/// start (`,joined` once joined), `participants=` each `name:id` (`*` after its own); and
+/// marks when it first sees another (a-there). A copy that leaves in order is gone from the
+/// room at its own event; one that died, only once its presence runs out.
+Future<void> _seeLeaving(AppState state) async {
+  final log = File('$_dir/b-sees.log');
+  var seen = '';
+  var there = false;
+  while (true) {
+    final room = state.roomState.room;
+    final people = [
+      for (final p in room?.participants ?? const <UiParticipant>[])
+        '${p.person.name}:${p.person.id.substring(0, 8)}${p.me ? '*' : ''}',
+    ];
+    final now = [
+      room?.participants.any((p) => !p.me) ?? false ? 'there' : 'gone',
+      'room=${room == null ? 'null' : '${room.startedMs}${room.joined ? ',joined' : ''}'}',
+      'participants=${people.join(',')}',
+    ].join(' ');
+    if (now != seen) {
+      seen = now;
+      log.writeAsStringSync(
+        '${DateTime.now().millisecondsSinceEpoch} $now\n',
+        mode: FileMode.append,
+      );
+      if (!there && now.startsWith('there')) {
+        there = true;
+        _mark('a-there');
+      }
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+}
+
 /// Waits for a file that whatever runs the copies writes to FOGATA_CALL.
 Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
     _until(
@@ -4707,6 +4755,8 @@ Future<void> _rig(WidgetTester tester, String name, {int seconds = 120}) =>
 ///   meanwhile is logged.
 /// - broken, alsa, hang: see [_noSoundServer].
 /// - quit: see [_quitWhileOpening]; copy b only waits for a to go.
+/// - term: both stay in the call until they are ended: a by mic.sh's signal, which must
+///   make it leave in order, b by mic.sh once done; b notes a leaving ([_seeLeaving]).
 /// - devices: see [_listedAfterCall]; copy b only stays in the call.
 /// - rejoin: see [_rejoin].
 /// - echo: see [_echo].
@@ -4889,6 +4939,8 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
     case 'quit':
       // Copy a quits on its own while entering; nothing more to do here.
       break;
+    case 'term':
+      await _wait(tester, const Duration(minutes: 10));
     case 'devices':
       if (_role == 'a') await _listedAfterCall(tester, state);
     case 'media':
