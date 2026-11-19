@@ -140,10 +140,14 @@ if [[ $unsafe_uses != "$expected_unsafe" ]]; then
     exit 1
 fi
 # Nothing changes the process's environment once it has threads, which read it unlocked
-# (docs/architecture/5d-desktop-application.md, on the start). Rust's own calls need an
-# unsafe block, pinned above; these are the helpers of libraries that change it on the way.
-# The runners' native code changes it at one place only, before any thread starts.
-env_changes=$(find crates -name '*.rs' ! -name frb_generated.rs -print0 | LC_ALL=C sort -z |
+# (docs/architecture/5d-desktop-application.md, on the start). The project's own and vendored
+# Rust names none of Rust's calls that change it (safe code in the vendored crates' edition
+# 2021, which the unsafe count above does not see) nor the helpers of libraries that change it
+# on the way; the native code of the runners and plugins changes it at one place only, before
+# any thread starts. What a dependency does inside itself is not seen here: the start's test
+# (the_start_leaves_the_environment_alone) is.
+env_changes=$(find crates vendor -name '*.rs' ! -name frb_generated.rs -print0 |
+    LC_ALL=C sort -z |
     xargs -0 awk '
         { sub(/\/\/.*/, "") }
         /(^|[^A-Za-z0-9_])(set_var|remove_var|setup_default_user_utils|setup_backtrace|connect_to_env)([^A-Za-z0-9_]|$)/ {
@@ -151,8 +155,9 @@ env_changes=$(find crates -name '*.rs' ! -name frb_generated.rs -print0 | LC_ALL
         }')
 native_env_changes=$(grep -rE \
     '(^|[^A-Za-z0-9_])(setenv|unsetenv|putenv|_putenv|_putenv_s|_wputenv|_wputenv_s|SetEnvironmentVariable[AW]?|g_setenv|g_unsetenv|clearenv)[[:space:]]*\(' \
-    app/linux app/macos app/windows app/third_party --include='*.c' --include='*.cc' \
-    --include='*.cpp' --include='*.h' --include='*.m' --include='*.mm' --include='*.swift' |
+    app/linux app/macos app/windows app/packages app/third_party --include='*.c' \
+    --include='*.cc' --include='*.cpp' --include='*.h' --include='*.m' --include='*.mm' \
+    --include='*.swift' |
     grep -v '/test/' | LC_ALL=C sort || true)
 if [[ -n $env_changes ||
     $native_env_changes != 'app/linux/runner/main.cc:  setenv("PIPEWIRE_ALSA", props.c_str(), 0);' ]]; then

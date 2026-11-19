@@ -461,14 +461,21 @@ as the engine's raster thread does while it sets up its graphics. The Rust side'
 (`init_app`, which the window calls as it draws its first frame) therefore leaves out the
 bridge's `setup_default_user_utils`, which set `RUST_BACKTRACE` when it was missing; a debug
 build's panic hook takes the backtrace itself, whatever the environment says, and writes
-the panic's frames to the log after the panic's line (`logs::report_panics`). A release
-build has no symbols, so it writes none. A panic in a call reaches the window with what it
-said, without a backtrace. That helper's other part, a macOS logger for the `log` crate, is
-left out too: it sent those lines to the system's log unscrubbed, and kept them from the
-days' log. The only change of the environment is the Linux runner's `PIPEWIRE_ALSA` (the
-sounds' stream, above), set in `main` before any thread starts; `tools/check.sh` refuses
-any other, and a test (`the_start_leaves_the_environment_alone`) runs the start in a copy
-of itself without `RUST_BACKTRACE` and compares the whole environment before and after.
+the panic's frames to the log after the panic's line, once the log is started
+(`logs::report_panics`). A release build has no symbols, so it writes none. A panic in a
+call reaches the window with what it said, without a backtrace. Without the variable, an
+`anyhow` error no longer takes a backtrace as it is made: the bridge hands the window the
+core's errors as their `{:?}` (`frb_generated.rs`), which then ended in a "Stack backtrace"
+with the absolute paths of the sources: the window shows only the first line, and the day's
+log, where the window noted one, took it all, scrubbed. That helper's other part, a macOS
+logger for the `log` crate, is left out too: it sent those lines to the system's log
+unscrubbed, and kept them from the days' log. The only change of the environment is the
+Linux runner's `PIPEWIRE_ALSA` (the sounds' stream, above), set in `main` before any thread
+starts. `tools/check.sh` refuses any other in the project's own and vendored code: a Rust
+call that changes it or a library's helper known to, and a native one in the runners and
+plugins. What a dependency does inside itself it cannot see; a test
+(`the_start_leaves_the_environment_alone`) runs the start in a copy of itself without
+`RUST_BACKTRACE` and compares the whole environment before and after.
 
 The window has no system title bar: the application's header is the title bar (dragging
 its empty parts moves the window, a double click maximizes it). On Windows and Linux it ends

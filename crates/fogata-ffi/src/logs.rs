@@ -255,7 +255,9 @@ fn report_panic(info: &std::panic::PanicHookInfo<'_>, err: &mut dyn Write) {
     }
     let message = info.payload_as_str().unwrap_or("(not text)");
     tracing::error!("panicked at {place}: {message}");
-    if cfg!(debug_assertions) {
+    // Only when a log takes the line (none before the core starts it): taking a backtrace
+    // reads the debug information, which holds the thread that panicked for a moment.
+    if cfg!(debug_assertions) && tracing::enabled!(tracing::Level::ERROR) {
         // A line of its own, so a long message does not crowd it out of a line's length.
         let backtrace = std::backtrace::Backtrace::force_capture().to_string();
         tracing::error!("backtrace of the panic above:\n{}", frames(&backtrace));
@@ -854,7 +856,9 @@ mod tests {
 
     /// A panic in a call of the screens goes to a debug build's log with its backtrace, taken
     /// whether or not `RUST_BACKTRACE` asks for one (nothing sets it: see `init_app`),
-    /// scrubbed as the rest of the log is.
+    /// scrubbed as the rest of the log is. A debug build's only: a release build has no
+    /// symbols, and writes no backtrace.
+    #[cfg(debug_assertions)]
     #[test]
     fn a_panic_in_a_call_goes_to_the_log_with_its_backtrace() {
         use flutter_rust_bridge::{
