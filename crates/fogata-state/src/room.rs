@@ -64,6 +64,11 @@ pub const MAX_SHARES_EACH: usize = 100;
 const EARLIER_ROOM_MS: u64 = 10 * 60 * 1000;
 /// Other ids of one room kept; merging more forgets the oldest.
 const MAX_ALIASES: usize = 8;
+/// Files stopped being shared that a room remembers, by holder, with when: a share sent
+/// before and arriving after (sent again after it seemed lost, or among events asked for
+/// again) does not list the file again. Past this the oldest is forgotten; all go with the
+/// room. A few KiB at most.
+const MAX_UNSHARED: usize = 256;
 
 /// The biggest first picture of a video a room keeps; a bigger one is left out.
 pub const MAX_THUMB_BYTES: usize = 64 * 1024;
@@ -225,6 +230,9 @@ pub struct Room<S> {
     /// Chat lines let go to keep this device's memory within a bound (see
     /// [`RoomTracker::forget_chat`]), newest last: a copy that comes again is not taken.
     forgotten: VecDeque<[u8; 16]>,
+    /// When each holder last stopped sharing a file, by its own clock (see
+    /// [`MAX_UNSHARED`]).
+    unshared: BTreeMap<([u8; 32], DevicePublicKey), u64>,
 }
 
 impl<S> Room<S> {
@@ -240,11 +248,27 @@ impl<S> Room<S> {
             chat_records: VecDeque::new(),
             share_records: BTreeMap::new(),
             forgotten: VecDeque::new(),
+            unshared: BTreeMap::new(),
         }
     }
 
     fn has_id(&self, id: &RoomId) -> bool {
         self.id == *id || self.aliases.contains(id)
+    }
+
+    /// Remembers that `device` stopped sharing file `id` at `at_ms` by its own clock.
+    fn note_unshared(&mut self, id: [u8; 32], device: DevicePublicKey, at_ms: u64) {
+        let at = self.unshared.entry((id, device)).or_default();
+        *at = (*at).max(at_ms);
+        if self.unshared.len() > MAX_UNSHARED
+            && let Some(oldest) = self
+                .unshared
+                .iter()
+                .min_by_key(|(_, t)| **t)
+                .map(|(k, _)| *k)
+        {
+            self.unshared.remove(&oldest);
+        }
     }
 
     /// Takes `device` off the holders of file `id`; the file goes away when nobody has it.
@@ -703,6 +727,8 @@ impl<S: Clone> RoomTracker<S> {
                 {
                     return changes;
                 }
+                // Also when the share is not here (yet): it may come after.
+                room.note_unshared(id, sender, event.timestamp_ms);
                 room.drop_holder(id, sender, &mut changes);
             }
             RoomInput::Share(mut info) => {
@@ -710,6 +736,15 @@ impl<S: Clone> RoomTracker<S> {
                     return changes;
                 };
                 if earlier_room {
+                    return changes;
+                }
+                // Sent before its holder stopped sharing it: no longer shared. Its holder's
+                // events have distinct times, each later than the one before.
+                if room
+                    .unshared
+                    .get(&(info.id, sender))
+                    .is_some_and(|at| *at >= event.timestamp_ms)
+                {
                     return changes;
                 }
                 // Its picture counts whole, as sent, even when too big to show.
@@ -1833,6 +1868,50 @@ mod tests {
         let c = t.apply(event(room, ana, 5, RoomInput::Unshare(info.id)), 6, 5);
         assert!(c.contains(&RoomChange::FileGone { file: info }));
         assert!(t.room().unwrap().files.is_empty());
+    }
+
+    /// A share that comes after its holder stopped sharing the file, sent before (again,
+    /// after it seemed lost, or among a room's events asked for again), does not list the
+    /// file again, whether the share was there before the unshare or not; a later share
+    /// does. Remembered unshares are bounded, the oldest forgotten first.
+    #[test]
+    fn a_share_older_than_its_unshare_does_not_list_the_file_again() {
+        let (ana, bea) = (key(), key());
+        let mut t: RoomTracker<u32> = RoomTracker::new(ana);
+        let room = [7; 16];
+        t.apply(event(room, ana, 0, join("Ana", 0)), 1, 0);
+        t.apply(event(room, bea, 0, join("Bea", 0)), 2, 0);
+        let file = |n: u8| FileInfo {
+            id: [n; 32],
+            name: "notes.txt".into(),
+            size: 12,
+            video: None,
+        };
+        let shared = |t: &RoomTracker<u32>, n: u8| t.room().unwrap().files.contains_key(&[n; 32]);
+        // Shared, stopped, then the share again.
+        t.apply(event(room, bea, 1, RoomInput::Share(file(1))), 3, 1);
+        t.apply(event(room, bea, 2, RoomInput::Unshare([1; 32])), 4, 2);
+        let c = t.apply(event(room, bea, 1, RoomInput::Share(file(1))), 3, 3);
+        assert!(c.is_empty(), "{c:?}");
+        assert!(!shared(&t, 1));
+        // The unshare first, the share it ends after.
+        t.apply(event(room, bea, 5, RoomInput::Unshare([2; 32])), 5, 5);
+        t.apply(event(room, bea, 4, RoomInput::Share(file(2))), 6, 6);
+        assert!(!shared(&t, 2));
+        // Shared again later: listed.
+        t.apply(event(room, bea, 6, RoomInput::Share(file(1))), 7, 7);
+        assert!(shared(&t, 1));
+        // Another holder's share of the same file is its own.
+        t.apply(event(room, ana, 1, RoomInput::Share(file(2))), 8, 8);
+        assert!(shared(&t, 2));
+        // Bounded: past MAX_UNSHARED the oldest unshares are forgotten.
+        for n in 0..(MAX_UNSHARED as u64 + 10) {
+            let mut id = [0; 32];
+            id[..8].copy_from_slice(&n.to_le_bytes());
+            id[31] = 9;
+            t.apply(event(room, bea, 100 + n, RoomInput::Unshare(id)), 9, 9);
+        }
+        assert_eq!(t.room().unwrap().unshared.len(), MAX_UNSHARED);
     }
 
     #[test]
