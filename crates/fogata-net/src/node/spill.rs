@@ -558,48 +558,79 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// xorshift64.
+    struct Rng(u64);
+
+    impl Rng {
+        fn below(&mut self, n: u64) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0 % n
+        }
+    }
+
     /// Messages of every size coming and going over many rounds: the file is never longer
-    /// than the most pages taken at once, every page is either free or a message's, and once
-    /// all are let go each page was freed once (a page freed twice fails `give_back`) and
-    /// the file is empty.
+    /// than the most pages taken at once, every page is either free or one kept message's,
+    /// the messages kept are those not let go and read back as written (none, when the last
+    /// round let all go), and once all are let go each page was freed once (a page freed
+    /// twice fails `give_back`) and the file is empty. The same rounds every run:
+    /// `FOGATA_SPILL_SEED` sets another seed (1 by default).
     #[test]
     fn the_file_stays_within_its_bound_through_churn() {
-        let random = |below: u64| {
-            let mut bytes = [0u8; 8];
-            fogata_crypto::random_bytes(&mut bytes).unwrap();
-            u64::from_le_bytes(bytes) % below
-        };
+        let seed = std::env::var("FOGATA_SPILL_SEED")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1u64);
+        let mut rng = Rng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1);
         let dir = dir("churn");
         let mut spill = Spill::open(dir.clone()).unwrap();
-        let mut live: Vec<u64> = Vec::new();
+        // Each message kept: its number, and what it was made of.
+        let mut live: Vec<(u64, u8, usize)> = Vec::new();
         let mut peak = 0;
         for round in 0..2_000u32 {
-            if random(3) > 0 || live.is_empty() {
-                let size = 100 + random(120_000) as usize;
+            if rng.below(3) > 0 || live.is_empty() {
+                let size = 100 + rng.below(120_000) as usize;
                 let number = spill.put(&message(round as u8, size)).unwrap();
-                live.push(number);
+                live.push((number, round as u8, size));
                 peak = peak.max(spill.pages_taken());
             } else {
                 // Some let go, as rooms let shares go between slots.
-                live.retain(|_| random(4) > 0);
-                spill.keep_only(&live.iter().copied().collect());
+                live.retain(|_| rng.below(4) > 0);
+                spill.keep_only(&live.iter().map(|(number, ..)| *number).collect());
             }
+            let at = format!("seed {seed}, round {round}");
             let (file, _) = spill.bytes();
             assert!(
                 file / PAGE as u64 <= peak,
-                "{file} bytes, {peak} pages at most"
+                "{at}: {file} bytes, {peak} pages at most"
             );
-            let free: u64 = spill.free.values().map(|c| u64::from(*c)).sum();
-            let taken: u64 = spill
+            let mut owners = vec![0u8; spill.end as usize];
+            let runs = spill.free.iter().map(|(first, count)| (*first, *count));
+            let taken = spill
                 .kept
                 .values()
-                .flat_map(|(_, runs)| runs.iter())
-                .map(|(_, c)| u64::from(*c))
-                .sum();
-            assert_eq!(free + taken, u64::from(spill.end));
+                .flat_map(|(_, runs)| runs.iter().copied());
+            for (first, count) in runs.chain(taken) {
+                assert!(first + count <= spill.end, "{at}: a page past the end");
+                for page in first..first + count {
+                    owners[page as usize] = owners[page as usize].saturating_add(1);
+                }
+            }
+            assert!(
+                owners.iter().all(|n| *n == 1),
+                "{at}: a page both free and taken, or neither"
+            );
+            assert_eq!(spill.kept.len(), live.len(), "{at}");
+            assert!(
+                live.iter()
+                    .all(|(number, ..)| spill.kept.contains_key(number))
+            );
         }
-        let last = *live.last().unwrap();
-        assert!(spill.read(last).is_ok());
+        for (number, id, size) in &live {
+            let read = spill.read(*number).unwrap();
+            assert!(same(&read, &message(*id, *size)), "seed {seed}: {number}");
+        }
         spill.keep_only(&HashSet::new());
         assert_eq!(spill.bytes(), (0, 0));
         assert!(spill.free.is_empty());
