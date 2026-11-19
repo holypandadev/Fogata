@@ -2,29 +2,20 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/app_state.dart';
 import 'package:fogata/src/outgoing_send.dart';
 import 'package:fogata_video/fogata_video.dart';
 
-/// Runs [body] in fake time, the clock of the video turns with it: a reading's 20 ms and
-/// a wait's 200 ms are then what they say, however busy the computer is.
-void inFakeTime(Future<void> Function() body) {
-  fakeAsync((time) {
+import 'fake_time.dart';
+
+/// Runs [body] in fake time ([inFakeTime]), the clock of the video turns with it: a
+/// reading's 20 ms and a wait's 200 ms are then what they say, however busy the computer
+/// is.
+Future<void> inVideoTime(Future<void> Function() body) {
+  return inFakeTime((time) async {
     videoProbeClock = () => time.elapsed;
-    var done = false;
-    Object? error;
-    StackTrace? trace;
-    body().then(
-      (_) => done = true,
-      onError: (Object e, StackTrace t) {
-        (error, trace, done) = (e, t, true);
-      },
-    );
-    time.elapse(const Duration(minutes: 1));
-    if (error != null) Error.throwWithStackTrace(error!, trace!);
-    expect(done, isTrue, reason: 'it ended within a minute of fake time');
+    await body();
     // Every reading ended, so every turn is back: none is left to the next test.
     expect(videoTurnsHeld, 0, reason: 'turns still held');
   });
@@ -278,7 +269,7 @@ void main() {
   test(
     'videos are read two at a time in the whole application, a turn held until the '
     'system is done',
-    () => inFakeTime(() async {
+    () => inVideoTime(() async {
       videoProbeTime = const Duration(milliseconds: 200);
       var running = 0, most = 0;
       final hung = Completer<void>();
@@ -336,7 +327,7 @@ void main() {
 
   test(
     'readings that never end give their turns back after a while, once',
-    () => inFakeTime(() async {
+    () => inVideoTime(() async {
       videoProbeTime = const Duration(milliseconds: 200);
       videoProbeHeldMost = const Duration(milliseconds: 400);
       var running = 0, most = 0;
