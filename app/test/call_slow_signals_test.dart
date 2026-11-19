@@ -177,6 +177,38 @@ void main() {
     });
   }
 
+  for (final answersCopies in [true, false]) {
+    test(
+      'a first offer with no answer goes again '
+      '${answersCopies ? 'as it is' : 'anew to a copy before this one'}',
+      () async {
+        net = FakeNet()..install();
+        await inCallTime(() async {
+          // The other device's call is not here: nothing answers.
+          final small = net.add(
+            Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+          );
+          await small.setParticipants([_small, _large]);
+          // Its asking, as a copy before this one sends it (naming its call, saying
+          // nothing of copies) or as this one does.
+          await small.handleSignal(_large, {
+            't': 'again',
+            'c': 'first',
+            if (answersCopies) 'w': 1,
+          });
+          await Future<void>.delayed(const Duration(seconds: 6));
+          final numbers = [
+            for (final s in net.sent)
+              if (s.type == 'offer') s.message['n'],
+          ];
+          expect(numbers, hasLength(2));
+          expect(numbers.toSet(), hasLength(answersCopies ? 1 : 2));
+          expect(net.madeBy(_small), hasLength(answersCopies ? 1 : 2));
+        }, stop: net.stop);
+      },
+    );
+  }
+
   test('an offer that arrives after its copy changes nothing', () async {
     net = FakeNet()..install();
     await inCallTime(() async {

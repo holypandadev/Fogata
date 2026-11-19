@@ -156,53 +156,58 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   be sent and handled), a new offer at each try threw away the one whose answer was on
   its way, and a pair took 25 to 50 s, up to two minutes, to connect; now one offer and
   its answer, however slow, as long as the answer comes within the 15 s. A copy of a lost
-  offer does what a new one did, at the same moment. When the core loses its link with a participant (a
-  network change, a short outage) and has it again, a connection with it that is not up
+  offer does what a new one did, at the same moment. Copies before this one (0.1.0-beta.11
+  and before) answer a copy anew, on a new end of theirs, and the first answer would then
+  be set on a connection whose other end is closed: a participant whose signals say
+  nothing of copies (see `w` below) gets a new offer at each try as before. One heard from
+  not at all yet gets a copy, which costs such an older copy, when its answer takes more
+  than 5 s, one more round of 15 to 20 s. When the core loses its link with a participant
+  (a network change, a short outage) and has it again, a connection with it that is not up
   and whose offer or answer went while the link was down, or was still being agreed when
   it went, is tried again at once (the smaller id offers, the other asks), rather than
   after its tries ran out; one made after the link came back is not, so the two sides'
   tries do not undo each other, and a whole network coming back tries each participant
   once. A participant that leaves and enters again at once may be named in every list of
-  participants the application reads meanwhile: the room's own event that it left lets
-  its connection go at once, and each call has an id of its own, named in its offers,
-  answers and askings, so a participant whose signals name another call than its
-  connection was made with (it left and came back, or its application started again
-  faster than WebRTC finds a connection dead) gets a new connection at once, and what its
-  ended call still sends is dropped. The call a participant had when it left the room is
-  kept while this call goes on (the last 64 to leave), so that a late signal of it, after
-  the participant came back with another, is dropped too rather than taken for a newer
-  call. An answer names a new call only when it answers this side's latest offer (it was
-  made after that offer, by the call they had then). An offer or an asking that names
-  another call than the one known may also be a late one of an older call this side does
-  not remember (both sides made their calls anew within seconds, as this side's memory
-  of who left starts empty with its new call; or more than 8 of their calls ended): taken
-  as theirs, it ended the call they have, every later signal of that one was dropped, and
-  the pair stayed unable to connect until one of them left the room or started again. So
-  such a signal is held, and the sender is asked which call it has now (`which`, with a
-  random token made for the question); its answer (`this`) carries the token back and
-  names the call it has as it reads the question (`now`). A late signal cannot carry a
-  token made after it was sent, so only that answer decides: the call held is taken (and
-  its signal handled as it came) when the answer names it; when it names the call known,
-  the one held is older and ended; another, and that is their call now, connected to
-  anew. Every change of the call known drops the question, and a signal of yet another
-  call held meanwhile gets a question of its own, so an answer made before that call or
-  that change cannot undo it. This costs a call that is really new one question and its
-  answer (two signals' time) when a call of theirs is known; nothing is asked when none
-  is (the room showed them gone, or this side just started). One question at a time per
-  participant (one held signal, the latest), asked every 3 s with the same token, five
-  times: with no answer meanwhile the call known is kept, and an answer that comes later
-  is still taken (a new call goes on offering or asking, which asks the same again); the
-  participant is shown as it was meanwhile. Signals
-  come from the device they name (the network layer takes the sender from the member
-  connection that brought them), so a member can make others ask, or answer, only about
-  its own calls. Copies that do not answer say nothing of it: those that do mark their
-  offers, answers and askings (`w`), and a participant whose signals never did
-  (0.1.0-beta.11 and before) has a signal of another call taken at once as before, with the
-  same weakness, until it is updated. Still not covered: a participant who goes out and
-  back with the same call and whose first signal naming a call after it came back is a
+  participants the application reads meanwhile: the room's own event that it left lets its
+  connection go at once, and each call has an id of its own, named in its offers, answers
+  and askings, so a participant whose signals name another call than its connection was
+  made with (it left and came back, or its application started again faster than WebRTC
+  finds a connection dead) gets a new connection at once, and what its ended call still
+  sends is dropped. The call a participant had when it left the room is kept while this
+  call goes on (the last 64 to leave), so that a late signal of it, after the participant
+  came back with another, is dropped too rather than taken for a newer call. An answer
+  names a new call only when it answers this side's latest offer (it was made after that
+  offer, by the call they had then). An offer or an asking that names another call than
+  the one known may also be a late one of an older call this side does not remember (both
+  sides made their calls anew within seconds, as this side's memory of who left starts
+  empty with its new call; or more than 8 of their calls ended): taken as theirs, it ended
+  the call they have, every later signal of that one was dropped, and the pair stayed
+  unable to connect until one of them left the room or started again. So such a signal is
+  held, and the sender is asked which call it has now (`which`, with a random token made
+  for the question); its answer (`this`) carries the token back and names the call it has
+  as it reads the question (`now`). A late signal cannot carry a token made after it was
+  sent, so only that answer decides: the call held is taken (and its signal handled as it
+  came) when the answer names it; when it names the call known, the one held is older and
+  ended; another, and that is their call now, connected to anew. Every change of the call
+  known drops the question, and a signal of yet another call held meanwhile gets a
+  question of its own, so an answer made before that call or that change cannot undo it.
+  This costs a call that is really new one question and its answer (two signals' time)
+  when a call of theirs is known; nothing is asked when none is (the room showed them
+  gone, or this side just started). One question at a time per participant (one held
+  signal, the latest), asked every 3 s with the same token, five times: with no answer
+  meanwhile the call known is kept, and an answer that comes later is still taken (a new
+  call goes on offering or asking, which asks the same again); the participant is shown as
+  it was meanwhile. Signals come from the device they name (the network layer takes the
+  sender from the member connection that brought them), so a member can make others ask,
+  or answer, only about its own calls. Copies that do not answer say nothing of it: those
+  that do mark their offers, answers and askings (`w`, which also says they answer a copy
+  of an offer with the answer it had), and a participant whose signals never did
+  (0.1.0-beta.11 and before) has a signal of another call taken at once as before, with
+  the same weakness, until it is updated. Still not covered: a participant who goes out
+  and back with the same call and whose first signal naming a call after it came back is a
   late one of an older call not remembered (that one is taken, and the call they have is
-  taken for ended). Each signal goes on its own, with no
-  order between two, and may come twice: a copy of the first offer a connection was made
+  taken for ended). Each signal goes on its own, with no order between two, and may come
+  twice: a copy of the first offer a connection was made
   for (the same call and number), or of a screen's sound offer already answered, gets the
   same answer again and leaves the connection as it is. Only the room's participants get
   a connection: a signal from a member that is not in the room is dropped, and one that

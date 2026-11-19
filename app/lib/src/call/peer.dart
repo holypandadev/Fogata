@@ -103,9 +103,11 @@ class CallPeer {
     if (_endedCalls.length > endedCallsKept) _endedCalls.removeAt(0);
   }
 
-  /// Their signals say they answer a `which` ([Call._askWhich]); those of copies before it
-  /// say nothing, and their signals of another call are taken as they come.
-  bool _answersWhich = false;
+  /// Their signals say they answer a `which` ([Call._askWhich]), and a copy of an offer
+  /// with the answer it had ([Call._watch]); those of copies before it say nothing, their
+  /// signals of another call are taken as they come, and they get no copies. Null while
+  /// none of their signals that name a call came.
+  bool? _answersWhich;
 
   /// The question asked of them, while its answer is awaited ([Call._askWhich]); kept once
   /// no longer asked, as its answer is still taken, until the call known changes.

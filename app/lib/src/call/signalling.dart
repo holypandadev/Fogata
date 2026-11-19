@@ -92,10 +92,15 @@ extension _Signalling on Call {
             // An offer still waiting for its answer goes again as it is: it may only be
             // slow on its way, or its answer on theirs, and a new one would throw that
             // negotiation away; a copy of a lost one does what a new one would. One that
-            // cannot be agreed any more is made anew.
+            // cannot be agreed any more is made anew, and so is one to a copy whose
+            // signals say nothing of answering a copy with the answer it gave (copies
+            // before it make their end anew, and the offer's first answer would be set on
+            // this one). With nothing heard from them yet it goes as a copy: the offer
+            // most likely went before they could take it, or is slow on its way.
             final out = peer._offerOut;
             final made = peer._madeAt;
-            if (out != null &&
+            if (peer._answersWhich != false &&
+                out != null &&
                 out.on == peer.connection &&
                 peer._offering &&
                 !peer._described &&
@@ -367,7 +372,12 @@ extension _Signalling on Call {
   ) async {
     final theirs = message['c'];
     if (theirs is! String) return true;
-    if (message['w'] == 1) peer._answersWhich = true;
+    // A late signal of a call before an update says nothing of the copy they run now.
+    if (message['w'] == 1) {
+      peer._answersWhich = true;
+    } else {
+      peer._answersWhich ??= false;
+    }
     if (peer._endedCalls.contains(theirs)) {
       _trace(
         '${message['t']} from an ended call of ${from.substring(0, 8)}: dropped',
@@ -386,7 +396,7 @@ extension _Signalling on Call {
     if (before != null &&
         before != theirs &&
         message['t'] != 'answer' &&
-        peer._answersWhich) {
+        peer._answersWhich == true) {
       _askWhich(peer, theirs, message);
       return false;
     }
