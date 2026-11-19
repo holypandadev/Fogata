@@ -287,7 +287,9 @@ void main() {
         } while (depth > 0);
         final arguments = source.substring(call.end, end - 1);
         if (arguments.contains('maxBytes')) {
-          given.add('${file.path}: ${call[1]}(${arguments.trim()})');
+          // The same path on every system: Windows lists with its own separator.
+          final path = file.path.replaceAll(r'\', '/');
+          given.add('$path: ${call[1]}(${arguments.trim()})');
         }
       }
     }
