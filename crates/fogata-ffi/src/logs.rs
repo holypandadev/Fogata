@@ -225,8 +225,11 @@ where
 /// error from the start of the core on), and only where in the code one happened on standard
 /// error itself: a panic's message may carry a path or a value, and Rust's own report prints
 /// it as it is on standard error, which may end in the system's journal. A debug build with
-/// [`RAW_VARIABLE`] set keeps Rust's report. Set before anything else takes the hook (the
-/// bridge's, which keeps the backtrace for the application, then hands each panic on here).
+/// [`RAW_VARIABLE`] set keeps Rust's report (with a backtrace when `RUST_BACKTRACE` asked for
+/// one before the start). A debug build's log has the panic's backtrace too ([`frames`]),
+/// taken whatever the environment says: the process's environment is never changed to ask
+/// for one (see `init_app`). A release build has no symbols (`strip` in Cargo.toml), so a
+/// backtrace would name no function of it.
 pub(crate) fn report_panics() {
     if cfg!(debug_assertions) && std::env::var_os(RAW_VARIABLE).is_some() {
         return;
@@ -252,7 +255,44 @@ fn report_panic(info: &std::panic::PanicHookInfo<'_>, err: &mut dyn Write) {
     }
     let message = info.payload_as_str().unwrap_or("(not text)");
     tracing::error!("panicked at {place}: {message}");
+    if cfg!(debug_assertions) {
+        // A line of its own, so a long message does not crowd it out of a line's length.
+        let backtrace = std::backtrace::Backtrace::force_capture().to_string();
+        tracing::error!("backtrace of the panic above:\n{}", frames(&backtrace));
+    }
     REPORTING.with(|r| r.set(false));
+}
+
+/// The most frames of a backtrace the log takes.
+const FRAMES: usize = 40;
+
+/// The functions of a backtrace (as `Backtrace` writes one), one a line, from the code that
+/// panicked on: the frames above it (the taking of the backtrace, the report, Rust's panic)
+/// and the files (which the scrubbing takes out) left out.
+fn frames(backtrace: &str) -> String {
+    let names: Vec<&str> = backtrace
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("at "))
+        .collect();
+    let panicking = |name: &str| {
+        [
+            "panicking::",
+            "rust_begin_unwind",
+            "__rust_end_short_backtrace",
+        ]
+        .iter()
+        .any(|part| name.contains(part))
+    };
+    // The first run of Rust's panic frames: the next frame is the code that panicked.
+    let from = names.iter().position(|n| panicking(n)).map_or(0, |first| {
+        first + names[first..].iter().take_while(|n| panicking(n)).count()
+    });
+    names[from..]
+        .iter()
+        .take(FRAMES)
+        .copied()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// What a panic said (its payload), without what is personal, as the log has it: for the
@@ -809,6 +849,58 @@ mod tests {
             log.contains("panicked at") && log.contains("no answer"),
             "{log}"
         );
+        assert!(!log.contains(PEER), "{log}");
+    }
+
+    /// A panic in a call of the screens goes to a debug build's log with its backtrace, taken
+    /// whether or not `RUST_BACKTRACE` asks for one (nothing sets it: see `init_app`),
+    /// scrubbed as the rest of the log is.
+    #[test]
+    fn a_panic_in_a_call_goes_to_the_log_with_its_backtrace() {
+        use flutter_rust_bridge::{
+            BaseCodec, Handler as _,
+            for_generated::{FfiCallMode, SseCodec, TaskInfo},
+        };
+        use tracing_subscriber::prelude::*;
+        type Message = <SseCodec as BaseCodec>::Message;
+        let _hook = HOOK.lock().unwrap_or_else(|e| e.into_inner());
+        let log = Sink::default();
+        let writer = log.clone();
+        let subscriber = tracing_subscriber::registry().with(scrubbed_layer(
+            move || writer.clone(),
+            EnvFilter::new("error"),
+            false,
+        ));
+        let before = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|info| report_panic(info, &mut io::sink())));
+        let info = TaskInfo {
+            debug_name: "test",
+            port: None,
+            mode: FfiCallMode::Sync,
+        };
+        // A call on the window's thread runs on this one, which logs to the subscriber above.
+        tracing::subscriber::with_default(subscriber, || {
+            crate::api::FLUTTER_RUST_BRIDGE_HANDLER
+                .wrap_sync::<SseCodec, _>(info, || -> Result<Message, Message> {
+                    panic!("no answer from {PEER}")
+                })
+        });
+        std::panic::set_hook(before);
+        let log = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+        let (_, backtrace) = log
+            .split_once("backtrace of the panic above:\n")
+            .unwrap_or_else(|| panic!("no backtrace in:\n{log}"));
+        // From the code that panicked on (this test's call), which the bridge ran.
+        let first = backtrace.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("a_panic_in_a_call_goes_to_the_log_with_its_backtrace"),
+            "{backtrace}"
+        );
+        assert!(
+            backtrace.contains("fogata_ffi::bridge::scrubbed"),
+            "{backtrace}"
+        );
+        assert!(!backtrace.contains("report_panic"), "{backtrace}");
         assert!(!log.contains(PEER), "{log}");
     }
 

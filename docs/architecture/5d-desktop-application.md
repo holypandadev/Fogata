@@ -454,6 +454,22 @@ most 10240): desktop apps on macOS get 256. The network keeps about 50 open in n
 (DHT nodes are reached over QUIC and their connections close soon, see 3.2); the higher
 limit leaves room for calls, files and bursts of TCP connections.
 
+Nothing changes the process's environment once it has threads: the C library's
+`getenv` (glibc's, and in principle macOS's and Windows' too) walks the environment without
+a lock, and a change can move that array and free the old one under a thread reading it,
+as the engine's raster thread does while it sets up its graphics. The Rust side's start
+(`init_app`, which the window calls as it draws its first frame) therefore leaves out the
+bridge's `setup_default_user_utils`, which set `RUST_BACKTRACE` when it was missing; a debug
+build's panic hook takes the backtrace itself, whatever the environment says, and writes
+the panic's frames to the log after the panic's line (`logs::report_panics`). A release
+build has no symbols, so it writes none. A panic in a call reaches the window with what it
+said, without a backtrace. That helper's other part, a macOS logger for the `log` crate, is
+left out too: it sent those lines to the system's log unscrubbed, and kept them from the
+days' log. The only change of the environment is the Linux runner's `PIPEWIRE_ALSA` (the
+sounds' stream, above), set in `main` before any thread starts; `tools/check.sh` refuses
+any other, and a test (`the_start_leaves_the_environment_alone`) runs the start in a copy
+of itself without `RUST_BACKTRACE` and compares the whole environment before and after.
+
 The window has no system title bar: the application's header is the title bar (dragging
 its empty parts moves the window, a double click maximizes it). On Windows and Linux it ends
 with Fogata's own minimize, maximize/restore and close buttons; on macOS the content reaches
@@ -578,8 +594,9 @@ and other long hex their first six, fingerprints their short form, so the steps 
 device can still be followed. Fogata's own crates log ids, never names. Standard error,
 which a desktop session may keep in its journal, is scrubbed the same way at any level
 `RUST_LOG` asks for; only a debug build with `FOGATA_RAW_LOGS` set leaves the values as they
-are. A panic of the Rust side goes to the log as a scrubbed line, and standard error is
-told only where in the code it happened (`logs::report_panics`), not what it said. A panic
+are. A panic of the Rust side goes to the log as a scrubbed line (in a debug build with
+its backtrace's functions after it), and standard error is told only where in the code it
+happened (`logs::report_panics`), not what it said. A panic
 in a call of the screens (from the reading of its arguments, which the bridge does before
 the call runs, to the writing of its result), or in a task one waits for, reaches the window
 with what it said scrubbed the same way (`bridge.rs`), since the window may print it; so does

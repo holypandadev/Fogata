@@ -163,8 +163,8 @@ impl<E> std::fmt::Debug for ScrubbedPanics<E> {
 }
 
 /// Runs `f`, a panic in it going on with what it said scrubbed. Going on with
-/// [`resume_unwind`] calls no panic hook again: the panic was reported once, and the
-/// backtrace the bridge's hook kept for it stays the one sent.
+/// [`resume_unwind`] calls no panic hook again: the panic was reported once, with the
+/// backtrace of where it happened.
 fn scrubbed<R>(f: impl FnOnce() -> R) -> R {
     match catch_unwind(AssertUnwindSafe(f)) {
         Ok(r) => r,

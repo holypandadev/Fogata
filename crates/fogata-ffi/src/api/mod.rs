@@ -139,4 +139,51 @@ mod tests {
             assert!(!found.iter().any(|f| f == slow), "{slow} blocks the window");
         }
     }
+
+    /// The start (`init_app`, which the screens call as the window draws its first frame,
+    /// the engine's threads already reading the environment, unlocked) leaves the process's
+    /// environment as it was: a change may move the array those threads walk, and free the
+    /// old one under them. Run in a copy of this test without `RUST_BACKTRACE`, which the
+    /// bridge's default setup set when it was missing.
+    #[test]
+    fn the_start_leaves_the_environment_alone() {
+        const COPY: &str = "FOGATA_TEST_START_COPY";
+        if std::env::var_os(COPY).is_some() {
+            let before: Vec<_> = std::env::vars_os().collect();
+            super::app::init_app();
+            let after: Vec<_> = std::env::vars_os().collect();
+            // Rust's own report of the panic below, with what it said, in place of the
+            // start's.
+            drop(std::panic::take_hook());
+            // The names alone: a test's output may be public, and values may be secret.
+            let changed: Vec<_> = before
+                .iter()
+                .chain(&after)
+                .filter(|pair| before.contains(pair) != after.contains(pair))
+                .map(|(name, _)| name)
+                .collect();
+            assert!(
+                before == after,
+                "the start changed the environment: {changed:?}"
+            );
+            return;
+        }
+        let copy = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "api::tests::the_start_leaves_the_environment_alone",
+                "--nocapture",
+            ])
+            .env(COPY, "1")
+            .env_remove("RUST_BACKTRACE")
+            .env_remove("RUST_LIB_BACKTRACE")
+            .output()
+            .unwrap();
+        let out = String::from_utf8_lossy(&copy.stdout);
+        assert!(
+            copy.status.success() && out.contains("1 passed"),
+            "{out}{}",
+            String::from_utf8_lossy(&copy.stderr)
+        );
+    }
 }

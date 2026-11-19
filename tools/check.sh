@@ -139,6 +139,27 @@ if [[ $unsafe_uses != "$expected_unsafe" ]]; then
     echo "review it, give each unsafe block a SAFETY comment, and update tools/check.sh" >&2
     exit 1
 fi
+# Nothing changes the process's environment once it has threads, which read it unlocked
+# (docs/architecture/5d-desktop-application.md, on the start). Rust's own calls need an
+# unsafe block, pinned above; these are the helpers of libraries that change it on the way.
+# The runners' native code changes it at one place only, before any thread starts.
+env_changes=$(find crates -name '*.rs' ! -name frb_generated.rs -print0 | LC_ALL=C sort -z |
+    xargs -0 awk '
+        { sub(/\/\/.*/, "") }
+        /(^|[^A-Za-z0-9_])(set_var|remove_var|setup_default_user_utils|setup_backtrace|connect_to_env)([^A-Za-z0-9_]|$)/ {
+            print FILENAME ":" FNR ": " $0
+        }')
+native_env_changes=$(grep -rE \
+    '(^|[^A-Za-z0-9_])(setenv|unsetenv|putenv|_putenv|_putenv_s|_wputenv|_wputenv_s|SetEnvironmentVariable[AW]?|g_setenv|g_unsetenv|clearenv)[[:space:]]*\(' \
+    app/linux app/macos app/windows app/third_party --include='*.c' --include='*.cc' \
+    --include='*.cpp' --include='*.h' --include='*.m' --include='*.mm' --include='*.swift' |
+    grep -v '/test/' | LC_ALL=C sort || true)
+if [[ -n $env_changes ||
+    $native_env_changes != 'app/linux/runner/main.cc:  setenv("PIPEWIRE_ALSA", props.c_str(), 0);' ]]; then
+    echo "the process's environment is changed somewhere new (or no longer where it was):" >&2
+    printf "%s\n" "$env_changes" "$native_env_changes" >&2
+    exit 1
+fi
 # The judgment of the level before, which the state tests compare with this one, is
 # fogata-state as it was at level one, unchanged (see crates/fogata-state/before/Cargo.toml):
 # its sources must hash as they did then (every file's SHA-256, by path, hashed again).

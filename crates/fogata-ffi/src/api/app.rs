@@ -180,9 +180,16 @@ fn to_avatar(preset: u8, photo: Option<Vec<u8>>) -> Avatar {
 
 #[frb(init)]
 pub fn init_app() {
-    // First, so the bridge's hook, set next, hands each panic on to this one.
+    // Not the bridge's setup_default_user_utils: it sets RUST_BACKTRACE when it is missing,
+    // and this runs as the window draws its first frame, with the engine's threads reading
+    // the environment unlocked (a change may move the array they walk and free the old one).
+    // Nothing changes the process's environment once it has threads. In a debug build the
+    // panic hook logs a backtrace taken whatever the environment says; the bridge's own
+    // hook, left out, only added to a call's panic a backtrace that needed the variable
+    // (and named nothing in a release build, which has no symbols); and the bridge's macOS
+    // logger, left out too, took the `log` crate's lines out of the days' log (whose
+    // subscriber then could not have them) and into the system's log unscrubbed.
     crate::logs::report_panics();
-    flutter_rust_bridge::setup_default_user_utils();
     raise_open_files_limit();
 }
 
