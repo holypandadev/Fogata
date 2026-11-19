@@ -161,7 +161,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   answers and askings, so a participant whose signals name another call than its
   connection was made with (it left and came back, or its application started again
   faster than WebRTC finds a connection dead) gets a new connection at once, and what its
-  ended call still sends is dropped. Each signal goes on its own, with no order between
+  ended call still sends is dropped. The call a participant had when it left the room is
+  kept while this call goes on (the last 64 to leave), so that a late signal of it, after
+  the participant came back with another, is dropped too rather than taken for a newer
+  call. Each signal goes on its own, with no order between
   two, and may come twice: a copy of the first offer a connection was made for (the same
   call and number), or of a screen's sound offer already answered, gets the same answer
   again and leaves the connection as it is. Only the room's participants get a connection: a signal
@@ -235,11 +238,13 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   A `state` message tells the others what is on, for the muted icon and the tiles. It
   carries a number that only grows (`s`: the sender's clock in milliseconds, or one more
   than its last state's, from 0 below 2^53), and one below the newest taken from that
-  participant arrived late and is dropped. What is kept starts over when the participant
-  comes into the room again and when its offers, answers or askings name a new call of
-  theirs; a state carries no call id, so the first state of a new call whose clock went
-  back may be dropped once, until those signals arrive. One without the number (older
-  copies) is taken as it comes.
+  participant arrived late and is dropped. It also names the sender's call (`sc`, the id
+  its offers, answers and askings carry as `c`): one naming another call than those
+  signals named is dropped (a late one of a call that ended, or one of the next call ahead
+  of its offer, whose state comes again once its connection is up), and numbers are
+  compared only within one call. What is kept starts over when the participant comes into
+  the room again and when its offers, answers or askings name a new call of theirs. One
+  without these fields (older copies) is taken as it comes.
 - **The microphone is open only while it is on**, and its track is closed while muted.
   WebRTC records whenever a send stream of sound runs, with a track or not: a voice
   channel's whose encoding is on, or the screen's sound channel's. That one sends only
