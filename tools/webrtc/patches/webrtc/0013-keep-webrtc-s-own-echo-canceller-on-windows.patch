@@ -1,0 +1,73 @@
+Keep WebRTC's own echo canceller on Windows
+
+The Windows audio device (AudioDeviceWindowsCore) makes Windows' Voice Capture DMO
+(CLSID_CWMAudioAEC) and answered that a built-in echo canceller is available, so the
+voice engine enabled the DMO and turned AEC3 off ("Disabling EC since built-in EC will be
+used instead"; every ApplyConfig then has echo_canceller enabled 0). The DMO also records
+the microphone itself, at 16 kHz in one channel (InitRecordingDMO), polled every 5 ms with
+no delay given to the audio processing. None of the project's changes to AEC3 (patches
+0009 to 0011, wrapper patch 0019) ran on Windows.
+
+Measured in a loop of virtual devices (the Windows copy playing into VB-Cable's input and
+recording from its output, unity gain; the other side a Linux copy whose microphone is a
+speech-like signal): the DMO sent the other side's words back at full level, +10.5 to
++10.8 dB against their microphone, what any sound that is not cancelled gives in that
+loop, where a Linux copy (AEC3) in its place sends nothing back (below the -63 dB floor).
+
+With this patch, in the same loop on the same day (3 runs of the speech-like signal and 1
+of a voice, 75 s each, against a run with the DMO between them that gave +10.7 dB again):
+what goes back is at the floor of what the Windows copy sends with the loop cut, -62 to
+-70 dB against the other side's microphone at the median in every window from the call's
+first phrase on, the echo itself (the part linear in their words) at the estimator's own
+floor, about -95 dB. Twice in the four runs the loop's delay grew later in the call (AEC3
+moved its delay by 16 and 24 ms) and one phrase went back, at -28 and -56 dB, until AEC3
+aligned again. With both talking at once (a voice played into the Windows copy's
+microphone too) its own voice went out at +5.6 dB (+4.6 with the DMO) and the echo stayed
+under the estimator's floor. The microphone is recorded at 48 kHz in the cable's two
+channels and processed in one at 32 kHz: what the Windows copy sends now reaches 12 kHz,
+the voice file's own limit (8 to 12 kHz: -21.7 dB against the whole, the file -21.3; the
+DMO's stopped at 8 kHz, -64.6).
+
+The device now answers that no built-in echo canceller is available. The voice engine
+keeps AEC3, and the microphone is recorded through WASAPI as without the DMO: the device's
+shared-mode format (48 kHz first, patch 0004's rates included), on the capture thread
+registered with MMCSS as before, with the recording delay WASAPI reports. The DMO is
+still made at construction and never enabled. Endpoint notifications (patches 0003 and
+0011) do not depend on the capture path.
+
+Windows' own capture effects of a device (its driver's or Windows' "voice" processing)
+are not touched: they apply to a WASAPI stream as to any other application's.
+
+Known and not settled: in the call rigs' check (tools of the PC-Windows call) the VM plays
+a steady tone on the cable that is also the Windows copy's microphone (the shared screen's
+sound). With the DMO that tone went out weakened and with the other side's voice coming
+back; with AEC3 it goes out alone and steady, and the Linux copy (AEC3 too) then held its
+own microphone down at a call's start or after an unmute: with the same 440 Hz tone on both
+sides 2 calls of 3 failed; with a 600 Hz tone in the VM 3 of 12 failed ("too little audio
+from Ana", its voice out 102 to 145 packets in 6 s instead of about 320) and an unmute took
+up to 20 s to be heard; with a speech-like signal as the Linux copy's microphone and the
+tone in the VM, 2 of 5 failed the same way; with a recorded voice played in the VM instead
+of a tone, 5 of 5 passed, every unmute heard within 0.3 s. The published library passed
+all 16 calls of those kinds. Once, in 28 calls with this patch (none in 18 without), the
+Windows copy crashed as a direct call hung up: an access violation in WebRtcVideoSendChannel's
+constructor (media/engine/webrtc_video_engine.cc, `call->network_thread()` through a Call
+already destroyed: PeerConnection::Close resets `call_` but `call_ptr_` stays and a video
+channel was then made with it), on its face a teardown race of the peer connection, not of
+the capture path; not seen in the 27 others. No real Windows hardware was tried.
+
+--- a/modules/audio_device/win/audio_device_core_win.cc
++++ b/modules/audio_device/win/audio_device_core_win.cc
+@@ -2602,7 +2602,12 @@
+ }
+ 
+ bool AudioDeviceWindowsCore::BuiltInAECIsAvailable() const {
+-  return _dmo != nullptr;
++  // Fogata: Windows' Voice Capture DMO is not offered as the echo canceller, so
++  // the voice engine keeps its own (AEC3), as on Linux and macOS, and records
++  // the microphone through WASAPI in the device's format; with the DMO it
++  // turned AEC3 off and recorded 16 kHz in one channel, and in a loop of
++  // virtual devices let the other side's voice go back to them at full level.
++  return false;
+ }
+ 
+ // ----------------------------------------------------------------------------

@@ -251,6 +251,19 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    voice engine goes on to start them, which patch 0006 keeps for the server's return: a
    microphone turned on while the server was away recorded nothing once it was back
    (`tools/call-lab/mic.sh restart:down20` with `RESTART_MUTED=1`).
+13. `0013-keep-webrtc-s-own-echo-canceller-on-windows` (Windows only): the Windows audio
+   device no longer offers Windows' Voice Capture DMO as a built-in echo canceller, so the
+   voice engine keeps AEC3 (and patches 0009 to 0011 and wrapper patch 0019 run on
+   Windows too) and the microphone is recorded through WASAPI in the device's own format
+   instead of the DMO's 16 kHz in one channel. With the DMO, a loop of virtual devices
+   sent the other side's words back to them at full level (+10.7 dB against their
+   microphone); with AEC3, at the floor of what the copy sends with the loop cut (-62 to
+   -70 dB) from a call's first phrase on, and what the copy sends reaches 12 kHz instead
+   of 8. Not settled (the patch's header gives the figures): in the PC-Windows call check,
+   a steady tone in the Windows copy's microphone makes the Linux copy hold its own voice
+   down at times (the check fails in up to 2 calls of 5; with a voice there instead of a
+   tone it passed 5 of 5), and one call in 28 ended with the Windows copy crashing as a
+   direct call hung up (a peer connection's Call used after Close).
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
