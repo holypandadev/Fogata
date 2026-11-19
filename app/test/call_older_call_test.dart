@@ -1,0 +1,338 @@
+// A signal of an older call of a participant's device, held up on its way, arrives once
+// the two devices are connected with their calls of now: it must not replace the call
+// there is, whether or not this side remembers that older call as ended.
+
+import 'dart:convert';
+
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:fogata/src/call.dart';
+
+import 'call_net.dart';
+import 'fake_time.dart';
+import 'wait.dart';
+
+// The smaller id offers, the larger asks for offers.
+const _small = '2500000000000000';
+const _large = 'd500000000000000';
+
+void main() {
+  final messenger =
+      TestWidgetsFlutterBinding.ensureInitialized().defaultBinaryMessenger;
+  var textures = 0;
+  late FakeNet net;
+
+  /// [inCallTime] with every call of [net] stopped once the test ended ([FakeNet.stop]).
+  Future<void> inNetTime(Future<void> Function() body) =>
+      inCallTime(body, stop: net.stop);
+
+  setUp(() {
+    // The pictures of a participant, made ready as it comes.
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('FlutterWebRTC.Method'),
+      (call) async {
+        if (call.method != 'createVideoRenderer') return <String, dynamic>{};
+        final events = EventChannel('FlutterWebRTC/Texture${++textures}');
+        messenger.setMockStreamHandler(
+          events,
+          MockStreamHandler.inline(onListen: (_, _) {}),
+        );
+        addTearDown(() => messenger.setMockStreamHandler(events, null));
+        return <String, dynamic>{'textureId': textures};
+      },
+    );
+    net = FakeNet()..install();
+  });
+  tearDown(() {
+    net.uninstall();
+    messenger.setMockMethodCallHandler(
+      const MethodChannel('FlutterWebRTC.Method'),
+      null,
+    );
+  });
+
+  bool up(Call small, Call large) =>
+      small.peers[_large]?.connected == true &&
+      large.peers[_small]?.connected == true;
+
+  /// Two calls connected to each other.
+  Future<(Call, Call)> connected() async {
+    final small = net.add(
+      Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+    );
+    final large = net.add(
+      Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+    );
+    await Future.wait([
+      small.setParticipants([_small, _large]),
+      large.setParticipants([_small, _large]),
+    ]);
+    await until(() => up(small, large), what: 'connected');
+    return (small, large);
+  }
+
+  // An offer reaches the larger side, an asking the smaller.
+  for (final (type, sender) in [('offer', _small), ('again', _large)]) {
+    test(
+      'a late $type of a call both devices made before starting again leaves '
+      'their calls of now connected',
+      () => inNetTime(() async {
+        // The first of it is copied, and the copy held up past both starting again.
+        const held = Duration(seconds: 8);
+        net.duplicate(
+          (from, to, message) => from == sender && message['t'] == type,
+          held,
+        );
+        final (small1, large1) = await connected();
+        // Both start again at once (the computer woke, the network came back): their
+        // new calls know nothing of the ones before.
+        await small1.stop();
+        await large1.stop();
+        final (small, large) = await connected();
+        final smallPeer = small.peers[_large]!;
+        final largePeer = large.peers[_small]!;
+        final (smallKnows, largeKnows) = (
+          smallPeer.theirCall,
+          largePeer.theirCall,
+        );
+        final connections = (smallPeer.connection, largePeer.connection);
+        final copied = net.sent.where(
+          (s) => s.from == sender && s.type == type,
+        );
+        final stale = copied.first.message['c'];
+        expect(
+          stale,
+          isNot(sender == _small ? largePeer.theirCall : smallPeer.theirCall),
+        );
+        // The copy arrives, and well past every try after it.
+        await Future<void>.delayed(const Duration(seconds: 40));
+        expect(up(small, large), isTrue);
+        expect((smallPeer.connection, largePeer.connection), connections);
+        expect(smallPeer.theirCall, smallKnows);
+        expect(largePeer.theirCall, largeKnows);
+        // The older call is known as ended now: another copy of it asks nothing.
+        expect(
+          (sender == _small ? largePeer : smallPeer).endedCalls,
+          contains(stale),
+        );
+      }),
+    );
+  }
+
+  /// The questions [from] sent, in order.
+  List<String> questions(String from) => [
+    for (final s in net.sent)
+      if (s.from == from && s.type == 'which') '${s.message['k']}',
+  ];
+
+  /// The id of [call], as its signals name it.
+  String callOf(Call call) =>
+      '${net.sent.lastWhere((s) => s.from == call.me && s.message['c'] != null).message['c']}';
+
+  /// A late signal of [type] from [from]'s call [stale], which neither side remembers,
+  /// arrives at the other device's call [to] now.
+  Future<void> late(Call to, String from, String type, String stale) {
+    final first = net.sent.firstWhere((s) => s.type == 'offer').message;
+    return to.onSignal(
+      from,
+      jsonEncode({
+        't': type,
+        if (type == 'offer') ...{'sdp': first['sdp'], 'n': first['n']},
+        'c': stale,
+        'w': 1,
+      }),
+    );
+  }
+
+  /// The larger device's call ends and it comes back at once with a new one, which the
+  /// room never shows the smaller one as gone ([heardLeaving] false) or does: how long
+  /// the two take to be connected again from the moment its new call has started.
+  Future<(Call, Duration)> comesBack(
+    Call small, {
+    required bool heardLeaving,
+  }) async {
+    await net.calls[_large]!.stop();
+    net.calls.remove(_large);
+    if (heardLeaving) {
+      await small.setParticipants([_small]);
+      await small.setParticipants([_small, _large]);
+    }
+    final back = net.add(
+      Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+    );
+    final started = callClock();
+    await back.setParticipants([_small, _large]);
+    await until(() => up(small, back), what: 'connected again');
+    return (back, callClock().difference(started));
+  }
+
+  test(
+    'a new call that is real is taken one question later, when the room never '
+    'showed its device gone',
+    () => inNetTime(() async {
+      final (small, _) = await connected();
+      // The room showed it gone: no call of theirs is known, and nothing is asked.
+      final (_, heard) = await comesBack(small, heardLeaving: true);
+      expect(questions(_small), isEmpty);
+      final (back, unheard) = await comesBack(small, heardLeaving: false);
+      // Its asking, the question and its answer, the offer and its answer (two more
+      // signals than with no question), each description's candidates, and the
+      // connection coming up; the room showing it gone spared the offer's time.
+      expect(questions(_small), hasLength(1));
+      expect(
+        unheard,
+        lessThanOrEqualTo(
+          net.latency * 5 +
+              net.gathering * 2 +
+              net.connecting +
+              const Duration(milliseconds: 20),
+        ),
+      );
+      expect(heard, lessThan(unheard));
+      expect(small.peers[_large]!.theirCall, callOf(back));
+      expect(small.peers[_large]!.asking, isFalse);
+    }),
+  );
+
+  test(
+    'a lost answer is asked for again, with the same token',
+    () => inNetTime(() async {
+      final (small, _) = await connected();
+      net.lose((from, to, message) => message['t'] == 'this');
+      final (_, took) = await comesBack(small, heardLeaving: false);
+      final asked = questions(_small);
+      expect(asked, hasLength(2));
+      expect(asked.toSet(), hasLength(1));
+      // The second question goes [Call.whichEvery] after the first.
+      expect(took, lessThan(Call.whichEvery + const Duration(seconds: 2)));
+    }),
+  );
+
+  test(
+    'a late signal of an older call while their call now has not been heard from '
+    'yet: the answer names the call now, and it is connected to',
+    () => inNetTime(() async {
+      final (small, _) = await connected();
+      final before = small.peers[_large]!.theirCall!;
+      // The larger device starts again; its new call's asking is lost on the way.
+      net.lose(
+        (from, to, message) => from == _large && message['t'] == 'again',
+      );
+      await net.calls[_large]!.stop();
+      final back = net.add(
+        Call(group: 'g', me: _large)..bridgeForTests = fakeBridge,
+      );
+      await back.setParticipants([_small, _large]);
+      // A late asking of a call before both arrives first.
+      await late(small, _large, 'again', '0123456789abcdef');
+      await until(() => up(small, back), what: 'connected again');
+      final peer = small.peers[_large]!;
+      expect(peer.theirCall, callOf(back));
+      expect(peer.endedCalls, containsAll([before, '0123456789abcdef']));
+    }),
+  );
+
+  test(
+    'both sides asking at once each answer, and both stay connected',
+    () => inNetTime(() async {
+      final (small, large) = await connected();
+      final connections = (
+        small.peers[_large]!.connection,
+        large.peers[_small]!.connection,
+      );
+      // An offer waits its turn (one a second): the asking goes once its question is
+      // out, and the two questions cross.
+      final offered = late(large, _small, 'offer', 'fedcba9876543210');
+      await until(
+        () => questions(_large).isNotEmpty,
+        what: 'the larger side asking',
+      );
+      await late(small, _large, 'again', '0123456789abcdef');
+      await offered;
+      expect(small.peers[_large]!.asking, isTrue);
+      expect(large.peers[_small]!.asking, isTrue);
+      await Future<void>.delayed(const Duration(seconds: 1));
+      expect(questions(_small), hasLength(1));
+      expect(questions(_large), hasLength(1));
+      expect(small.peers[_large]!.asking, isFalse);
+      expect(large.peers[_small]!.asking, isFalse);
+      expect(up(small, large), isTrue);
+      expect((
+        small.peers[_large]!.connection,
+        large.peers[_small]!.connection,
+      ), connections);
+      expect(small.peers[_large]!.endedCalls, contains('0123456789abcdef'));
+      expect(large.peers[_small]!.endedCalls, contains('fedcba9876543210'));
+    }),
+  );
+
+  test(
+    'questions and answers that arrive twice, late signals that come again, and '
+    'answers to no question change nothing',
+    () => inNetTime(() async {
+      bool asks(String from, String to, Map<String, dynamic> message) =>
+          message['t'] == 'which' || message['t'] == 'this';
+      net.duplicate(asks, const Duration(milliseconds: 500), times: 10);
+      final (small, large) = await connected();
+      final peer = small.peers[_large]!;
+      final (known, connection) = (peer.theirCall, peer.connection);
+      // The same late asking twice before the answer, and once after it.
+      await late(small, _large, 'again', '0123456789abcdef');
+      await late(small, _large, 'again', '0123456789abcdef');
+      await Future<void>.delayed(const Duration(seconds: 2));
+      await late(small, _large, 'again', '0123456789abcdef');
+      // An answer naming another call with a token never asked, or with none.
+      for (final token in ['00000000000000ff', null]) {
+        await small.onSignal(
+          _large,
+          jsonEncode({'t': 'this', 'k': ?token, 'now': 'aaaaaaaaaaaaaaaa'}),
+        );
+      }
+      await Future<void>.delayed(const Duration(seconds: 2));
+      expect(questions(_small), hasLength(1));
+      expect(peer.asking, isFalse);
+      expect(peer.theirCall, known);
+      expect(peer.connection, same(connection));
+      expect(up(small, large), isTrue);
+    }),
+  );
+
+  test(
+    'a participant that says it answers but never does keeps its call: asked a '
+    'few times, then the late signal is dropped',
+    () => inNetTime(() async {
+      final (small, large) = await connected();
+      final peer = small.peers[_large]!;
+      final (known, connection) = (peer.theirCall, peer.connection);
+      net.lose((from, to, message) => message['t'] == 'this', times: 100);
+      await late(small, _large, 'again', '0123456789abcdef');
+      await Future<void>.delayed(Call.whichEvery * (Call.whichTries + 1));
+      expect(questions(_small), hasLength(Call.whichTries));
+      expect(peer.asking, isFalse);
+      expect(peer.theirCall, known);
+      expect(peer.connection, same(connection));
+      expect(up(small, large), isTrue);
+    }),
+  );
+
+  test(
+    'a copy before this one, which neither answers nor says it would, has its new '
+    'call taken at once, as before',
+    () => inNetTime(() async {
+      // Its signals name its call but say nothing of answering.
+      final small = net.add(
+        Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+      );
+      await small.setParticipants([_small, _large]);
+      final peer = small.peers[_large]!;
+      await small.handleSignal(_large, {'t': 'again', 'c': 'first'});
+      peer.upForTests();
+      final made = net.madeBy(_small).length;
+      await small.handleSignal(_large, {'t': 'again', 'c': 'second'});
+      expect(questions(_small), isEmpty);
+      expect(peer.theirCall, 'second');
+      expect(peer.endedCalls, ['first']);
+      expect(net.madeBy(_small).length, made + 1);
+    }),
+  );
+}

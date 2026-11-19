@@ -4,7 +4,7 @@
 // and the link between their devices is up. Enough of a connection for a call to agree on
 // one; nothing is sent on it. Signals arrive in order, each [FakeNet.latency] after it was
 // sent, unless the test makes chosen ones late or arrive twice ([FakeNet.delay],
-// [FakeNet.duplicate]).
+// [FakeNet.duplicate]) or lost ([FakeNet.lose]).
 
 import 'dart:async';
 import 'dart:convert';
@@ -69,6 +69,10 @@ class FakeNet {
   /// first.
   void duplicate(SignalMatch which, Duration after, {int times = 1}) =>
       _rules.add(_Rule(which, times, copyAfter: after));
+
+  /// The next [times] signals [which] matches are lost on their way (counted in [sent]).
+  void lose(SignalMatch which, {int times = 1}) =>
+      _rules.add(_Rule(which, times, lost: true));
 
   final Map<int, FakeConnection> _connections = {};
   int _next = 0;
@@ -153,6 +157,7 @@ class FakeNet {
     for (final rule in _rules) {
       if (rule.times > 0 && rule.which(from, to, message)) {
         rule.times--;
+        if (rule.lost) return;
         wait += rule.by;
         copy = rule.copyAfter;
         break;
@@ -198,12 +203,19 @@ typedef SignalMatch = bool Function(
 );
 
 class _Rule {
-  _Rule(this.which, this.times, {this.by = Duration.zero, this.copyAfter});
+  _Rule(
+    this.which,
+    this.times, {
+    this.by = Duration.zero,
+    this.copyAfter,
+    this.lost = false,
+  });
 
   final SignalMatch which;
   int times;
   final Duration by;
   final Duration? copyAfter;
+  final bool lost;
 }
 
 final _fakeId = RegExp(r'a=fake:(\d+)');

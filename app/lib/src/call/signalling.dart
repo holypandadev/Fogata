@@ -284,6 +284,25 @@ extension _Signalling on Call {
         );
       case 'sound-end':
         await peer._closeSoundIn();
+      case 'which':
+        // They ask which call this device has now (see [_askWhich]): the token goes back
+        // with it, so they know the answer is not an older one.
+        final token = message['k'];
+        if (token is String) {
+          _signal(from, {'t': 'this', 'k': token, 'now': _callId});
+        }
+      case 'this':
+        final question = peer._asked;
+        final now = message['now'];
+        if (question == null ||
+            message['k'] != question.token ||
+            now is! String) {
+          _trace(
+            'answer on which call from ${_short(from)} not asked: dropped',
+          );
+          return;
+        }
+        await _theirCallNow(peer, from, question, now);
       case 'again':
         // The other side has no working connection and asks for a new offer; one made a
         // moment ago is still on its way, and another would only replace it (both sides
@@ -310,6 +329,14 @@ extension _Signalling on Call {
   /// made as for someone who just came in, with no wait for that connection to be given
   /// up on. Only for a participant whose connection is here already: a call's id alone
   /// makes no connection with anyone.
+  ///
+  /// An offer or an asking of another call than the one known may also be a late one of an
+  /// older call that this side does not remember as ended (this call started after it, or
+  /// so many ended since): taken as theirs, it would end the call they have, and drop all
+  /// its signals after. From a participant whose signals say it answers (`w`), such a
+  /// signal is held, and they are asked which call is theirs now ([_askWhich]). An answer
+  /// to this side's latest offer was made after that offer, by the call they had then, and
+  /// is taken at once.
   Future<bool> _theirCall(
     CallPeer peer,
     String from,
@@ -317,6 +344,7 @@ extension _Signalling on Call {
   ) async {
     final theirs = message['c'];
     if (theirs is! String) return true;
+    if (message['w'] == 1) peer._answersWhich = true;
     if (peer._endedCalls.contains(theirs)) {
       _trace(
         '${message['t']} from an ended call of ${from.substring(0, 8)}: dropped',
@@ -332,19 +360,42 @@ extension _Signalling on Call {
       return true;
     }
     final before = peer._theirCall;
+    if (before != null &&
+        before != theirs &&
+        message['t'] != 'answer' &&
+        peer._answersWhich) {
+      _askWhich(peer, theirs, message);
+      return false;
+    }
     peer._theirCall = theirs;
     // The call they had when they last left the room, if this one is another: it ended.
     final left = peer._callWhenLeft;
     peer._callWhenLeft = null;
     if (before == null && left != null && left != theirs) peer._ended(left);
     if (before == null || before == theirs) return true;
+    await _theirNewCall(peer, from, before, '${message['t']}');
+    return true;
+  }
+
+  /// [peer]'s call is a new one, no longer [before], as a signal of type [type] showed:
+  /// the connection with the one that ended is dropped at once and the first connection
+  /// made anew.
+  Future<void> _theirNewCall(
+    CallPeer peer,
+    String from,
+    String before,
+    String type,
+  ) async {
     peer._ended(before);
+    // A question asked before is answered by a call of theirs that may be older than this.
+    peer._asked?.wait?.cancel();
+    peer._asked = null;
     // Their new call numbers its states anew (see [Call._stateNumber]).
     peer._stateIn = null;
     _trace('${from.substring(0, 8)} has a new call; connecting anew');
     // An answer of their new call answers an offer of this side made since it started:
     // its connection is the right one.
-    if (message['t'] == 'answer') return true;
+    if (type == 'answer') return;
     await peer._close();
     peer._madeAt = null;
     peer._attempt = 0;
@@ -353,7 +404,7 @@ extension _Signalling on Call {
     _watch(peer);
     // An offer is answered and an asking offered to as they are; anything else from the
     // new call starts the first connection now.
-    if (message['t'] != 'offer' && message['t'] != 'again') {
+    if (type != 'offer' && type != 'again') {
       if (me.compareTo(from) < 0) {
         await _offer(peer);
       } else {
@@ -361,14 +412,84 @@ extension _Signalling on Call {
       }
     }
     // What shows them connected follows once the signal is handled ([onSignal]).
-    return true;
+  }
+
+  /// Asks [peer] which call of theirs is the one now (`which`, with a token made for the
+  /// question), holding [message], which named their call [theirs] and not the one known.
+  /// A late signal cannot carry the token, and their answer (`this`) names the call they
+  /// have once they read the question. One question at a time: a signal of another call
+  /// meanwhile is held in place of the one before. Asked again every [Call.whichEvery], up
+  /// to [Call.whichTries] times; with no answer at all the call known is kept, and the
+  /// signal held is dropped (a new call of theirs that is real goes on offering or asking,
+  /// which asks again).
+  void _askWhich(CallPeer peer, String theirs, Map<String, dynamic> message) {
+    final asked = peer._asked;
+    if (asked != null) {
+      asked
+        ..call = theirs
+        ..message = message;
+      return;
+    }
+    final question = peer._asked = _Asked(Call._newCallId(), theirs, message);
+    _trace(
+      '${message['t']} from another call of ${_short(peer.id)}: '
+      'asking which is theirs now',
+    );
+    _signal(peer.id, {'t': 'which', 'k': question.token});
+    _askWhichAgain(peer, question);
+  }
+
+  void _askWhichAgain(CallPeer peer, _Asked question) {
+    question.wait = Timer(Call.whichEvery, () {
+      if (_closed || peers[peer.id] != peer || peer._asked != question) return;
+      if (question.tries >= Call.whichTries) {
+        _trace(
+          'no answer from ${_short(peer.id)} on which call is theirs: '
+          'the one known kept',
+        );
+        peer._asked = null;
+        return;
+      }
+      question.tries++;
+      _signal(peer.id, {'t': 'which', 'k': question.token});
+      _askWhichAgain(peer, question);
+    });
+  }
+
+  /// Their answer [now] to the question [question]: the call they have. The signal held
+  /// is taken when it is of that call; a call known before that is not it ended.
+  Future<void> _theirCallNow(
+    CallPeer peer,
+    String from,
+    _Asked question,
+    String now,
+  ) async {
+    peer._asked = null;
+    question.wait?.cancel();
+    // Whatever this side took for ended, the answer is what they have.
+    peer._endedCalls.remove(now);
+    final known = peer._theirCall;
+    if (question.call != now) peer._ended(question.call);
+    if (now == known) {
+      _trace(
+        '${question.message['t']} from ${_short(from)} was of an older call: '
+        'dropped',
+      );
+      return;
+    }
+    peer._theirCall = now;
+    peer._callWhenLeft = null;
+    final type = question.call == now ? '${question.message['t']}' : 'this';
+    if (known != null) await _theirNewCall(peer, from, known, type);
+    if (question.call == now) await _handle(peer, from, question.message);
   }
 
   void _signal(String to, Map<String, dynamic> message) {
-    // What starts or agrees a connection says which call of this device it is from (see
-    // [_theirCall]); copies that do not know the field leave it.
+    // What starts or agrees a connection says which call of this device it is from, and
+    // that this device answers a `which` (see [_theirCall]); copies that do not know the
+    // fields leave them.
     if (const {'offer', 'answer', 'again'}.contains(message['t'])) {
-      message = {...message, 'c': _callId};
+      message = {...message, 'c': _callId, 'w': 1};
     }
     if (signalsBetweenForTests case final sent?) {
       sent(me, to, message);

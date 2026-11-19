@@ -2635,6 +2635,11 @@ class Call extends ChangeNotifier {
   /// How long a new connection has to come up before it is tried again.
   static const connectWithin = Duration(seconds: 15);
 
+  /// A `which` with no answer is asked again this often, as many times in all as
+  /// [whichTries] ([_askWhich]): an answer may come in the [connectWithin] after the first.
+  static const whichEvery = Duration(seconds: 3);
+  static const whichTries = 5;
+
   /// How many times a renegotiation's offer, or its asking for one, goes again unanswered.
   static const _renegotiationTries = 5;
 

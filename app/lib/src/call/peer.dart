@@ -1,5 +1,22 @@
 part of '../call.dart';
 
+/// A question to a participant whose signal named another call of theirs than the one
+/// known: which call of theirs is the one now ([Call._askWhich]).
+class _Asked {
+  _Asked(this.token, this.call, this.message);
+
+  /// Made for this question, so only an answer made after it was asked can carry it.
+  final String token;
+
+  /// The call the latest such signal named, and that signal, held until the answer.
+  String call;
+  Map<String, dynamic> message;
+
+  /// Times asked, and the wait before the next time.
+  int tries = 1;
+  Timer? wait;
+}
+
 /// Another participant of the call.
 class CallPeer {
   CallPeer(this.id);
@@ -81,6 +98,13 @@ class CallPeer {
     if (_endedCalls.length > endedCallsKept) _endedCalls.removeAt(0);
   }
 
+  /// Their signals say they answer a `which` ([Call._askWhich]); those of copies before it
+  /// say nothing, and their signals of another call are taken as they come.
+  bool _answersWhich = false;
+
+  /// The question asked of them, while its answer is awaited ([Call._askWhich]).
+  _Asked? _asked;
+
   /// Their call when they last left the room during this call ([Call._left]): a signal of
   /// another call of theirs says it ended, and a late one of it is then dropped.
   String? _callWhenLeft;
@@ -107,6 +131,10 @@ class CallPeer {
   String? get theirCall => _theirCall;
   @visibleForTesting
   List<String> get endedCalls => List.unmodifiable(_endedCalls);
+
+  /// A `which` asked of them waits for its answer, for tests.
+  @visibleForTesting
+  bool get asking => _asked != null;
 
   /// [connection]'s offer or answer went while the link to them was down, or it was left
   /// waiting to be agreed when the link went ([Call.memberGone]): its signals went nowhere,
@@ -336,6 +364,8 @@ class CallPeer {
     _gone = true;
     _watchWait?.cancel();
     _connectWait?.cancel();
+    _asked?.wait?.cancel();
+    _asked = null;
     await _letGo('the connection with $id', _close);
     // A description still waiting for its candidates goes on now, on the closed
     // connection, as it would once its wait ran out.

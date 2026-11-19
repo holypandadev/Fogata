@@ -394,8 +394,14 @@ const maxSdpSections = 4;
 @visibleForTesting
 bool fairSignal(Map<String, dynamic> message) {
   // The sender's call (see Call's `_callId`): 16 hexadecimal digits from this version on;
-  // a state names it apart (`sc`).
-  for (final call in [message['c'], message['sc']]) {
+  // a state names it apart (`sc`), and so does the answer to a `which` (`now`, with the
+  // question's token `k`, made the same way).
+  for (final call in [
+    message['c'],
+    message['sc'],
+    message['now'],
+    message['k'],
+  ]) {
     if (call != null && (call is! String || call.length > maxCallIdChars)) {
       return false;
     }

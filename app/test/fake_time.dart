@@ -45,8 +45,9 @@ Future<void> inFakeTime(
 
 /// [inFakeTime] with the calls' clock on that time ([callClock]); [stop] stops the calls
 /// made in it once [body] ended, before the timers left are looked at. A stop cancels a
-/// participant's tries ([Call]'s `_watch`), its connection's time to come up (`_connect`)
-/// and the wait for its candidates (`_describe`); the call's other waits (`_retry`,
+/// participant's tries ([Call]'s `_watch`), its connection's time to come up (`_connect`),
+/// the question of which call is theirs (`_askWhich`) and the wait for its candidates
+/// (`_describe`); the call's other waits (`_retry`,
 /// `_watchOffer`, `_watchUpdate`, `_offerTurn`, `_askAgain`, the timeout in
 /// `_withCandidates`) are not, and a test that leaves one is told so here.
 Future<void> inCallTime(
