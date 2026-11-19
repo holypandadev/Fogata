@@ -150,6 +150,25 @@ void main() {
     expect(made, isEmpty);
   });
 
+  test('someone who leaves while their connection is being made leaves no tries waiting', () async {
+    final call = Call(group: 'g', me: _ana)..bridgeForTests = _bridge;
+    await inCallTime(() async {
+      final making = Completer<RTCPeerConnection>();
+      var asked = false;
+      call.connectionsForTests = () {
+        asked = true;
+        return making.future;
+      };
+      // Ana's id is the smaller: she offers to Zoe, and leaves while that goes on.
+      final entering = call.setParticipants([_ana, _zoe]);
+      await until(() => asked, what: 'a connection asked for');
+      await call.participantLeft(_zoe);
+      making.complete(_Connection());
+      await entering;
+      expect(call.peers, isEmpty);
+    }, stop: call.stop);
+  });
+
   test(
     "signals that come before the room's call is made are handed to it",
     () async {

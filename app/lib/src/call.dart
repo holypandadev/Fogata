@@ -2616,7 +2616,9 @@ class Call extends ChangeNotifier {
     // A connection that never comes up is tried again as one that failed: one whose
     // descriptions do not match (offers that crossed, a signal lost on the way) may take
     // minutes to give up by itself.
-    Future<void>.delayed(connectWithin, () {
+    // One made before is no longer [connection]: its own wait would do nothing.
+    peer._connectWait?.cancel();
+    peer._connectWait = Timer(connectWithin, () {
       if (_closed ||
           peers[peer.id] != peer ||
           peer.connection != connection ||

@@ -43,19 +43,12 @@ Future<void> inFakeTime(
   );
 }
 
-/// The waits of a call that its [Call.stop] does not end, which outlive it: each one,
-/// once due, finds the call stopped and does nothing more.
-const callWaitsAfterStop = {
-  // `Future.delayed`, which cannot be cancelled.
-  'Call._connect': 'the time a new connection has to come up (15 s)',
-  '_Signalling._watch': 'the next round of tries for someone (5 s and more)',
-  // A `Future.timeout` on the candidates of a description being made when it stopped.
-  '_Signalling._describe': 'the wait for the candidates of a description (3 s)',
-};
-
 /// [inFakeTime] with the calls' clock on that time ([callClock]); [stop] stops the calls
-/// made in it once [body] ended, before the timers left are looked at, of which only
-/// [callWaitsAfterStop] may be.
+/// made in it once [body] ended, before the timers left are looked at. A stop cancels a
+/// participant's tries ([Call]'s `_watch`), its connection's time to come up (`_connect`)
+/// and the wait for its candidates (`_describe`); the call's other waits (`_retry`,
+/// `_watchOffer`, `_watchUpdate`, `_offerTurn`, `_askAgain`, the timeout in
+/// `_withCandidates`) are not, and a test that leaves one is told so here.
 Future<void> inCallTime(
   Future<void> Function() body, {
   Future<void> Function()? stop,
@@ -66,4 +59,4 @@ Future<void> inCallTime(
   callClock = () => start.add(time.elapsed);
   await body();
   await stop?.call();
-}, timersLeftBy: callWaitsAfterStop);
+});

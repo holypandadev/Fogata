@@ -69,8 +69,13 @@ extension _Signalling on Call {
   void _watch(CallPeer peer) {
     // One loop at a time for each participant: a new one ends any before it.
     final round = ++peer._watching;
+    // Let go of already: nothing would cancel the wait ([CallPeer.dispose]), and once due
+    // it would do nothing.
+    if (_closed || peer._gone) return;
     final wait = Duration(seconds: 5 + 5 * peer._waits.clamp(0, 5));
-    Future<void>.delayed(wait, () async {
+    // A round before this one would do nothing once due.
+    peer._watchWait?.cancel();
+    peer._watchWait = Timer(wait, () async {
       if (_closed ||
           peers[peer.id] != peer ||
           peer._watching != round ||

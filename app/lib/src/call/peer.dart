@@ -123,6 +123,12 @@ class CallPeer {
   @visibleForTesting
   int get watchRounds => _watching;
 
+  /// The next of those tries, and the time [connection] has to come up
+  /// ([Call.connectWithin]): cancelled once they are let go of, so that nothing of theirs
+  /// waits on after they left or the call ended.
+  Timer? _watchWait;
+  Timer? _connectWait;
+
   /// The connection has its network candidates.
   Completer<void> _gathered = Completer<void>();
 
@@ -328,7 +334,12 @@ class CallPeer {
   /// others to be let go of all the same ([_letGo]).
   Future<void> _dispose() async {
     _gone = true;
+    _watchWait?.cancel();
+    _connectWait?.cancel();
     await _letGo('the connection with $id', _close);
+    // A description still waiting for its candidates goes on now, on the closed
+    // connection, as it would once its wait ran out.
+    if (!_gathered.isCompleted) _gathered.complete();
     await _letGo('the screen sound from $id', _closeSoundIn);
     final out = _soundOut;
     _soundOut = null;
