@@ -6,9 +6,12 @@ after each unmute (UNMUTE_WORDS_AT); b's output is recorded throughout (played-b
 unmute.py). For each unmute, against the same unmute's last gap (14.65 to 15.5 s) and last
 word (12.5 s), which a settled echo canceller lets through as it does mid-call:
 - headset (no echo path): each word's level (90th percentile of 50 ms RMS levels over the
-  word) may be no more than WORD_UNDER dB under the last word's, and the noise floor in each
-  gap between the words (20th percentile; 0.25-0.5, 2.65-3.5, 5.65-6.5, 8.65-9.5, 11.65-12.5
-  s) no more than FLOOR_UNDER dB under the last gap's. A new echo canceller held the
+  word) may be no more than WORD_UNDER dB under the last word's, and the noise floor in the
+  first gap between the words judged (20th percentile; 0.25-0.5, 2.65-3.5, 5.65-6.5,
+  8.65-9.5, 11.65-12.5 s), and in each later one while all before it were, no more than
+  FLOOR_UNDER dB under the last gap's: held down from the unmute on. A later gap may be
+  FLOOR_DEEP under it, as the floor b plays sinks in every pause; a dip past FLOOR_UNDER
+  there is noted. A new echo canceller held the
   microphone down while b's sound played, until its transparent mode had seen 6 s of it
   without echo: the first words went out 8 dB weaker on average (17 dB at worst) and the
   floor of the first 0.5 s 12 dB lower, then it came back at once. With the echo canceller
@@ -64,7 +67,19 @@ import time
 import wave
 
 WORD_UNDER = 6.0
+# The room's noise as b plays it sinks in every pause while a's microphone hears it steady:
+# by 2.7 dB from the first half of a gap to the second (median; more than 4 dB in one gap
+# in 5), so a gap's floor against the last gap's spreads by 2 dB (sd) and reached 5.7 dB
+# under it in the first judged gap and 6.6 in a later one, in 107 unmutes with no echo
+# controller made (GitHub's runners and this lab, 2026-11-16 to 11-19). Held down, the
+# floor was so from the unmute on: the first judged gap 6.9 to 13.9 dB under, each later
+# one less deep than it (8 unmutes with an echo controller made at the unmute: before
+# WebRTC patch 0010, and with libwebrtc 8078.7 as the processing initialized itself
+# again). So the first judged gap, and each one after it while all before it were too,
+# may be no more than FLOOR_UNDER dB under the last; a later gap only FLOOR_DEEP, and a
+# dip between the two is noted.
 FLOOR_UNDER = 6.0
+FLOOR_DEEP = 10.0
 TONE_UNDER = 20.0
 TAIL_UNDER = 5.0  # dB: the bar after each of a's words, where WebRTC lets the tone through
 WORD_END = 2.0  # s into each word that its last syllable ends (unmute-sound.sh)
@@ -175,14 +190,29 @@ while (meet / f"mark-a-unmute-{n + 1}").exists():
                     f"unmute {n}: a's word at {WORDS[k]:.1f} s went out {-x:.0f} dB under its "
                     f"last (at most {WORD_UNDER:.0f}): the echo canceller held the microphone down"
                 )
+        held = True  # every gap judged so far more than FLOOR_UNDER under the last
         for k, x in enumerate(g[:-1]):
-            if x < -FLOOR_UNDER:
-                a, b = GAPS[k]
+            if x != x:
+                continue
+            a, b = GAPS[k]
+            if x < -FLOOR_UNDER and held:
                 problems.append(
                     f"unmute {n}: the room's noise {a:.2f}-{b:.2f} s after it went out {-x:.0f} dB "
                     f"under its later level (at most {FLOOR_UNDER:.0f}): held down, then back as "
                     "a step"
                 )
+            elif x < -FLOOR_DEEP:
+                problems.append(
+                    f"unmute {n}: the room's noise {a:.2f}-{b:.2f} s after it went out {-x:.0f} dB "
+                    f"under its later level, after it had been back (at most {FLOOR_DEEP:.0f} there)"
+                )
+            elif x < -FLOOR_UNDER:
+                notes.append(
+                    f"unmute {n}: the room's noise {a:.2f}-{b:.2f} s after it {-x:.0f} dB under its "
+                    f"later level after an earlier gap within {FLOOR_UNDER:.0f}: a pause's dip, not "
+                    f"held down from the unmute (fails from {FLOOR_DEEP:.0f})"
+                )
+            held = held and x < -FLOOR_UNDER
     else:
         own = pct([x for x in words if x == x], 0.5)
 

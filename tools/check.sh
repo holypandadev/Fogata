@@ -197,6 +197,7 @@ python3 -I -B tools/test_ci.py
 python3 -I -B tools/test_native_build.py
 python3 -I -B tools/test_third_party_notices.py
 python3 -I -B tools/test_desktop_entry.py
+python3 -I -B tools/test_unmute_check.py
 python3 -I -B tools/test_repo_checks.py
 tools/webrtc/test-check-archive.sh
 # The Linux player's HDR tone mapping is plain C++: tested on every system.
