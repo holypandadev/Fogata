@@ -989,7 +989,10 @@ async fn a_file_asked_for_and_cut_again_and_again_comes_whole() {
     })
     .await;
     assert!(!came, "progress shown although nothing came");
-    assert!(!here(&bea.direct_chat(ana.me(), 100).await.unwrap()));
+    // Told it did not come, it is no longer coming: asked for again at once, it starts.
+    let chat = bea.direct_chat(ana.me(), 100).await.unwrap();
+    assert!(!here(&chat));
+    assert_eq!(chat.items.last().unwrap().files[0].received, None);
 
     // Given up after 200 KiB, again and again.
     let cut = 200 << 10;

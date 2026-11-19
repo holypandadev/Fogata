@@ -332,26 +332,34 @@ pub(super) async fn fetch(
         } else if !asked {
             tried(&inner, friend, file, fetched.is_ok());
         }
-        match fetched {
+        let failed = match fetched {
             Ok(()) if attachment.voice.is_some() => {
                 fetched_voice(&inner, friend, &attachment, group, &dest, asked).await;
+                None
             }
             Ok(()) if attachment.kind == FileKind::Picture => {
                 fetched_picture(&inner, friend, &attachment, group, &dest, asked).await;
+                None
             }
-            Ok(()) => fetched_file(&inner, friend, &attachment, group, &dest, !asked),
-            Err(e) => {
-                tracing::debug!("an attachment did not come: {e}");
-                inner.emit(CoreEvent::DirectDownloadFailed {
-                    friend,
-                    file,
-                    reason: e.to_string(),
-                });
+            Ok(()) => {
+                fetched_file(&inner, friend, &attachment, group, &dest, !asked);
+                None
             }
-        }
+            Err(e) => Some(e),
+        };
         // Still downloading until it is kept or not: a voice message being checked would
-        // otherwise be fetched again, and charged again, by the next message to arrive.
+        // otherwise be fetched again, and charged again, by the next message to arrive. And
+        // no longer once the person hears it did not come: asked for again at once, it
+        // starts again rather than being taken for the download still going.
         inner.direct.lock().set_download(friend, file, None);
+        if let Some(e) = failed {
+            tracing::debug!("an attachment did not come: {e}");
+            inner.emit(CoreEvent::DirectDownloadFailed {
+                friend,
+                file,
+                reason: e.to_string(),
+            });
+        }
         inner.emit(CoreEvent::DirectChanged { friend });
     });
     Ok(())
