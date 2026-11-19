@@ -98,9 +98,30 @@ class CallPeer {
   final List<String> _endedCalls = [];
   static const endedCallsKept = 8;
 
-  void _ended(String call) {
-    _endedCalls.add(call);
-    if (_endedCalls.length > endedCallsKept) _endedCalls.removeAt(0);
+  /// Those of [_endedCalls] put there on a guess, while it was not known that they answer
+  /// a `which`: a signal of one that says it answers (`w`) takes it off ([Call._theirCall]).
+  /// Always among [_endedCalls].
+  final Set<String> _guessedEnded = {};
+
+  /// [call] ended; on a guess unless [certain].
+  void _ended(String call, {bool certain = true}) {
+    _endedCalls
+      ..remove(call)
+      ..add(call);
+    if (certain) {
+      _guessedEnded.remove(call);
+    } else {
+      _guessedEnded.add(call);
+    }
+    if (_endedCalls.length > endedCallsKept) {
+      _guessedEnded.remove(_endedCalls.removeAt(0));
+    }
+  }
+
+  /// [call] did not end after all.
+  void _notEnded(String call) {
+    _endedCalls.remove(call);
+    _guessedEnded.remove(call);
   }
 
   /// Their signals say they answer a `which` ([Call._askWhich]), and a copy of an offer

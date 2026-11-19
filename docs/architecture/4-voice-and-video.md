@@ -174,14 +174,17 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   made with (it left and came back, or its application started again faster than WebRTC
   finds a connection dead) gets a new connection at once, and what its ended call still
   sends is dropped. The call a participant had when it left the room is kept while this
-  call goes on (the last 64 to leave), with the calls of theirs known to have ended. A
-  call is put among those that ended only when it is certain: their answer to a `which`
-  names another (below), or, for a participant that never answers one, whenever a signal
-  of another call is taken (a late signal of the call before would otherwise end the one
-  they have, and so back and forth). A call taken on a guess (a signal of another call
-  taken at once, or after questions that went unanswered) changes the call known without
-  ending the one before, so that a later signal of it is asked about rather than dropped
-  for good. An answer names a new call only when it answers this side's latest offer (it
+  call goes on (the last 64 to leave), with the calls of theirs taken for ended. Only an
+  answer to a `which` naming another call (below) ends one for good. A call taken on a
+  guess (a signal of another call taken at once, or after questions that went
+  unanswered) changes the call known without ending the one before, so that a later
+  signal of it is asked about rather than dropped, except for a participant not known to
+  answer a `which`: the one before is then taken for ended (a late signal of it would
+  otherwise end the call they have, and so back and forth), but as a guess, which any
+  signal of that call saying that it answers (`w`) undoes, as it may be the call they
+  have (they came back with the same call, and a late signal of an older copy came
+  first); copies before this one never say so, and a late signal costs at most one
+  question. An answer names a new call only when it answers this side's latest offer (it
   was made after that offer, by the call they had then). An offer or an asking that names
   another call than the one known may also be a late one of an older call this side does
   not remember (both sides made their calls anew within seconds, as this side's memory of
@@ -222,8 +225,9 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   the connection, which holds the answer of their ended call, is made anew at once. A
   participant who goes out and back with the same call and whose first signal after it
   came back is a late one of an older call has that one taken, and the call they have
-  asked about at its next signal. Still not covered: such a participant on a copy before
-  this one (the call they have is taken for ended); and a `which` to a device whose room
+  asked about at its next signal, whether or not it was known to answer. Still not
+  covered: such a participant on a copy before this one (the call they have is taken for
+  ended, until they or this device make a new call); and a `which` to a device whose room
   has not named this one yet takes one of the four places its signals wait in, until it
   does. Each signal goes on its own, with no order between two, and may come twice: a copy
   of the first offer a connection was made

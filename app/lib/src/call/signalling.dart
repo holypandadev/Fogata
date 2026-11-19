@@ -396,10 +396,20 @@ extension _Signalling on Call {
       peer._answersWhich ??= false;
     }
     if (peer._endedCalls.contains(theirs)) {
-      _trace(
-        '${message['t']} from an ended call of ${from.substring(0, 8)}: dropped',
-      );
-      return false;
+      // Taken for ended on a guess, while it was not known that they answer: a signal of
+      // it that says so may be of the call they have, and goes on as any other.
+      if (message['w'] == 1 && peer._guessedEnded.contains(theirs)) {
+        _trace(
+          '${message['t']} from a call of ${_short(from)} taken for ended on a '
+          'guess: taken back',
+        );
+        peer._notEnded(theirs);
+      } else {
+        _trace(
+          '${message['t']} from an ended call of ${from.substring(0, 8)}: dropped',
+        );
+        return false;
+      }
     }
     // An answer to an earlier offer of this side says nothing of the call they have now (a
     // call of theirs that answered it late may have ended since); it is dropped below.
@@ -421,18 +431,19 @@ extension _Signalling on Call {
       return false;
     }
     peer._theirCall = theirs;
-    // Taken without an answer to a `which`, the call is a guess: a call of theirs put among
-    // those that ended on a guess would have its signals dropped for good, however wrong
-    // the guess, so only a participant that never answers has one so put (a late signal
-    // of it would otherwise end the call it has, back and forth); one that answers is
-    // asked about it if it comes again.
+    // Taken without an answer to a `which`, the call is a guess, and so is the end of the
+    // one before. Of a participant that answers, the one before is not put among those
+    // that ended: it is asked about if it comes again. Of one not known to answer, it is,
+    // as a late signal of it would otherwise end the call they have, and so back and
+    // forth; but as a guess, which a signal of it saying that it answers (`w`) undoes:
+    // a copy before this one never says so.
     final guessEnds = peer._answersWhich != true;
     // The call they had when they last left the room, if this one is another: it ended,
     // or this signal is a late one of an older call (they came back with the same).
     final left = peer._callWhenLeft;
     peer._callWhenLeft = null;
     if (before == null && left != null && left != theirs && guessEnds) {
-      peer._ended(left);
+      peer._ended(left, certain: false);
     }
     if (before == null || before == theirs) return true;
     await _theirNewCall(
@@ -441,21 +452,24 @@ extension _Signalling on Call {
       before,
       '${message['t']}',
       ended: guessEnds,
+      certain: false,
     );
     return true;
   }
 
   /// [peer]'s call is a new one, no longer [before], as a signal of type [type] showed:
   /// the connection with the one that ended is dropped at once and the first connection
-  /// made anew. [before] is put among their calls that ended if [ended].
+  /// made anew. [before] is put among their calls that ended if [ended], on a guess
+  /// unless [certain].
   Future<void> _theirNewCall(
     CallPeer peer,
     String from,
     String before,
     String type, {
     required bool ended,
+    bool certain = true,
   }) async {
-    if (ended) peer._ended(before);
+    if (ended) peer._ended(before, certain: certain);
     // A question asked before is answered by a call of theirs that may be older than this.
     peer._asked?.wait?.cancel();
     peer._asked = null;
@@ -579,7 +593,7 @@ extension _Signalling on Call {
     peer._asked = null;
     question.wait?.cancel();
     // Whatever this side took for ended, the answer is what they have.
-    peer._endedCalls.remove(now);
+    peer._notEnded(now);
     final known = peer._theirCall;
     if (question.call != now && answered) peer._ended(question.call);
     if (now == known) {

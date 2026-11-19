@@ -1985,9 +1985,11 @@ class Call extends ChangeNotifier {
   /// The calls of each participant that left the room while this call went on, as their
   /// signals named them: the one they had then and those that ended before it. Someone who
   /// comes back with another call has that one ended, and a late signal of it (an offer, an
-  /// answer, an asking) is dropped rather than taken for a newer call that ends theirs. The
-  /// last [leftKept] to leave; a new call of this device starts with none.
-  final Map<String, ({String? call, List<String> ended})> _left = {};
+  /// answer, an asking) is dropped rather than taken for a newer call that ends theirs; of
+  /// those, the ones taken for ended on a guess ([CallPeer._guessedEnded]). The last
+  /// [leftKept] to leave; a new call of this device starts with none.
+  final Map<String, ({String? call, List<String> ended, Set<String> guessed})>
+  _left = {};
   static const leftKept = 64;
 
   /// The number of the last offer made for each participant that left (the last
@@ -2032,9 +2034,10 @@ class Call extends ChangeNotifier {
         (_offersTo[id] ?? 0) + 1,
         DateTime.now().millisecondsSinceEpoch,
       );
-      if (_left.remove(id) case (:final call, :final ended)) {
+      if (_left.remove(id) case (:final call, :final ended, :final guessed)) {
         peer._callWhenLeft = call;
         peer._endedCalls.addAll(ended);
+        peer._guessedEnded.addAll(guessed);
       }
       peers[id] = peer;
       await peer._prepare();
@@ -2149,6 +2152,7 @@ class Call extends ChangeNotifier {
       _left[peer.id] = (
         call: peer._theirCall ?? peer._callWhenLeft,
         ended: [...peer._endedCalls],
+        guessed: {...peer._guessedEnded},
       );
       if (_left.length > leftKept) _left.remove(_left.keys.first);
       _offersTo.remove(peer.id);
