@@ -223,13 +223,17 @@ Future<void> beforeQuitting(
 }) async {
   Future<void>? leaving;
   Future<void> leave() => leaving ??= () async {
-    // Gone from the screen at once; the network may take a moment more to let go of what
-    // this device just said in a room (up to 2 s, then its connections close).
+    // Off the screen at once, out of full screen first (up to 2 s on macOS, which would
+    // otherwise leave an empty black space until the process ends), alongside the
+    // shutdown rather than before it. Both get 6 s, for what the core runs one step after
+    // another: the media bridge (up to 2 s), what this device just said in a room going
+    // out (up to 2 s), the connections closing (0.8 s), the network's tasks (up to 2 s,
+    // usually at once) and 0.2 s for the closes to leave, then the events it told before
+    // stopping (up to 10 s, usually at once). Over a slow link without a call that is some
+    // 3 to 3.5 s; past 6 s the application goes all the same.
+    final hidden = _hideWindow().catchError((Object _) {});
     try {
-      await windowManager.hide();
-    } catch (_) {}
-    try {
-      await before().timeout(const Duration(seconds: 5));
+      await Future.wait([hidden, before()]).timeout(const Duration(seconds: 6));
     } catch (_) {}
     // The window's errors of the last second wait to be noted: on the disk before it goes.
     try {
