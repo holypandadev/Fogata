@@ -34,7 +34,7 @@ invite), since the invite names the group and its manager.
 | relay (client) | Reserve a slot at a member who can be reached. |
 | dcutr | Hole punching coordinated through a member's relay slot. |
 | stream | Fogata's own stream protocols (files, updates, typing, the media bridge, direct chats, an account's move). Up to 128 streams of one protocol that come in together wait for the task that takes them, which applies its own limits then; libp2p as published keeps one and drops the rest, so several requests at once from one member failed on a busy computer (vendor/libp2p-stream/FOGATA.md). |
-| request-response | Membership proof, roster exchange, group messages, call signals. Each member request goes on the peer's best connection as it leaves (best path, QUIC first, the oldest), leaving out those this device is closing (silent ones, those that missed pings) and, while another is not, suspect ones: one where a small request (64 KiB at most, with a small answer) has gone unanswered for 3 s, and every direct QUIC one to the peer once the most recently heard of them has received nothing for 6 s (silence is counted per peer, not per connection: an old dead QUIC connection beside a live new one is caught only by the 3 s rule). With none known here, or one that has just closed, libp2p chooses; libp2p as published takes any of a peer's connections, a slower one or one about to close (vendor/libp2p-request-response/FOGATA.md). A connection that died unnoticed is chosen until it is suspect, and the requests sent on it until then (at most the 6 on their way at once) are lost: each fails after 10 s, when its stream does not open, while the connection itself closes 25 to 30 s after it died (QUIC: 30 s without a packet, keep-alives every 5 s) or 55 to 70 s after (TCP: a ping failure libp2p does not report, 15 + 20 s, then two failed openings of a ping stream, 15 + 10 and 10 s; derived where the pings are counted, in swarm_events.rs). Nothing is sent again. A message is at most 4 MiB, and one with more CBOR data items than one per 32 bytes of that is refused before it is decoded: anyone can send one, and tiny items would each take far more memory decoded than on the wire. |
+| request-response | Membership proof, roster exchange, group messages, call signals. Each member request goes on the peer's best connection as it leaves (best path, QUIC first, the oldest), leaving out those this device is closing (silent ones, those that missed pings) and, while another is not, suspect ones: one where a small request (64 KiB at most, with a small answer) has gone unanswered for 3 s, and every direct QUIC one to the peer once the most recently heard of them has received nothing for 6 s (silence is counted per peer, not per connection: an old dead QUIC connection beside a live new one is caught only by the 3 s rule). With none known here, or one that has just closed, libp2p chooses; libp2p as published takes any of a peer's connections, a slower one or one about to close (vendor/libp2p-request-response/FOGATA.md). A connection that died unnoticed is chosen until it is suspect, and the requests sent on it until then (at most the 6 on their way at once) are lost: each fails after 10 s, when its stream does not open, while the connection itself closes 25 to 30 s after it died (QUIC: 30 s without a packet, keep-alives every 5 s) or 55 to 70 s after (TCP: a ping failure libp2p does not report, 15 + 20 s, then two failed openings of a ping stream, 15 + 10 and 10 s; derived where the pings are counted, in swarm_events.rs). Nothing is sent again, but a device's own room events, once (3.7). A message is at most 4 MiB, and one with more CBOR data items than one per 32 bytes of that is refused before it is decoded: anyone can send one, and tiny items would each take far more memory decoded than on the wire. |
 
 Not used: AutoNAT (it asks strangers to probe us) and libp2p's UPnP behaviour (MPL-2.0
 dependency). Port mapping with `rupnp` and `crab_nat` is planned for a later milestone.
@@ -833,7 +833,18 @@ A group message goes once to each member, not to everyone from everyone:
   an event lost on the way (a request that failed with a connection that went away, a stale
   roster) arrives within a `Here` or two, about 20 s at most. Of those 16 a device keeps
   whole only the newest that fit 1 MiB together (the newest always), the size of one answer:
-  the others it still names, but no longer gives.
+  the others it still names, but no longer gives. That needs a participant that has the
+  event: a device that left the room no longer sends `Here`, and one whose node stopped
+  has nothing.
+- A device's own room events but its `Here` (lines, files shared or no longer, entering,
+  leaving, a taking out) are kept until each request carrying one is answered by the member
+  (taken or refused) or failed (`node::own`). One that fails on its way, or is dropped from
+  a full queue, goes again once, on the member's best connection then, while the member is
+  still connected; a member takes the copy that comes again as any copy, by its id. Quitting
+  waits until none is waiting or on its way, for at most 2 s (`OWN_GOING_WAIT`), then closes
+  the connections. Still lost: an event to a member whose every connection closed before it
+  got there (none goes again then), and one that reached no participant before its
+  author's node stopped. The author's own room shows its line either way.
 
 Every message and request to a member is a request of the member protocol, on a stream of its
 own. A connection takes 16 such streams at once, both ways together, and drops any stream

@@ -332,15 +332,19 @@ impl Node {
         }
     }
 
-    /// Sends a group message of this device to every connected member of `group`.
-    pub(super) fn deliver(&mut self, group: GroupId, wire: WireMessage) {
+    /// Sends a group message of this device to every connected member of `group`; with
+    /// `kept`, its message id, it is kept until each request is gone (see own.rs).
+    pub(super) fn deliver(&mut self, group: GroupId, wire: WireMessage, kept: Option<[u8; 16]>) {
         let peers: Vec<PeerId> = self
             .groups
             .get(&group)
             .map(|s| s.members.iter().copied().collect())
             .unwrap_or_default();
         let reached = self.reached_with(&[], &peers);
-        self.send_group_message(&peers, &wire, &reached);
+        match kept {
+            Some(id) => self.send_own(group, id, &peers, wire, reached),
+            None => self.send_group_message(&peers, &wire, &reached),
+        }
     }
 
     /// Sends a group message to `peers`: spread, naming `reached`, to those that take it,

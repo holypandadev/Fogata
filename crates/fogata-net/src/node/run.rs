@@ -17,7 +17,7 @@ use libp2p::{
 
 #[cfg(test)]
 use super::Pending;
-use super::{Node, links::LINK_CHECK, slot::until_next_slot};
+use super::{Node, links::LINK_CHECK, own, slot::until_next_slot};
 use crate::{Command, behaviour::BehaviourEvent};
 
 /// Longest wait, when the node stops, for its connections to close and those being set up
@@ -411,6 +411,9 @@ impl Node {
             } => self.on_swarm_event(event),
             command = self.commands.recv() => match command {
                 Some(Command::Shutdown(reply)) => {
+                    // What this device just said in a room (a last line, its leave) goes
+                    // first, for a moment at most.
+                    self.let_own_go().await;
                     self.close_all().await;
                     return Some(Some(reply));
                 }
@@ -501,6 +504,26 @@ impl Node {
             }
         }
         None
+    }
+
+    /// Before the node stops: drives the swarm until none of this device's room events is
+    /// waiting or on its way (answered or failed, see own.rs), for at most
+    /// [`own::OWN_GOING_WAIT`]. With none, it returns at once.
+    async fn let_own_go(&mut self) {
+        if self.own_going.is_empty() {
+            return;
+        }
+        let deadline = tokio::time::sleep(own::OWN_GOING_WAIT);
+        tokio::pin!(deadline);
+        while !self.own_going.is_empty() {
+            tokio::select! {
+                event = self.swarm.select_next_some() => self.on_swarm_event(event),
+                _ = &mut deadline => {
+                    tracing::debug!("quitting with room events of this device's on their way");
+                    break;
+                }
+            }
+        }
     }
 
     /// Closes every connection and drives the swarm until they are closed, for at most

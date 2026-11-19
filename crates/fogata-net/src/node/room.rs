@@ -645,8 +645,11 @@ impl Node {
             .map_err(|e| format!("message not sent: {e}"))?;
         self.remember(sealed.header.message_id);
         let wire = WireMessage::from(&sealed);
+        // Kept until it is gone to each member, but a presence: another goes soon.
+        let kept =
+            (!matches!(payload, GroupPayload::RoomHere { .. })).then_some(sealed.header.message_id);
         self.apply_room(group, &sealed, payload, wire.clone(), None);
-        self.deliver(group, wire);
+        self.deliver(group, wire, kept);
         Ok(())
     }
 

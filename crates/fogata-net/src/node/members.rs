@@ -142,9 +142,9 @@ impl Node {
             }
             request_response::Event::OutboundFailure {
                 peer,
+                connection_id,
                 request_id,
                 error,
-                ..
             } => {
                 // Every way a request ends: failed on its way, timed out, its connection
                 // closed (the peer gone too), its dial failed.
@@ -177,6 +177,11 @@ impl Node {
                     {
                         self.request_dropped(to, kind);
                         self.challenge_with(peer, group, None);
+                    }
+                    // A room event of this device's goes again once, on another connection
+                    // if there is one (see own.rs).
+                    Pending::Own(group, id, again) => {
+                        self.own_lost(to, group, id, again, Some(connection_id))
                     }
                     // Lost on the way (its connection closed while another stays, or no
                     // answer in time): let go as one that never went, so that an invite is
@@ -1180,6 +1185,8 @@ impl Node {
             (Pending::Presence(sent), response) => {
                 self.presence_done(peer, sent, matches!(response, MemberResponse::Ack))
             }
+            // Taken or refused, it got there (see own.rs).
+            (Pending::Own(_, id, _), _) => self.own_answered(id),
             // Every other answer leaves nothing to do. Each kind is named, with no wildcard:
             // a kind added to `Pending` is placed here on purpose.
             (

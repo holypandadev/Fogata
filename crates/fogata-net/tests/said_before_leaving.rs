@@ -5,13 +5,14 @@
 //! loopback interface.
 //!
 //! What these tests show (rounds and rates measured on one computer, see each test):
-//! - A line goes to each member as its own request, the leave as another, and an answer
-//!   is never awaited for either: a request that fails on its way is not sent again.
+//! - A line goes to each member as its own request, the leave as another. One that fails
+//!   on its way, or is dropped from a full queue, goes again once while the member is still
+//!   connected; quitting waits up to 2 s for those still on their way.
 //! - A member that missed a line gets it when a participant's presence (every 20 s) names
 //!   it within two minutes, from the line's author while connected, else from the
 //!   participant that named it: Cai's presence brings Bea a line Ana's link failed to.
-//! - Nothing brings back a line no member got: once its author left, nobody names it; once
-//!   its author's node stopped, nobody has it, and its next session does not either.
+//! - Nothing brings back a line no member got once its author's node stopped: nobody has
+//!   it, and its next session does not either.
 //! - Ana's own room shows the line said whether or not anyone got it: nothing tells her.
 
 use std::{
@@ -23,9 +24,21 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId};
+use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId, MembershipProof, SealedMessage};
 use fogata_net::{GroupSetup, Multiaddr, NodeConfig, NodeEvents, NodeHandle};
+use fogata_proto::{
+    GroupPayload, MEMBER_PROTOCOL, MemberRequest, MemberResponse, WireMessage, WireProof,
+};
 use fogata_state::{FIRST_ROOM, GroupLog};
+use futures::StreamExt;
+use libp2p::{
+    StreamProtocol, Swarm,
+    request_response::{self, ProtocolSupport, ResponseChannel},
+    swarm::{
+        ConnectionId, SwarmEvent,
+        dial_opts::{DialOpts, PeerCondition},
+    },
+};
 use tokio::{net::UdpSocket, time::timeout};
 
 /// One test at a time: each starts devices that talk over this computer's network.
@@ -412,23 +425,24 @@ async fn a_last_line_before_quitting_reaches_everyone_on_a_fast_link() {
     assert_eq!(tally.lost, [0, 0], "{tally:?}");
 }
 
-/// Scenario (ii) over links of 250 ms each way (a relayed or long-distance connection).
-/// Measured, 10 rounds: in 6 neither Bea nor Cai ever got the line, nor did Ana's next
-/// session bring it; in 3 one of them missed it and had it 11-19 s later from the other's
-/// presence; in 1 both got it.
+/// Scenario (ii) over links of 250 ms each way (a relayed or long-distance connection):
+/// quitting waits for the line and the leave to be answered. Measured before that wait,
+/// 10 rounds: in 6 neither Bea nor Cai ever got the line, nor did Ana's next session bring
+/// it; in 3 one of them missed it and had it 11-19 s later from the other's presence; in 1
+/// both got it. With it: 10 of 10 rounds, both had it about 1.2 s after it was said.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "a line said right before quitting over a slow link is lost for everyone, as the node stops before it went; fix pending"]
 async fn a_last_line_before_quitting_reaches_everyone_on_a_slow_link() {
     let _one = ONE_AT_A_TIME.lock().await;
-    let tally = quit_after_the_last_line(250, 10).await;
+    let tally = quit_after_the_last_line(250, 2).await;
     assert_eq!(tally.lost, [0, 0], "{tally:?}");
 }
 
 /// Scenario (iii): Ana's link to Bea is cut as she says a last line and leaves, so that the
-/// line to Bea fails on its way (after the 20 s a request is given) while Cai gets it. Cai's
-/// presence, every 20 s, names the line, and Bea asks for it: from Ana while she still
-/// counts as connected (the cut link: no answer), then from Cai. Measured: 3 of 3 rounds,
-/// Bea had it 19.8-20.0 s after it was said. About 70 s.
+/// line to Bea fails on its way (after the 20 s a request is given, and so does the one
+/// sent again on the same cut link) while Cai gets it. Cai's presence, every 20 s, names the
+/// line, and Bea asks for it: from Ana while she still counts as connected (the cut link: no
+/// answer), then from Cai. Measured: 3 of 3 rounds, Bea had it 19.8-20.0 s after it was
+/// said; with lines sent again once, 16.3-20.0 s. About 70 s.
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "slow (about 70 s): pins that a member gets from another member a line that failed on its way to it; run by hand"]
 async fn a_line_that_failed_on_its_way_comes_from_another_member() {
@@ -444,7 +458,7 @@ async fn a_line_that_failed_on_its_way_comes_from_another_member() {
         let said = Instant::now();
         ana.room_chat(three.group, text.clone()).await.unwrap();
         ana.leave_room(three.group).await.unwrap();
-        // Long enough for the line to Bea to fail on its way: nothing goes again.
+        // Long enough for the line to Bea to fail on its way.
         let got = timeout(Duration::from_secs(45), async {
             while !has_line(&three.bea, three.group, &text).await {
                 tokio::time::sleep(Duration::from_millis(50)).await;
@@ -552,8 +566,9 @@ async fn back_after_a_line_lost_to_the_only_other(node_up: bool) -> (bool, bool,
 /// the line only now and then; Ana entering the room again does. Scenario (v): her own room
 /// showed it said all along. Measured, 4 runs: Bea always missed the line; on connecting
 /// again she got it in 1 run, and in the 3 others within 11 s of Ana entering again (in the
-/// first of those the timing was not split, it may have been on connecting). About 50-90 s
-/// (the cut waits for the connection to close).
+/// first of those the timing was not split, it may have been on connecting). With a line
+/// that failed on its way sent again once: 1 run, Bea had it 0.05 s after connecting again.
+/// About 50-90 s (the cut waits for the connection to close).
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "slow (about 50-90 s): pins that a line lost to the only other member comes when its author, node up, enters the room again; run by hand"]
 async fn a_line_lost_to_the_only_other_comes_when_its_author_enters_again() {
@@ -575,4 +590,200 @@ async fn a_line_lost_to_the_only_other_comes_when_its_author_starts_again() {
     assert!(shown_at_ana, "Ana's room does not show her line");
     assert!(missed, "Bea got the line through the cut link");
     assert!(back, "Bea never got the line");
+}
+
+type Hand = Swarm<request_response::cbor::Behaviour<MemberRequest, MemberResponse>>;
+
+/// Bea played by hand, over TCP and QUIC: she proves herself when challenged, and answers
+/// every other request but Ana's lines while `hold` is set, which wait for their answer.
+/// Each line that comes is noted with the connection it came on.
+struct Bea {
+    swarm: Hand,
+    identity: DeviceIdentity,
+    log: GroupLog,
+    hold: bool,
+    held: Vec<ResponseChannel<MemberResponse>>,
+    lines: Vec<([u8; 16], ConnectionId)>,
+}
+
+impl Bea {
+    fn new(identity: DeviceIdentity, log: GroupLog) -> Self {
+        let swarm = libp2p::SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .unwrap()
+            .with_quic()
+            .with_behaviour(|_| {
+                request_response::cbor::Behaviour::<MemberRequest, MemberResponse>::new(
+                    [(StreamProtocol::new(MEMBER_PROTOCOL), ProtocolSupport::Full)],
+                    request_response::Config::default(),
+                )
+            })
+            .unwrap()
+            .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(120)))
+            .build();
+        Self {
+            swarm,
+            identity,
+            log,
+            hold: false,
+            held: Vec::new(),
+            lines: Vec::new(),
+        }
+    }
+
+    /// The id of the line `wire` is, if it is one.
+    fn line(&self, wire: &WireMessage) -> Option<[u8; 16]> {
+        let sealed = SealedMessage::try_from(wire).ok()?;
+        let keys = self.log.current_keys(&self.identity)?;
+        let payload = GroupPayload::decode(&sealed.open(&keys).ok()?).ok()?;
+        matches!(payload, GroupPayload::RoomChat { .. }).then_some(sealed.header.message_id)
+    }
+
+    /// Handles the next event of Bea's side; returns it unless it was a request.
+    async fn step(
+        &mut self,
+    ) -> Option<SwarmEvent<request_response::Event<MemberRequest, MemberResponse>>> {
+        let event = self.swarm.select_next_some().await;
+        let SwarmEvent::Behaviour(request_response::Event::Message {
+            peer,
+            connection_id,
+            message:
+                request_response::Message::Request {
+                    request, channel, ..
+                },
+        }) = event
+        else {
+            return Some(event);
+        };
+        let answer = match request {
+            MemberRequest::Challenge { challenge, .. } => {
+                let challenge: [u8; 32] = challenge.try_into().unwrap();
+                let keys = self.log.current_keys(&self.identity).unwrap();
+                let bea_peer = self.swarm.local_peer_id().to_bytes();
+                let ana_peer = peer.to_bytes();
+                let proof = MembershipProof::create(
+                    &keys,
+                    &self.identity,
+                    &bea_peer,
+                    &ana_peer,
+                    &challenge,
+                );
+                let sealed = proof.seal(&keys, &bea_peer, &ana_peer, &challenge).unwrap();
+                MemberResponse::Proof(WireProof::from(&sealed))
+            }
+            MemberRequest::Deliver(message) | MemberRequest::Spread { message, .. } => {
+                if let Some(id) = self.line(&message) {
+                    self.lines.push((id, connection_id));
+                    if self.hold {
+                        self.held.push(channel);
+                        return None;
+                    }
+                }
+                MemberResponse::Ack
+            }
+            _ => MemberResponse::Ack,
+        };
+        let _ = self.swarm.behaviour_mut().send_response(channel, answer);
+        None
+    }
+
+    /// Dials Ana at `address` on a connection of its own, and waits for it.
+    async fn connect(&mut self, ana: libp2p::PeerId, address: Multiaddr) -> ConnectionId {
+        let dial = DialOpts::peer_id(ana)
+            .addresses(vec![address])
+            .condition(PeerCondition::Always)
+            .build();
+        let wanted = dial.connection_id();
+        self.swarm.dial(dial).unwrap();
+        timeout(Duration::from_secs(20), async {
+            loop {
+                if let Some(SwarmEvent::ConnectionEstablished { connection_id, .. }) =
+                    self.step().await
+                    && connection_id == wanted
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("connected");
+        wanted
+    }
+
+    /// Keeps Bea's side going until `done` holds, for up to `seconds`.
+    async fn until(&mut self, seconds: u64, done: impl Fn(&Self) -> bool) -> bool {
+        timeout(Duration::from_secs(seconds), async {
+            while !done(self) {
+                self.step().await;
+            }
+        })
+        .await
+        .is_ok()
+    }
+}
+
+/// Scenario (iii) on its own: the line to Bea is lost on its way, its connection closed
+/// while another one stays and Bea stays a member, and Ana sends it again at once on the
+/// one left, rather than leaving it to a presence of someone else's 20 s on (when there is
+/// anyone else). Measured: it came again on the other connection within a second.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_line_lost_with_its_connection_goes_again_on_another() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    if let Ok(filter) = std::env::var("FOGATA_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_test_writer()
+            .try_init();
+    }
+    let ana = Arc::new(DeviceIdentity::generate().unwrap());
+    let identity = DeviceIdentity::generate().unwrap();
+    let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+    log.add(&ana, identity.public_key(), "bea", 2).unwrap();
+    let group = log.group_id();
+    let port_a = free_port();
+    let node_a = node(ana, log.clone(), port_a, Vec::new());
+    let ana_peer = node_a.local_peer();
+    let mut bea = Bea::new(identity, log);
+    let device = bea.identity.public_key();
+    let tcp = format!("/ip4/127.0.0.1/tcp/{port_a}").parse().unwrap();
+    let first = bea.connect(ana_peer, tcp).await;
+    let second = bea.connect(ana_peer, loopback(port_a)).await;
+    let counted = timeout(Duration::from_secs(20), async {
+        while !connected(&node_a, group, &[device]).await {
+            bea.until(1, |_| false).await;
+        }
+    })
+    .await;
+    assert!(counted.is_ok(), "Bea is not a member at Ana's");
+    // Ana's side counts a connection open a moment after Bea's side does: the line must
+    // find the other one there when its own closes.
+    bea.until(1, |_| false).await;
+    node_a
+        .join_room(group, FIRST_ROOM, "ana".into())
+        .await
+        .unwrap();
+    bea.hold = true;
+    node_a.room_chat(group, "last word".into()).await.unwrap();
+    assert!(bea.until(10, |b| !b.lines.is_empty()).await, "no line came");
+    let (id, on) = bea.lines[0];
+    let other = if on == first { second } else { first };
+    // The connection the line came on closes before Bea answers it.
+    bea.hold = false;
+    bea.held.clear();
+    assert!(bea.swarm.close_connection(on));
+    let closed = Instant::now();
+    let again = bea.until(10, |b| b.lines.len() > 1).await;
+    let took = closed.elapsed();
+    eprintln!("lines: {:?}, again after {took:?}", bea.lines);
+    assert!(again, "the line did not come again");
+    assert_eq!(bea.lines[1], (id, other), "the line sent again");
+    assert!(took < Duration::from_secs(5), "came again after {took:?}");
+    // Once, however long Bea's side keeps going.
+    bea.until(3, |_| false).await;
+    assert_eq!(bea.lines.len(), 2, "{:?}", bea.lines);
 }

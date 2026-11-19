@@ -29,6 +29,7 @@ mod member_reach;
 mod members;
 mod network;
 mod outbox;
+mod own;
 mod presence;
 mod proofs;
 mod room;
@@ -368,6 +369,7 @@ pub(crate) fn start_with(
         connections: HashMap::new(),
         pending: HashMap::new(),
         quick_on_its_way: HashMap::new(),
+        own_going: own::OwnGoing::default(),
         outbox: HashMap::new(),
         presence: presence::PresenceWays::default(),
         farewell: HashSet::new(),
@@ -522,7 +524,11 @@ enum Pending {
     /// A challenge about a group, with the challenge sent: its answer is checked against
     /// that one, even when another was sent since.
     Challenge(GroupId, [u8; 32]),
+    /// A group message passed on, or a presence of this device's in a room.
     Deliver,
+    /// A room event of this device's (see `own::OwnGoing`): its group, its message id, and
+    /// whether it is the one sending again after the first failed.
+    Own(GroupId, [u8; 16], bool),
     Roster(GroupId),
     /// A group's banner, with its digest: a member that refuses it is not sent it again.
     Banner(GroupId, [u8; 32]),
@@ -1040,6 +1046,8 @@ struct Node {
     /// Quick member requests on their way (see `outbox::is_quick`): the connection each went
     /// on and when, until it is answered, fails or times out, or its connection closes.
     quick_on_its_way: HashMap<OutboundRequestId, (ConnectionId, Instant)>,
+    /// This device's room events on their way to members (see own.rs).
+    own_going: own::OwnGoing,
     /// Member requests to each peer, sent a few at a time (see `outbox::IN_FLIGHT`).
     outbox: HashMap<PeerId, Outbox>,
     /// This device's presence on its way to each member, one at a time to each.

@@ -105,6 +105,18 @@ impl Node {
     /// [`IN_FLIGHT`]); past [`MAX_WAITING`] or [`MAX_WAITING_BYTES`] waiting, the oldest
     /// waiting go (the one just added always waits).
     pub(super) fn request(&mut self, peer: PeerId, request: MemberRequest, kind: Pending) {
+        self.request_besides(peer, request, kind, None);
+    }
+
+    /// [`Self::request`], on another connection than `besides` if `peer` has one when the
+    /// request leaves at once (one that waits its turn goes as any other).
+    pub(super) fn request_besides(
+        &mut self,
+        peer: PeerId,
+        request: MemberRequest,
+        kind: Pending,
+        besides: Option<libp2p::swarm::ConnectionId>,
+    ) {
         let outbox = self.outbox.entry(peer).or_default();
         if outbox.in_flight >= IN_FLIGHT {
             outbox.waiting_bytes += request_bytes(&request);
@@ -130,7 +142,7 @@ impl Node {
         // about to close (a relayed or silent one kept a few seconds). Without one known
         // here, as libp2p chooses.
         let quick = is_quick(&request);
-        let chosen = self.request_connection(&peer);
+        let chosen = self.request_connection(&peer, besides);
         let member = &mut self.swarm.behaviour_mut().member;
         let id = match chosen {
             Some(connection) => member.send_request_on(&peer, connection, request),
@@ -207,6 +219,8 @@ impl Node {
                     outbox.direct.clear();
                 }
             }
+            // A room event of this device's goes again once (see own.rs).
+            Pending::Own(group, id, again) => self.own_lost(peer, group, id, again, None),
             _ => {}
         }
     }

@@ -102,8 +102,14 @@ impl Node {
     /// suspect, by the same ranking as [`Self::best_connection`]; the best one when all
     /// are. Suspect is one a quick request has waited on for [`SUSPECT_AFTER`] or more, and
     /// a direct QUIC connection while the peer's QUIC connections heard nothing for
-    /// [`QUIC_SUSPECT_SILENCE`]: both say it may have died unnoticed.
-    pub(super) fn request_connection(&self, peer: &PeerId) -> Option<ConnectionId> {
+    /// [`QUIC_SUSPECT_SILENCE`]: both say it may have died unnoticed. `besides` counts worse
+    /// than any other: a request just failed on it (its stream ended, or the connection is
+    /// closing, which may be heard of after the failure).
+    pub(super) fn request_connection(
+        &self,
+        peer: &PeerId,
+        besides: Option<ConnectionId>,
+    ) -> Option<ConnectionId> {
         let quic_silent =
             crate::datagram::silent_for(peer).is_some_and(|d| d >= QUIC_SUSPECT_SILENCE);
         let suspect = |id: &ConnectionId, c: &ConnectionInfo| {
@@ -116,7 +122,13 @@ impl Node {
                     .any(|(on, since)| on == id && since.elapsed() >= SUSPECT_AFTER)
         };
         self.open_connections(peer)
-            .min_by_key(|(id, c)| (suspect(id, c), connection_rank(id, c)))
+            .min_by_key(|(id, c)| {
+                (
+                    Some(**id) == besides,
+                    suspect(id, c),
+                    connection_rank(id, c),
+                )
+            })
             .map(|(id, _)| *id)
     }
 
