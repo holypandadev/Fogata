@@ -207,9 +207,7 @@ extension _Signalling on Call {
         final number = message['s'];
         if (number is int) {
           final last = peer._stateIn;
-          if (last != null &&
-              number < last &&
-              last - number < Call.stateOrderWithin.inMilliseconds) {
+          if (last != null && number < last) {
             _trace(
               'state $number from ${_short(from)} older than $last: dropped',
             );

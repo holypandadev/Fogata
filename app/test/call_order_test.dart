@@ -157,15 +157,12 @@ void main() {
       expect(peer.mic, isFalse);
     });
 
-    test('a state a minute or more below the newest is taken as one of a call '
-        'that started anew', () async {
+    test('a state told before their clock jumped forward, arriving late, is '
+        'dropped', () async {
       final peer = alone.peers[_large]!;
-      await alone.handleSignal(_large, told(mic: true, number: 200000));
-      // Its new call was not named yet (its first signals are on their way).
-      await alone.handleSignal(_large, told(mic: false, number: 140000));
-      expect(peer.mic, isFalse);
-      // And the numbers after it are taken.
-      await alone.handleSignal(_large, told(mic: true, number: 140001));
+      // Their clock jumped an hour forward between the two states.
+      await alone.handleSignal(_large, told(mic: true, number: 3700000));
+      await alone.handleSignal(_large, told(mic: false, number: 100000));
       expect(peer.mic, isTrue);
     });
   });

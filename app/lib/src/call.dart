@@ -495,12 +495,6 @@ class Call extends ChangeNotifier {
   /// numbers of the call before it.
   int _stateNumber = 0;
 
-  /// How far behind the newest state taken from a participant one can be and still be an
-  /// older one of theirs that came late, not one of a call of theirs that started anew
-  /// after their clock went back: a signal is given up on 20 s after it was sent.
-  @visibleForTesting
-  static const stateOrderWithin = Duration(minutes: 1);
-
   static String _newCallId() {
     final random = math.Random.secure();
     return [
