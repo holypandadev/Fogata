@@ -19,6 +19,7 @@ import 'moving.dart';
 import 'report.dart' show flushAppErrors, noteAppError;
 import 'rust/api/tray.dart' as linux_tray;
 import 'shown.dart';
+import 'test_switches.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -264,6 +265,9 @@ Future<void> beforeQuitting(
       return AppExitResponse.exit;
     },
   );
+  // Ended from outside (`kill`, the session ending): quits as the tray's Quit does,
+  // through [quitApplication] as it is by the time the signal comes.
+  quitOnSignals(_endingSignals(), quit: () => quitApplication());
   if (!ownTitleBar) {
     quitApplication = () async {
       await leave();
@@ -284,6 +288,7 @@ Future<void> beforeQuitting(
         await trayManager.destroy();
       }
     } catch (_) {}
+    _stopWatchingSignals();
     await windowManager.destroy();
   }
 
@@ -303,6 +308,62 @@ Future<void> beforeQuitting(
 
 /// Quits the application as the tray's menu does: leaving the room first.
 Future<void> Function() quitApplication = () async => exit(0);
+
+/// Quits with [quit] at the first of [signals], and ends the process with [end] at once if
+/// [quit] fails, or if it has not ended it [within] of the signal, as long as the
+/// application's event loop runs: the 6 s leaving gives the shutdown, the second for the
+/// window's last errors, and three for the tray and the window to go, which have no limit
+/// of their own. A signal that comes while quitting changes nothing.
+@visibleForTesting
+void quitOnSignals(
+  Stream<ProcessSignal> signals, {
+  required Future<void> Function() quit,
+  void Function() end = _killNow,
+  Duration within = const Duration(seconds: 10),
+}) {
+  var quitting = false;
+  signals.listen((_) async {
+    if (quitting) return;
+    quitting = true;
+    final late = Timer(within, end);
+    try {
+      await quit();
+    } catch (_) {
+      late.cancel();
+      end();
+    }
+  });
+}
+
+// Not exit(): it runs the exit handlers that the runner itself avoids (main.cc).
+void _killNow() => Process.killPid(pid, ProcessSignal.sigkill);
+
+/// SIGTERM and SIGINT, which end the process at once unless watched. Not SIGHUP: watching
+/// it would undo an "ignore" the application was started with (`nohup`). None on Windows,
+/// which has no SIGTERM and gives a windowed application no SIGINT, nor in widget tests:
+/// their runner's own would be taken.
+Stream<ProcessSignal> _endingSignals() {
+  if (Platform.isWindows || testSwitch('FLUTTER_TEST') != null) {
+    return const Stream.empty();
+  }
+  final all = StreamController<ProcessSignal>();
+  for (final signal in [ProcessSignal.sigterm, ProcessSignal.sigint]) {
+    _signalWatches.add(signal.watch().listen(all.add, onError: (Object _) {}));
+  }
+  return all.stream;
+}
+
+final _signalWatches = <StreamSubscription<ProcessSignal>>[];
+
+/// Gives SIGTERM and SIGINT back their default action, which ends the process at once, as
+/// the window is destroyed: a teardown that hangs once Dart has stopped would otherwise
+/// keep every later one from ending it.
+void _stopWatchingSignals() {
+  for (final watch in _signalWatches) {
+    unawaited(watch.cancel());
+  }
+  _signalWatches.clear();
+}
 
 class _CloseWatcher with WindowListener {
   _CloseWatcher(this.close);

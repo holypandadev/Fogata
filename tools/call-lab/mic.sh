@@ -310,7 +310,7 @@ if [ "${1:-}" = --inside ]; then
       while kill -0 "$apid" 2>/dev/null && [ $SECONDS -lt $end ]; do sleep 0.1; done
       if kill -0 "$apid" 2>/dev/null; then
         echo "still running 15 s after quitting" > "$RUN/quit.txt"
-        lab_kill "$apid" "$BUNDLE"
+        lab_kill "$apid" "$BUNDLE" KILL
       else
         wait "$apid"
         echo "ended with status $? at $(now)" > "$RUN/quit.txt"

@@ -417,12 +417,17 @@ lab_wait() { # "a b c" seconds
 }
 
 # Stops a process this lab started, by the PID it wrote down, once its command line still
-# holds [word] (a PID can be reused once its process ends).
-lab_kill() { # pid word
+# holds [word] (a PID can be reused once its process ends). Copies of the application are
+# ended with KILL, at once as before: on a signal it can handle the application now leaves
+# in order, for seconds and seen leaving by the others. Their PID is the application's own
+# (lab_copy's env runs it in its place).
+lab_kill() { # pid word [KILL]
   local p=$1
   [ -n "$p" ] && [ -r "/proc/$p/cmdline" ] || return 0
   tr '\0' ' ' < "/proc/$p/cmdline" | grep -q -- "$2" || return 0
-  kill "$p" 2>/dev/null || return 0
+  kill ${3:+-"$3"} "$p" 2>/dev/null || return 0
+  # Reaped here, quietly: bash would otherwise tell of each copy killed on standard error.
+  [ "${3:-}" = KILL ] && wait "$p" 2>/dev/null
   for _ in $(seq 50); do kill -0 "$p" 2>/dev/null || return 0; sleep 0.1; done
   kill -9 "$p" 2>/dev/null
 }
@@ -689,7 +694,7 @@ lab_unmute_stop() {
 
 lab_stop() {
   local f
-  for f in "$RUN"/[a-h].pid; do [ -e "$f" ] && lab_kill "$(cat "$f")" "$BUNDLE"; done
+  for f in "$RUN"/[a-h].pid; do [ -e "$f" ] && lab_kill "$(cat "$f")" "$BUNDLE" KILL; done
   for f in "$RUN"/tone-?.pid "$RUN/tone-apps.pid" "$RUN/recorder.pid" "$RUN/phases.pid" \
     "$RUN/echo-proof.pid" "$RUN/moving.pid" "$RUN/stalls.pid"; do [ -e "$f" ] && lab_kill "$(cat "$f")" bash; done
   for f in "$RUN"/played/*.pids; do

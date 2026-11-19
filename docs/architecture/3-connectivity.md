@@ -853,9 +853,14 @@ A group message goes once to each member, not to everyone from everyone:
   way when the 2 s run out; one that failed twice, or was dropped from a full queue (not
   sent again: it would push out the next); one to a member whose every connection closed
   before it got there; one that reached no participant before its author's node stopped;
-  and whatever is on its way when the application is ended by a signal (nothing handles
-  SIGTERM: a Flatpak closed, a logout) or its own limit on quitting cuts the shutdown short.
-  The author's own room shows its line either way.
+  and whatever is on its way when the application is ended at once or its own limit on
+  quitting cuts the shutdown short. The author's own room shows its line either way.
+  SIGTERM and SIGINT (`kill`, systemd stopping the session's programs, Ctrl+C in a
+  terminal) quit as the tray's Quit does, once however many come, and the process is ended
+  10 s after the first as long as the application's event loop runs (`quitOnSignals`); one
+  that comes before the window has set up its quitting still ends it at once, and Windows
+  watches none. Still ended at once: SIGKILL and SIGHUP, and SIGTERM and SIGINT again once
+  the window is being destroyed.
 
 Every message and request to a member is a request of the member protocol, on a stream of its
 own. A connection takes 16 such streams at once, both ways together, and drops any stream

@@ -21,7 +21,7 @@
 #   voice   Leo and Marta, Marta twice: the second time with ALSA unable to open a microphone
 #   move    an account moved from one copy to another, in each scenario of move_test
 #
-# Needs Xvfb, pactl, paplay, python3, timeout and flutter. Exits 0 when every test passed, 1
+# Needs Xvfb, pactl, paplay, pkill, python3, timeout and flutter. Exits 0 when every test passed, 1
 # when one failed, and 3 when something it needs is missing, naming it. FOGATA_PAIRS_TIMEOUT
 # is how long one copy may run, in seconds (1800); FOGATA_PAIRS_OUT, a folder that keeps each
 # test's logs, folders and pictures (else they go); FOGATA_PAIRS_MOVE_SCENARIOS, which scenarios
@@ -34,7 +34,7 @@ tests=("$@")
 [[ ${#tests[@]} -gt 0 ]] || tests=("${all[@]}")
 
 missing=()
-for tool in Xvfb pactl paplay python3 timeout flutter; do
+for tool in Xvfb pactl paplay pkill python3 timeout flutter; do
     command -v "$tool" > /dev/null || missing+=("$tool")
 done
 if [[ ${#missing[@]} -eq 0 ]] && ! pactl info > /dev/null 2>&1; then
@@ -57,11 +57,16 @@ modules=() # sound modules loaded, unloaded in reverse
 copies=()  # processes of the copies and of what feeds them, stopped before the sinks go
 sinks=()   # the names of the sinks loaded
 
-# Stops process $1 and waits until it is gone.
+# Stops process $1 and waits until it is gone. With KILL, at once and its children first, as
+# copies are: on a signal it can handle the application leaves in order, for seconds, and a
+# copy runs under `timeout`, which cannot pass a KILL on to it.
 stop_pid() {
     local p=$1 n
     [[ -n $p ]] || return 0
-    kill "$p" 2> /dev/null || return 0
+    if [[ ${2:-} == KILL ]]; then pkill -KILL -P "$p" 2> /dev/null || true; fi
+    kill ${2:+-"$2"} "$p" 2> /dev/null || return 0
+    # Reaped here, quietly: bash would otherwise tell of each copy killed on standard error.
+    if [[ ${2:-} == KILL ]]; then wait "$p" 2> /dev/null || true; fi
     for n in $(seq 50); do
         kill -0 "$p" 2> /dev/null || { wait "$p" 2> /dev/null || true; return 0; }
         sleep 0.1
@@ -86,7 +91,7 @@ sink_players() {
 finish() {
     local p sink pids n i
     for p in ${copies[@]+"${copies[@]}"}; do
-        stop_pid "$p"
+        stop_pid "$p" KILL
     done
     copies=()
     for sink in ${sinks[@]+"${sinks[@]}"}; do
@@ -273,7 +278,7 @@ run_direct() {
     b1=$pid
     wait_file "$d/meet/b1-result.txt" "$limit" "$b1" || echo "  direct: b1 gave no result" >&2
     sleep 2
-    stop_pid "$b1"
+    stop_pid "$b1" KILL
     wait_file "$d/meet/a-wrote" 600 "$a" || echo "  direct: Ana never wrote" >&2
     start b 2
     b2=$pid
@@ -318,7 +323,7 @@ run_voice() {
     wait_file "$d/meet/b-quit" "$limit" "$b1" || echo "  voice: b1 did not get to the end" >&2
     wait_file "$d/meet/b1-result.txt" 30 "$b1" || true
     sleep 1
-    stop_pid "$b1"
+    stop_pid "$b1" KILL
     wait_file "$d/meet/a-offline-done" 600 "$a" || echo "  voice: a made no offline pictures" >&2
     start b 2 ALSA_CONFIG_PATH="$d/empty-alsa.conf"
     b2=$pid
@@ -358,7 +363,7 @@ run_move() {
         # A copy the test started again writes its own pid file.
         local f
         for f in "$d"/move/*.pid; do
-            [[ -e $f ]] && stop_pid "$(cat "$f")"
+            [[ -e $f ]] && stop_pid "$(cat "$f")" KILL
         done
         finish
         start_display || { echo "  move: no free X display" >&2; return 1; }

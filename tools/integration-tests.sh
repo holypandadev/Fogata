@@ -47,8 +47,9 @@ finish() {
         for n in $(seq 50); do
             pids=$(sink_players "$sink")
             [[ -z $pids ]] && break
-            # The copies are gone by now; whatever still plays here is one of theirs.
-            [[ $n == 20 ]] && kill $pids 2> /dev/null || true
+            # The copies are gone by now, or still leaving in order after flutter's SIGTERM:
+            # whatever still plays here is one of theirs, ended at once.
+            [[ $n == 20 ]] && kill -KILL $pids 2> /dev/null || true
             sleep 0.1
         done
         pactl unload-module "$module" 2> /dev/null || true
