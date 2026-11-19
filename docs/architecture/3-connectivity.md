@@ -988,8 +988,10 @@ at once instead of after the QUIC idle timeout.
 A device is **away** after 10 minutes without keyboard or mouse input on the whole
 computer, and back with the first input. Nobody chooses it. The application asks the
 system how long the computer has gone unused (fogata-ffi `idle.rs`). On Linux under
-Wayland it opens a connection of its own to the compositor (`wayland-client` with its
-pure-Rust backend, so no system library is linked or loaded) and asks the
+Wayland it opens a connection of its own to the compositor's socket that `WAYLAND_DISPLAY`
+names (`wayland-client` with its pure-Rust backend, so no system library is linked or
+loaded; never a socket handed over in `WAYLAND_SOCKET`, which is the window's and which
+the library's own way of connecting would take, removing the variable) and asks the
 `ext_idle_notifier_v1` global for a notification after those 10 minutes: version 2's
 input notification where the compositor has it, which counts keyboard and mouse alone and
 ignores idle inhibitors such as a video playing, else version 1's. `idled` means no input

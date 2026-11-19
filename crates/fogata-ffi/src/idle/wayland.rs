@@ -7,6 +7,8 @@
 //! protocol's pure-Rust implementation is used: no system library is linked or loaded.
 
 use std::{
+    os::unix::net::UnixStream,
+    path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -89,12 +91,30 @@ struct State {
     wake: fn(),
 }
 
+/// A connection of its own to the compositor's socket that `WAYLAND_DISPLAY` names (in
+/// `XDG_RUNTIME_DIR` when not a whole path). Not `Connection::connect_to_env`: given a socket
+/// already open (`WAYLAND_SOCKET`, the window's when it is there), it takes it and removes
+/// the variable, a change of the environment on this thread while others read it.
+fn connect() -> Result<Connection, Box<dyn std::error::Error>> {
+    let name = PathBuf::from(std::env::var_os("WAYLAND_DISPLAY").ok_or("no WAYLAND_DISPLAY")?);
+    let path = if name.is_absolute() {
+        name
+    } else {
+        let dir = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").ok_or("no XDG_RUNTIME_DIR")?);
+        if !dir.is_absolute() {
+            return Err("XDG_RUNTIME_DIR is not a whole path".into());
+        }
+        dir.join(name)
+    };
+    Ok(Connection::from_socket(UnixStream::connect(path)?)?)
+}
+
 fn follow(
     timeout: Duration,
     watch: &Arc<Watch>,
     wake: fn(),
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let connection = Connection::connect_to_env()?;
+    let connection = connect()?;
     let (globals, mut queue) = registry_queue_init::<State>(&connection)?;
     let handle = queue.handle();
     let seat: wl_seat::WlSeat = globals.bind(&handle, 1..=1, ())?;
