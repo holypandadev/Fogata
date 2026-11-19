@@ -161,7 +161,10 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   answers and askings, so a participant whose signals name another call than its
   connection was made with (it left and came back, or its application started again
   faster than WebRTC finds a connection dead) gets a new connection at once, and what its
-  ended call still sends is dropped. Only the room's participants get a connection: a signal
+  ended call still sends is dropped. Each signal goes on its own, with no order between
+  two, and may come twice: a copy of the first offer a connection was made for (the same
+  call and number), or of a screen's sound offer already answered, gets the same answer
+  again and leaves the connection as it is. Only the room's participants get a connection: a signal
   from a member that is not in the room is dropped, and one that arrives before the room
   says its sender is in it, or before this device's call has made its connection with the
   sender, waits for that (the last 4 of each sender): those already in a room offer as soon
@@ -229,7 +232,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   of a connection the call replaced or closed is not heard.
 - **Fixed channels** per connection, in this order: voice, camera, screen, the screen's
   sound. Turning the camera or screen on or off swaps the channel's track (`replaceTrack`).
-  A `state` message tells the others what is on, for the muted icon and the tiles.
+  A `state` message tells the others what is on, for the muted icon and the tiles. It
+  carries a number that only grows (`s`: the sender's clock in milliseconds, or one more
+  than its last state's), and one below the newest taken from that participant arrived
+  late and is dropped, unless it is a minute or more below or the participant's signals
+  named a new call of theirs since (it started over); one without it (older copies) is
+  taken as it comes.
 - **The microphone is open only while it is on**, and its track is closed while muted.
   WebRTC records whenever a send stream of sound runs, with a track or not: a voice
   channel's whose encoding is on, or the screen's sound channel's. That one sends only
