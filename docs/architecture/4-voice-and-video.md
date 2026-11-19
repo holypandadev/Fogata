@@ -234,10 +234,12 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   sound. Turning the camera or screen on or off swaps the channel's track (`replaceTrack`).
   A `state` message tells the others what is on, for the muted icon and the tiles. It
   carries a number that only grows (`s`: the sender's clock in milliseconds, or one more
-  than its last state's), and one below the newest taken from that participant arrived
-  late and is dropped, unless it is a minute or more below or the participant's signals
-  named a new call of theirs since (it started over); one without it (older copies) is
-  taken as it comes.
+  than its last state's, from 0 below 2^53), and one below the newest taken from that
+  participant arrived late and is dropped. What is kept starts over when the participant
+  comes into the room again and when its offers, answers or askings name a new call of
+  theirs; a state carries no call id, so the first state of a new call whose clock went
+  back may be dropped once, until those signals arrive. One without the number (older
+  copies) is taken as it comes.
 - **The microphone is open only while it is on**, and its track is closed while muted.
   WebRTC records whenever a send stream of sound runs, with a track or not: a voice
   channel's whose encoding is on, or the screen's sound channel's. That one sends only
