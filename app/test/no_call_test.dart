@@ -9,6 +9,7 @@ import 'package:fogata/src/l10n.dart';
 import 'package:fogata/src/rust/api/types.dart';
 
 import 'fake_room.dart';
+import 'fake_time.dart';
 
 /// A connection that only knows whether it was closed.
 class _Connection implements RTCPeerConnection {
@@ -74,38 +75,41 @@ void main() {
     });
   });
 
-  test('coming and going without a call leaves one round of tries', () async {
-    // This device has the larger id here, so its tries are "again" signals, not offers.
-    const late = 'f000000000000000';
-    final sent = <String>[];
-    signalsForTests = (to, message) => sent.add('${message['t']}');
-    addTearDown(() => signalsForTests = null);
-    final c = Call(group: 'g', me: late)
-      ..bridgeForTests = const UiMediaBridge(
-        host: '127.0.0.1',
-        port: 3478,
-        username: 'u',
-        password: 'p',
-      );
-    c.peers[ana] = CallPeer(ana);
-    final state = jsonEncode({
-      't': 'state',
-      'mic': true,
-      'cam': false,
-      'screen': false,
-      'sound': false,
-      'watch': '',
-    });
-    for (var i = 0; i < 3; i++) {
-      await c.onSignal(ana, jsonEncode({'t': Call.noVoice}));
-      await c.onSignal(ana, state);
-    }
-    expect(c.peers[ana]!.watchRounds, 3);
-    sent.clear();
-    // Only the last round tries, once, 5 s on.
-    await Future<void>.delayed(const Duration(milliseconds: 5600));
-    expect(sent.where((t) => t == 'again'), hasLength(1));
-  });
+  test(
+    'coming and going without a call leaves one round of tries',
+    () => inFakeTime((_) async {
+      // This device has the larger id here, so its tries are "again" signals, not offers.
+      const late = 'f000000000000000';
+      final sent = <String>[];
+      signalsForTests = (to, message) => sent.add('${message['t']}');
+      addTearDown(() => signalsForTests = null);
+      final c = Call(group: 'g', me: late)
+        ..bridgeForTests = const UiMediaBridge(
+          host: '127.0.0.1',
+          port: 3478,
+          username: 'u',
+          password: 'p',
+        );
+      c.peers[ana] = CallPeer(ana);
+      final state = jsonEncode({
+        't': 'state',
+        'mic': true,
+        'cam': false,
+        'screen': false,
+        'sound': false,
+        'watch': '',
+      });
+      for (var i = 0; i < 3; i++) {
+        await c.onSignal(ana, jsonEncode({'t': Call.noVoice}));
+        await c.onSignal(ana, state);
+      }
+      expect(c.peers[ana]!.watchRounds, 3);
+      sent.clear();
+      // Only the last round tries, once, 5 s on.
+      await Future<void>.delayed(const Duration(milliseconds: 5600));
+      expect(sent.where((t) => t == 'again'), hasLength(1));
+    }),
+  );
 
   test('a refused call tells everyone else in the room, once', () async {
     final state = fakeRoom(people: 3)..callState.call = null;
