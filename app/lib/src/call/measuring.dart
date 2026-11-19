@@ -238,7 +238,7 @@ extension _Measuring on Call {
         continue;
       }
       if (_closed || peers[peer.id] != peer) continue;
-      final now = DateTime.now();
+      final now = callClock();
       final unfair =
           unfairPicture(reports) ?? peer._pictures.take(reports, now);
       if (unfair != null) {
@@ -259,7 +259,7 @@ extension _Measuring on Call {
       // all the same, so that the person is told rather than nothing.
       if (mic &&
           (peer._voiceDone == _micAsked ||
-              DateTime.now().difference(_micAskedAt) > _voiceStepWithin) &&
+              callClock().difference(_micAskedAt) > _voiceStepWithin) &&
           await _sendsVoice(connection)) {
         voiceSending = true;
         for (final r in reports) {
@@ -304,7 +304,7 @@ extension _Measuring on Call {
           sending: voiceSending,
           read: voiceRead,
           sent: voiceSent,
-          now: DateTime.now(),
+          now: callClock(),
         )) {
       unawaited(_tellMicUnusable());
     }

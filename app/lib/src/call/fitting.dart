@@ -424,7 +424,7 @@ class ScreenLoad {
   /// as low as their number calls for, if not lower already. Returns whether [level] or
   /// [ceiling] changed.
   bool watchersAre(int watchers, {DateTime? now}) {
-    final at = now ?? DateTime.now();
+    final at = now ?? callClock();
     final capped = _followCeiling(watchers, at);
     _watchers = watchers;
     final more = watchers > _mostWatchers;
@@ -1145,7 +1145,7 @@ extension _Fitting on Call {
     final ceiling = _screenLoad.ceiling;
     // Also where the ceiling goes back up once fewer have watched for a while.
     final more = _screenLoad.watchersAre(watchers);
-    final changed = _screenLoad.take(encoders: encoders, now: DateTime.now());
+    final changed = _screenLoad.take(encoders: encoders, now: callClock());
     if (more || changed) {
       _screenLoadChanged(before, ceiling);
     } else {

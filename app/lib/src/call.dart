@@ -41,6 +41,11 @@ List<Duration> voiceStartAgainAfter = const [
   Duration(seconds: 4),
 ];
 
+/// The time the call's waits and limits go by (not the time of day its log lines and
+/// state numbers carry); tests put fake time in its place, with that of their timers.
+@visibleForTesting
+DateTime Function() callClock = DateTime.now;
+
 /// Where capturing the screen brings the other applications' sound with it.
 bool get _displaySound => onLinux || onWindows;
 
@@ -1146,7 +1151,7 @@ class Call extends ChangeNotifier {
   /// Shows again what [_watchBack] or [_focusBack] kept, now that [peer] says what it
   /// shares.
   void _showBack(CallPeer peer) {
-    final now = DateTime.now();
+    final now = callClock();
     final shown = watching != null || focused != null || ownScreen;
     final screen = _watchBack;
     if (screen != null && screen.id == peer.id) {
@@ -1229,7 +1234,7 @@ class Call extends ChangeNotifier {
   Future<void> setMic(bool on) {
     mic = on;
     _micCheck.reset();
-    _micAskedAt = DateTime.now();
+    _micAskedAt = callClock();
     _silenceComing = !on && _wantSilence;
     final asked = ++_micAsked;
     if (!on) {
@@ -2139,7 +2144,7 @@ class Call extends ChangeNotifier {
     // And what showed them: once they are let go of, they may be back and shown again.
     for (final gone in left.map((peer) => peer.id)) {
       _showScreenOut(gone, null);
-      final until = DateTime.now().add(_backWithin);
+      final until = callClock().add(_backWithin);
       if (watching == gone) {
         _watchingTo(null, 'its sharer left');
         _watchBack = (id: gone, until: until);
@@ -2307,14 +2312,14 @@ class Call extends ChangeNotifier {
       for (final peer in peers.values.toList()) {
         _queueVoice(peer);
       }
-      final end = DateTime.now().add(const Duration(seconds: 3));
+      final end = callClock().add(const Duration(seconds: 3));
       while (on()) {
         final still = await _voiceOn();
         if (still.isEmpty) break;
         // A participant who arrived meanwhile, or whose step came before: their step
         // again (once at a time: [_queueVoice]).
         still.forEach(_queueVoice);
-        if (DateTime.now().isAfter(end)) {
+        if (callClock().isAfter(end)) {
           _trace('recording restart: a voice encoding still on after 3 s');
           break;
         }
@@ -2410,11 +2415,7 @@ class Call extends ChangeNotifier {
   @visibleForTesting
   void takeDevices(List<MediaDeviceInfo> devices) {
     final wasLost = _soundServer.lost;
-    final sound = _soundServer.take(
-      devices,
-      linux: onLinux,
-      now: DateTime.now(),
-    );
+    final sound = _soundServer.take(devices, linux: onLinux, now: callClock());
     if (sound != null) {
       _trace('sound server, said: $sound');
       onNotice?.call(sound);
@@ -2514,7 +2515,7 @@ class Call extends ChangeNotifier {
       final mine = ++peer._offersIn;
       await _offerTurn(peer, peer._offerTaken);
       if (mine != peer._offersIn) return;
-      peer._offerTaken = DateTime.now();
+      peer._offerTaken = callClock();
       await peer._inTurn(() async {
         if (mine == peer._offersIn) await _handleSafely(peer, from, message);
       });
@@ -2522,7 +2523,7 @@ class Call extends ChangeNotifier {
       final mine = ++peer._soundOffersIn;
       await _offerTurn(peer, peer._soundOfferTaken);
       if (mine != peer._soundOffersIn) return;
-      peer._soundOfferTaken = DateTime.now();
+      peer._soundOfferTaken = callClock();
       await peer._inTurn(() async {
         if (mine == peer._soundOffersIn) {
           await _handleSafely(peer, from, message);
@@ -2567,7 +2568,7 @@ class Call extends ChangeNotifier {
       throw StateError('no longer in the call');
     }
     peer.connection = connection;
-    peer._madeAt = DateTime.now();
+    peer._madeAt = callClock();
     // Nothing of it sent yet (see [_sentWhileGone]).
     peer._blind = false;
     peer.state = RTCPeerConnectionState.RTCPeerConnectionStateNew;

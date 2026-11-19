@@ -99,7 +99,7 @@ extension _Signalling on Call {
   /// Waits until [CallPeer.offerEvery] has passed since an offer of [peer] was last taken
   /// ([taken]).
   Future<void> _offerTurn(CallPeer peer, DateTime taken) async {
-    final wait = CallPeer.offerEvery - DateTime.now().difference(taken);
+    final wait = CallPeer.offerEvery - callClock().difference(taken);
     if (wait > Duration.zero) await Future<void>.delayed(wait);
   }
 
@@ -288,7 +288,7 @@ extension _Signalling on Call {
         final fresh =
             made != null &&
             !peer._blind &&
-            DateTime.now().difference(made) < Call.connectWithin &&
+            callClock().difference(made) < Call.connectWithin &&
             peer.state != RTCPeerConnectionState.RTCPeerConnectionStateFailed;
         if (me.compareTo(from) < 0 && !peer.connected && !fresh) {
           await _offer(peer);

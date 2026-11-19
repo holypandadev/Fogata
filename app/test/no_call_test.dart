@@ -597,17 +597,22 @@ void main() {
       expect(told, isEmpty);
     });
 
-    test('the call tells it once gone 5 s, reading the list again', () async {
-      final c = Call(group: 'g', me: me, input: 'headset');
-      final told = <String>[];
-      c.onNotice = told.add;
-      c.listDevices = () async => const <MediaDeviceInfo>[];
-      c.takeDevices(const []);
-      await Future<void>.delayed(const Duration(milliseconds: 5400));
-      expect(told, [l10n.callSoundSystemLost]);
-      c.takeDevices([mic, speaker]);
-      expect(told, [l10n.callSoundSystemLost, l10n.callSoundSystemBack]);
-    });
+    test(
+      'the call tells it once gone 5 s, reading the list again',
+      () => inFakeTime((time) async {
+        callClock = () => start.add(time.elapsed);
+        addTearDown(() => callClock = DateTime.now);
+        final c = Call(group: 'g', me: me, input: 'headset');
+        final told = <String>[];
+        c.onNotice = told.add;
+        c.listDevices = () async => const <MediaDeviceInfo>[];
+        c.takeDevices(const []);
+        await Future<void>.delayed(const Duration(milliseconds: 5400));
+        expect(told, [l10n.callSoundSystemLost]);
+        c.takeDevices([mic, speaker]);
+        expect(told, [l10n.callSoundSystemLost, l10n.callSoundSystemBack]);
+      }),
+    );
   });
 
   group('a microphone that reads nothing', () {

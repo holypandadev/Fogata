@@ -678,10 +678,10 @@ extension _LocalMedia on Call {
   /// while they do), and one larger than a participant takes ([fairPicture]) would get
   /// this device kept out of the call.
   Future<void> _screenSized() async {
-    final end = DateTime.now().add(const Duration(seconds: 3));
+    final end = callClock().add(const Duration(seconds: 3));
     while (localScreen.value.width <= 0 &&
         _screenTooLarge == null &&
-        DateTime.now().isBefore(end)) {
+        callClock().isBefore(end)) {
       await Future<void>.delayed(const Duration(milliseconds: 20));
     }
     await _rescale();
