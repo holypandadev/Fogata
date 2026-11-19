@@ -2124,12 +2124,14 @@ class Call extends ChangeNotifier {
   /// the call up for one at most; known to [stop] until they are done, so the voice engine
   /// waits for them.
   Future<void> _letGoOf(List<CallPeer> left) async {
-    await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
+    // Before letting go, as they are taken out: they may be in the room again before that
+    // is done, and their calls must be known then.
     for (final peer in left) {
       _left.remove(peer.id);
       _left[peer.id] = (call: peer._theirCall, ended: [...peer._endedCalls]);
       if (_left.length > leftKept) _left.remove(_left.keys.first);
     }
+    await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
     for (final gone in left.map((peer) => peer.id)) {
       _showScreenOut(gone, null);
       final until = DateTime.now().add(_backWithin);
