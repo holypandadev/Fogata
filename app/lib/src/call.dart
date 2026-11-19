@@ -2128,7 +2128,12 @@ class Call extends ChangeNotifier {
     // is done, and their calls must be known then.
     for (final peer in left) {
       _left.remove(peer.id);
-      _left[peer.id] = (call: peer._theirCall, ended: [...peer._endedCalls]);
+      // One that came back and left again before any signal named its call still had
+      // the call it left with first; the ended calls it was given are kept with it.
+      _left[peer.id] = (
+        call: peer._theirCall ?? peer._callWhenLeft,
+        ended: [...peer._endedCalls],
+      );
       if (_left.length > leftKept) _left.remove(_left.keys.first);
     }
     await Future.wait([for (final peer in left) _whileLeaving(peer.dispose())]);
