@@ -187,11 +187,20 @@ pub(super) async fn fetch(
     };
     inner.emit(CoreEvent::DirectChanged { friend });
     let weak = Arc::downgrade(inner);
+    let mut downloading = Downloading {
+        inner: weak.clone(),
+        key: Some((friend, file)),
+    };
     tokio::spawn(async move {
         let _turns = match turns {
             Some((mine, all)) => {
                 let (Ok(mine), Ok(all)) = (mine.acquire_owned().await, all.acquire_owned().await)
                 else {
+                    if let Some(inner) = weak.upgrade() {
+                        downloading.end(&inner);
+                        settle(&inner, friend, file, charged, false);
+                        inner.emit(CoreEvent::DirectChanged { friend });
+                    }
                     return;
                 };
                 Some((mine, all))
@@ -209,7 +218,7 @@ pub(super) async fn fetch(
                     Ok(room) => room,
                     Err(_) => {
                         tracing::info!("an attachment waits to be asked for: the disk is full");
-                        inner.direct.lock().set_download(friend, file, None);
+                        downloading.end(&inner);
                         settle(&inner, friend, file, charged, false);
                         tried(&inner, friend, file, false);
                         inner.emit(CoreEvent::DirectChanged { friend });
@@ -351,7 +360,7 @@ pub(super) async fn fetch(
         // otherwise be fetched again, and charged again, by the next message to arrive. And
         // no longer once the person hears it did not come: asked for again at once, it
         // starts again rather than being taken for the download still going.
-        inner.direct.lock().set_download(friend, file, None);
+        downloading.end(&inner);
         if let Some(e) = failed {
             tracing::debug!("an attachment did not come: {e}");
             inner.emit(CoreEvent::DirectDownloadFailed {
@@ -428,6 +437,31 @@ impl Coming {
 
     pub(super) fn last(&self) -> tokio::time::Instant {
         self.since + Duration::from_millis(self.last_ms.load(std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
+/// A fetch's place among the downloads going, ended by [`Downloading::end`] or else when its
+/// task ends however it does (a panic, the runtime stopping): an ask for the file again would
+/// otherwise be taken for it still going, for good. Only this fetch's: none of the file
+/// starts while it is there, and once ended it touches nothing a later fetch put there.
+struct Downloading {
+    inner: std::sync::Weak<Inner>,
+    key: Option<(DevicePublicKey, FileId)>,
+}
+
+impl Downloading {
+    fn end(&mut self, inner: &Inner) {
+        if let Some((friend, file)) = self.key.take() {
+            inner.direct.lock().set_download(friend, file, None);
+        }
+    }
+}
+
+impl Drop for Downloading {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.upgrade() {
+            self.end(&inner);
+        }
     }
 }
 
