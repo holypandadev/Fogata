@@ -567,4 +567,66 @@ void main() {
       expect(small.peers[_large]!.theirCall, callOf(large));
     }),
   );
+
+  test(
+    'a late signal of an older copy taken when every answer was lost leaves '
+    'their call of now to be asked about, not dropped',
+    () => inNetTime(() async {
+      final (small, large) = await connected();
+      final now = callOf(small);
+      // Every answer to the questions about it is lost.
+      net.lose(
+        (from, to, message) => message['t'] == 'this',
+        times: Call.whichTries,
+      );
+      await late(large, _small, 'offer', '0123456789abcdef', answers: false);
+      await Future<void>.delayed(
+        Call.whichEvery * Call.whichTries + const Duration(seconds: 1),
+      );
+      // Taken: the connection with their call of now was let go of.
+      expect(large.peers[_small]!.theirCall, '0123456789abcdef');
+      // Theirs finds its connection failed, and offers anew.
+      net.madeBy(_small).first.fail();
+      final failed = callClock();
+      await until(() => up(small, large), what: 'connected again');
+      // Its try after the failure (4 s), a question and its answer, an offer and its
+      // answer.
+      expect(
+        callClock().difference(failed),
+        lessThan(const Duration(seconds: 7)),
+      );
+      expect(large.peers[_small]!.theirCall, now);
+      expect(large.peers[_small]!.endedCalls, contains('0123456789abcdef'));
+    }),
+  );
+
+  test(
+    'someone back in the room with the call they left with, whose first signal is '
+    'a late one of an older call, has the call they left with asked about',
+    () => inNetTime(() async {
+      final alone = net.add(
+        Call(group: 'g', me: _small)..bridgeForTests = fakeBridge,
+      );
+      await alone.setParticipants([_small, _large]);
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first', 'w': 1});
+      await alone.setParticipants([_small]);
+      await alone.setParticipants([_small, _large]);
+      final peer = alone.peers[_large]!;
+      // A late asking of an older call comes first, then one of the call they have.
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'older', 'w': 1});
+      await alone.handleSignal(_large, {'t': 'again', 'c': 'first', 'w': 1});
+      expect(peer.endedCalls, isNot(contains('first')));
+      expect(peer.asking, isTrue);
+      final token = net.sent.lastWhere((s) => s.type == 'which').message['k'];
+      await alone.handleSignal(_large, {
+        't': 'this',
+        'k': token,
+        'now': 'first',
+      });
+      expect(peer.theirCall, 'first');
+      expect(peer.endedCalls, contains('older'));
+      // Its asking held, then handled: an offer made for their call.
+      await Future<void>.delayed(const Duration(seconds: 1));
+    }),
+  );
 }

@@ -404,25 +404,41 @@ extension _Signalling on Call {
       return false;
     }
     peer._theirCall = theirs;
-    // The call they had when they last left the room, if this one is another: it ended.
+    // Taken without an answer to a `which`, the call is a guess: a call of theirs put among
+    // those that ended on a guess would have its signals dropped for good, however wrong
+    // the guess, so only a participant that never answers has one so put (a late signal
+    // of it would otherwise end the call it has, back and forth); one that answers is
+    // asked about it if it comes again.
+    final guessEnds = peer._answersWhich != true;
+    // The call they had when they last left the room, if this one is another: it ended,
+    // or this signal is a late one of an older call (they came back with the same).
     final left = peer._callWhenLeft;
     peer._callWhenLeft = null;
-    if (before == null && left != null && left != theirs) peer._ended(left);
+    if (before == null && left != null && left != theirs && guessEnds) {
+      peer._ended(left);
+    }
     if (before == null || before == theirs) return true;
-    await _theirNewCall(peer, from, before, '${message['t']}');
+    await _theirNewCall(
+      peer,
+      from,
+      before,
+      '${message['t']}',
+      ended: guessEnds,
+    );
     return true;
   }
 
   /// [peer]'s call is a new one, no longer [before], as a signal of type [type] showed:
   /// the connection with the one that ended is dropped at once and the first connection
-  /// made anew.
+  /// made anew. [before] is put among their calls that ended if [ended].
   Future<void> _theirNewCall(
     CallPeer peer,
     String from,
     String before,
-    String type,
-  ) async {
-    peer._ended(before);
+    String type, {
+    required bool ended,
+  }) async {
+    if (ended) peer._ended(before);
     // A question asked before is answered by a call of theirs that may be older than this.
     peer._asked?.wait?.cancel();
     peer._asked = null;
@@ -497,7 +513,8 @@ extension _Signalling on Call {
       // A signal held that says nothing of answering is of a copy before this one,
       // which takes no question: their device runs it now (it started again with it, or
       // its late signal would have lost to the answer of the copy they run), and it is
-      // taken as such a copy's signals are.
+      // taken as such a copy's signals are. A guess: the call known is not put among
+      // those that ended, and a signal of it later (with `w`) is asked about again.
       if (question.message['w'] != 1) {
         _trace(
           'no answer from ${_short(peer.id)} on which call is theirs, and their '
@@ -510,7 +527,13 @@ extension _Signalling on Call {
               return;
             }
             try {
-              await _theirCallNow(peer, peer.id, question, question.call);
+              await _theirCallNow(
+                peer,
+                peer.id,
+                question,
+                question.call,
+                answered: false,
+              );
             } catch (e) {
               _trace('${question.message['t']} from ${_short(peer.id)}: $e');
             }
@@ -526,19 +549,22 @@ extension _Signalling on Call {
   }
 
   /// Their answer [now] to the question [question]: the call they have. The signal held
-  /// is taken when it is of that call; a call known before that is not it ended.
+  /// is taken when it is of that call; a call known before that is not it ended. Unless
+  /// [answered] (the call held is taken with no answer), nothing is put among their calls
+  /// that ended (see [_theirCall]).
   Future<void> _theirCallNow(
     CallPeer peer,
     String from,
     _Asked question,
-    String now,
-  ) async {
+    String now, {
+    bool answered = true,
+  }) async {
     peer._asked = null;
     question.wait?.cancel();
     // Whatever this side took for ended, the answer is what they have.
     peer._endedCalls.remove(now);
     final known = peer._theirCall;
-    if (question.call != now) peer._ended(question.call);
+    if (question.call != now && answered) peer._ended(question.call);
     if (now == known) {
       _trace(
         '${question.message['t']} from ${_short(from)} was of an older call: '
@@ -549,7 +575,9 @@ extension _Signalling on Call {
     peer._theirCall = now;
     peer._callWhenLeft = null;
     final type = question.call == now ? '${question.message['t']}' : 'this';
-    if (known != null) await _theirNewCall(peer, from, known, type);
+    if (known != null) {
+      await _theirNewCall(peer, from, known, type, ended: answered);
+    }
     if (question.call == now) await _handle(peer, from, question.message);
   }
 
