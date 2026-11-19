@@ -7,6 +7,7 @@ import 'package:fogata/src/call.dart';
 import 'package:fogata/src/quality.dart';
 import 'package:fogata/src/rust/api/types.dart';
 
+import 'fake_time.dart';
 import 'wait.dart';
 
 /// A connection that keeps the descriptions set on it, with [stats] as its statistics.
@@ -420,7 +421,10 @@ void main() {
 
   test(
     'a failure of a connection that was replaced is not the live one\'s',
-    () async {
+    () => inFakeTime((time) async {
+      final start = DateTime(2026, 11, 19, 9);
+      callClock = () => start.add(time.elapsed);
+      addTearDown(() => callClock = DateTime.now);
       // Ana has the smaller id and offers; this device answers on a new connection, twice.
       final call = Call(group: 'g', me: zoe);
       final made = <_Connection>[];
@@ -466,7 +470,7 @@ void main() {
       expect(made, hasLength(2));
       expect(peer.connection, live);
       expect(live.closed, isFalse);
-    },
+    }),
   );
 
   test('an offer whose video is in H.264 only is dropped', () async {
