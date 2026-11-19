@@ -164,26 +164,29 @@ Everyone in a room is in its call; there is no separate "join the call" step. Th
   ended call still sends is dropped. The call a participant had when it left the room is
   kept while this call goes on (the last 64 to leave), so that a late signal of it, after
   the participant came back with another, is dropped too rather than taken for a newer
-  call; only an answer to this side's latest offer names a new call. Two cases still slip
-  through: a participant who goes out and back with the same call and whose first signal
-  naming a call is a late one of an older call not remembered (that one is taken, and the
-  call they have is taken for ended), and both sides making their calls anew within
-  seconds (this side's memory of who left starts empty with its new call). Each signal goes on its own, with no order between
-  two, and may come twice: a copy of the first offer a connection was made for (the same
-  call and number), or of a screen's sound offer already answered, gets the same answer
-  again and leaves the connection as it is. Only the room's participants get a connection: a signal
-  from a member that is not in the room is dropped, and one that arrives before the room
-  says its sender is in it, or before this device's call has made its connection with the
-  sender, waits for that (the last 4 of each sender): those already in a room offer as soon
-  as they hear a device came in, a moment before its call has its media bridge and
-  microphone, or is made at all. The node already drops signals that reach a device in
-  none of the group's voice rooms, those over 64 KiB (a description takes a few kilobytes)
-  and, from each member, those past a burst of 32 and then 8 a second; from a member not in
-  this device's room (its join may still be on its way), those past 4 and then one every 5
-  seconds, so they never reach the application in numbers. Such a signal also has the
-  room asked of its sender (once every 15 s at most), so a join that was lost does not
-  wait for the sender's next presence. The
-  application drops a description over 64 KiB or with more than 4 media sections, and an
+  call. Offers and askings name a new call as they come; an answer does only when it
+  answers this side's latest offer. Two cases still slip through: a participant who goes
+  out and back with the same call and whose first signal naming a call is a late one of an
+  older call not remembered (that one is taken, and the call they have is taken for
+  ended); and both sides making their calls anew within seconds, whenever a late signal
+  of the other's call before arrives after its new call is known (this side's memory of
+  who left starts empty with its new call). In both the pair stays unable to connect
+  until one of them leaves the room or starts again. Each signal goes on its own, with no
+  order between two, and may come twice: a copy of the first offer a connection was made
+  for (the same call and number), or of a screen's sound offer already answered, gets the
+  same answer again and leaves the connection as it is. Only the room's participants get
+  a connection: a signal from a member that is not in the room is dropped, and one that
+  arrives before the room says its sender is in it, or before this device's call has made
+  its connection with the sender, waits for that (the last 4 of each sender): those
+  already in a room offer as soon as they hear a device came in, a moment before its call
+  has its media bridge and microphone, or is made at all. The node already drops signals
+  that reach a device in none of the group's voice rooms, those over 64 KiB (a description
+  takes a few kilobytes) and, from each member, those past a burst of 32 and then 8 a
+  second; from a member not in this device's room (its join may still be on its way),
+  those past 4 and then one every 5 seconds, so they never reach the application in
+  numbers. Such a signal also has the room asked of its sender (once every 15 s at most),
+  so a join that was lost does not wait for the sender's next presence.
+  The application drops a description over 64 KiB or with more than 4 media sections, and an
   offer or answer whose sections are not the call's channels (voice, camera, screen, the
   screen's sound, in that order, named 0 to 3): WebRTC makes a channel for every section of
   an offer and decodes what comes on it, drawn or not. An offer or answer (or a screen's
