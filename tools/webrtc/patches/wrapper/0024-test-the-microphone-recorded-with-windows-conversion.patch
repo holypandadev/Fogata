@@ -1,0 +1,129 @@
+Test the microphone recorded with Windows' conversion
+
+WebRTC patch 0013 records a capture device that takes none of the formats
+AudioDeviceWindowsCore::InitRecording tries at 48 kHz, with Windows' audio engine
+converting from the device's mix format. test/capture_conversion.test.cc (Windows only)
+takes that path for the computer's first capture device
+(InitRecordingWithConversionForTesting), records half a second and checks that 10 ms
+blocks arrive at 48 kHz in the channels chosen. Without a capture device it is skipped.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 57fabaa..5b362a9 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -450,5 +450,14 @@ if (rtc_include_tests) {
+       "//test:test_support",
+       "//test:test_main",
+     ]
++    if (is_win) {
++      # The microphone recorded with Windows' conversion (WebRTC patch 0013).
++      sources += [ "test/capture_conversion.test.cc" ]
++      deps += [
++        "../modules/audio_device:audio_device_buffer",
++        "../modules/audio_device:audio_device_impl",
++        "../rtc_base/win:scoped_com_initializer",
++      ]
++    }
+   }
+ }
+diff --git a/test/capture_conversion.test.cc b/test/capture_conversion.test.cc
+new file mode 100644
+index 0000000..adcc9c4
+--- /dev/null
++++ b/test/capture_conversion.test.cc
+@@ -0,0 +1,95 @@
++// Windows only: the microphone recorded with Windows' own conversion, as for a device
++// that takes none of the formats AudioDeviceWindowsCore::InitRecording tries (WebRTC
++// patch 0013). The computer's first capture device is recorded for half a second that
++// way, and must deliver 10 ms blocks at 48 kHz in the channels chosen.
++
++#include <windows.h>
++
++#include <atomic>
++#include <cstdint>
++
++#include "api/audio/audio_device_defines.h"
++#include "api/environment/environment.h"
++#include "modules/audio_device/audio_device_buffer.h"
++#include "modules/audio_device/win/audio_device_core_win.h"
++#include "rtc_base/win/scoped_com_initializer.h"
++#include "test/create_test_environment.h"
++#include "test/gtest.h"
++
++namespace {
++
++class CountingTransport : public webrtc::AudioTransport {
++ public:
++  int32_t RecordedDataIsAvailable(const void* /*audioSamples*/,
++                                  size_t nSamples,
++                                  size_t /*nBytesPerSample*/,
++                                  size_t nChannels,
++                                  uint32_t samplesPerSec,
++                                  uint32_t /*totalDelayMS*/,
++                                  int32_t /*clockDrift*/,
++                                  uint32_t /*currentMicLevel*/,
++                                  bool /*keyPressed*/,
++                                  uint32_t& newMicLevel) override {
++    newMicLevel = 0;
++    blocks++;
++    if (nSamples != samplesPerSec / 100) wrong++;
++    rate = samplesPerSec;
++    channels = static_cast<int>(nChannels);
++    return 0;
++  }
++  int32_t NeedMorePlayData(size_t, size_t, size_t, uint32_t, void*,
++                           size_t& nSamplesOut, int64_t*, int64_t*) override {
++    nSamplesOut = 0;
++    return 0;
++  }
++  void PullRenderData(int, int, size_t, size_t, void*, int64_t*,
++                      int64_t*) override {}
++
++  std::atomic<int> blocks{0};
++  std::atomic<int> wrong{0};
++  std::atomic<uint32_t> rate{0};
++  std::atomic<int> channels{0};
++};
++
++TEST(CaptureConversion, RecordsAt48kHzWithWindowsConverting) {
++  webrtc::ScopedCOMInitializer com(webrtc::ScopedCOMInitializer::kMTA);
++  ASSERT_TRUE(com.Succeeded());
++  if (!webrtc::AudioDeviceWindowsCore::CoreAudioIsSupported()) {
++    GTEST_SKIP() << "no Core Audio";
++  }
++  webrtc::Environment env = webrtc::CreateTestEnvironment();
++  webrtc::AudioDeviceBuffer buffer(env);
++  CountingTransport transport;
++  buffer.RegisterAudioCallback(&transport);
++
++  webrtc::AudioDeviceWindowsCore device;
++  device.AttachAudioBuffer(&buffer);
++  ASSERT_EQ(device.Init(), webrtc::AudioDeviceGeneric::InitStatus::OK);
++  if (device.RecordingDevices() < 1) {
++    device.Terminate();
++    GTEST_SKIP() << "no capture device";
++  }
++  ASSERT_EQ(device.SetRecordingDevice(static_cast<uint16_t>(0)), 0);
++  ASSERT_EQ(device.InitMicrophone(), 0);
++
++  ASSERT_EQ(device.InitRecordingWithConversionForTesting(), 0);
++  EXPECT_TRUE(device.RecordingIsInitialized());
++  EXPECT_EQ(device.RecordingSampleRateForTesting(), 48000);
++  const int channels = device.RecordingChannelsForTesting();
++  EXPECT_TRUE(channels == 1 || channels == 2) << channels;
++
++  buffer.StartRecording();
++  ASSERT_EQ(device.StartRecording(), 0);
++  Sleep(500);
++  EXPECT_EQ(device.StopRecording(), 0);
++  buffer.StopRecording();
++  device.Terminate();
++
++  // About 50 blocks of 10 ms in half a second; a capture that did not run gives none.
++  EXPECT_GE(transport.blocks.load(), 30);
++  EXPECT_EQ(transport.wrong.load(), 0);
++  EXPECT_EQ(transport.rate.load(), 48000u);
++  EXPECT_EQ(transport.channels.load(), channels);
++}
++
++}  // namespace

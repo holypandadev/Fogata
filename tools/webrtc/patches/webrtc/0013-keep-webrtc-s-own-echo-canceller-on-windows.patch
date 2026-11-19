@@ -35,6 +35,19 @@ registered with MMCSS as before, with the recording delay WASAPI reports. The DM
 still made at construction and never enabled. Endpoint notifications (patches 0003 and
 0011) do not depend on the capture path.
 
+A device that takes none of the formats InitRecording tries (48, 44.1, 16, 96, 32 and 8
+kHz, then 176.4 and 192, each in two, one or four channels, asked one by one with
+IsFormatSupported in shared mode) had no microphone at all on that path, where the DMO
+converted any device. It is now recorded at 48 kHz (in one channel if its mix format has
+one, else in two) with Windows' audio engine converting from its mix format
+(AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM with SRC_DEFAULT_QUALITY on Initialize, which then
+takes a PCM format that is not the mix format; IsFormatSupported is not asked for it), and
+WebRTC's log says so with the device's mix format. A device that takes one of the formats
+tried records exactly as before. InitRecordingWithConversionForTesting() takes that path
+for any device: wrapper patch 0024's test records the first capture device so.
+InitPlayout has the same search and no such fallback, as before this patch: a render
+device that takes none of its formats still fails to start playout.
+
 Windows' own capture effects of a device (its driver's or Windows' "voice" processing)
 are not touched: they apply to a WASAPI stream as to any other application's.
 
@@ -48,18 +61,92 @@ from Ana", its voice out 102 to 145 packets in 6 s instead of about 320) and an 
 up to 20 s to be heard; with a speech-like signal as the Linux copy's microphone and the
 tone in the VM, 2 of 5 failed the same way; with a recorded voice played in the VM instead
 of a tone, 5 of 5 passed, every unmute heard within 0.3 s. The published library passed
-all 16 calls of those kinds. Once, in 28 calls with this patch (none in 18 without), the
-Windows copy crashed as a direct call hung up: an access violation in WebRtcVideoSendChannel's
-constructor (media/engine/webrtc_video_engine.cc, `call->network_thread()` through a Call
-already destroyed: PeerConnection::Close resets `call_` but `call_ptr_` stays and a video
-channel was then made with it), on its face a teardown race of the peer connection, not of
-the capture path; not seen in the 27 others. No real Windows hardware was tried.
+all 16 calls of those kinds. One call of 28 with this patch ended with the Windows copy
+crashing as a direct call hung up (a peer connection's Call used after its close, which
+wrapper patch 0023 fixes). No real Windows hardware was tried.
 
 --- a/modules/audio_device/win/audio_device_core_win.cc
 +++ b/modules/audio_device/win/audio_device_core_win.cc
-@@ -2602,7 +2602,12 @@
+@@ -63,6 +63,14 @@
+ // REFERENCE_TIME time units per millisecond
+ #define REFTIMES_PER_MILLISEC 10000
+ 
++// Fogata: in Windows' SDK since Windows 7, defined here for older headers.
++#if !defined(AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY)
++#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
++#endif
++#if !defined(AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM)
++#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
++#endif
++
+ typedef struct tagTHREADNAME_INFO {
+   DWORD dwType;      // must be 0x1000
+   LPCSTR szName;     // pointer to name (in user addr space)
+@@ -2227,6 +2235,31 @@
+       break;
+   }
+ 
++  // Fogata: a device that takes none of the formats above (its shared-mode mix
++  // format at another rate or with another number of channels: the DMO, which
++  // recorded before patch 0013, converted any) is recorded at 48 kHz, in one
++  // channel if it has one and else in two, and Windows' audio engine converts
++  // its mix format to that (AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM). A device that
++  // takes one of the formats above records as before.
++  bool convert = false;
++  if (hr != S_OK || _recConversionForTesting) {
++    convert = true;
++    Wfx.Format.nChannels = (pWfxIn && pWfxIn->nChannels == 1) ? 1 : 2;
++    Wfx.Format.nSamplesPerSec = 48000;
++    Wfx.Format.nBlockAlign =
++        Wfx.Format.nChannels * Wfx.Format.wBitsPerSample / 8;
++    Wfx.Format.nAvgBytesPerSec =
++        Wfx.Format.nSamplesPerSec * Wfx.Format.nBlockAlign;
++    RTC_LOG(LS_WARNING) << "The capture device takes none of the formats tried"
++                        << " (its mix format: "
++                        << (pWfxIn ? pWfxIn->nSamplesPerSec : 0) << " Hz, "
++                        << (pWfxIn ? pWfxIn->nChannels : 0)
++                        << " channels): recording 48000 Hz in "
++                        << Wfx.Format.nChannels
++                        << " channels, converted by Windows";
++    hr = S_OK;
++  }
++
+   if (hr == S_OK) {
+     _recAudioFrameSize = Wfx.Format.nBlockAlign;
+     _recSampleRate = Wfx.Format.nSamplesPerSec;
+@@ -2254,9 +2287,12 @@
+       AUDCLNT_SHAREMODE_SHARED,  // share Audio Engine with other applications
+       AUDCLNT_STREAMFLAGS_EVENTCALLBACK |  // processing of the audio buffer by
+                                            // the client will be event driven
+-          AUDCLNT_STREAMFLAGS_NOPERSIST,   // volume and mute settings for an
++          AUDCLNT_STREAMFLAGS_NOPERSIST |  // volume and mute settings for an
+                                            // audio session will not persist
+                                            // across system restarts
++          (convert ? AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
++                         AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
++                   : 0),
+       0,                    // required for event-driven shared mode
+       0,                    // periodicity
+       (WAVEFORMATEX*)&Wfx,  // selected wave format
+@@ -2601,8 +2637,28 @@
+   return 0;
  }
  
++int32_t AudioDeviceWindowsCore::InitRecordingWithConversionForTesting() {
++  _recConversionForTesting = true;
++  const int32_t result = InitRecording();
++  _recConversionForTesting = false;
++  return result;
++}
++
++int AudioDeviceWindowsCore::RecordingSampleRateForTesting() const {
++  return _recSampleRate;
++}
++
++int AudioDeviceWindowsCore::RecordingChannelsForTesting() const {
++  return _recChannels;
++}
++
  bool AudioDeviceWindowsCore::BuiltInAECIsAvailable() const {
 -  return _dmo != nullptr;
 +  // Fogata: Windows' Voice Capture DMO is not offered as the echo canceller, so
@@ -71,3 +158,27 @@ the capture path; not seen in the 27 others. No real Windows hardware was tried.
  }
  
  // ----------------------------------------------------------------------------
+--- a/modules/audio_device/win/audio_device_core_win.h
++++ b/modules/audio_device/win/audio_device_core_win.h
+@@ -176,6 +176,13 @@
+ 
+   virtual bool BuiltInAECIsAvailable() const;
+ 
++  // Fogata: InitRecording() as for a device that takes none of the formats it
++  // tries, so that Windows converts the device's format; and the format chosen.
++  // For tests.
++  int32_t InitRecordingWithConversionForTesting() RTC_LOCKS_EXCLUDED(mutex_);
++  int RecordingSampleRateForTesting() const;
++  int RecordingChannelsForTesting() const;
++
+   virtual int32_t EnableBuiltInAEC(bool enable);
+ 
+   virtual int32_t SetObserver(AudioDeviceObserver* observer);
+@@ -272,6 +279,7 @@
+   scoped_refptr<IMediaObject> _dmo;
+   scoped_refptr<IMediaBuffer> _mediaBuffer;
+   bool _builtInAecEnabled;
++  bool _recConversionForTesting = false;  // Fogata
+ 
+   HANDLE _hRenderSamplesReadyEvent;
+   HANDLE _hPlayThread;

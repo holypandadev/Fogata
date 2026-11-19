@@ -263,8 +263,10 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    of 8. Not settled (the patch's header gives the figures): in the PC-Windows call check,
    a steady tone in the Windows copy's microphone makes the Linux copy hold its own voice
    down at times (the check fails in up to 2 calls of 5; with a voice there instead of a
-   tone it passed 5 of 5), and one call in 28 ended with the Windows copy crashing as a
-   direct call hung up (a peer connection's Call used after Close).
+   tone it passed 5 of 5). A capture device that takes none of the formats the plain
+   path tries (the DMO converted any) is recorded at 48 kHz with Windows' conversion
+   (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`), which the log says with the device's mix
+   format; wrapper patch 0024 tests that path.
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -374,7 +376,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     WebRTC's own close (`PeerConnectionInterface::Close()`, outside the lock): the
     connection reports itself closed (ICE connection, connection and signaling states)
     and no callback comes after it returns, also when another call still holds it. With
-    its tests (`test/closed_connection.test.cc`, in processes of their own).
+    its tests (`test/closed_connection.test.cc`, in processes of their own);
+24. the test of WebRTC's patch 0013's fallback (`test/capture_conversion.test.cc`,
+    Windows only): the first capture device recorded with Windows' conversion at 48 kHz.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of
