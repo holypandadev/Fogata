@@ -211,10 +211,12 @@ void main() {
         switch (call.method) {
           case 'createPeerConnection':
             final id = 'sound${++connections}';
+            final events = EventChannel('FlutterWebRTC/peerConnectionEvent$id');
             messenger.setMockStreamHandler(
-              EventChannel('FlutterWebRTC/peerConnectionEvent$id'),
+              events,
               MockStreamHandler.inline(onListen: (_, _) {}),
             );
+            addTearDown(() => messenger.setMockStreamHandler(events, null));
             return {'peerConnectionId': id};
           case 'createAnswer' || 'getLocalDescription':
             return {'sdp': answer, 'type': 'answer'};
