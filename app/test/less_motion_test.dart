@@ -1,4 +1,7 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/motion.dart';
 import 'package:fogata/src/theme.dart';
@@ -101,4 +104,41 @@ void main() {
     expect(transition.scale.value, 2.0);
     await tester.pumpAndSettle();
   });
+
+  // macOS does not tell Flutter; the runner answers on the application's channel and says
+  // when the setting changes (macos/Runner/MainFlutterWindow.swift). Here the runner's
+  // part is played by the test.
+  testWidgets(
+    "on macOS, the runner's answer and its notice of a change are followed",
+    (tester) async {
+      const channel = MethodChannel('fogata/motion');
+      final messenger = tester.binding.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(
+        channel,
+        (call) async => call.method == 'reduceMotion' ? true : null,
+      );
+      addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+      Future<void> changed(bool on) async {
+        await messenger.handlePlatformMessage(
+          channel.name,
+          channel.codec.encodeMethodCall(MethodCall('reduceMotion', on)),
+          (_) {},
+        );
+        await tester.pump();
+      }
+
+      await tester.pumpWidget(_window(less: false));
+      await tester.pump();
+      expect(spring.transform(.3), 1.0, reason: 'the runner said: less motion');
+      expect(tester.hasRunningAnimations, isFalse);
+      await changed(false);
+      expect(spring.transform(.3), Curves.easeOutBack.transform(.3));
+      expect(tester.hasRunningAnimations, isTrue);
+      await changed(true);
+      expect(spring.transform(.3), 1.0);
+      expect(tester.hasRunningAnimations, isFalse);
+      await tester.pumpWidget(const SizedBox());
+    },
+    skip: !Platform.isMacOS,
+  );
 }

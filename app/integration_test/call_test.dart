@@ -126,7 +126,9 @@ import 'package:fogata/src/rust/api/app.dart' as api;
 import 'package:fogata/src/rust/api/types.dart';
 import 'package:fogata/src/screens/shell.dart';
 import 'package:fogata/src/widgets.dart';
-import 'package:fogata/src/window.dart' show quitApplication;
+import 'package:fogata/src/window.dart'
+    show quitApplication, setWindowFullScreen;
+import 'package:window_manager/window_manager.dart' show windowManager;
 import 'package:integration_test/integration_test.dart';
 
 import 'output_swap_verdict.dart';
@@ -154,6 +156,10 @@ final _patience = int.tryParse(_env['FOGATA_TEST_PATIENCE'] ?? '') ?? 1;
 final _mic = _env['FOGATA_TEST_MIC'];
 final _camera = _env['FOGATA_TEST_CAMERA'] == '1';
 final _share = _env['FOGATA_TEST_SCREEN'];
+
+/// What a copy that came to its end writes as its result: `passed`, or `ran` for a case
+/// that only measures, whose verdict is the rig's script's (as `term` writes its own).
+var _ended = 'passed';
 
 const _names = {
   'a': 'Ana',
@@ -442,7 +448,7 @@ void main() {
     }
     try {
       await _call(tester);
-      File('$_dir/$_role-result.txt').writeAsStringSync('passed\n');
+      File('$_dir/$_role-result.txt').writeAsStringSync('$_ended\n');
     } catch (e, trace) {
       // mic.sh term: the signal sent to copy a quits the application under its test.
       if (_env['FOGATA_TEST_MIC_CASE'] != 'term' || _role != 'a') {
@@ -470,6 +476,12 @@ Future<void> _call(WidgetTester tester) async {
   await _until(tester, 'home', () => find.byType(Shell).evaluate().isNotEmpty);
   final state = _state(tester);
   await _ask();
+  // One copy alone: how the application follows the system's "less motion" (see
+  // [_lessMotion]).
+  if (_env['FOGATA_TEST_MOTION'] == '1') {
+    await _lessMotion(tester);
+    return;
+  }
 
   if (_role == 'a') {
     // A link takes one request, and a new link replaces the last one: one at a time.
@@ -526,6 +538,8 @@ Future<void> _call(WidgetTester tester) async {
   // The noise check: copy a enters as someone who left noise suppression on.
   if (_env['FOGATA_TEST_MIC_CASE'] == 'noise' && _role == 'a') {
     state.prefs.noiseSuppression = true;
+    // Entering muted, to turn the microphone on in the call (see [_noise]).
+    if (_env['FOGATA_TEST_NOISE_MUTED'] == '1') state.prefs.joinWithMic = false;
   }
   // The unmute check, with noise suppression on (mic.sh, UNMUTE_NS=1).
   if (_env['FOGATA_TEST_UNMUTE_NS'] == '1') state.prefs.noiseSuppression = true;
@@ -584,8 +598,21 @@ Future<void> _call(WidgetTester tester) async {
       'FOGATA_TEST_MIC=broken needs a copy without sound inputs',
     );
   }
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'quit' &&
+      _role == 'a' &&
+      (_env['FOGATA_TEST_FULL_SCREEN'] == '1' ||
+          _env['FOGATA_TEST_QUIT_IDLE'] == '1')) {
+    await _quitFromFullScreen(tester, state);
+    return;
+  }
   if (_env['FOGATA_TEST_MIC_CASE'] == 'quit' && _role == 'a') {
     await _quitWhileOpening(tester, state);
+    return;
+  }
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'quit' &&
+      _role == 'b' &&
+      _env['FOGATA_TEST_QUIT_SEEN'] == '1') {
+    await _seeQuit(tester, state);
     return;
   }
   if (_env['FOGATA_TEST_MIC_CASE'] == 'devices' && _role == 'a') {
@@ -640,6 +667,7 @@ Future<void> _call(WidgetTester tester) async {
     seconds: 900,
   );
   await _quality(state, 'at the start');
+  await _chooseOutputLater(state);
   if (_env['FOGATA_TEST_QUALITY'] != null) {
     await _connectionQuality(tester, state);
     await _say(state, 'done');
@@ -2522,6 +2550,20 @@ Future<({int width, int height, double fps})> _screenIn(CallPeer peer) async {
     }
   }
   return (width: 0, height: 0, fps: 0.0);
+}
+
+/// The frames of [peer]'s screen decoded so far (its channel, mid 2); 0 without them.
+Future<int> _screenFramesIn(CallPeer peer) async {
+  for (final report
+      in await peer.connection?.getStats() ?? const <StatsReport>[]) {
+    final v = report.values;
+    if (report.type == 'inbound-rtp' &&
+        v['kind'] == 'video' &&
+        '${v['mid']}' == '2') {
+      return (v['framesDecoded'] as num? ?? 0).toInt();
+    }
+  }
+  return 0;
 }
 
 /// The packets of [peer]'s screen sound received so far, on its channel or (from macOS) on
@@ -4955,6 +4997,10 @@ Future<void> _micCase(WidgetTester tester, AppState state, String name) async {
       await _unmute(tester, state);
     case 'restart':
       await _soundRestart(tester, state);
+    case 'churn':
+      await _churn(tester, state);
+    case 'far-echo':
+      await _farEcho(tester, state);
     default:
       throw StateError('no microphone check called $name');
   }
@@ -5354,13 +5400,40 @@ Timer _logLevels(AppState state) {
 /// mic_check.py judges them: the noise must be as low in `start` as in `on` and `again`,
 /// well under `off`. Copy b only stays in the call, its microphone on a silent source
 /// (mic.sh), so that nothing plays at a.
+///
+/// With FOGATA_TEST_NOISE_RECEIVED=1, the other copy also logs a's voice as it receives it
+/// ([_logReceived], level-in-b.txt).
+/// With FOGATA_TEST_NOISE_MUTED=1, a enters muted instead, stays so 4 s and turns its
+/// microphone on (marked `unmute`) before the four stretches: `start` is then the first
+/// seconds after that unmute.
 Future<void> _noise(WidgetTester tester, AppState state) async {
   if (_copies != 2) throw StateError('the noise check takes two copies');
+  if (_role != 'a' && _env['FOGATA_TEST_NOISE_RECEIVED'] == '1') {
+    final received = _logReceived(state);
+    try {
+      await _hear(tester, state, ['noise done'], seconds: 300);
+    } finally {
+      received.cancel();
+    }
+    return;
+  }
   if (_role != 'a') {
     await _hear(tester, state, ['noise done'], seconds: 300);
     return;
   }
   final call = state.callState.call!;
+  if (_env['FOGATA_TEST_NOISE_MUTED'] == '1') {
+    if (call.mic) throw StateError('entered with the microphone on');
+    await _until(
+      tester,
+      'connected',
+      () => call.peers.values.any((p) => p.connected),
+      seconds: 120,
+    );
+    await _wait(tester, const Duration(seconds: 4));
+    _mark('unmute');
+    await state.setMic(true);
+  }
   if (!call.mic) throw StateError('the noise check needs the microphone on');
   if (!call.noiseSuppression) {
     throw StateError('entered with noise suppression off');
@@ -6309,4 +6382,553 @@ Future<void> _quitWhileOpening(WidgetTester tester, AppState state) async {
   // Not reached when quitting ends the process; the runner then says how long it took.
   _mark('quit-returned');
   await _wait(tester, const Duration(seconds: 30));
+}
+
+/// An output to choose only once the call is up, by a part of its name
+/// (FOGATA_TEST_OUTPUT_LATER): macOS lists only the default devices until its sound engine
+/// has started, so FOGATA_TEST_OUTPUT cannot name another one there.
+final _outputLater = _env['FOGATA_TEST_OUTPUT_LATER'];
+
+/// Chooses [_outputLater], now listed, as the call's menu does.
+Future<void> _chooseOutputLater(AppState state) async {
+  final name = _outputLater;
+  if (name == null || name.isEmpty) return;
+  final devices = await navigator.mediaDevices.enumerateDevices();
+  final found = devices
+      .where((d) => d.kind == 'audiooutput' && d.label.contains(name))
+      .firstOrNull;
+  if (found == null) {
+    throw StateError(
+      'no audiooutput called $name: '
+      '${devices.where((d) => d.kind == 'audiooutput').map((d) => d.label)}',
+    );
+  }
+  await state.setAudioOutput(found.deviceId);
+  _log('output chosen in the call: ${found.label}');
+}
+
+/// The voice's level and energy in [reports]' first report of [type] on the voice's
+/// channel (mid 0), as `level energy seconds`, or null.
+String? _voiceEnergy(List<StatsReport> reports, String type) {
+  final byId = {for (final r in reports) r.id: r};
+  for (final r in reports) {
+    if (r.type != type || '${r.values['mid']}' != '0') continue;
+    // What is sent is read at its media source, before the codec.
+    final v = type == 'outbound-rtp'
+        ? byId[r.values['mediaSourceId']]?.values
+        : r.values;
+    final energy = v?['totalAudioEnergy'];
+    final seconds = v?['totalSamplesDuration'];
+    if (energy is num && seconds is num) {
+      return '${v?['audioLevel'] ?? 0} $energy $seconds';
+    }
+  }
+  return null;
+}
+
+/// Runs [step] every 200 ms until the timer is cancelled, one at a time: a step still
+/// running when the next is due is not started again beside it, and [live] says whether
+/// the timer still runs, so that a step that ends after the cancel writes nothing.
+Timer _every200ms(Future<void> Function(bool Function() live) step) {
+  var busy = false;
+  late final Timer timer;
+  timer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
+    if (busy) return;
+    busy = true;
+    try {
+      await step(() => timer.isActive);
+    } catch (_) {
+    } finally {
+      busy = false;
+    }
+  });
+  return timer;
+}
+
+/// Logs every 200 ms, in `level-in-<role>.txt` of FOGATA_CALL, the voice this copy
+/// receives from the first other copy: the time in milliseconds since the epoch, its level
+/// (0 to 1), its total energy and the seconds of it so far (the level over any stretch is
+/// the square root of the energy over the seconds it took), until the timer is cancelled.
+Timer _logReceived(AppState state) {
+  final file = File('$_dir/level-in-$_role.txt');
+  return _every200ms((live) async {
+    final connection =
+        state.callState.call?.peers.values.firstOrNull?.connection;
+    if (connection == null) return;
+    final line = _voiceEnergy(await connection.getStats(), 'inbound-rtp');
+    if (line != null && live()) {
+      file.writeAsStringSync(
+        '${DateTime.now().millisecondsSinceEpoch} $line\n',
+        mode: FileMode.append,
+      );
+    }
+  });
+}
+
+/// As [_logReceived], what this copy sends of its voice after its processing, in
+/// `level-out-<role>.txt`.
+Timer _logSent(AppState state) {
+  final file = File('$_dir/level-out-$_role.txt');
+  return _every200ms((live) async {
+    final connection =
+        state.callState.call?.peers.values.firstOrNull?.connection;
+    if (connection == null) return;
+    final line = _voiceEnergy(await connection.getStats(), 'outbound-rtp');
+    if (line != null && live()) {
+      file.writeAsStringSync(
+        '${DateTime.now().millisecondsSinceEpoch} $line\n',
+        mode: FileMode.append,
+      );
+    }
+  });
+}
+
+/// [_quitWhileOpening] with FOGATA_TEST_FULL_SCREEN=1 (the window in macOS's full screen
+/// first, [_fullScreen]) or FOGATA_TEST_QUIT_IDLE=1 (quitting without entering the room):
+/// copy a quits FOGATA_TEST_QUIT_AFTER milliseconds after entering the room, or after
+/// home when idle, as the tray's Quit does, and logs whether the window is in full screen.
+Future<void> _quitFromFullScreen(WidgetTester tester, AppState state) async {
+  if (_env['FOGATA_TEST_FULL_SCREEN'] == '1') await _fullScreen(tester);
+  final after = int.tryParse(_env['FOGATA_TEST_QUIT_AFTER'] ?? '') ?? 0;
+  if (_env['FOGATA_TEST_QUIT_IDLE'] != '1') {
+    _mark('entering');
+    unawaited(state.openRoom(state.contacts.groups.first.id));
+  }
+  if (after > 0) await Future<void>.delayed(Duration(milliseconds: after));
+  final call = state.callState.call;
+  _log(
+    'quitting: in the call ${call != null}, mic ${call?.mic}, '
+    'connected ${call?.peers.values.where((p) => p.connected).length}, '
+    'full screen ${await windowManager.isFullScreen()}',
+  );
+  _mark('quit');
+  File('$_dir/$_role-result.txt').writeAsStringSync('quit\n');
+  await quitApplication();
+  // Not reached when quitting ends the process; the runner then says how long it took.
+  _mark('quit-returned');
+  await _wait(tester, const Duration(seconds: 30));
+}
+
+/// Puts the window in macOS's own full screen (its space of its own), as a picture's full
+/// screen button does ([setWindowFullScreen]), and waits until the window is there.
+Future<void> _fullScreen(WidgetTester tester) async {
+  await setWindowFullScreen(true);
+  final end = DateTime.now().add(const Duration(seconds: 15));
+  while (!await windowManager.isFullScreen()) {
+    if (DateTime.now().isAfter(end)) {
+      throw StateError('the window did not go full screen');
+    }
+    await _wait(tester, const Duration(milliseconds: 200));
+  }
+  // macOS's animation into the new space.
+  await _wait(tester, const Duration(seconds: 2));
+  _mark('full-screen');
+}
+
+/// Copy b in the quit check with FOGATA_TEST_QUIT_SEEN=1: enters the room too (not with
+/// FOGATA_TEST_QUIT_IDLE=1, where a quits without entering it) and notes in b-sees.log
+/// every change of a's presence and of whether a is in the room, one line each with the
+/// time in milliseconds, until 5 s after it marked `a-gone` (the first time a, once seen
+/// online or in the room as `a-there`, is not), or for 5 minutes at most. Its result is
+/// `ran`: the rig's script judges what it noted.
+Future<void> _seeQuit(WidgetTester tester, AppState state) async {
+  _ended = 'ran';
+  final idle = _env['FOGATA_TEST_QUIT_IDLE'] == '1';
+  if (!idle) await state.openRoom(state.contacts.groups.first.id);
+  final log = File('$_dir/b-sees.log');
+  var seen = '';
+  var there = false, gone = false;
+  final end = DateTime.now().add(const Duration(minutes: 5));
+  while (DateTime.now().isBefore(end)) {
+    final presence =
+        state.contacts.friends.firstOrNull?.presence.name ?? 'none';
+    final inRoom =
+        state.roomState.room?.participants.any((p) => !p.me) ?? false;
+    final now = 'presence=$presence room=${inRoom ? 'with-a' : 'alone'}';
+    if (now != seen) {
+      seen = now;
+      log.writeAsStringSync(
+        '${DateTime.now().millisecondsSinceEpoch} $now\n',
+        mode: FileMode.append,
+      );
+    }
+    final here = idle ? presence != 'offline' && presence != 'none' : inRoom;
+    if (here && !there) {
+      there = true;
+      _mark('a-there');
+    }
+    if (there && !here && !gone) {
+      gone = true;
+      _mark('a-gone');
+      await _wait(tester, const Duration(seconds: 5));
+      return;
+    }
+    await _wait(tester, const Duration(milliseconds: 100));
+  }
+}
+
+/// FOGATA_TEST_MOTION=1, one copy, macOS: what the system says of "Reduce motion" is
+/// asked of the runner on the application's own channel (fogata/motion), as the
+/// application does at its start, and logged; then the runner's message that the setting
+/// changed is played into the application, on, then off, then as the system says: with it
+/// on, everything under the window sees less motion asked for (MediaQuery's
+/// disableAnimations) and the springs land at once ([spring]); with it off, they bounce
+/// again. The system's setting itself is never changed; only the runner's own reading of
+/// it, and its notice of a change, are left out.
+Future<void> _lessMotion(WidgetTester tester) async {
+  if (!Platform.isMacOS) throw StateError('the motion check is for macOS');
+  const channel = MethodChannel('fogata/motion');
+  final system = await channel.invokeMethod<bool>('reduceMotion') ?? false;
+  _log('macOS asks for less motion: $system');
+  bool less() =>
+      MediaQuery.disableAnimationsOf(tester.element(find.byType(Shell)));
+  Future<void> told(bool on) async {
+    await tester.binding.defaultBinaryMessenger.handlePlatformMessage(
+      channel.name,
+      channel.codec.encodeMethodCall(MethodCall('reduceMotion', on)),
+      (_) {},
+    );
+    await _wait(tester, const Duration(milliseconds: 500));
+  }
+
+  final problems = <String>[];
+  void check(String when, bool want) {
+    final at = spring.transform(.3);
+    final bounces = Curves.easeOutBack.transform(.3);
+    _log(
+      'motion $when: less motion ${less()}, the spring at 0.3 of its time $at '
+      '(${want ? 'asked: 1.0' : 'asked: $bounces'})',
+    );
+    if (less() != want || at != (want ? 1.0 : bounces)) {
+      problems.add('$when: less motion ${less()}, spring at $at');
+    }
+  }
+
+  check('as macOS says', system);
+  await told(true);
+  check('told on', true);
+  await told(false);
+  check('told off', false);
+  await told(system);
+  check('as macOS says again', system);
+  if (problems.isNotEmpty) {
+    throw StateError('less motion not followed: ${problems.join('; ')}');
+  }
+}
+
+/// FOGATA_TEST_MIC_CASE=churn, three copies or more (FOGATA_TEST_SCREEN on copy a): the
+/// check of the macOS video library's lock around received tracks and streams
+/// (FlutterRTCPeerConnection.m, gRemoteLock). Copy a shares its screen and b watches it
+/// throughout, while each other copy leaves the room and enters it again
+/// FOGATA_TEST_CHURN_ROUNDS times (6 when left out), after pauses of 0 to 3 s, watching a's
+/// screen each time until its picture shows; then b leaves and enters again 3 times, and
+/// a 3 times, sharing again each time. Every join and leave adds or removes received
+/// tracks (written by the connection's delegate on WebRTC's signalling thread) while the
+/// watching, the volumes and the statistics of every copy read them (the plugin's method
+/// calls, on the main thread). b must see a's picture again, moving, within 30 s each
+/// time; a crash or a hang ends a copy without its result. The copies tell each other the
+/// steps with files in FOGATA_CALL (`churn-<step>`), as one out of the room does not get
+/// its chat; each join and leave is logged as `churn event`. macOS sends a shared screen's
+/// frames only while something on it changes: the rig keeps something moving on a's
+/// screen (on one Mac the copies' own windows, showing that screen, do).
+Future<void> _churn(WidgetTester tester, AppState state) async {
+  if (_copies < 3) {
+    throw StateError('the churn check takes three copies or more');
+  }
+  final group = state.callState.call!.group;
+  final rounds = int.tryParse(_env['FOGATA_TEST_CHURN_ROUNDS'] ?? '') ?? 6;
+  final comers = _names.keys.take(_copies).skip(2).toList();
+  final random = math.Random();
+  File step(String name) => File('$_dir/churn-$name');
+  void touch(String name) =>
+      step(name)
+          .writeAsStringSync('${DateTime.now().millisecondsSinceEpoch}\n');
+  Future<void> waitFor(String name, int seconds) => _until(
+    tester,
+    'churn: $name',
+    () => step(name).existsSync(),
+    seconds: seconds,
+  );
+  var events = 0;
+  void event(String what) {
+    events++;
+    _log('churn event $events: $_role $what');
+  }
+
+  Future<void> rejoin(String why) async {
+    await state.leaveRoom();
+    event('left ($why)');
+    await _wait(tester, Duration(milliseconds: random.nextInt(3000)));
+    await state.openRoom(group);
+    event('entered ($why)');
+  }
+
+  // a's id, from its first word in the room's chat.
+  Future<String> sharer() async {
+    await _until(
+      tester,
+      'a sharing',
+      () => _said(state, ['churn sharing']).isNotEmpty,
+      seconds: 120,
+    );
+    return _said(state, ['churn sharing']).keys.single.id;
+  }
+
+  // Watches a's screen in the call there is now until its picture shows and moves: how
+  // long that took.
+  Future<int> picture(String aId, String when) async {
+    final asked = DateTime.now();
+    await _until(tester, "a's picture shown $when", () {
+      final call = state.callState.call;
+      final peer = call?.peers[aId];
+      if (call == null || peer == null || !peer.sharing) return false;
+      if (call.watching != aId) call.watch(aId);
+      return peer.screen.videoWidth > 0;
+    }, seconds: 30);
+    final took = DateTime.now().difference(asked).inMilliseconds;
+    final peer = state.callState.call!.peers[aId]!;
+    final first = await _screenFramesIn(peer);
+    final end = DateTime.now().add(const Duration(seconds: 10));
+    while (await _screenFramesIn(peer) <= first) {
+      if (DateTime.now().isAfter(end)) {
+        throw StateError("a's picture $when shown but not moving");
+      }
+      await _wait(tester, const Duration(milliseconds: 500));
+    }
+    _log("churn: a's picture $when after $took ms");
+    return took;
+  }
+
+  Future<void> connectedTo(String id, String when) => _until(
+    tester,
+    'connected $when',
+    () => state.callState.call?.peers[id]?.connected == true,
+    seconds: 60,
+  );
+
+  Future<void> share() async {
+    final call = state.callState.call!;
+    final sources = await call.screens();
+    await call.shareScreen(
+      sources.firstWhere(
+        (s) => s.type == SourceType.Screen,
+        orElse: () => throw StateError('no screen to share'),
+      ),
+    );
+    if (!call.sharing) throw StateError('not sharing: ${call.problem}');
+  }
+
+  if (_role == 'a') {
+    await share();
+    await _say(state, 'churn sharing');
+    await waitFor('b-watching', 120);
+    // b's word in the chat may come a moment after its file.
+    await _until(
+      tester,
+      'b watching',
+      () => _said(state, ['churn watching']).isNotEmpty,
+      seconds: 60,
+    );
+    final bId = _said(state, ['churn watching']).keys.single.id;
+    for (final r in comers) {
+      await waitFor('$r-done', 900);
+    }
+    await waitFor('b-done', 600);
+    for (var n = 1; n <= 3; n++) {
+      await rejoin('round $n');
+      await connectedTo(bId, 'to b again ($n)');
+      await share();
+      touch('a-shared-$n');
+      await waitFor('b-saw-$n', 90);
+    }
+    touch('a-done');
+  } else if (_role == 'b') {
+    final aId = await sharer();
+    await picture(aId, 'at the start');
+    await _say(state, 'churn watching');
+    touch('b-watching');
+    // While the others come and go, a's picture keeps coming: frames decoded over every
+    // 6 s, for as long as a's own wait for them (900 s).
+    final until = DateTime.now().add(const Duration(seconds: 900));
+    var frames = -1;
+    var at = DateTime.now();
+    while (!comers.every((r) => step('$r-done').existsSync())) {
+      if (DateTime.now().isAfter(until)) {
+        throw StateError('the others did not end their rounds in 900 s');
+      }
+      await _wait(tester, const Duration(seconds: 2));
+      final peer = state.callState.call!.peers[aId];
+      if (peer == null) {
+        throw StateError('a gone while the others came and went');
+      }
+      final now = await _screenIn(peer);
+      final decoded = await _screenFramesIn(peer);
+      _log(
+        "churn: a's picture while the others come and go: "
+        '${now.width}x${now.height} at ${now.fps} fps, $decoded frames',
+      );
+      if (decoded > frames) {
+        frames = decoded;
+        at = DateTime.now();
+      } else if (DateTime.now().difference(at) > const Duration(seconds: 6)) {
+        throw StateError("a's picture stopped while the others came and went");
+      }
+    }
+    for (var n = 1; n <= 3; n++) {
+      await rejoin('round $n');
+      await connectedTo(aId, 'to a again ($n)');
+      await picture(aId, 'after b entered again ($n)');
+    }
+    touch('b-done');
+    for (var n = 1; n <= 3; n++) {
+      await waitFor('a-shared-$n', 180);
+      await picture(aId, 'after a entered again ($n)');
+      touch('b-saw-$n');
+    }
+    await waitFor('a-done', 120);
+  } else {
+    final aId = await sharer();
+    await waitFor('b-watching', 180);
+    for (var n = 1; n <= rounds; n++) {
+      await rejoin('round $n');
+      await connectedTo(aId, 'to a again ($n)');
+      await picture(aId, '$_role round $n');
+      await _wait(tester, Duration(milliseconds: 1000 + random.nextInt(3000)));
+    }
+    touch('$_role-done');
+    await waitFor('a-done', 900);
+  }
+  _log('churn: $events joins and leaves by $_role');
+}
+
+/// FOGATA_TEST_MIC_CASE=far-echo, two copies on one Mac (the rig's script): how much of the
+/// other's voice copy a sends back when it plays it on speakers its own microphone hears.
+/// b's voice is a shared window's sound: b shares the window whose name has
+/// FOGATA_TEST_ECHO_WINDOW in it ("macplay" when left out), whose program plays speech,
+/// with that program's sound, its microphone off. Copy a (its microphone on, its output
+/// the speakers) watches b's screen while the file `rig-watch` is in FOGATA_CALL, and stops
+/// watching while it is not, until `rig-end`; a number in `rig-volume` sets how loud b's
+/// screen plays here, in percent, and a part of an output's name in `rig-output` chooses
+/// that output: what it plays of b then goes through the
+/// call's own playback, which its echo canceller takes as what it plays. a logs what it
+/// sends ([_logSent]) and b what it receives of a ([_logReceived]); whatever runs the
+/// copies plays the same speech, or other speech, into the room itself in stretches it
+/// marks, and judges.
+Future<void> _farEcho(WidgetTester tester, AppState state) async {
+  if (_copies != 2) throw StateError('the far echo check takes two copies');
+  // It only measures: the rig's script judges.
+  _ended = 'ran';
+  final call = state.callState.call!;
+  final otherId = call.peers.keys.single;
+  if (_role == 'b') {
+    if (call.mic) throw StateError("b's microphone must be off");
+    final name = _env['FOGATA_TEST_ECHO_WINDOW'] ?? 'macplay';
+    final sources = await call.screens();
+    _log(
+      'sources: ${sources.map((s) => '${s.type.name}:${s.name}').join(' | ')}',
+    );
+    await call.shareScreen(
+      sources.firstWhere(
+        (s) => s.type == SourceType.Window && s.name.contains(name),
+        orElse: () => throw StateError('no window called $name to share'),
+      ),
+    );
+    if (!call.sharing) throw StateError('not sharing: ${call.problem}');
+    await _until(
+      tester,
+      'sharing with sound',
+      () => call.sharingSound,
+      seconds: 30,
+    );
+    _log('sharing with sound: ${call.sharingSound}');
+    final received = _logReceived(state);
+    try {
+      await _until(
+        tester,
+        'rig: rig-end',
+        () => File('$_dir/rig-end').existsSync(),
+        seconds: 1800,
+      );
+    } finally {
+      received.cancel();
+    }
+    await call.stopSharing();
+    return;
+  }
+  if (!call.mic) throw StateError("a's microphone must be on");
+  final peer = _peer(state, (id: otherId, name: _names['b']!));
+  await _until(
+    tester,
+    'b shares with sound',
+    () => peer.sharing && peer.sound,
+    seconds: 120,
+  );
+  // How loud b's screen plays here, in percent (FOGATA_TEST_ECHO_VOLUME), as the person's
+  // volume control in the call sets it: kept low on speakers in a room.
+  final volume = int.tryParse(_env['FOGATA_TEST_ECHO_VOLUME'] ?? '');
+  if (volume != null) await state.setScreenVolume(otherId, volume, save: false);
+  _log(
+    'noise suppression ${call.noiseSuppression}, b plays at ${volume ?? 100} %',
+  );
+  _mark('ready');
+  final sent = _logSent(state);
+  final screenSound = File('$_dir/screen-in-a.txt');
+  final heard = _every200ms((live) async {
+    for (final r
+        in await peer.soundConnection?.getStats() ?? const <StatsReport>[]) {
+      final v = r.values;
+      if (r.type == 'inbound-rtp' && v['kind'] == 'audio' && live()) {
+        screenSound.writeAsStringSync(
+          '${DateTime.now().millisecondsSinceEpoch} ${v['audioLevel'] ?? 0} '
+          '${v['totalAudioEnergy'] ?? 0} ${v['totalSamplesDuration'] ?? 0}\n',
+          mode: FileMode.append,
+        );
+      }
+    }
+  });
+  try {
+    final end = DateTime.now().add(const Duration(minutes: 30));
+    int? shownVolume = volume;
+    String? shownOutput;
+    while (!File('$_dir/rig-end').existsSync()) {
+      if (DateTime.now().isAfter(end)) throw StateError('no rig-end in time');
+      // A volume the rig asks for in percent (`rig-volume`), set as the call's control does.
+      final asked = File('$_dir/rig-volume');
+      final percent = asked.existsSync()
+          ? int.tryParse(asked.readAsStringSync().trim())
+          : null;
+      if (percent != null && percent != shownVolume) {
+        shownVolume = percent;
+        await state.setScreenVolume(otherId, percent, save: false);
+        _mark('volume-$percent');
+      }
+      // An output the rig asks for by a part of its name (`rig-output`), chosen as the
+      // call's menu does.
+      final output = File('$_dir/rig-output');
+      final name = output.existsSync() ? output.readAsStringSync().trim() : '';
+      if (name.isNotEmpty && name != shownOutput) {
+        shownOutput = name;
+        final devices = await navigator.mediaDevices.enumerateDevices();
+        final found = devices
+            .where((d) => d.kind == 'audiooutput' && d.label.contains(name))
+            .firstOrNull;
+        if (found == null) throw StateError('no audiooutput called $name');
+        await state.setAudioOutput(found.deviceId);
+        _mark('output-${name.replaceAll(' ', '-')}');
+        _log('output chosen by the rig: ${found.label}');
+      }
+      final want = File('$_dir/rig-watch').existsSync();
+      if (want && call.watching != otherId) {
+        call.watch(otherId);
+        _mark('watching');
+      } else if (!want && call.watching == otherId) {
+        call.watch(null);
+        _mark('not-watching');
+      }
+      await _wait(tester, const Duration(milliseconds: 100));
+    }
+  } finally {
+    sent.cancel();
+    heard.cancel();
+  }
 }
