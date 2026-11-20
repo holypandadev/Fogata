@@ -136,9 +136,12 @@ elif check == "switch":
             problems.append(f"a records from {sorted(sources_at('a', quiet + 2))} after switching to the quiet input")
         # 2 s after switching back, or, when the call ended and a's recording with it
         # before that (b hears a again within half a second, and the copies then end),
-        # as its recording was just before it ended.
+        # as its recording was just before it ended. A recording not linked for an
+        # instant, as the one made for the other microphone is, has not ended.
         back_at = tone + 2
-        ended = next((t for t, s in recordings("a") if tone < t <= back_at and not s), None)
+        ended = next(
+            (t for t, s in recordings("a", unlinked=True) if tone < t <= back_at and not s), None
+        )
         if ended is not None:
             back_at = ended - 0.05
             notes.append(f"a's recording ended {ended - tone:.2f} s after switching back: judged just before")
