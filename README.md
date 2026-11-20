@@ -82,7 +82,9 @@ copy you run was built to trust.
 - No telemetry, analytics or crash reporting. **Settings → Report a problem** writes a report you
   read first and then send yourself, by e-mail or as a file.
 - Messages, calls and files go from device to device. Room chats are gone when the last person
-  leaves the room; direct chats are kept on the two devices, encrypted on disk.
+  leaves the room, except that a line of your own that has not reached everyone who was in the
+  room yet is kept encrypted on your device until it is delivered, for a day at most, or until
+  Fogata next starts after that; direct chats are kept on the two devices, encrypted on disk.
 - What leaves the device besides your friends' and groups' traffic: lookups in the public IPFS
   distributed hash table, which see this device's network addresses, as any peer you connect to
   does, and a look at this repository's releases on GitHub at every start and every few hours,

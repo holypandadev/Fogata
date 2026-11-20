@@ -72,7 +72,7 @@ up where their friends are, then talk to them directly.
 | Transport identity | One run of the app | RAM | Ed25519 key pair used as the libp2p `PeerId`. A new one each time the app starts, never written down; it stays the same while the app runs (also across key changes and network changes), so the network can link what one run announces, not one run to the next. |
 | Friend   | Permanent  | Device disk                      | Device public key, chosen nickname, last known addresses. |
 | Group    | Permanent  | Each member's disk               | Group secret, epoch, signed member list. Never messages. |
-| Room     | Ephemeral  | RAM of the members present       | Chat log, participants, shared file index, media topology. |
+| Room     | Ephemeral  | RAM of the members present       | Chat log, participants, shared file index, media topology. Its author's disk keeps a line of its own that someone who was in the room lacks, sealed, until delivered, for a day at most or until the next start after that (3). |
 | File     | Ephemeral  | Disk of whoever shared/downloaded it | Served on demand while the holder is in the room. |
 | Direct chat | Until deleted, or its timer runs out | Both friends' disks | Messages and attachments between two friends, over a group of the two (3.13). |
 

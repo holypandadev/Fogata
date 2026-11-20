@@ -7,7 +7,9 @@ is a member of and its friends. A background task turns the node's events into s
 and screen events: a group log is saved when it changes, the friends file when friends
 change, a group a friend shared or an invite brought is registered under a free local name,
 and two kinds of times are kept for the screens (when a friend was last seen, when a group
-last had a room). Nothing said or shared in a room is written; direct chats are kept in
+last had a room). Nothing said or shared in a room is written, but this device's own lines
+that someone who was in the room lacks, sealed, until delivered, for a day at most or until
+the next start after that (3); direct chats are kept in
 `direct/` (3.13). A group this device left is gone from the screens at once, but the node
 runs it on until a member has the leave: one that takes it when it is pushed, names it among
 the entries it has when it syncs, has the same log heads, or writes an entry on it. A member
