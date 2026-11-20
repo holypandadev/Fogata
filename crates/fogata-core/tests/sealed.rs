@@ -1,17 +1,22 @@
 //! Data folders sealed with a key from the keychain (a keychain in memory here, so the
 //! computer's own is never touched): two friends write and send files with everything
 //! sealed on both disks, and a folder an earlier version left plain is sealed at its first
-//! start, its attachments in the background, and its plain copies go at the next start.
+//! start, its attachments in the background, and its plain copies go at the next start. A
+//! room line said while the only other member is out of reach is kept on the sealed disk
+//! through a restart, and delivered by the next start.
 
 use std::{
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use fogata_core::CoreEvents;
 use fogata_core::{
-    AtRest, Core, CoreEvent, NetOptions, Store,
+    AtRest, Core, CoreEvent, FIRST_ROOM, NetOptions, Store,
     direct::{
         ChatView, Outgoing,
         model::{Attachment, Body, Chat, FileKind, Item, Local},
@@ -22,8 +27,9 @@ use fogata_core::{
 };
 use fogata_crypto::{DeviceIdentity, DevicePublicKey, at_rest::sealed_form};
 use fogata_friends::{Friend, FriendBook};
-use fogata_net::Multiaddr;
-use tokio::time::timeout;
+use fogata_net::{Multiaddr, RoomChange};
+use fogata_state::GroupLog;
+use tokio::{net::UdpSocket, time::timeout};
 
 /// One test at a time: each starts devices that talk over this computer's network, and
 /// several at once on a busy computer leave the protocol's timers too little room.
@@ -464,5 +470,139 @@ async fn a_folder_not_all_sealed_says_so_until_it_is() {
         picture
     );
     core.shutdown().await.unwrap();
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A UDP forwarder to the device listening on `port`, for the latest device to send to the
+/// port it returns, both ways, dropping every packet while `cut` is set.
+async fn forwarder(port: u16, cut: Arc<AtomicBool>) -> u16 {
+    let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let behind = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let address = front.local_addr().unwrap().port();
+    let client: Arc<std::sync::Mutex<Option<std::net::SocketAddr>>> = Default::default();
+    let back = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    {
+        let (front, behind, cut, client) =
+            (front.clone(), behind.clone(), cut.clone(), client.clone());
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            while let Ok((n, from)) = front.recv_from(&mut buf).await {
+                *client.lock().unwrap() = Some(from);
+                if !cut.load(Ordering::SeqCst) {
+                    let _ = behind.send_to(&buf[..n], back).await;
+                }
+            }
+        });
+    }
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        while let Ok((n, _)) = behind.recv_from(&mut buf).await {
+            let to = *client.lock().unwrap();
+            if let Some(to) = to
+                && !cut.load(Ordering::SeqCst)
+            {
+                let _ = front.send_to(&buf[..n], to).await;
+            }
+        }
+    });
+    address
+}
+
+/// Whether `core`'s room of `group` has the line `text`.
+async fn has_line(core: &Core, group: fogata_crypto::GroupId, text: &str) -> bool {
+    core.room(group, FIRST_ROOM)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|r| r.chat.iter().any(|l| l.text == text))
+}
+
+/// Ana and Bea in the room of Ana's group, both folders sealed; Ana reaches Bea only
+/// through a forwarder, and neither is given the other's address otherwise (the group is in
+/// both folders from the start, not joined with an invite that names Ana's). The way is cut
+/// with Bea still in the room on her side, her core running; Ana says a line and quits as
+/// the application does. The line is on Ana's disk, Bea has not got it; once the way is open
+/// again, Ana's next start on the same folder delivers it, and the file goes once taken.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_room_line_said_while_out_of_reach_is_delivered_by_the_next_start() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    keychain();
+    let base = std::env::temp_dir().join(format!("fogata-sealed-lines-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let (dir_a, dir_b) = (base.join("ana"), base.join("bea"));
+    Core::create_profile(&dir_a, "Ana", None).unwrap();
+    Core::create_profile(&dir_b, "Bea", None).unwrap();
+    let ana_identity = Store::open(dir_a.clone()).unwrap().identity().unwrap().0;
+    let bea_key = Store::open(dir_b.clone())
+        .unwrap()
+        .identity()
+        .unwrap()
+        .0
+        .public_key();
+    let mut log = GroupLog::create(&ana_identity, "crew", 1).unwrap();
+    log.add(&ana_identity, bea_key, "Bea", 2).unwrap();
+    let group = log.group_id();
+    for dir in [&dir_a, &dir_b] {
+        Store::open(dir.clone())
+            .unwrap()
+            .save_group_log(&log, "crew")
+            .unwrap();
+    }
+    let kept = dir_a.join("room-lines.bin");
+
+    let port_b = free_port();
+    let cut = Arc::new(AtomicBool::new(false));
+    let via = forwarder(port_b, cut.clone()).await;
+    let (bea, mut events_b) = Core::start(dir_b.clone(), alone(port_b, None)).unwrap();
+    let (ana, mut events_a) = Core::start(dir_a.clone(), alone(free_port(), Some(via))).unwrap();
+    let ana_key = ana_identity.public_key();
+    ana.join_room(group).await.unwrap();
+    bea.join_room(group).await.unwrap();
+    let joined = |who: DevicePublicKey| {
+        move |e: &CoreEvent| match e {
+            CoreEvent::Room {
+                change: RoomChange::Joined { device, .. },
+                ..
+            } => *device == who,
+            _ => false,
+        }
+    };
+    wait_for(&mut events_a, "Bea in the room", joined(bea_key)).await;
+    wait_for(&mut events_b, "Ana in the room", joined(ana_key)).await;
+
+    let started = std::time::Instant::now();
+    cut.store(true, Ordering::SeqCst);
+    let text = "said while Bea was away";
+    ana.say(group, text).await.unwrap();
+    ana.shutdown().await.unwrap();
+    drop((ana, events_a));
+    assert!(kept.exists(), "the line was not kept on Ana's disk");
+    assert!(
+        sealed_form(&std::fs::read(&kept).unwrap()).is_some(),
+        "the kept line is not sealed"
+    );
+    assert!(
+        !has_line(&bea, group, text).await,
+        "Bea got the line through the cut way"
+    );
+    let room = bea.room(group, FIRST_ROOM).await.unwrap().unwrap();
+    assert!(room.participants.iter().any(|(p, _)| p.device == bea_key));
+
+    cut.store(false, Ordering::SeqCst);
+    let (ana, _events_a) = start_again(&dir_a, alone(free_port(), Some(via))).await;
+    wait_for(&mut events_b, "the line kept on Ana's disk", |e| {
+        matches!(e, CoreEvent::Room { change: RoomChange::Chat(line), .. } if line.text == text)
+    })
+    .await;
+    let gone = timeout(Duration::from_secs(10), async {
+        while kept.exists() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await;
+    assert!(gone.is_ok(), "the line taken is still on Ana's disk");
+    eprintln!("from the cut to the file gone: {:?}", started.elapsed());
+    ana.shutdown().await.unwrap();
+    bea.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }
