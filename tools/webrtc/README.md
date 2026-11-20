@@ -263,11 +263,13 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    of 8. AEC3 removes only what the application plays: other applications' sound on the
    speakers is no longer taken out of the microphone, as on Linux and macOS. In the
    PC-Windows call check, with a pure tone as the Windows copy's microphone the far side's
-   echo canceller holds its own voice down at times: 12 of 17 calls passed; with a recorded
-   voice 31 of 31. The plain capture thread no longer reads the keyboard (a typing flag
-   nothing uses) and waits through a stall of capture events instead of ending the
-   recording; a device that fails ends it, as with the DMO. A capture device that takes none of the formats the plain
-   path tries (the DMO converted any) is recorded at 48 kHz with Windows' conversion
+   echo canceller holds its own voice down at times: 12 of 17 calls passed, 1 of 3 with the
+   same 440 Hz tone on both sides; with a recorded voice 31 of 31, and 62 of 62 with the
+   patches as released. The plain capture thread no longer reads the keyboard (a typing
+   flag that reaches only the debug recordings) and waits through a stall of capture
+   events instead of ending the recording; a device that fails ends it, as with the DMO. A
+   capture device that takes none of the formats the plain path tries (the DMO converted
+   any) is recorded at 48 kHz with Windows' conversion
    (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`), which the log says with the device's mix
    format; wrapper patch 0024 tests that path.
 

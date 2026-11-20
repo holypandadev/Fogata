@@ -61,7 +61,9 @@ The plain capture thread differs from the DMO's in two more ways, made as the DM
 - It ended the recording for good after 0.5 s without a capture event. It now waits on,
   saying so in the log (at the first half second and every 10 s), and still ends at
   once on the shutdown event; a stream that no longer works after a stall fails in
-  GetBuffer. The DMO's thread polled every 5 ms and never ended on a stall.
+  GetBuffer once events come again; one that never signals again leaves the microphone
+  silent, as a stream that fails does (below). The DMO's thread polled every 5 ms and
+  never ended on a stall.
 A stream that fails (AUDCLNT_E_DEVICE_INVALIDATED: the device unplugged, its format
 changed in the Sound settings, the audio service restarted) still ends the capture
 thread, as a failing ProcessOutput ended the DMO's: the microphone stays silent (the
