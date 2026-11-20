@@ -71,6 +71,8 @@ impl Node {
     /// Stops running a group without leaving it: its members are let go and it is no longer
     /// announced.
     pub(super) fn drop_group(&mut self, group: GroupId) {
+        // Lines of a group this device left go with it (see kept.rs).
+        self.tidy_kept();
         let Some(slot) = self.groups.get(&group) else {
             return;
         };
@@ -295,6 +297,9 @@ impl Node {
                 declined,
             } => self.give_entries(&to, entries, declined),
             Command::Typing { group, typing } => self.send_typing(group, typing),
+            Command::KeepOwnLines(path, key, all_groups) => {
+                self.keep_own_lines(path, key, all_groups)
+            }
             other => self.on_friend_command(other),
         }
     }

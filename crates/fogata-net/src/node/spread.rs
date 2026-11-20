@@ -373,7 +373,7 @@ impl Node {
     /// The devices a message reached, named in `earlier`, with this device and `peers`, the
     /// members it is sending it to now. A member whose connection went silent is left out:
     /// it may not get it from here, and others then pass it on to it.
-    fn reached_with(&self, earlier: &[u8], peers: &[PeerId]) -> Vec<u8> {
+    pub(super) fn reached_with(&self, earlier: &[u8], peers: &[PeerId]) -> Vec<u8> {
         let mut named = Vec::new();
         let mut reached = Vec::new();
         let mine = std::iter::once(self.local_peer());

@@ -648,6 +648,11 @@ impl Node {
         // Kept until it is gone to each member, but a presence: another goes soon.
         let kept =
             (!matches!(payload, GroupPayload::RoomHere { .. })).then_some(sealed.header.message_id);
+        // A line is also kept until every member in the room has it, those away now included
+        // (see kept.rs).
+        if let GroupPayload::RoomChat { voice, .. } = payload {
+            self.keep_line(group, voice, sealed.header.message_id, &wire);
+        }
         self.apply_room(group, &sealed, payload, wire.clone(), None);
         self.deliver(group, wire, kept);
         Ok(())
@@ -812,6 +817,7 @@ impl Node {
         changes: Vec<RoomChange>,
         in_room_before: Option<GroupId>,
     ) {
+        self.kept_room_changes(group, voice, &changes);
         for change in changes {
             self.emit(NodeEvent::Room {
                 group,
@@ -982,6 +988,7 @@ impl Node {
     /// this device), and let quiet participants go.
     pub(super) fn room_heartbeat(&mut self) {
         self.ask_rooms_again();
+        self.kept_heartbeat();
         let groups: Vec<GroupId> = self.groups.keys().copied().collect();
         for group in groups {
             self.say_here(group);

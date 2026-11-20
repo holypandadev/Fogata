@@ -1,7 +1,8 @@
 //! Rooms: the live part of a group. A room exists only in the memory of the members online;
 //! it holds who is in it, its chat and the files its participants share. Nothing of it is
 //! kept once the program ends (the node may hold the messages of shares in a file sealed
-//! with a key of that run only, see [`RoomTracker::replace_share_record`]). A file stays
+//! with a key of that run only, see [`RoomTracker::replace_share_record`], and its author's
+//! node a line not every member in the room has yet, to send it again). A file stays
 //! listed while someone in the room has it.
 //!
 //! Every event is a signed group message, so all members apply the same events and agree on

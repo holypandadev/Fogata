@@ -367,7 +367,7 @@ impl Drop for Spill {
 
 /// A message as written: its version, epoch and time, then each of its byte fields after
 /// its length.
-fn encode(wire: &WireMessage) -> Vec<u8> {
+pub(super) fn encode(wire: &WireMessage) -> Vec<u8> {
     let fields = fields(wire);
     let mut out = Vec::with_capacity(13 + fields.iter().map(|f| 4 + f.len()).sum::<usize>());
     out.push(wire.version);
@@ -391,7 +391,7 @@ fn fields(wire: &WireMessage) -> [&Vec<u8>; 6] {
     ]
 }
 
-fn decode(bytes: &[u8]) -> Option<WireMessage> {
+pub(super) fn decode(bytes: &[u8]) -> Option<WireMessage> {
     let (version, rest) = bytes.split_first()?;
     let (epoch, rest) = rest.split_first_chunk::<4>()?;
     let (timestamp, mut rest) = rest.split_first_chunk::<8>()?;

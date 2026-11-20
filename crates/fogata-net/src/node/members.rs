@@ -181,6 +181,7 @@ impl Node {
                     }
                     // A room event of this device's goes again once (see own.rs).
                     Pending::Own(group, id, again) => {
+                        self.kept_unsent(to, id);
                         self.own_lost(to, group, id, again, connection_id)
                     }
                     // Lost on the way (its connection closed while another stays, or no
@@ -511,9 +512,14 @@ impl Node {
             self.leave_taken(group);
             return MemberResponse::Refused;
         }
-        // One sync at a time with each member: the answer asks for the next.
+        // One sync at a time with each member: the answer asks for the next. The same log
+        // as here: it reads every key this device does (see kept.rs).
+        let same = heads.as_ref().is_some_and(|h| h.as_slice() == heads_digest);
         if heads.is_some_and(|h| h.as_slice() != heads_digest) {
             served += self.request_sync(peer, group);
+        }
+        if same {
+            self.kept_caught_up(group, peer);
         }
         let Some(slot) = self.groups.get(&group) else {
             return MemberResponse::Refused;
@@ -1185,8 +1191,12 @@ impl Node {
             (Pending::Presence(sent), response) => {
                 self.presence_done(peer, sent, matches!(response, MemberResponse::Ack))
             }
-            // Taken or refused, it got there (see own.rs).
-            (Pending::Own(_, id, _), _) => self.own_answered(id),
+            // Taken or refused, it got there (see own.rs); a line is let go only once taken
+            // (see kept.rs).
+            (Pending::Own(_, id, _), response) => {
+                self.own_answered(id);
+                self.kept_answered(peer, id, matches!(response, MemberResponse::Ack));
+            }
             // Every other answer leaves nothing to do. Each kind is named, with no wildcard:
             // a kind added to `Pending` is placed here on purpose.
             (

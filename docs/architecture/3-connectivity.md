@@ -861,6 +861,34 @@ A group message goes once to each member, not to everyone from everyone:
   that comes before the window has set up its quitting still ends it at once, and Windows
   watches none. Still ended at once: SIGKILL and SIGHUP, and SIGTERM and SIGINT again once
   the window is being destroyed.
+- A line of this device's is kept besides, in a sealed folder, until each member owed it has
+  taken it (`node::kept`): those in its room when it was said, listed there or let go of it
+  without a leave (cut off, or not heard from for the grace) since the room opened on this
+  device, which is remembered in memory while the room lasts; not a member that never entered
+  it nor one that left it saying so, and one that leaves it saying so later is let go of the
+  lines said there. With nobody owed, nothing is kept. Kept lines are at most 16 of a group
+  and 64 in all, the oldest going first, for a day at most by the clock either way (one that
+  expires while Fogata is not running goes at its next start), in one file sealed with the
+  folder's key and padded to a few fixed sizes, which a move or a restore removes. The file
+  follows the lines 2 s late, at a check of the links, and when the node stops, so that a
+  line everyone takes at once never reaches the disk; a write that failed is tried again a
+  minute later. A member answers `Ack` to a line it could not read (a key it lacks), so a
+  line goes to a member, and its `Ack` counts, only once the member is known to read the
+  line's epoch by a key the log gave it: the one it proved itself with and those given to it
+  before, or every one given to it once its roster names the same log heads; what is known
+  of a member goes when it disconnects. So a line said just after a key changed is written,
+  and sent once more, as a member's `Ack` counts only from its next roster with the same log,
+  up to a heartbeat later. A line goes to a member that lacks it when that member proves
+  membership, in this session or a later one, and at a heartbeat, to each member at most once
+  a minute, or at the next heartbeat after that member refused it or a send to it did not get
+  there; it is sent naming every connected member as reached, so that a device that takes
+  `Spread` passes it on to none of them (an older one gets `Deliver` and passes it on as
+  before). A member whose room is not the
+  line's any more takes it and its room ignores it, so it never shows in a later room; where
+  it shows, it takes its place by the time it was said. A member no longer one, and a group
+  left, let it go. Leaves and shares are not kept. Nothing changes on the wire. A file that
+  does not open is removed; one that cannot be written leaves the lines in memory: said all
+  the same, and the log names none.
 
 Every message and request to a member is a request of the member protocol, on a stream of its
 own. A connection takes 16 such streams at once, both ways together, and drops any stream

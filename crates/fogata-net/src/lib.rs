@@ -683,6 +683,10 @@ enum Command {
         reply: tokio::sync::oneshot::Sender<Result<Vec<DevicePublicKey>, String>>,
     },
     Shutdown(tokio::sync::oneshot::Sender<()>),
+    /// Keeps this device's lines said in rooms that not every member in the room has yet in
+    /// that file, sealed with that key; whether the node runs every group of this device's
+    /// (see node/kept.rs).
+    KeepOwnLines(std::path::PathBuf, fogata_crypto::at_rest::DataKey, bool),
     /// Makes the node panic, to check that it goes on.
     #[cfg(test)]
     Panic,
@@ -781,6 +785,16 @@ impl Commands {
         };
         sender.send(command).await.map_err(|_| NetError::Stopped)
     }
+
+    /// Sends `command` without waiting: refused when the node stopped or has too many
+    /// commands waiting.
+    fn try_send(&self, command: Command) -> Result<(), NetError> {
+        let sender = match self {
+            Self::Keeps(sender) => sender.clone(),
+            Self::Background(weak) => weak.upgrade().ok_or(NetError::Stopped)?,
+        };
+        sender.try_send(command).map_err(|_| NetError::Stopped)
+    }
 }
 
 /// Peers that proved membership, per group. Shared with the handle for stream protocols.
@@ -863,6 +877,7 @@ impl fmt::Debug for Command {
             Command::SetAnimation { .. } => "SetAnimation",
             Command::MutualFriends { .. } => "MutualFriends",
             Command::Shutdown(_) => "Shutdown",
+            Command::KeepOwnLines(..) => "KeepOwnLines",
             #[cfg(test)]
             Command::Panic => "Panic",
             #[cfg(test)]
@@ -1471,6 +1486,27 @@ impl NodeHandle {
             .get(device)
             .copied()
             .unwrap_or(caps::FIRST_LEVEL)
+    }
+
+    /// Keeps this device's lines said in rooms that not every member in the room has yet at
+    /// `path`, sealed with `key`, until each has them, also for its next sessions; those an earlier
+    /// session kept there go to the members that lack them as they connect (see
+    /// node/kept.rs). Without it, none is kept. A line not kept is said all the same. With
+    /// `all_groups`, every group of this device's was read and given to the node: the lines of
+    /// one it does not run go, as of a group left; without, they are kept until they expire.
+    pub fn keep_own_lines(
+        &self,
+        path: std::path::PathBuf,
+        key: fogata_crypto::at_rest::DataKey,
+        all_groups: bool,
+    ) {
+        if self
+            .commands
+            .try_send(Command::KeepOwnLines(path, key, all_groups))
+            .is_err()
+        {
+            tracing::warn!("this device's room lines are not kept: the node is busy or stopped");
+        }
     }
 
     /// Levels kept from earlier sessions ([`NodeEvent::LevelSeen`]); a lower one never

@@ -373,6 +373,8 @@ impl Node {
         // member at once if this device is in one.
         self.ask_room(group, peer);
         self.say_here(group);
+        // This device's lines it does not have yet, said while it was away.
+        self.kept_proved(group, peer, wire.epoch);
         if held_back {
             self.ask_again(peer, group, wire.epoch);
         }

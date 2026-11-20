@@ -2,7 +2,7 @@
 //! is still joining with an invite.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     sync::Arc,
 };
 
@@ -356,6 +356,33 @@ impl GroupContext {
     /// How many members the group has, this device included when it is one.
     pub(crate) fn member_count(&self) -> usize {
         self.state.members.len()
+    }
+
+    /// The numbers of the epochs whose secret `device` was given, in the order they started,
+    /// up to `last` (all of them without it; when it is not one of them, `last` alone).
+    pub(crate) fn epochs_given(&self, device: &DevicePublicKey, last: Option<u32>) -> Vec<u32> {
+        let given = self.state.epochs_given(device);
+        let Some(last) = last else {
+            return given;
+        };
+        match given.iter().position(|n| *n == last) {
+            Some(at) => given[..=at].to_vec(),
+            None => vec![last],
+        }
+    }
+
+    /// The number of the current epoch.
+    pub(crate) fn current_epoch(&self) -> Option<u32> {
+        (self.state.current_epoch()).map(|e| fogata_state::epoch_number(&e.id))
+    }
+
+    /// The members a manager let in (see [`Self::is_member_device`]), this device included
+    /// when it is one.
+    pub(crate) fn member_devices(&self) -> BTreeSet<DevicePublicKey> {
+        (self.state.members.keys())
+            .filter(|d| self.state.keyed(d))
+            .copied()
+            .collect()
     }
 
     pub(crate) fn i_am_manager(&self) -> bool {

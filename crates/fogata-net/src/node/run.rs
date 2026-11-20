@@ -358,6 +358,8 @@ impl Node {
         // aborted, whatever stopped it; then a moment for all the closes to leave before
         // saying it is done.
         let tasks = self.tasks.clone();
+        // This device's room lines still owed reach the disk before the node is gone.
+        self.kept_lines.follow(true);
         drop(self);
         tasks.stop(TASKS_WAIT).await;
         if !stopped.is_empty() {
@@ -509,6 +511,7 @@ impl Node {
                 slot.as_mut().reset(tokio::time::Instant::now() + until_next_slot());
             }
             _ = links.tick() => {
+                self.kept_lines.follow(false);
                 self.answer_waiting_addresses();
                 self.push_shown_again();
                 self.retry_mdns_dials();

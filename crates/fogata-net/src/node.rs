@@ -21,6 +21,7 @@ mod group_changes;
 mod heartbeat;
 mod joins;
 mod judging;
+mod kept;
 mod limits;
 mod links;
 mod mdns_dials;
@@ -370,6 +371,7 @@ pub(crate) fn start_with(
         pending: HashMap::new(),
         quick_on_its_way: HashMap::new(),
         own_going: own::OwnGoing::default(),
+        kept_lines: kept::KeptLines::default(),
         stopping: None,
         outbox: HashMap::new(),
         presence: presence::PresenceWays::default(),
@@ -1049,6 +1051,9 @@ struct Node {
     quick_on_its_way: HashMap<OutboundRequestId, (ConnectionId, Instant)>,
     /// This device's room events on their way to members (see own.rs).
     own_going: own::OwnGoing,
+    /// This device's lines said in rooms that not every member in the room has yet (see
+    /// kept.rs).
+    kept_lines: kept::KeptLines,
     /// Asked to stop: the replies, and when to stop at the latest, for those to go first
     /// (see `Node::turn`).
     stopping: Option<(Vec<tokio::sync::oneshot::Sender<()>>, tokio::time::Instant)>,

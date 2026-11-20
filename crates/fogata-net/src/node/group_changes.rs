@@ -136,6 +136,7 @@ impl Node {
         };
         self.publish_members();
         if let Some(device) = device {
+            self.kept_member_gone(group, &device);
             self.emit(NodeEvent::MemberDisconnected {
                 group,
                 device,
@@ -242,6 +243,8 @@ impl Node {
             for peer in peers {
                 self.drop_member(group, peer);
             }
+            // Lines of a group this device is no longer in go with it (see kept.rs).
+            self.tidy_kept();
             let slot = self.groups.remove(&group).expect("checked above");
             self.publish_members();
             self.provided.1 = None;

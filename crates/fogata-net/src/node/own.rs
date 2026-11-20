@@ -6,8 +6,10 @@
 //!
 //! A presence (`RoomHere`) is not kept: another goes at the next heartbeat. Every other room
 //! event of this device's is: a line, a file shared or no longer, entering, leaving, a
-//! taking out. A line or a leave lost here is never said again: once this device left, its
-//! presences no longer name its latest events, and once its node stopped, nothing has them.
+//! taking out. A leave lost here is never said again: once this device left, its presences
+//! no longer name its latest events, and once its node stopped, nothing has them. A line is
+//! kept besides until every member in its room has it, also for the next session, when the
+//! application gives a file for it (see kept.rs).
 
 use std::{collections::HashMap, time::Duration};
 
@@ -43,6 +45,11 @@ impl OwnGoing {
     /// Whether none of this device's room events is waiting or on its way.
     pub(super) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Whether event `id` is waiting or on its way.
+    pub(super) fn holds(&self, id: &[u8; 16]) -> bool {
+        self.0.contains_key(id)
     }
 }
 

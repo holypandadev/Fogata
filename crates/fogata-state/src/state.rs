@@ -542,6 +542,15 @@ impl GroupState {
             })
     }
 
+    /// The numbers of the epochs whose secret `key` was given by an entry that applied, in
+    /// the order they started.
+    pub fn epochs_given(&self, key: &DevicePublicKey) -> Vec<u32> {
+        (self.epochs.iter())
+            .filter(|e| self.holders.get(&e.id).is_some_and(|h| h.contains(key)))
+            .map(|e| epoch_number(&e.id))
+            .collect()
+    }
+
     /// Whether `key` was given or sent the secret of any epoch, that is, ever had a group key.
     pub fn ever_held(&self, key: &DevicePublicKey) -> bool {
         self.holders.values().any(|h| h.contains(key))

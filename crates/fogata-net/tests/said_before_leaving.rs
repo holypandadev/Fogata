@@ -11,8 +11,8 @@
 //! - A member that missed a line gets it when a participant's presence (every 20 s) names
 //!   it within two minutes, from the line's author while connected, else from the
 //!   participant that named it: Cai's presence brings Bea a line Ana's link failed to.
-//! - Nothing brings back a line no member got once its author's node stopped: nobody has
-//!   it, and its next session does not either.
+//! - A line no member got before its author's node stopped is kept on the author's disk,
+//!   and its next session sends it to the member that lacks it once connected.
 //! - Ana's own room shows the line said whether or not anyone got it: nothing tells her.
 
 use std::{
@@ -24,7 +24,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId, MembershipProof, SealedMessage};
+use fogata_crypto::{
+    DeviceIdentity, DevicePublicKey, GroupId, MembershipProof, SealedMessage, at_rest::DataKey,
+};
 use fogata_net::{GroupSetup, Multiaddr, NodeConfig, NodeEvents, NodeHandle};
 use fogata_proto::{
     GroupPayload, MEMBER_PROTOCOL, MemberRequest, MemberResponse, WireMessage, WireProof,
@@ -104,6 +106,15 @@ async fn forwarder(back: SocketAddr, link: Arc<Link>) -> SocketAddr {
         }
     });
     address
+}
+
+/// A file of its own for a device's lines kept, in a folder of the test's own.
+fn kept_file() -> std::path::PathBuf {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::SeqCst);
+    let dir = std::env::temp_dir().join(format!("fogata-said-{}-{n}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir.join("lines")
 }
 
 fn free_port() -> u16 {
@@ -207,6 +218,17 @@ struct Three {
     to_bea: Arc<Link>,
     to_cai: Arc<Link>,
     peers: Vec<Multiaddr>,
+    /// Where Ana's sessions keep her lines that not every member in the room has yet, and
+    /// its key.
+    kept: (std::path::PathBuf, DataKey),
+}
+
+impl Drop for Three {
+    fn drop(&mut self) {
+        if let Some(dir) = self.kept.0.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
 }
 
 impl Three {
@@ -247,6 +269,7 @@ impl Three {
             to_bea,
             to_cai,
             peers: vec![quic(via_b), quic(via_c)],
+            kept: (kept_file(), DataKey::generate().unwrap()),
         }
     }
 
@@ -263,6 +286,7 @@ impl Three {
     /// [`Self::start_ana`], waiting until she is connected to `devices`.
     async fn start_ana_with(&self, devices: &[DevicePublicKey]) -> NodeHandle {
         let ana = node(self.ana.clone(), self.log.clone(), 0, self.peers.clone());
+        ana.keep_own_lines(self.kept.0.clone(), self.kept.1.clone(), true);
         eventually("Ana connected", 60, || async {
             connected(&ana, self.group, devices).await
         })
@@ -489,9 +513,14 @@ async fn a_line_that_failed_on_its_way_comes_from_another_member() {
 /// - `node_up`: Ana's node, up all along, connects to Bea again; if that does not bring the
 ///   line, Ana enters the room again, within the two minutes her presence names her latest
 ///   events for: Bea asks her for the line.
-/// - otherwise Ana's node stops and her next session connects and enters: it has nothing of
-///   the line.
-async fn back_after_a_line_lost_to_the_only_other(node_up: bool) -> (bool, bool, bool) {
+/// - otherwise Ana's node stops and her next session connects: it has the line from her
+///   disk, and sends it to Bea.
+///
+/// Returns whether Ana's room showed the line, whether Bea missed it, whether it came back
+/// to her, and how long after Ana was connected again it came, when it came then.
+async fn back_after_a_line_lost_to_the_only_other(
+    node_up: bool,
+) -> (bool, bool, bool, Option<Duration>) {
     let three = Three::new().await;
     // Cai goes: Bea is the only other in the room, and nobody carries Ana's way to her.
     three.cai.shutdown().await.unwrap();
@@ -541,6 +570,7 @@ async fn back_after_a_line_lost_to_the_only_other(node_up: bool) -> (bool, bool,
     };
     let at = Instant::now();
     let mut back = line_at_bea().await;
+    let on_connecting = back.then(|| at.elapsed());
     eprintln!(
         "back at Bea on connecting again: {back} ({:?})",
         at.elapsed()
@@ -558,7 +588,7 @@ async fn back_after_a_line_lost_to_the_only_other(node_up: bool) -> (bool, bool,
         );
     }
     eprintln!("shown at Ana: {shown_at_ana}, missed by Bea: {missed}, back at Bea: {back}");
-    (shown_at_ana, missed, back)
+    (shown_at_ana, missed, back, on_connecting)
 }
 
 /// Scenario (iv) with Ana's node up: once connected again, Bea asks her for the room and gets
@@ -572,23 +602,29 @@ async fn back_after_a_line_lost_to_the_only_other(node_up: bool) -> (bool, bool,
 #[ignore = "slow (about 50-90 s): pins that a line lost to the only other member comes when its author, node up, enters the room again; run by hand"]
 async fn a_line_lost_to_the_only_other_comes_when_its_author_enters_again() {
     let _one = ONE_AT_A_TIME.lock().await;
-    let (shown_at_ana, missed, back) = back_after_a_line_lost_to_the_only_other(true).await;
+    let (shown_at_ana, missed, back, _) = back_after_a_line_lost_to_the_only_other(true).await;
     assert!(shown_at_ana, "Ana's room does not show her line");
     assert!(missed, "Bea got the line through the cut link");
     assert!(back, "Bea never got the line");
 }
 
-/// Scenario (iv) after Ana's node stopped: her next session has nothing of the line, and Bea
-/// never gets it. Measured: 3 of 3 runs lost it (nothing within 30 s of the new session
-/// connecting, nor within 30 s of it entering the room).
+/// Scenario (iv) after Ana's node stopped: her next session has the line kept on her disk
+/// and sends it to Bea as Bea proves herself to it, within 2 s of connecting, well before a
+/// room heartbeat (every 20 s) would. Before the line was kept, 3 of 3 runs lost it (nothing
+/// within 30 s of the new session connecting, nor within 30 s of it entering the room).
+/// About 50-90 s (the cut waits for the connection to close).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "a line that reached nobody before its author's node stopped is lost for good, its author's room having shown it said; fix pending"]
 async fn a_line_lost_to_the_only_other_comes_when_its_author_starts_again() {
     let _one = ONE_AT_A_TIME.lock().await;
-    let (shown_at_ana, missed, back) = back_after_a_line_lost_to_the_only_other(false).await;
+    let (shown_at_ana, missed, back, on_connecting) =
+        back_after_a_line_lost_to_the_only_other(false).await;
     assert!(shown_at_ana, "Ana's room does not show her line");
     assert!(missed, "Bea got the line through the cut link");
     assert!(back, "Bea never got the line");
+    assert!(
+        on_connecting.is_some_and(|at| at < Duration::from_secs(2)),
+        "the line did not come as Ana connected again: {on_connecting:?}"
+    );
 }
 
 type Hand = Swarm<request_response::cbor::Behaviour<MemberRequest, MemberResponse>>;
