@@ -117,6 +117,7 @@ async fn two_devices_starting_together_find_each_other_beside_an_older_one() {
         .and_then(|c| c.parse().ok())
         .unwrap_or(4);
     let mut took = Vec::new();
+    let mut held = None;
     for _ in 0..rounds {
         let ana = Arc::new(DeviceIdentity::generate().unwrap());
         let bea = Arc::new(DeviceIdentity::generate().unwrap());
@@ -128,11 +129,80 @@ async fn two_devices_starting_together_find_each_other_beside_an_older_one() {
         took.push(connected_within(&mut events_a, Duration::from_secs(25)).await);
         node_a.shutdown().await.unwrap();
         node_b.shutdown().await.unwrap();
+        if took.last() == Some(&None) {
+            held = firewall_holds_this_binary();
+            if held.is_some() {
+                break;
+            }
+        }
     }
     println!("found each other after {took:?}");
+    if let Some(held) = held {
+        panic!("{held}; found each other after {took:?}");
+    }
     assert!(
         took.iter()
             .all(|t| t.is_some_and(|t| t < Duration::from_secs(20))),
         "devices starting together took most of a query interval: {took:?}"
     );
+}
+
+/// Why macOS's application firewall keeps this test binary from hearing the network, if it
+/// does. With the firewall on, a program it has no rule for has every packet from the network
+/// held (`socketfilterfw`: "Enqueuing new inbound flow") until someone answers its dialog
+/// asking whether that program may accept incoming connections, and the dialogs come one
+/// after the other. A test binary is signed ad hoc under its file name, which changes with
+/// what it is built from (another Cargo.lock, other features: `cargo nextest run -p fogata-net`
+/// alone builds another binary than with fogata-core beside it), so each new one waits for
+/// a dialog of its own, for as long as nobody is at the computer; every round then finds no
+/// one. The application, signed with a Developer ID, is let in by the firewall's rule for
+/// signed software, on unless the user turned it off. The firewall's own list (`--listapps`)
+/// tells whether it has a rule for this binary's name. Asked only once a round found no one,
+/// this never fails a test that would pass.
+#[cfg(target_os = "macos")]
+fn firewall_holds_this_binary() -> Option<String> {
+    const FIREWALL: &str = "/usr/libexec/ApplicationFirewall/socketfilterfw";
+    let ask = |arg: &str| {
+        std::process::Command::new(FIREWALL)
+            .arg(arg)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).into_owned())
+    };
+    if ask("--getglobalstate")?.contains("State = 0") {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    let name = exe.file_name()?.to_str()?;
+    let apps = ask("--listapps")?;
+    let mut lines = apps.lines();
+    let mut known = false;
+    while let Some(line) = lines.next() {
+        let listed = line.split_once(" : ").map(|(_, path)| path.trim());
+        if listed.is_some_and(|path| path.rsplit('/').next() == Some(name)) {
+            if lines.next().is_some_and(|rule| rule.contains("Allow")) {
+                return None;
+            }
+            known = true;
+        }
+    }
+    Some(if known {
+        format!(
+            "macOS's firewall blocks incoming connections to {}",
+            exe.display()
+        )
+    } else {
+        format!(
+            "macOS's firewall holds every packet from the network for {} until someone answers \
+             its dialog asking whether it may accept incoming connections (one for each newly \
+             built test binary, one after the other): allow it, then run the test again",
+            exe.display()
+        )
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn firewall_holds_this_binary() -> Option<String> {
+    None
 }
