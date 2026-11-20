@@ -13,6 +13,26 @@ use crate::{Core, FileView, MediaBridge, RoomState, now_ms, shares};
 /// it holds of them in memory: sealed with a key of that run only, and emptied at start.
 pub(crate) const SPILL_DIR: &str = "rooms";
 
+/// The file of the data folder the node keeps this device's lines said in rooms in, those
+/// that someone who was in the room lacks, sealed with the folder's key, until delivered, for
+/// a day at most or until the next start after that (see fogata-net's node/kept.rs). It
+/// stays on this computer: a move or a restore removes it, and a copy leaves it out.
+pub(crate) const KEPT_LINES_FILE: &str = "room-lines.bin";
+
+/// Removes the file of lines kept at `path`, and its temporary file, if they are there.
+pub(crate) fn remove_kept_lines(path: &std::path::Path) {
+    let mut temp = path.as_os_str().to_owned();
+    temp.push(".tmp");
+    for path in [path.to_path_buf(), std::path::PathBuf::from(temp)] {
+        match std::fs::remove_file(&path) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                tracing::warn!("cannot remove {}: {e}", path.display());
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A time to wait, in words: "58 min", "3 h", "2 days".
 fn time_left(ms: u64) -> String {
     let minutes = ms.div_ceil(60_000).max(1);

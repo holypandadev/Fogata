@@ -838,9 +838,15 @@ pub(crate) fn put_in_place(dir: &Path, stage: &Incoming, keychain: &Keychain) ->
             if keep(&name) {
                 continue;
             }
+            // This device's room lines still owed are not kept aside: nothing would send them
+            // or let them expire there.
+            let to = replaced.join(&name);
+            if name.starts_with(crate::rooms::KEPT_LINES_FILE) {
+                remove_any(&entry.path())?;
+                continue;
+            }
             // Already aside, the folder's own went there in an earlier try: this one was made
             // since (the empty folder for group logs a store makes as it opens).
-            let to = replaced.join(&name);
             if fs::symlink_metadata(&to).is_ok() {
                 remove_any(&entry.path())?;
                 continue;
@@ -2708,7 +2714,10 @@ fn deactivate(dir: &Path) -> Result<()> {
         let name = entry.file_name().to_string_lossy().into_owned();
         // The identity, the friend secrets, the recovery key that proves copies, and the
         // tickets of invites still waiting for a manager (they name this device's identity).
+        // And this device's room lines still owed, which the account's new computer sends
+        // no more.
         if name == "identity.key"
+            || name.starts_with(crate::rooms::KEPT_LINES_FILE)
             || name.starts_with("friends.bin")
             || name.starts_with(crate::recovery::KEY_FILE)
             || name == "joins.json"

@@ -77,9 +77,11 @@ impl Kind {
 
 /// What the file at `rel` (relative to the data folder, `/` between names) is, or `None`
 /// for one that does not move: what belongs to this computer (its key's name, its locks,
-/// copies made while sealing and how far sealing got, videos fetched to play, rooms' shares kept on disk while it runs, downloads cut short, how chats end as
-/// written with this folder's key, what was judged of group logs, its own log, the new versions of Fogata it keeps for this
-/// system), the move's own files, and names that start with a dot (nothing the application
+/// copies made while sealing and how far sealing got, videos fetched to play, rooms' shares
+/// kept on disk while it runs, its own room lines kept until delivered, downloads cut
+/// short, how chats end as written with this folder's key, what was judged of group logs,
+/// its own log, the new versions of Fogata it keeps for this system), the move's own files,
+/// and names that start with a dot (nothing the application
 /// writes does).
 pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
     let parts: Vec<&str> = rel.split('/').collect();
@@ -120,6 +122,8 @@ pub(crate) fn kind_of(rel: &str) -> Option<Kind> {
         ] => None,
         ["identity.key"] => Some(Kind::Whole("identity".into())),
         [crate::recovery::KEY_FILE] => Some(Kind::Whole(crate::recovery::KEY_CONTEXT.into())),
+        // Sealed with this folder's key, and the lines in it are this computer's to send.
+        [name] if name.starts_with(crate::rooms::KEPT_LINES_FILE) => None,
         // A key file set aside as damaged opens nowhere: copies are turned on again instead.
         [name] if name.starts_with(&format!("{}.damaged", crate::recovery::KEY_FILE)) => None,
         ["friends.bin" | "friends.bin.bak"] => Some(Kind::Whole("friends".into())),
@@ -755,6 +759,7 @@ mod tests {
             kind_of(&format!("{}/shares-0", crate::rooms::SPILL_DIR)),
             None
         );
+        assert_eq!(kind_of(crate::rooms::KEPT_LINES_FILE), None);
         assert_eq!(kind_of("app.json"), Some(Kind::Plain));
         assert_eq!(
             kind_of(&format!("direct/{CHAT}/journal")),

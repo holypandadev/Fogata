@@ -1,10 +1,12 @@
 //! Files kept on this device: the device identity, the profile and friends, the list of its
 //! groups and each group's log, and a few times for the screens (when a friend was last
 //! seen, when a group last had a room, where friends and members were last reached). Nothing
-//! said or shared in a room; direct chats are kept apart, in `direct/` (see
-//! [`crate::direct::store`]). The identity is secret, the friends file holds friend secrets
-//! and the logs hold epoch keys sealed to it. On Unix the files are created readable by their
-//! owner only.
+//! said or shared in a room, but this device's own lines that someone who was in the room
+//! lacks, sealed, until delivered, for a day at most or until the next start after that (see
+//! [`crate::rooms::KEPT_LINES_FILE`]); direct chats are kept apart, in `direct/` (see
+//! [`crate::direct::store`]). The identity is secret, the
+//! friends file holds friend secrets and the logs hold epoch keys sealed to it. On Unix the
+//! files are created readable by their owner only.
 //!
 //! When the system keychain keeps a data key for the folder ([`crate::vault`]), the identity
 //! and the friends file are sealed with it, as are direct chats' journals, pins, profiles and

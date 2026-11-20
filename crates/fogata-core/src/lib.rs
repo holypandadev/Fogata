@@ -4,9 +4,11 @@
 //! presence, a room's people, chat and files. [`CoreEvent`]s tell the screens when to look
 //! again.
 //!
-//! Nothing said or shared in a room is ever written to disk: the folder holds the identity,
-//! the profile and friends, the group logs, a few times (when a friend was last seen, when
-//! a group last had a room) and, in `direct/`, the direct chats with friends.
+//! Nothing said or shared in a room is written to disk but this device's own lines that
+//! someone who was in the room lacks, which are kept sealed until delivered, for a day at
+//! most or until the next start after that. The folder holds the identity, the profile and
+//! friends, the group logs, a few times (when a friend was last seen, when a group last had a
+//! room) and, in `direct/`, the direct chats with friends.
 //!
 //! What [`Core`] does is spread by subject: this device's profile and friends (friends.rs),
 //! groups (groups.rs), voice rooms (rooms.rs) and room file downloads (downloads.rs);
@@ -1023,6 +1025,19 @@ impl Core {
             spill_dir: Some(store.dir().join(rooms::SPILL_DIR)),
         })?;
         node.remember_levels(store.levels());
+        // Only in a sealed folder: a folder without a key keeps none, as before, and one
+        // whose key cannot be had removes what an earlier run kept, which nothing would
+        // send or let expire.
+        let kept_lines = store.dir().join(rooms::KEPT_LINES_FILE);
+        match store.data_key() {
+            Ok(Some(key)) => node.keep_own_lines(kept_lines, key, all_read),
+            found => {
+                if let Err(e) = found {
+                    tracing::warn!("this device's room lines are not kept: {e:#}");
+                }
+                rooms::remove_kept_lines(&kept_lines);
+            }
+        }
         // Right as the node starts, so members learn it when they first connect, with the
         // rest of what this device takes.
         fogata_media::bridge::advertise_parts(&node);
