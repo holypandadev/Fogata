@@ -1,0 +1,300 @@
+Test the restart after a change of devices
+
+WebRTC patch 0016 has the echo controller aligned again at the first start of recording
+after a change of audio devices, forgetting only its transparent mode
+(EchoControl::RestartForOtherDevices), where patch 0011 made it anew; a change a device's
+own restart already handled while recording ran is not taken again. In
+test/echo_call.test.cc the echo controller counts its restarts for other devices. A change
+while the microphone is off, one while recording runs with no device restart, one before
+a failed start and one as the sound server goes (the start the device keeps for later)
+restart it at the next start in the call as a restart for other devices; the next unmute
+with no change is a plain restart. In the test of patch 0014, a device restart after a
+change is a plain restart, the unmute after it too (the change handled once), and a newer
+change while the microphone is off a restart for other devices. A change and a device
+restart marked while recording is stopped, with the first recorded block reaching the
+audio processing before the audio state's start of recording returns (the mock device
+delivers it from its start), still give the unmute's restart for other devices. The
+helper for an unmute no longer expects a new controller after a change marked by
+another test's device module.
+
+diff --git a/test/echo_call.test.cc b/test/echo_call.test.cc
+index 8b4ead4..f0d7848 100644
+--- a/test/echo_call.test.cc
++++ b/test/echo_call.test.cc
+@@ -38,6 +38,10 @@ using ::testing::_;
+ using ::testing::AnyNumber;
+ using ::testing::Return;
+ 
++// How many restarts were for other devices (WebRTC patch 0016), forgetting AEC3's
++// transparent mode; each is counted as a restart too.
++int restarts_for_other_devices = 0;
++
+ // An echo controller that restarts for recording, counting each restart.
+ class Restartable : public webrtc::EchoControl {
+  public:
+@@ -54,6 +58,10 @@ class Restartable : public webrtc::EchoControl {
+     ++*restarted_;
+     return true;
+   }
++  bool RestartForOtherDevices() override {
++    ++restarts_for_other_devices;
++    return RestartForRecording();
++  }
+ 
+  private:
+   int* const restarted_;
+@@ -130,6 +138,9 @@ class EchoCall : public ::testing::Test {
+         return 0;  // Kept for later, as with no sound server (patch 0012).
+       }
+       recording_ = true;
++      if (deliver_on_start_) {
++        Deliver();  // The first block, before the start returns.
++      }
+       return 0;
+     });
+     ON_CALL(*adm_, StopRecording()).WillByDefault([this] {
+@@ -205,18 +216,12 @@ class EchoCall : public ::testing::Test {
+   int Made() const { return made_ - made_before_; }
+   int Restarted() const { return restarted_ - restarted_before_; }
+ 
+-  // The microphone turned on again in the call: restarted, unless a change of
+-  // devices was marked since the last start by something else in this process (a
+-  // real audio device module of another test), which makes it anew.
++  // The microphone turned on again in the call: restarted, also after a change of
++  // devices (WebRTC patch 0016).
+   void UnmuteAndExpectRestart() {
+-    const bool others = webrtc::AudioDevicesChangedCount().load() != marks_;
+     Count();
+     state_->AddSendingStream(&voice_, 48000, 1);
+     marks_ = webrtc::AudioDevicesChangedCount().load();
+-    if (others) {
+-      EXPECT_EQ(Made(), 1) << "a change of devices marked meanwhile";
+-      return;
+-    }
+     EXPECT_EQ(Made(), 0);
+     EXPECT_EQ(Restarted(), 1);
+   }
+@@ -234,6 +239,7 @@ class EchoCall : public ::testing::Test {
+   bool fail_ = false;
+   bool keep_ = false;
+   bool deliver_on_stop_ = false;
++  bool deliver_on_start_ = false;
+   int delivered_ = 0;
+   webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
+   webrtc::scoped_refptr<webrtc::test::MockAudioDeviceModule> adm_;
+@@ -289,35 +295,45 @@ TEST_F(EchoCall, AnUnmuteInTheCallRestartsIt) {
+   state_->RemoveReceivingStream(&heard_);
+ }
+ 
+-// A change of devices while the microphone is off makes it anew at the next start
+-// in the call, once: the start after it restarts again.
+-TEST_F(EchoCall, AChangeOfDevicesMakesItAnewOnce) {
++// A change of devices while the microphone is off restarts it at the next start in
++// the call, as any unmute does (WebRTC patch 0016, in place of 0011's new one).
++TEST_F(EchoCall, AChangeOfDevicesRestartsIt) {
+   state_->AddReceivingStream(&heard_);
+   Start();
+   state_->RemoveSendingStream(&voice_);
+   webrtc::MarkAudioDevicesChanged();
+   Count();
++  int others = restarts_for_other_devices;
+   Start();
+-  EXPECT_EQ(Made(), 1);
+-  EXPECT_EQ(Restarted(), 0);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++  EXPECT_EQ(restarts_for_other_devices, others + 1) << "for other devices";
++
++  // The next unmute with no change: a plain restart.
++  state_->RemoveSendingStream(&voice_);
++  others = restarts_for_other_devices;
++  UnmuteAndExpectRestart();
++  EXPECT_EQ(restarts_for_other_devices, others) << "the same devices";
+ 
+   state_->RemoveSendingStream(&voice_);
+   UnmuteAndExpectRestart();
+ 
+-  // A change while recording runs counts at the next start too.
++  // So does a change while recording runs (no device restart handled it).
+   webrtc::MarkAudioDevicesChanged();
+   state_->RemoveSendingStream(&voice_);
+   Count();
++  others = restarts_for_other_devices;
+   state_->AddSendingStream(&voice_, 48000, 1);
+-  EXPECT_EQ(Made(), 1);
+-  EXPECT_EQ(Restarted(), 0);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++  EXPECT_EQ(restarts_for_other_devices, others + 1) << "for other devices";
+ 
+   state_->RemoveSendingStream(&voice_);
+   state_->RemoveReceivingStream(&heard_);
+ }
+ 
+ // A start of recording that fails touches nothing, and takes nothing it was
+-// told: neither the call it stopped in nor a change of devices.
++// told: neither the call it stopped in nor a change of devices (which restarts it).
+ TEST_F(EchoCall, AFailedStartRestartsNothingAndKeepsWhatItWasTold) {
+   state_->AddReceivingStream(&heard_);
+   state_->AddSendingStream(&voice_, 48000, 1);
+@@ -333,57 +349,59 @@ TEST_F(EchoCall, AFailedStartRestartsNothingAndKeepsWhatItWasTold) {
+   EXPECT_EQ(Made(), 0);
+   EXPECT_EQ(Restarted(), 0);
+   fail_ = false;
+-  const bool others = webrtc::AudioDevicesChangedCount().load() != marks_;
+   state_->SetRecording(true);
+   EXPECT_TRUE(recording_);
+-  if (!others) {
+-    EXPECT_EQ(Made(), 0);
+-    EXPECT_EQ(Restarted(), 1);
+-  }
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
+ 
+-  // A change of devices, a failed start, then a start: the change still counts.
++  // A change of devices, a failed start, then a start: restarted, once.
+   state_->RemoveSendingStream(&voice_);
+   webrtc::MarkAudioDevicesChanged();
+   fail_ = true;
+   Count();
++  const int others = restarts_for_other_devices;
+   state_->AddSendingStream(&voice_, 48000, 1);
+   EXPECT_EQ(Made(), 0);
+   EXPECT_EQ(Restarted(), 0);
+   fail_ = false;
+   state_->SetRecording(true);
+-  EXPECT_EQ(Made(), 1);
+-  EXPECT_EQ(Restarted(), 0);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++  EXPECT_EQ(restarts_for_other_devices, others + 1) << "for other devices";
+ 
+   state_->RemoveSendingStream(&voice_);
+   state_->RemoveReceivingStream(&heard_);
+ }
+ 
+ // With no sound server the device keeps a start, tells it done and records later on
+-// its own (WebRTC patch 0012): the start counts, and the change of devices the
+-// server's going marked makes the echo controller anew; when the device then records
+-// on its own, and while it records, nothing makes or restarts it again. The device here
++// its own (WebRTC patch 0012): the start counts and restarts the echo controller, the
++// change of devices the server's going marked included (WebRTC patch 0016); when the
++// device then records on its own, and while it records, nothing makes or restarts it
++// again (the device's own restart there is WebRTC patch 0015's, not simulated here). The device here
+ // is simulated: that PulseAudio's module answers 0 to a start it keeps with no server
+ // is what the lab's restart check with the microphone muted covers
+ // (tools/call-lab/mic.sh restart:down20 with RESTART_MUTED=1), as no unit test runs it.
+-TEST_F(EchoCall, AStartKeptForLaterMakesItAnew) {
++TEST_F(EchoCall, AStartKeptForLaterRestartsIt) {
+   state_->AddReceivingStream(&heard_);
+   Start();
+   state_->RemoveSendingStream(&voice_);
+   webrtc::MarkAudioDevicesChanged();  // The server went.
+   keep_ = true;
+   Count();
++  const int others = restarts_for_other_devices;
+   state_->AddSendingStream(&voice_, 48000, 1);
+   EXPECT_FALSE(recording_);
+-  EXPECT_EQ(Made(), 1);
+-  EXPECT_EQ(Restarted(), 0);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++  EXPECT_EQ(restarts_for_other_devices, others + 1) << "for other devices";
+   keep_ = false;
+   recording_ = true;  // The server back: the device starts on its own.
+   webrtc::test::MockAudioSendStream screen_sound;
+   state_->AddSendingStream(&screen_sound, 48000, 2);  // Recording runs: no start.
+   state_->RemoveSendingStream(&screen_sound);
+   EXPECT_TRUE(recording_);
+-  EXPECT_EQ(Made(), 1);
+-  EXPECT_EQ(Restarted(), 0);
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
+   state_->RemoveSendingStream(&voice_);
+   state_->RemoveReceivingStream(&heard_);
+ }
+@@ -528,8 +546,8 @@ TEST(EchoCallDevices, AnotherDeviceChosenIsMarked) {
+ // The device starting recording again by itself while it records (another device
+ // chosen, the default changed: MarkAudioDeviceRestarted, WebRTC patch 0014): the next
+ // recorded block aligns the echo controller again, once for each restart, also after a
+-// change of devices since its last restart. The audio state does not see it: the next
+-// microphone turned on again after a change still makes it anew.
++// change of devices since its last restart; the next microphone turned on again
++// restarts it as any unmute does (WebRTC patch 0016).
+ TEST_F(EchoCall, ADeviceRestartWhileRecordingAlignsItAgain) {
+   state_->AddReceivingStream(&heard_);
+   // A restart marked before the audio state's own start of recording: the start
+@@ -545,24 +563,40 @@ TEST_F(EchoCall, ADeviceRestartWhileRecordingAlignsItAgain) {
+   EXPECT_EQ(Made(), 0);
+   EXPECT_EQ(Restarted(), 0);
+ 
++  int others = restarts_for_other_devices;
+   webrtc::MarkAudioDeviceRestarted();
+   Count();
+   Deliver();
+   EXPECT_EQ(Made(), 0);
+   EXPECT_EQ(Restarted(), 1);
++  EXPECT_EQ(restarts_for_other_devices, others) << "the same devices";
+   Deliver();
+   EXPECT_EQ(Restarted(), 1) << "once for each restart";
+ 
++  // After a change of devices: a plain restart too, keeping the transparent mode
++  // while recording runs (WebRTC patch 0016).
+   webrtc::MarkAudioDevicesChanged();
+   webrtc::MarkAudioDeviceRestarted();
+   Count();
++  others = restarts_for_other_devices;
+   Deliver();
+   EXPECT_EQ(Made(), 0) << "aligned again, not made anew, after a change too";
+   EXPECT_EQ(Restarted(), 1);
++  EXPECT_EQ(restarts_for_other_devices, others) << "kept while recording runs";
+ 
+-  // The audio state's own start counts what it saw since its last start.
++  // The audio state's own start: a plain restart, the change being handled by
++  // the device's restart already.
+   state_->RemoveSendingStream(&voice_);
++  others = restarts_for_other_devices;
+   UnmuteAndExpectRestart();
++  EXPECT_EQ(restarts_for_other_devices, others) << "a change handled once";
++
++  // A newer change while the microphone is off: for other devices at the next start.
++  state_->RemoveSendingStream(&voice_);
++  webrtc::MarkAudioDevicesChanged();
++  others = restarts_for_other_devices;
++  UnmuteAndExpectRestart();
++  EXPECT_EQ(restarts_for_other_devices, others + 1) << "a newer change";
+ 
+   state_->RemoveSendingStream(&voice_);
+   state_->RemoveReceivingStream(&heard_);
+@@ -610,3 +644,31 @@ TEST(EchoCallDevices, ARestartWhileRecordingIsMarked) {
+   }
+   worker->Stop();
+ }
++
++// A change of devices and a device restart marked while recording is stopped (WebRTC
++// patch 0015: a stream the server moved while muted), the first recorded block
++// reaching the audio processing before the audio state's start of recording returns:
++// that block realigns keeping the transparent mode and takes the change as handled,
++// but the unmute read the counts before it and still restarts for other devices,
++// forgetting the transparent mode (WebRTC patch 0016).
++TEST_F(EchoCall, AChangeMarkedWhileStoppedIsForgottenAtTheUnmute) {
++  state_->AddReceivingStream(&heard_);
++  Start();
++  Deliver();
++  state_->RemoveSendingStream(&voice_);
++  webrtc::MarkAudioDevicesChanged();
++  webrtc::MarkAudioDeviceRestarted();
++  Count();
++  const int others = restarts_for_other_devices;
++  deliver_on_start_ = true;
++  delivered_ = 0;
++  state_->AddSendingStream(&voice_, 48000, 1);
++  deliver_on_start_ = false;
++  marks_ = webrtc::AudioDevicesChangedCount().load();
++  EXPECT_EQ(delivered_, 1) << "a block before the start returned";
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(restarts_for_other_devices, others + 1)
++      << "the unmute after the change forgets the transparent mode";
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}

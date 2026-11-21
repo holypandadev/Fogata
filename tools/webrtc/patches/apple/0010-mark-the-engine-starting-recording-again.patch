@@ -1,0 +1,51 @@
+Mark the macOS engine starting recording again by itself
+
+WebRTC patch 0014 aligns the echo controller again when the audio device module starts
+recording again by itself in a call. WebRTC-SDK's AudioEngineDevice marks it
+(MarkAudioDeviceRestarted) when it starts an engine that records while recording was
+asked for before the change and still is: a restart or a new engine for another output
+or input chosen (by its own SetPlayoutDevice or SetRecordingDevice, or by the plugin's
+FogataPlayout, which takes the input away and gives it back around the devices it gives
+the engine: the request is what counts, not whether the input is available), a change
+of the system's default output or input, playout starting or stopping while it records,
+and the end of an interruption; and when it starts the engine again around the system's
+change of its configuration (ReconfigureEngine, which stops it and starts it again in
+two steps). Not marked: a first start, asked for by the audio state (a call's start, a
+microphone turned on again: Fogata turns the microphone on again by starting recording,
+so an unmute is never one), which restarts the echo controller already, and the manual
+rendering mode, which plays nothing into a room. Playout started right after recording
+starts is marked, and aligns the echo controller once more, one block later.
+
+--- a/modules/audio_device/audio_engine_device.mm
++++ b/modules/audio_device/audio_engine_device.mm
+@@ -1683,6 +1683,11 @@
+     if (recover_result != 0) {
+       LOGE() << "ReconfigureEngine: Failed to recover engine state, error: " << recover_result;
+       // We're in a bad state now, could consider more recovery options here
++    } else if (current_state.IsInputRunning()) {
++      // Fogata: stopped and started again around the system's change of the
++      // engine's configuration, recording with it (WebRTC patch 0014).
++      LOGI() << "ReconfigureEngine: recording started again";
++      MarkAudioDeviceRestarted();
+     }
+   }));
+ }
+@@ -3035,6 +3040,18 @@
+       }
+ 
+       if (start_result) {
++        // Fogata: recording asked for before and after, and running again in an
++        // engine started anew (another device chosen, the default one changed, the
++        // input given back after the plugin took it away, the end of an
++        // interruption): the echo controller aligns again (WebRTC patch 0014). The
++        // request, not whether the input is available: the plugin takes the input
++        // away and gives it back around a device it chooses. A first start, asked
++        // for by the audio state, is not one.
++        if (state.prev.input_running && state.next.input_running &&
++            state.next.IsInputRunning()) {
++          LOGI() << "Recording started again with the engine";
++          MarkAudioDeviceRestarted();
++        }
+         rollback_actions.push_back([this]() {
+           RTC_DCHECK_RUN_ON(thread_);
+           LOGI() << "Rolling back engine start (Device)...";

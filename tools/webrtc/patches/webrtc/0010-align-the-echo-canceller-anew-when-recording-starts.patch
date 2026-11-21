@@ -1,4 +1,4 @@
-Restart the echo canceller for a microphone turned on again in a call, keeping what it knows of the room
+Restart the echo canceller for a microphone turned on again in a call, keeping whether there is any echo
 
 Patch 0009 made AEC3 anew each time the audio device started recording again: at a call's
 start, and when a microphone turned off (the voice channel only receiving) is turned on
@@ -27,7 +27,9 @@ and its echo remover as at a delay change (kBufferFlush: filters, ERLE, initial 
 suppressor's initial state), which is all the alignment the stale state of 0009 was about;
 but whether there is an echo path at all (transparent mode) is the room's, not the
 alignment's, and is kept (EchoPathVariability::recording_restarted,
-AecState::HandleEchoPathChange). As a new AEC3, the restarted one processes nothing before
+AecState::HandleEchoPathChange). What stays through the restart is the suppressor's and
+the residual echo's models and that transparent mode; both filters and the ERLE start
+over. As a new AEC3, the restarted one processes nothing before
 fresh played sound arrives (render_properly_started_). Another echo controller still is
 made anew.
 

@@ -1,0 +1,60 @@
+Test the echo controller after the audio device restarts recording by itself
+
+WebRTC patch 0014 aligns the echo controller again when the audio device module starts
+recording again by itself while it records (MarkAudioDeviceRestarted). In
+test/echo_call.test.cc, with the audio state, a real audio processing and the mock audio
+device: a restart marked while recording runs aligns the echo controller again at the next
+recorded block, once for each restart, also after a change of devices, but not one marked
+before the audio state's own start of recording, which takes it as seen; and the next
+microphone turned on again after that change still makes it anew, as the audio state does
+not see the restart.
+
+--- a/test/echo_call.test.cc
++++ b/test/echo_call.test.cc
+@@ -524,3 +524,46 @@
+ }
+ 
+ }  // namespace
++
++// The device starting recording again by itself while it records (another device
++// chosen, the default changed: MarkAudioDeviceRestarted, WebRTC patch 0014): the next
++// recorded block aligns the echo controller again, once for each restart, also after a
++// change of devices since its last restart. The audio state does not see it: the next
++// microphone turned on again after a change still makes it anew.
++TEST_F(EchoCall, ADeviceRestartWhileRecordingAlignsItAgain) {
++  state_->AddReceivingStream(&heard_);
++  // A restart marked before the audio state's own start of recording: the start
++  // takes it as seen, and no realign follows it.
++  webrtc::MarkAudioDeviceRestarted();
++  Count();
++  Start();
++  Deliver();
++  Deliver();
++  EXPECT_EQ(Restarted(), 0) << "a restart marked before the audio state's start";
++  Count();
++  Deliver();
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 0);
++
++  webrtc::MarkAudioDeviceRestarted();
++  Count();
++  Deliver();
++  EXPECT_EQ(Made(), 0);
++  EXPECT_EQ(Restarted(), 1);
++  Deliver();
++  EXPECT_EQ(Restarted(), 1) << "once for each restart";
++
++  webrtc::MarkAudioDevicesChanged();
++  webrtc::MarkAudioDeviceRestarted();
++  Count();
++  Deliver();
++  EXPECT_EQ(Made(), 0) << "aligned again, not made anew, after a change too";
++  EXPECT_EQ(Restarted(), 1);
++
++  // The audio state's own start counts what it saw since its last start.
++  state_->RemoveSendingStream(&voice_);
++  UnmuteAndExpectRestart();
++
++  state_->RemoveSendingStream(&voice_);
++  state_->RemoveReceivingStream(&heard_);
++}

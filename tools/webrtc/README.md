@@ -86,7 +86,7 @@ muted state, of the echo controller made anew, of the arrays it hands across, of
 shared screen encoder and of a connection closed while another thread calls it, and writes
 into `<work>/dist`:
 
-    fogata-libwebrtc.m158.8127.2/libwebrtc-linux-x64-release.zip   (+ .sha256)
+    fogata-libwebrtc.m158.8127.3/libwebrtc-linux-x64-release.zip   (+ .sha256)
 
 laid out like webrtc-sdk's archives (`linux-x64-release/{lib,include,LICENSE,NOTICE.md}`).
 `NOTICE.md` holds the licence of WebRTC and of every library built into it, as WebRTC's
@@ -246,7 +246,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    device (`patches/apple/0008`) mark the devices chosen. Known and not tried: a Bluetooth
    headset on Linux switching profile as recording stops and starts removes and adds its
    devices, so its unmutes most likely still get a new echo controller (as before 0010);
-   a change PulseAudio tells of is marked one round trip to the server later.
+   a change PulseAudio tells of is marked one round trip to the server later. Patch 0016
+   replaces the new echo controller at that unmute with a restart that forgets only the
+   "no echo".
 12. `0012-start-the-playout-and-recording-asked-for-while-no-sound-server-answered`: with
    no PulseAudio server, `InitPlayout` and `InitRecording` report success, so that the
    voice engine goes on to start them, which patch 0006 keeps for the server's return: a
@@ -272,6 +274,49 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    any) is recorded at 48 kHz with Windows' conversion
    (`AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM`), which the log says with the device's mix
    format; wrapper patch 0024 tests that path.
+14. `0014-align-the-echo-controller-again-when-the-audio-device-restarts-recording`: an
+   audio device module that starts recording again by itself in a call (another device
+   chosen, the default device changed, a sound server back) marks it
+   (`MarkAudioDeviceRestarted`, a count for the library), and the audio processing aligns
+   the echo controller again at the next recorded block, as for a microphone turned on
+   again (patch 0010), also after a change of devices; a start of recording asked for by
+   the audio state takes the count as seen. On a Mac, AEC3's estimate went from 12-13
+   blocks to 7-11 at each such restart of the engine and it found the new delay only 2 to
+   5 s later: the other side's speech came back in bursts of 0.4 to 1.2 s. On Linux, an
+   output chosen in a call let it back in 22 of 24 changes (0.25 to 0.45 s at the median),
+   and in none for 0.2 s or more with the patch (50 to 200 ms right at the change); making
+   the echo controller anew instead let it back in every change for over 2 s. In double
+   talk a word started within the first second after the change loses about 4 dB more.
+   Marked by the macOS engine device (`patches/apple/0010`), by the wrapper's restarts of
+   the output or the input for a device chosen while recording runs
+   (`patches/wrapper/0026`), and by PulseAudio's own restarts (patch 0015).
+15. `0015-align-the-echo-controller-again-when-pulseaudio-starts-or-moves-a-stream-by-itself`
+   (Linux): PulseAudio's module marks the restarts it makes by itself in a call (the
+   sound server back, the chosen device back, patch 0006) and a stream the server moves
+   to another device, for patch 0014. In the call lab each server's return and each
+   move was marked once; the other side's speech that came back for 0.5 to 1.2 s at
+   each (at -16 to -20 dBFS) came back for 50 to 100 ms; a recording moved with no
+   change of path, which let little through before, gets the realign's own 50 to 150 ms.
+   FollowChosen's move back to the chosen output, listed again after 6 s: 0.38 s at -29
+   dBFS before, 50 ms at -68 dBFS after. Windows' Core Audio module
+   starts nothing again by itself while recording runs: a change of the default device
+   leaves its streams where they were opened.
+
+16. `0016-align-the-echo-controller-again-at-an-unmute-after-a-change-of-devices`: at the
+   first unmute after a change of audio devices that no restart while recording handled,
+   the echo controller is aligned again forgetting only AEC3's transparent mode
+   (`EchoControl::RestartForOtherDevices`), in place of 0011's new controller; a change
+   while recording runs is handled once, by 0014's realign at the device's restart, which
+   keeps it (`AudioDevicesHandledCount`). In the call lab a controller made anew at the
+   unmute let the other side's speech back for 1.6 to 1.9 s with speakers and held a
+   headset's words down by 7.7 dB after speakers; with this patch 0.2 to 0.4 s and 1.9 dB,
+   and in 0011's own case (a headset used for half a minute, the output taken away while
+   muted) 50 to 100 ms at -25 dBFS at the loudest, against 0.05 to 0.15 s at -12 to -20
+   dBFS with a new controller. Forgetting the transparent mode at the device's restart
+   while recording as well let more bursts through and held a headset's first words down,
+   and is kept out; a headset taken off for speakers while unmuted keeps the transparent
+   mode through that restart, and let the other side back for 0.1 s at -59 dBFS at the
+   loudest (0.35 s at -18 dBFS without these patches).
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -384,6 +429,19 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     its tests (`test/closed_connection.test.cc`, in processes of their own);
 24. the test of WebRTC's patch 0013's fallback (`test/capture_conversion.test.cc`,
     Windows only): the first capture device recorded with Windows' conversion at 48 kHz.
+25. the test of WebRTC's patch 0014 with the audio state (`test/echo_call.test.cc`): a
+    restart of recording marked while it runs aligns the echo controller again at the
+    next recorded block, once for each restart, also after a change of devices.
+26. the wrapper marks its own restarts of the streams for WebRTC's patch 0014: the output
+    started again on another device while recording runs, and recording started again on
+    another input (`MarkAudioDeviceRestarted`), with a test in `test/echo_call.test.cc`.
+27. the tests of WebRTC's patch 0016 (`test/echo_call.test.cc`): a change of devices
+    while the microphone is off, while recording runs, before a failed start or as the
+    sound server goes restarts the echo controller at the next start in the call as a
+    restart for other devices; a device's restart after a change is a plain restart and
+    the change is not taken again at the next unmute; a change and a restart marked while
+    recording is stopped, with a block recorded before the unmute's start returns, still
+    give the restart for other devices.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

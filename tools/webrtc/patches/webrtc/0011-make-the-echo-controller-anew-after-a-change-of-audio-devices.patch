@@ -5,6 +5,9 @@ call: with a headset, that there is no echo. A headset taken off for speakers wh
 microphone was off then kept that, and the other side heard themselves for seconds after
 the unmute, until AEC3 found the echo (figures below).
 
+(Patch 0016 replaces the new echo controller at that unmute with a restart that forgets
+only the transparent mode.)
+
 Whatever learns of a change of audio devices now marks it, from any thread
 (MarkAudioDevicesChanged, api/audio/audio_device.h: a count for the library), and
 AudioState makes the echo controller anew at the next start of recording when the count

@@ -1,0 +1,219 @@
+Align the echo controller again when the audio device restarts recording by itself
+
+Patch 0009 left the echo controller as it was when the audio device itself starts again
+in a call (a device chosen, a sound server back), as it does when a stream is added or a
+track muted: none of those was seen to move the echo. On macOS it does. WebRTC-SDK's
+AudioEngineDevice stops and starts its AVAudioEngine, recording with it, whenever
+another output or input is chosen, the system's default output or input changes, or the
+system changes the engine's configuration, and the new engine plays and records with
+another delay between them: AEC3's estimate went from 12-13 blocks to 7-11 after each
+such restart (2 to 6 blocks less), and it kept the old alignment until its delay
+estimator found the new one, 2 to 5 s later. Meanwhile the other side's voice went back
+to them: on a Mac mini with its speakers, the application choosing the monitor's output
+and the speakers again in the middle of a call, the other side's speech came back in
+bursts of 0.4 to 1.2 s, all within 2 s of the choice and peaking at -30 dBFS (the same
+speech reaching the microphone with nothing to cancel it averaged -31 dBFS), in 2 of the
+4 returns to the speakers measured; a system's change of default output did the same
+once, 1.2 s at -24 dBFS. The patches of 0009 to 0011 restart or remake the echo
+controller only as the audio state starts recording, which these restarts do not pass
+through.
+
+A device module that starts recording again by itself while recording runs for a call
+now marks it (MarkAudioDeviceRestarted, api/audio/audio_device.h: a count for the
+library, beside patch 0011's), and the audio processing reads the count at each recorded
+block, before its locks, and again under them: when it moved, it aligns the echo
+controller again as for a microphone turned on again in the call (patch 0010: what was
+played and queued is dropped, the render buffer and delay estimator start over from the
+delay the device reports, both filters and the ERLE start over, the suppressor's and the
+residual echo's models and the transparent mode stay), also when a change of
+devices was marked. A start of recording asked for by the audio state restarts the echo
+controller already and takes the count as seen, so it is not followed by another; a
+restart marked after it (playout started right after recording, say) gives one more,
+one block later. With no echo controller and none wanted (the echo canceller off), the
+count is taken as seen and nothing is made. One count for the process: a restart of
+another device module (a second factory's) aligns this one's echo controller too, which
+costs what an unmute costs.
+
+Measured on Linux in the call lab (tools/call-lab/restart-echo.sh: the application
+choosing the other output every 20 s with the other side's speech playing and each
+output looped back into the microphone, 12 changes per rig, in two rigs: the loop's
+delay moving between the outputs, and the same delay on both): before, the other side's
+speech came back in 22 of the 24 changes (11 of 12 in each rig), for 0.25 and 0.45 s at
+the median (up to 0.6 s); with this patch in none of the 24 for 0.2 s or more, a remainder
+of 50 to 200 ms coming back right at the change. Making the echo controller anew at each
+restart instead was worse than doing nothing: the speech came back in 24 of 24 changes,
+for 2.2 and 2.3 s at the median (up to 4.7 s), while AEC3 learned the room again. What it costs: in
+double talk, a word started within the first second after the change loses about 4 dB
+more (8.8 dB at the median against 4.9); with a headset (no echo path) nothing changes.
+
+Measured on Windows (a PC and a virtual machine, the Windows copy choosing another output
+in the call between the virtual cable's two outputs, CABLE Input and CABLE In 16ch, both
+going back into its microphone: a virtual cable, not a room; 12 changes per build,
+interleaved): before, the other side's speech came back at every change, at -17.5 to -27
+dBFS for 300 to 500 ms, where the speaker's own words reached the other side at -27 to
+-30 dBFS; with this patch nothing in 4 of the 12 and 100 to 200 ms (once 600 ms) at -22
+to -38 dBFS in the others; each change marked once and aligned again once.
+
+Marked here: nothing; the macOS engine device marks its restarts (apple patch 0010), the
+wrapper its own restarts of the streams on Linux and Windows for a device chosen while
+recording runs (wrapper patch 0026), and PulseAudio's module its own (patch 0015).
+Windows' Core Audio module starts nothing again by itself while recording runs. Wrapper
+patch 0025 tests this patch with the audio state.
+
+diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
+index 0343e67..2136855 100644
+--- a/api/audio/audio_device.h
++++ b/api/audio/audio_device.h
+@@ -38,6 +38,22 @@ inline void MarkAudioDevicesChanged() {
+   AudioDevicesChangedCount().fetch_add(1, std::memory_order_relaxed);
+ }
+ 
++// Fogata: how many times an audio device module started recording again by itself
++// while recording ran for a call: its streams or its engine stopped and started
++// again for another device chosen, a change of the default device, or a device
++// back. The time from what is played to what is recorded may move with it, and
++// the echo controller's alignment with it: the audio processing reads the count
++// at each recorded block and, when it moved, aligns the echo controller again
++// (patch 0014). Not for a start of
++// recording asked for by the audio state (StartRecordingForCall does that).
++inline std::atomic<uint64_t>& AudioDeviceRestartsCount() {
++  static std::atomic<uint64_t> count{0};
++  return count;
++}
++inline void MarkAudioDeviceRestarted() {
++  AudioDeviceRestartsCount().fetch_add(1, std::memory_order_relaxed);
++}
++
+ class AudioDeviceModule : public RefCountInterface {
+  public:
+   enum AudioLayer {
+diff --git a/modules/audio_processing/BUILD.gn b/modules/audio_processing/BUILD.gn
+index 15a9af0..7abfc4a 100644
+--- a/modules/audio_processing/BUILD.gn
++++ b/modules/audio_processing/BUILD.gn
+@@ -169,6 +169,7 @@ rtc_library("audio_processing") {
+     ":rms_level",
+     "../../api:field_trials_view",
+     "../../api:scoped_refptr",
++    "../../api/audio:audio_device",
+     "../../api/audio:aec3_config",
+     "../../api/audio:audio_frame_api",
+     "../../api/audio:audio_processing",
+diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
+index 356d1b0..1884378 100644
+--- a/modules/audio_processing/audio_processing_impl.cc
++++ b/modules/audio_processing/audio_processing_impl.cc
+@@ -25,6 +25,7 @@
+ 
+ #include "absl/base/nullability.h"
+ #include "absl/strings/string_view.h"
++#include "api/audio/audio_device.h"
+ #include "api/audio/audio_processing.h"
+ #include "api/audio/audio_processing_statistics.h"
+ #include "api/audio/audio_view.h"
+@@ -897,9 +898,55 @@ bool AudioProcessingImpl::RuntimeSettingEnqueuer::Enqueue(
+   return successful_insert;
+ }
+ 
++void AudioProcessingImpl::FollowAudioDeviceRestarts() {
++  if (AudioDeviceRestartsCount().load() == device_restarts_seen_.load()) {
++    return;
++  }
++  MutexLock lock_render(&mutex_render_);
++  MutexLock lock_capture(&mutex_capture_);
++  // Decided again under the locks: a start of recording asked for by the audio
++  // state may have restarted the echo controller meanwhile, taking the count as
++  // seen, and is not followed by another.
++  const uint64_t restarts = AudioDeviceRestartsCount().load();
++  if (restarts == device_restarts_seen_.load()) {
++    return;
++  }
++  // Fogata, patch 0014: the audio device started recording again by itself in a
++  // call (another device chosen, the default device changed, a device back): what
++  // it plays may now reach what it records sooner or later than the echo
++  // controller's alignment says, and the other side's voice went back to them for
++  // up to 2 s until AEC3 found the new delay. Aligned again as at a microphone
++  // turned on again (patch 0010), also after a change of devices: an echo
++  // controller made anew in the middle of the other side's speech let it through
++  // for seconds while it learned the room, where the one kept found the new path
++  // at once. The next microphone turned on again after a change of devices still
++  // makes it anew (patch 0011).
++  const bool same_devices =
++      AudioDevicesChangedCount().load() == devices_seen_.load();
++  device_restarts_seen_ = restarts;
++  devices_seen_ = AudioDevicesChangedCount().load();
++  // With no echo controller and none wanted (the echo canceller off), there is
++  // nothing to align: the count is taken as seen.
++  if (!submodules_.echo_controller &&
++      !NeedEchoController(config_, !!echo_control_factory_)) {
++    return;
++  }
++  RTC_LOG(LS_INFO) << "AudioProcessing: the audio device started recording "
++                      "again by itself"
++                   << (same_devices ? "" : ", with other devices");
++  if (submodules_.echo_controller &&
++      submodules_.echo_controller->RestartForRecording()) {
++    RTC_LOG(LS_INFO) << "AudioProcessing: echo controller aligned anew";
++    return;
++  }
++  RTC_LOG(LS_INFO) << "AudioProcessing: echo controller made anew";
++  InitializeEchoController();
++}
++
+ void AudioProcessingImpl::MaybeInitializeCapture(
+     const StreamConfig& input_config,
+     const StreamConfig& output_config) {
++  FollowAudioDeviceRestarts();
+   ProcessingConfig processing_config;
+   bool reinitialization_required = false;
+   {
+@@ -1870,6 +1917,9 @@ void AudioProcessingImpl::InitializeHighPassFilter(bool forced_reset) {
+ void AudioProcessingImpl::RestartEchoController() {
+   MutexLock lock_render(&mutex_render_);
+   MutexLock lock_capture(&mutex_capture_);
++  // Fogata, patch 0014: what was seen is taken care of.
++  device_restarts_seen_ = AudioDeviceRestartsCount().load();
++  devices_seen_ = AudioDevicesChangedCount().load();
+   RTC_LOG(LS_INFO) << "AudioProcessing: echo controller made anew";
+   InitializeEchoController();
+ }
+@@ -1877,6 +1927,9 @@ void AudioProcessingImpl::RestartEchoController() {
+ void AudioProcessingImpl::RestartEchoControllerForRecording() {
+   MutexLock lock_render(&mutex_render_);
+   MutexLock lock_capture(&mutex_capture_);
++  // Fogata, patch 0014: as above.
++  device_restarts_seen_ = AudioDeviceRestartsCount().load();
++  devices_seen_ = AudioDevicesChangedCount().load();
+   // Fogata: AEC3 aligns again and keeps what it learned of the room (patch
+   // 0010); another echo controller is made anew.
+   if (submodules_.echo_controller &&
+diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
+index f4b8afd..f819dfc 100644
+--- a/modules/audio_processing/audio_processing_impl.h
++++ b/modules/audio_processing/audio_processing_impl.h
+@@ -23,6 +23,7 @@
+ 
+ #include "absl/base/nullability.h"
+ #include "absl/strings/string_view.h"
++#include "api/audio/audio_device.h"
+ #include "api/audio/audio_processing.h"
+ #include "api/audio/audio_processing_statistics.h"
+ #include "api/audio/echo_canceller3_config.h"
+@@ -160,6 +161,17 @@ class AudioProcessingImpl : public AudioProcessing {
+   }
+ 
+  private:
++  // Fogata, patch 0014: aligns the echo controller again when the audio device
++  // restarted its recording by itself since the last recorded block
++  // (AudioDeviceRestartsCount), after a change of devices too. Looks at the
++  // count without a lock, then takes both and decides again.
++  void FollowAudioDeviceRestarts() RTC_LOCKS_EXCLUDED(mutex_render_,
++                                                      mutex_capture_);
++  // The counts as of the last start of recording or restart of the echo
++  // controller (RestartEchoController, RestartEchoControllerForRecording).
++  std::atomic<uint64_t> device_restarts_seen_{AudioDeviceRestartsCount().load()};
++  std::atomic<uint64_t> devices_seen_{AudioDevicesChangedCount().load()};
++
+   // TODO(peah): These friend classes should be removed as soon as the new
+   // parameter setting scheme allows.
+   FRIEND_TEST_ALL_PREFIXES(ApmConfiguration, DefaultBehavior);

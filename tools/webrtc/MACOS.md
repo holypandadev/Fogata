@@ -58,6 +58,13 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    device's own format; once streams have sent, it keeps theirs (`patches/webrtc/0010`
    gives the last one), so that a block recorded as the microphone turns off does not
    make the audio processing initialize itself again, with another echo controller.
+10. `0010-mark-the-engine-starting-recording-again`: WebRTC-SDK's `AudioEngineDevice` marks
+   (`MarkAudioDeviceRestarted`, `patches/webrtc/0014`) each start of an engine that
+   records while recording was asked for before and after it (another output or input
+   chosen, also by the plugin's `FogataPlayout`, a change of the default device, playout
+   starting or stopping, the end of an interruption, the engine started again around a
+   change of its configuration), so that the echo controller aligns again with the new
+   engine's delay.
 
 The macOS framework is all these patches are for: the iOS framework and WebRTC's own
 Objective-C tests, which still name the VideoToolbox codecs, are not built from them.
@@ -73,7 +80,7 @@ x64 (`args/common.gn`, `args/mac.gn`, macOS 12 and later), joins them with `lipo
 that the framework exports no class of a codec other than Opus and VP8 and names no source
 file of one (nor of the frame cryptor), makes
 `WebRTC.xcframework` with WebRTC's `LICENSE` and the licences of everything built in
-(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m158.8127.2/WebRTC.xcframework.zip`
+(`NOTICE.md`), and writes `~/webrtc-work/dist/fogata-libwebrtc.m158.8127.3/WebRTC.xcframework.zip`
 with its SHA-256.
 
 To change the port, fix it in `~/webrtc-work/webrtc/src`, build again with `--no-prepare`,

@@ -1,0 +1,146 @@
+Align the echo controller again when PulseAudio starts or moves a stream by itself
+
+Patch 0014 aligns the echo controller again when an audio device module marks that it
+started recording again by itself in a call (MarkAudioDeviceRestarted). PulseAudio's
+module does that in three places, none of them marked so far:
+- Restore (patch 0006): the sound server came back, and the device starts again the
+  playout and recording the call had asked for, on new streams with another delay
+  between them;
+- FollowChosen (patch 0006): the chosen output or input, gone and replaced by the
+  server's default meanwhile, is listed again, and the device stops and starts that
+  stream on it;
+- a stream the server moves by itself to another device (PaStreamMovedCallback: the
+  user's choice in the system's mixer, or the device gone), which does not stop it but
+  sends what is played, or takes what is recorded, through another path.
+Each now marks it. Restore and FollowChosen mark only when recording runs for the call
+once they are done (recording was asked for and started); the moved stream is marked
+as it comes, from PulseAudio's thread, whether recording runs or not, and a start of
+recording that follows (an unmute) takes the count as seen, so it costs nothing then.
+The audio processing aligns the echo controller again at the next recorded block.
+
+Two consequences, both harmless. With no sound server at a call's start, recording asked
+for is started later by Restore (patch 0012's deferred start), which marks it: one
+realign of an echo controller that has processed nothing yet. A device going away moves
+both of the module's streams (playout and recording), each marked: two realigns a few
+milliseconds apart when they fall on different recorded blocks.
+
+Windows' Core Audio module (AudioDeviceWindowsCore) has nothing to mark: it never starts
+its streams again by itself while recording runs. A change of the system's default device
+or an endpoint's state is told (patches 0003 and 0011) but the streams stay on the
+endpoint they were opened on; a stall of capture events is waited through (patch 0013)
+and a stream that fails ends the capture thread for good. A restart there is the
+wrapper's, for a device chosen, which wrapper patch 0026 marks.
+
+Measured in the Linux call lab (tools/call-lab/device-echo.sh: the other side talking, a's
+outputs looped back into its microphone 60 and 180 ms later; before, without patches 0014
+and 0015, against after, interleaved; "over" is the time in the first 2 s more than 20 dB
+over the echo's floor before the event, medians [range]):
+- the sound server stopped and started again (12 events each): marked once and aligned
+  once at each return; before 1.2 s [0.75, 1.45] at -20 dBFS at the loudest, a burst at
+  every return (up to 1.55 s), after 0.1 s [0.05, 0.3] at -37 dBFS, bursts of 0.2 to 0.4
+  s in 3 of 12;
+- a's playback moved by the server to the other looped sink (12 each): each move marked
+  once (two events found the stream there already, the application's own output keeper
+  having moved it back to the chosen output, a move marked once too); before 1.1 s
+  [0, 1.35] at -16 dBFS, bursts in 10 of 12 (up to 1.3 s), after 0.1 s [0, 0.2] at -28
+  dBFS, one burst of 0.25 s;
+- a's recording moved to another source carrying the same microphone (12 each): marked
+  once each; before 0.15 s [0, 0.85], bursts in 5 of 12, after 0.1 s [0.05, 0.15] and no
+  burst, but at -25 dBFS at the loudest where before most moves let nothing through (-67
+  at the median): the realign itself lets 50 to 150 ms of echo through where the path
+  did not change;
+- a's output taken away (its playback moved by the server to the default output, looped
+  too) and made again (moved back) (24 events each): marked once each; before 0.5 s
+  [0, 1.75] at -17 dBFS, bursts in 19 of 24 (up to 2.15 s), after 0.05 s [0, 0.3] at -28
+  dBFS, bursts in 3 of 24 (up to 0.45 s). Both moves were the server's or the
+  application's, not FollowChosen's restart;
+- FollowChosen: the sound server stopped and started again with a's chosen output
+  missing for 6 s (its playback started again on the default output, not looped), then
+  listed again (12 events each): the move back to it marked once and aligned once (with
+  Restore's mark before it); before 0.38 s [0.1, 0.75] at -29 dBFS, bursts in 9 of 12 (up
+  to 0.6 s), after 0.05 s [0, 0.3] at -68 dBFS at the loudest, faint bursts (under -50
+  dBFS) in 5 of 12.
+
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -1605,6 +1605,7 @@
+     return;
+   }
+   bool failed = false;
++  bool restarted = false;
+   restoring_ = true;
+   if (play_wanted_ != Wanted::kNo && !_playing) {
+     // The chosen output where it is still listed, else the default until it is.
+@@ -1614,6 +1615,8 @@
+     if (InitPlayout() != 0 ||
+         (play_wanted_ == Wanted::kStarted && StartPlayout() != 0)) {
+       failed = true;
++    } else {
++      restarted = play_wanted_ == Wanted::kStarted;
+     }
+   }
+   if (rec_wanted_ != Wanted::kNo && !_recording) {
+@@ -1623,9 +1626,16 @@
+     if (InitRecording() != 0 ||
+         (rec_wanted_ == Wanted::kStarted && StartRecording() != 0)) {
+       failed = true;
++    } else {
++      restarted = restarted || rec_wanted_ == Wanted::kStarted;
+     }
+   }
+   restoring_ = false;
++  // Fogata, patch 0015: recording started again by the device itself while the
++  // call still records (the server back): the echo controller aligns again.
++  if (restarted && rec_wanted_ == Wanted::kStarted && _recording) {
++    MarkAudioDeviceRestarted();
++  }
+   if (failed) {
+     const TimeDelta delay = RestoreDelay(round);
+     RTC_LOG(LS_WARNING) << "PulseAudio: playout or recording did not start "
+@@ -1648,6 +1658,7 @@
+     return;
+   }
+   bool failed = false;
++  bool moved = false;
+   restoring_ = true;
+   if (play_on_default_ && _playing) {
+     const uint16_t index = DeviceIndexOf(false, play_name_);
+@@ -1659,6 +1670,8 @@
+       if (InitPlayout() != 0 ||
+           (play_wanted_ == Wanted::kStarted && StartPlayout() != 0)) {
+         failed = true;
++      } else {
++        moved = play_wanted_ == Wanted::kStarted;
+       }
+     }
+   }
+@@ -1672,10 +1685,17 @@
+       if (InitRecording() != 0 ||
+           (rec_wanted_ == Wanted::kStarted && StartRecording() != 0)) {
+         failed = true;
++      } else {
++        moved = moved || rec_wanted_ == Wanted::kStarted;
+       }
+     }
+   }
+   restoring_ = false;
++  // Fogata, patch 0015: playout or recording started again on the chosen device,
++  // back, while the call records: the echo controller aligns again.
++  if (moved && rec_wanted_ == Wanted::kStarted && _recording) {
++    MarkAudioDeviceRestarted();
++  }
+   // Moved and not started again: tried again as after the server came back. What
+   // was not running before is already Restore's, which looks for the chosen device
+   // by name at each try.
+@@ -1887,6 +1907,11 @@
+   RTC_LOG(LS_INFO) << "PulseAudio: a stream moved to another device: audio "
+                       "devices changed";
+   MarkAudioDevicesChanged();
++  // Fogata, patch 0015: the server moved a stream of this device's to another
++  // device (by the user's choice in its mixer, or a device gone): what is played
++  // reaches the microphone by another path, and the echo controller aligns again
++  // at the next recorded block (taken as seen by a start of recording).
++  MarkAudioDeviceRestarted();
+ }
+ 
+ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {

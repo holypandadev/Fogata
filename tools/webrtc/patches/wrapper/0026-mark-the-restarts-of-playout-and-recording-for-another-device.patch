@@ -1,0 +1,109 @@
+Mark the restarts of playout and recording for another device chosen in a call
+
+WebRTC patch 0014 aligns the echo controller again when the audio device module starts
+recording again by itself while it records (MarkAudioDeviceRestarted), and the macOS
+engine device marks its restarts (apple patch 0010). On Linux and Windows the wrapper's
+AudioDeviceImpl restarts the streams itself when another output or input is chosen while
+they run (patch 0021): the output stops and starts again on the other device, and what is
+played reaches the microphone along another path, maybe with another delay; or recording
+stops and starts again on the other input. The audio state starts neither, so nothing
+told the echo controller. AudioDeviceImpl now marks a restart after the output started
+again on another device while recording runs, and after recording started again on
+another input; not when the output is chosen while nothing records, nor when a start
+fails. A change of devices is marked as before (patch 0021), so the next recorded block
+follows patch 0014's rule for it.
+
+Not marked here: PulseAudio's own restarts of its streams (the sound server back, the
+chosen device back) and a stream the server moves to another device, which WebRTC patch
+0015 marks in the device module. Windows' Core Audio module starts nothing again by
+itself while recording runs: a change of the default device leaves its streams where they
+were opened.
+
+test/echo_call.test.cc: with the mock audio device, the output chosen again while
+recording runs marks one restart, recording chosen again on another input another; the
+output chosen with nothing recording, or with nothing playing or recording, marks none.
+
+diff --git a/src/rtc_audio_device_impl.cc b/src/rtc_audio_device_impl.cc
+index a5a3c7b..6e0821a 100644
+--- a/src/rtc_audio_device_impl.cc
++++ b/src/rtc_audio_device_impl.cc
+@@ -67,7 +67,13 @@ int32_t AudioDeviceImpl::SetPlayoutDevice(uint16_t index) {
+       audio_device_module_->StopPlayout();
+       audio_device_module_->SetPlayoutDevice(index);
+       audio_device_module_->InitPlayout();
+-      audio_device_module_->StartPlayout();
++      // Fogata: what is played now reaches the microphone along another path, maybe
++      // with another delay: while recording runs, the echo controller aligns again
++      // (WebRTC patch 0014).
++      if (audio_device_module_->StartPlayout() == 0 &&
++          audio_device_module_->Recording()) {
++        webrtc::MarkAudioDeviceRestarted();
++      }
+     } else {
+       audio_device_module_->SetPlayoutDevice(index);
+     }
+@@ -87,7 +93,12 @@ int32_t AudioDeviceImpl::SetRecordingDevice(uint16_t index) {
+       audio_device_module_->StopRecording();
+       audio_device_module_->SetRecordingDevice(index);
+       audio_device_module_->InitRecording();
+-      audio_device_module_->StartRecording();
++      // Fogata: recording started again by the device, not by the audio state, which
++      // aligns the echo controller only as it starts recording itself (WebRTC patch
++      // 0014).
++      if (audio_device_module_->StartRecording() == 0) {
++        webrtc::MarkAudioDeviceRestarted();
++      }
+     } else {
+       audio_device_module_->SetRecordingDevice(index);
+     }
+diff --git a/test/echo_call.test.cc b/test/echo_call.test.cc
+index a6af670..418c02f 100644
+--- a/test/echo_call.test.cc
++++ b/test/echo_call.test.cc
+@@ -561,3 +561,46 @@ TEST_F(EchoCall, ADeviceRestartWhileRecordingAlignsItAgain) {
+   state_->RemoveSendingStream(&voice_);
+   state_->RemoveReceivingStream(&heard_);
+ }
++
++// The wrapper marks a restart (MarkAudioDeviceRestarted, WebRTC patch 0014) when it
++// starts the output again on another device while recording runs, and when it starts
++// recording again on another input; not when the output is chosen while recording
++// does not run, nor when nothing plays or records.
++TEST(EchoCallDevices, ARestartWhileRecordingIsMarked) {
++  auto worker = webrtc::Thread::Create();
++  worker->Start();
++  auto adm = webrtc::test::MockAudioDeviceModule::CreateNice();
++  bool playing = false;
++  bool recording = false;
++  ON_CALL(*adm, Playing()).WillByDefault([&] { return playing; });
++  ON_CALL(*adm, Recording()).WillByDefault([&] { return recording; });
++  ON_CALL(*adm, StartPlayout()).WillByDefault(Return(0));
++  ON_CALL(*adm, StartRecording()).WillByDefault(Return(0));
++  {
++    libwebrtc::scoped_refptr<libwebrtc::AudioDeviceImpl> device(
++        new libwebrtc::RefCountedObject<libwebrtc::AudioDeviceImpl>(
++            adm, worker.get()));
++    auto restarts = [] { return webrtc::AudioDeviceRestartsCount().load(); };
++    auto settle = [&] { worker->BlockingCall([] {}); };
++
++    uint64_t before = restarts();
++    device->SetPlayoutDevice(1);
++    device->SetRecordingDevice(1);
++    settle();
++    EXPECT_EQ(restarts(), before) << "nothing plays or records";
++
++    playing = true;
++    device->SetPlayoutDevice(2);
++    settle();
++    EXPECT_EQ(restarts(), before) << "playing, not recording";
++
++    recording = true;
++    device->SetPlayoutDevice(3);
++    settle();
++    EXPECT_EQ(restarts(), before + 1) << "the output again while recording";
++    device->SetRecordingDevice(2);
++    settle();
++    EXPECT_EQ(restarts(), before + 2) << "recording again on another input";
++  }
++  worker->Stop();
++}

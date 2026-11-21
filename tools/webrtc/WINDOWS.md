@@ -52,7 +52,7 @@ it case-insensitively with ciopfs, which needs FUSE and libfuse 2: on Ubuntu the
 `libfuse2t64`, or its two libraries unpacked anywhere and named with `LD_LIBRARY_PATH`), applies the patches, builds with
 `args/common.gn` and `args/win-x64.gn`, and writes
 
-    <work>/dist/fogata-libwebrtc.m158.8127.2/libwebrtc-win-x64-release.zip   (+ .sha256)
+    <work>/dist/fogata-libwebrtc.m158.8127.3/libwebrtc-win-x64-release.zip   (+ .sha256)
 
 with `win-x64-release/{lib/libwebrtc.dll, lib/libwebrtc.dll.lib, include, LICENSE,
 NOTICE.md}`, as webrtc-sdk's Windows archives are laid out. Put its SHA-256 into
@@ -71,9 +71,11 @@ NOTICE.md}`, as webrtc-sdk's Windows archives are laid out. Put its SHA-256 into
 3. `windows/test/run_tests.ps1` of the plugin, and a call with the rigs (`win-call.sh`):
    sound both ways, camera and screen, the microphone kept when devices change (libwebrtc's
    own device change event, `OnDeviceChange`, comes from patch 0003 on Windows).
-4. With fogata-libwebrtc.m158.8127.2, a real camera by hand: cameras start and stop on a
+4. With fogata-libwebrtc.m158.8127.3, a real camera by hand: cameras start and stop on a
    thread of their own since 8127.1 (wrapper patch 22), where DirectShow's COM is
    initialized while a capture lives (as read in the code); no camera has been opened on
    Windows with it yet, the test VM having none. With 8127.2, also a real microphone and
    speakers by hand: WebRTC's echo canceller in place of Windows' (WebRTC patch 13) was
-   measured only with virtual devices.
+   measured only with virtual devices. With 8127.3, another output or input chosen in a
+   call by hand: the echo controller aligned again (WebRTC patch 14) was measured on
+   Windows only with the virtual cable.

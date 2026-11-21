@@ -27,4 +27,4 @@ SDK_COMMIT=2a0b27762f1e05d7ac86c1c36fc2b51cca7fe229
 
 # The name of what this builds, as libwebrtc_version.ini of the plugin names it. Raise the
 # last number with every change of the patches or the arguments.
-LIBWEBRTC_VERSION=fogata-libwebrtc.m158.8127.2
+LIBWEBRTC_VERSION=fogata-libwebrtc.m158.8127.3

@@ -1,0 +1,327 @@
+Align the echo controller again at an unmute after a change of devices, forgetting only whether there was echo
+
+Patch 0011 makes the echo controller anew at the first start of recording (an unmute)
+after any change of audio devices, so that a headset taken off for speakers while the
+microphone was off does not keep what AEC3 learned of the headset: that there is no
+echo at all, its transparent mode, which let the speakers' echo through (patch 0010
+alone: 0.9 s at -14 dBFS; with 0011, 0.3 s at -25 dBFS). Since patch 0014 a change while
+recording runs is followed by aligning the echo controller again at once, and a new
+controller at the next unmute starts from nothing in the middle of the other side's
+speech. Measured in the Linux call lab (tools/call-lab/device-echo.sh, the other side
+talking, each output looped back into the microphone; 6 unmutes per case and rule,
+interleaved): a controller made anew at the unmute let the other side's speech back for
+1.6 to 1.9 s (bursts of 3 to 4.8 s) in every case with speakers, the output or the
+microphone changed while unmuted or while muted and 0011's own case of a headset taken
+off for speakers while muted; and after speakers taken off for a headset it held the
+words said on the headset down (7.7 dB at the median, 64 % of the syllables' starts
+more than 6 dB down). Aligned again keeping everything, those came to 0.2 to 0.4 s and
+2 dB, but in 0011's case measured as 0011 was (mic.sh unmute with UNMUTE_UNPLUG: the
+headset used for half a minute, the output taken away while muted) the transparent mode
+kept let the speakers' echo through for 0.25 to 0.45 s at -10 dBFS (a new controller:
+0.05 to 0.15 s at -12 to -20 dBFS).
+
+At the first start of recording after a change of devices that no restart while
+recording handled, the audio state now has the echo controller aligned again forgetting
+only its transparent mode (AudioProcessing::RestartEchoControllerForOtherDevices,
+EchoControl::RestartForOtherDevices; in AEC3, patch 0010's restart for recording without
+keeping the transparent mode: both filters and the ERLE start over, the suppressor's and
+the residual echo's models stay), in place of 0011's new controller. A change while
+recording runs is handled at the device's own restart by patch 0014's realign, which
+keeps the transparent mode, and is noted as handled (AudioDevicesHandledCount,
+api/audio/audio_device.h), so the next unmute, maybe minutes later on the same devices,
+does not take it again. A call's start still makes the echo controller anew. With the
+echo canceller off nothing is made.
+
+Measured as above, at the unmute: 0011's case 0.05 to 0.1 s over -35 dBFS, -24 to -26
+dBFS at the loudest (the first second at -38 dBFS, against -25 with a new controller and
+-20 aligned again keeping everything); a headset taken off for speakers while muted 0.18
+s over the floor at -53 dBFS; the output changed while muted 0.38 s at -34 dBFS, bursts
+of 0.2 to 0.4 s; the microphone changed while muted 0.23 s; speakers taken off for a
+headset while muted, the words on the headset 1.9 dB down. The output or the microphone
+changed while unmuted, then an unmute (the change handled at the restart): 0.33 and 0.23
+s (a new controller: 1.85 and 1.78 s; aligned again: 0.23 and 0.25 s). Forgetting the
+transparent mode at the device's restart while recording too was tried and kept out: in
+restart-echo.sh's rig (12 output changes per cell, interleaved with patch 0014 alone) it
+let bursts of 0.2 to 0.4 s through in 3 of 24 changes with speakers (0014 alone: 1 of
+24) and held a headset's first words down (14 % of the syllables' starts more than 6 dB
+down, none with 0014 alone); with this patch the restart is 0014's (8 changes per cell:
+1 burst of 0.2 s in 16 with speakers, a headset's words untouched).
+
+A headset taken off for speakers while unmuted: the change is handled at the device's
+restart, which keeps the transparent mode the headset gave, and nothing forgets it
+afterwards. Measured (device-echo.sh's c3: 14 s on a headset, then the speakers chosen
+in the call, 12 changes each, interleaved with patch 0014 and this patch left out): the
+other side's speech came back for 0.1 s [0, 0.65] over the floor, -59 dBFS at the
+loudest at the median, faint bursts (0.2 to 0.45 s) in 5 of 12, the last of it above
+-70 dBFS 1.75 s [0, 5] after the change; without these patches 0.35 s [0.2, 0.85] at
+-18 dBFS, bursts in 11 of 12 (up to 0.85 s), over by 0.75 s [0.5, 8.6]. a's words said
+right after the change, in double talk: 1.4 dB down at the median (0.6 without).
+
+Not measured: a real headset and speakers.
+diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
+index 2136855..0e22525 100644
+--- a/api/audio/audio_device.h
++++ b/api/audio/audio_device.h
+@@ -54,6 +54,15 @@ inline void MarkAudioDeviceRestarted() {
+   AudioDeviceRestartsCount().fetch_add(1, std::memory_order_relaxed);
+ }
+ 
++// Fogata, patch 0016: the count of changes of devices (AudioDevicesChangedCount) as
++// of the last device restart while recording ran that aligned the echo controller
++// again (patch 0014): those changes are handled, and the audio state's next start
++// of recording takes only a newer one as a change.
++inline std::atomic<uint64_t>& AudioDevicesHandledCount() {
++  static std::atomic<uint64_t> count{~uint64_t{0}};
++  return count;
++}
++
+ class AudioDeviceModule : public RefCountInterface {
+  public:
+   enum AudioLayer {
+diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
+index 510c4b1..a915dd1 100644
+--- a/api/audio/audio_processing.h
++++ b/api/audio/audio_processing.h
+@@ -536,6 +536,12 @@ class RTC_EXPORT AudioProcessing : public RefCountInterface {
+   // is made anew (RestartEchoController). Takes both locks.
+   virtual void RestartEchoControllerForRecording() { RestartEchoController(); }
+ 
++  // Fogata, patch 0016: the same after a change of audio devices
++  // (EchoControl::RestartForOtherDevices). Takes both locks.
++  virtual void RestartEchoControllerForOtherDevices() {
++    RestartEchoControllerForRecording();
++  }
++
+   // Set to true when the output of AudioProcessing will be muted or in some
+   // other way not used. Ideally, the captured audio would still be processed,
+   // but some components may change behavior based on this information.
+diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
+index 61dc10e..5d2ba0c 100644
+--- a/api/audio/echo_control.h
++++ b/api/audio/echo_control.h
+@@ -68,6 +68,11 @@ class EchoControl {
+   // false when it cannot; the caller then makes it anew.
+   virtual bool RestartForRecording() { return false; }
+ 
++  // Fogata, patch 0016: the same after a change of audio devices, which may be
++  // another room: also forgets whether there was any echo at all (AEC3's
++  // transparent mode, which a headset gives and speakers must not keep).
++  virtual bool RestartForOtherDevices() { return RestartForRecording(); }
++
+   virtual ~EchoControl() {}
+ };
+ 
+diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+index 0cf769a..297d965 100644
+--- a/audio/audio_state.cc
++++ b/audio/audio_state.cc
+@@ -240,27 +240,40 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
+ // headset, that there is no echo). A call's start makes it anew as above: between
+ // calls the room and the devices may have changed.
+ void AudioState::StartRecordingForCall() {
++  // Fogata, patch 0011: and with the same devices: any change of them seen since
++  // recording last started (MarkAudioDevicesChanged) may have changed the room (a
++  // headset taken off for speakers), and makes it anew.
++  // Fogata, patch 0016: read before recording starts: its first recorded block may
++  // follow a restart the device marked while recording was stopped (patch 0015: a
++  // stream moved), and take the change as handled before this reads it. Read
++  // first, the change counts here, and the restart for other devices follows the
++  // realign; if it comes first, it takes the counts as seen.
++  const uint64_t devices = AudioDevicesChangedCount().load();
++  const uint64_t handled = AudioDevicesHandledCount().load();
+   if (config_.audio_device_module->StartRecording() != 0) {
+     return;
+   }
+   const bool same_call = stopped_in_call_;
+   stopped_in_call_ = false;
+-  // Fogata, patch 0011: and with the same devices: any change of them seen since
+-  // recording last started (MarkAudioDevicesChanged) may have changed the room (a
+-  // headset taken off for speakers), and makes it anew.
+-  const uint64_t devices = AudioDevicesChangedCount().load();
+-  const bool same_devices = devices == devices_seen_;
++  // Fogata, patch 0016: a change a device's own restart already handled while
++  // recording ran (patch 0014) is not taken again: the echo controller has heard
++  // the new devices since.
++  const bool same_devices = devices == devices_seen_ || devices == handled;
+   devices_seen_ = devices;
+   if (!config_.audio_processing) {
+     return;
+   }
++  // Fogata, patch 0016: after a change of devices, aligned again too, forgetting
++  // only whether there was any echo (AEC3's transparent mode), in place of 0011's
++  // new echo controller, which let the other side through for seconds while it
++  // learned the room and held a headset's microphone down meanwhile.
+   if (same_call && same_devices) {
+     config_.audio_processing->RestartEchoControllerForRecording();
++  } else if (same_call) {
++    RTC_LOG(LS_INFO) << "AudioState: audio devices changed since recording "
++                        "last started";
++    config_.audio_processing->RestartEchoControllerForOtherDevices();
+   } else {
+-    if (same_call) {
+-      RTC_LOG(LS_INFO) << "AudioState: audio devices changed since recording "
+-                          "last started";
+-    }
+     config_.audio_processing->RestartEchoController();
+   }
+ }
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index db2982e..0d42ab2 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -64,6 +64,7 @@ class BlockProcessorImpl final : public BlockProcessor {
+   void SetCaptureOutputUsage(bool capture_output_used) override;
+ 
+   void RestartForRecording() override;
++  void RestartForOtherDevices() override;
+ 
+  private:
+   static std::atomic<int> instance_count_;
+@@ -71,6 +72,7 @@ class BlockProcessorImpl final : public BlockProcessor {
+   const EchoCanceller3Config config_;
+   bool capture_properly_started_ = false;
+   bool recording_restarted_ = false;
++  bool other_devices_ = false;
+   bool render_properly_started_ = false;
+   const size_t sample_rate_hz_;
+   std::unique_ptr<RenderDelayBuffer> render_buffer_;
+@@ -153,10 +155,14 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+     recording_restarted_ = false;
+     echo_path_variability.delay_change =
+         EchoPathVariability::DelayAdjustment::kBufferFlush;
+-    echo_path_variability.recording_restarted = true;
++    // After a change of devices (patch 0016) the transparent mode goes too: a
++    // headset's "no echo" is not the speakers'.
++    echo_path_variability.recording_restarted = !other_devices_;
+     RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
+                      << capture_call_counter_
+-                     << ", render buffer aligned anew";
++                     << ", render buffer aligned anew"
++                     << (other_devices_ ? ", transparent mode reset" : "");
++    other_devices_ = false;
+   }
+ 
+   // Update the render buffers with any newly arrived render blocks and prepare
+@@ -253,6 +259,11 @@ void BlockProcessorImpl::RestartForRecording() {
+   recording_restarted_ = true;
+ }
+ 
++void BlockProcessorImpl::RestartForOtherDevices() {
++  RestartForRecording();
++  other_devices_ = true;
++}
++
+ void BlockProcessorImpl::SetCaptureOutputUsage(bool capture_output_used) {
+   echo_remover_->SetCaptureOutputUsage(capture_output_used);
+ }
+diff --git a/modules/audio_processing/aec3/block_processor.h b/modules/audio_processing/aec3/block_processor.h
+index c364bca..0412c87 100644
+--- a/modules/audio_processing/aec3/block_processor.h
++++ b/modules/audio_processing/aec3/block_processor.h
+@@ -83,6 +83,8 @@ class BlockProcessor {
+ 
+   // Fogata: recording starts again; see EchoCanceller3::RestartForRecording.
+   virtual void RestartForRecording() {}
++  // Fogata, patch 0016: the same, forgetting the transparent mode too.
++  virtual void RestartForOtherDevices() { RestartForRecording(); }
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_canceller3.cc b/modules/audio_processing/aec3/echo_canceller3.cc
+index aa22e0e..e6f4db4 100644
+--- a/modules/audio_processing/aec3/echo_canceller3.cc
++++ b/modules/audio_processing/aec3/echo_canceller3.cc
+@@ -967,6 +967,18 @@ bool EchoCanceller3::RestartForRecording() {
+   return true;
+ }
+ 
++// Fogata, patch 0016: as RestartForRecording, after a change of audio devices: the
++// block processor forgets the transparent mode too.
++bool EchoCanceller3::RestartForOtherDevices() {
++  RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
++  {
++    RTC_DCHECK_RUNS_SERIALIZED(&render_race_checker_);
++    render_transfer_queue_.Clear();
++    block_processor_->RestartForOtherDevices();
++  }
++  return true;
++}
++
+ bool EchoCanceller3::ActiveProcessing() const {
+   return true;
+ }
+diff --git a/modules/audio_processing/aec3/echo_canceller3.h b/modules/audio_processing/aec3/echo_canceller3.h
+index 42465ad..540f729 100644
+--- a/modules/audio_processing/aec3/echo_canceller3.h
++++ b/modules/audio_processing/aec3/echo_canceller3.h
+@@ -135,6 +135,8 @@ class EchoCanceller3 : public EchoControl {
+ 
+   // Fogata: see EchoControl::RestartForRecording.
+   bool RestartForRecording() override;
++  // Fogata: see EchoControl::RestartForOtherDevices.
++  bool RestartForOtherDevices() override;
+ 
+   // Signals whether an external detector has detected echo leakage from the
+   // echo canceller.
+diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
+index 1884378..82b8bcf 100644
+--- a/modules/audio_processing/audio_processing_impl.cc
++++ b/modules/audio_processing/audio_processing_impl.cc
+@@ -934,6 +934,15 @@ void AudioProcessingImpl::FollowAudioDeviceRestarts() {
+   RTC_LOG(LS_INFO) << "AudioProcessing: the audio device started recording "
+                       "again by itself"
+                    << (same_devices ? "" : ", with other devices");
++  // Fogata, patch 0016: a change of devices while recording runs is handled here,
++  // by this realign keeping the transparent mode (forgetting it at a restart while
++  // recording let more echo through and held a headset's first words down): the
++  // audio state's next start of recording does not take it again.
++  // A change marked between the check above and this store, with no restart of
++  // its own, is taken as handled too (rare; the next change is seen as usual).
++  if (!same_devices) {
++    AudioDevicesHandledCount().store(devices_seen_.load());
++  }
+   if (submodules_.echo_controller &&
+       submodules_.echo_controller->RestartForRecording()) {
+     RTC_LOG(LS_INFO) << "AudioProcessing: echo controller aligned anew";
+@@ -1941,6 +1950,29 @@ void AudioProcessingImpl::RestartEchoControllerForRecording() {
+   InitializeEchoController();
+ }
+ 
++// Fogata, patch 0016: as RestartEchoControllerForRecording, after a change of
++// audio devices (EchoControl::RestartForOtherDevices).
++void AudioProcessingImpl::RestartEchoControllerForOtherDevices() {
++  MutexLock lock_render(&mutex_render_);
++  MutexLock lock_capture(&mutex_capture_);
++  device_restarts_seen_ = AudioDeviceRestartsCount().load();
++  devices_seen_ = AudioDevicesChangedCount().load();
++  // With no echo controller and none wanted (the echo canceller off), nothing is
++  // made, as for a device's own restart.
++  if (!submodules_.echo_controller &&
++      !NeedEchoController(config_, !!echo_control_factory_)) {
++    return;
++  }
++  if (submodules_.echo_controller &&
++      submodules_.echo_controller->RestartForOtherDevices()) {
++    RTC_LOG(LS_INFO)
++        << "AudioProcessing: echo controller aligned anew for other devices";
++    return;
++  }
++  RTC_LOG(LS_INFO) << "AudioProcessing: echo controller made anew";
++  InitializeEchoController();
++}
++
+ void AudioProcessingImpl::InitializeEchoController() {
+   submodules_.echo_controller.reset();
+   capture_.linear_aec_output.reset();
+diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
+index f819dfc..3dd5a61 100644
+--- a/modules/audio_processing/audio_processing_impl.h
++++ b/modules/audio_processing/audio_processing_impl.h
+@@ -95,6 +95,7 @@ class AudioProcessingImpl : public AudioProcessing {
+   bool PostRuntimeSetting(RuntimeSetting setting) override;
+   void RestartEchoController() override;
+   void RestartEchoControllerForRecording() override;
++  void RestartEchoControllerForOtherDevices() override;
+ 
+   // Capture-side exclusive methods possibly running APM in a
+   // multi-threaded manner. Acquire the capture lock.
