@@ -2234,6 +2234,36 @@ mod tests {
         fs::remove_dir_all(&base).unwrap();
     }
 
+    /// Room lines kept until they reach everyone (here a file as the node writes one: a box
+    /// sealed with the folder's key) are not set aside with an account a restore replaces,
+    /// where nothing would send them or let them expire, nor taken along by a copy.
+    #[test]
+    fn room_lines_kept_are_neither_set_aside_nor_copied() {
+        let base = folder("lines");
+        let (_, keychain) = keychain();
+        let keep = |dir: &Path| {
+            let store = Store::open_with(dir.to_path_buf(), keychain.clone()).unwrap();
+            let key = store.data_key().unwrap().unwrap();
+            let sealed = key.seal_whole("room lines", b"lines owed").unwrap();
+            fs::write(dir.join(crate::rooms::KEPT_LINES_FILE), sealed).unwrap();
+        };
+        let dir_a = base.join("ana");
+        account(&dir_a, &keychain, "Ana");
+        keep(&dir_a);
+        let key = on(&dir_a, &keychain);
+        let copy = base.join(copy_name(now_ms()));
+        export_with(&dir_a, &copy, false, &keychain).unwrap();
+        let dir = base.join("bea");
+        account(&dir, &keychain, "Bea");
+        keep(&dir);
+        let restored = restore_with(&dir, &copy, &key, true, &keychain).unwrap();
+        assert!(restored.replaced);
+        let lines = crate::rooms::KEPT_LINES_FILE;
+        assert!(!dir.join(REPLACED_DIR).join(lines).exists(), "set aside");
+        assert!(!dir.join(lines).exists(), "copied");
+        fs::remove_dir_all(&base).unwrap();
+    }
+
     /// Once the account moved away, what is left of it here is deleted on the person's word;
     /// another person's account a restore replaced, kept here, is not part of it.
     #[test]

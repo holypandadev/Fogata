@@ -1,27 +1,35 @@
 //! Moving an account to another data folder ("computer") in one process, over the loopback
 //! interface only (no DHT, no mDNS): the moved account talks to its friend and its group as
 //! the same person, the old folder stops for good; wrong codes, a third computer answering
-//! on the rendezvous point, moves cut short, lost last steps and many large attachments.
-//! Every folder is sealed with keys of a keychain kept in memory.
+//! on the rendezvous point, moves cut short, lost last steps and many large attachments, and
+//! room lines kept until they reach everyone, which stay behind. Every folder is sealed with
+//! keys of a keychain kept in memory.
 
 use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
-    sync::{Arc, OnceLock},
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
 use fogata_core::CoreEvents;
 use fogata_core::{
-    Core, CoreEvent, NetOptions, Store,
+    Core, CoreEvent, FIRST_ROOM, NetOptions, Store,
     direct::Outgoing,
     transfer::{self, Failure, MovedState, TransferEvent, TransferOptions, TransferState},
     vault::{self, Keychain, MemoryKeyStore},
 };
-use fogata_crypto::at_rest::{SealReader, SealWriter};
+use fogata_crypto::{
+    DevicePublicKey, GroupId,
+    at_rest::{SealReader, SealWriter},
+};
 use fogata_friends::{Friend, TransferCode};
-use fogata_net::Multiaddr;
-use tokio::time::timeout;
+use fogata_net::{Multiaddr, RoomChange};
+use fogata_state::GroupLog;
+use tokio::{net::UdpSocket, time::timeout};
 
 /// One test at a time: each starts devices that talk over this computer's network.
 static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -1163,5 +1171,178 @@ async fn a_lost_word_before_the_end_is_finished_or_moved_again_with_a_new_code()
         let _ = std::fs::remove_dir_all(&dir_new);
         assert_eq!(alone(&base, "Ana"), dir_old);
     }
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// A UDP forwarder to the device listening on `port`, for the latest device to send to the
+/// port it returns, both ways, dropping every packet while `cut` is set.
+async fn forwarder(port: u16, cut: Arc<AtomicBool>) -> u16 {
+    let front = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let behind = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+    let address = front.local_addr().unwrap().port();
+    let client: Arc<std::sync::Mutex<Option<std::net::SocketAddr>>> = Default::default();
+    let back = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    {
+        let (front, behind, cut, client) =
+            (front.clone(), behind.clone(), cut.clone(), client.clone());
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            while let Ok((n, from)) = front.recv_from(&mut buf).await {
+                *client.lock().unwrap() = Some(from);
+                if !cut.load(Ordering::SeqCst) {
+                    let _ = behind.send_to(&buf[..n], back).await;
+                }
+            }
+        });
+    }
+    tokio::spawn(async move {
+        let mut buf = vec![0u8; 65536];
+        while let Ok((n, _)) = behind.recv_from(&mut buf).await {
+            let to = *client.lock().unwrap();
+            if let Some(to) = to
+                && !cut.load(Ordering::SeqCst)
+            {
+                let _ = front.send_to(&buf[..n], to).await;
+            }
+        }
+    });
+    address
+}
+
+/// Every file under `dir` whose name starts as the file of room lines kept does, in any
+/// folder (`replaced/`, `incoming/` and the like included).
+fn kept_lines_under(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(kept_lines_under(&path));
+        } else if entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with("room-lines.bin")
+        {
+            found.push(path);
+        }
+    }
+    found
+}
+
+/// Ana, on `dir`, starts with Bea reached only through the forwarder at `via`, both enter
+/// the room, the way is cut (Bea's core running, in the room), and Ana says `text` and shuts
+/// down as the application does: the line is kept on Ana's disk for Bea.
+async fn say_out_of_reach(
+    dir: &Path,
+    via: u16,
+    cut: &AtomicBool,
+    bea: &Core,
+    group: GroupId,
+    text: &str,
+) {
+    cut.store(false, Ordering::SeqCst);
+    let (ana, mut events_a) = start_again(dir, net(free_port(), &[via])).await;
+    ana.join_room(group).await.unwrap();
+    bea.join_room(group).await.unwrap();
+    let joined = |who: DevicePublicKey| {
+        move |e: &CoreEvent| match e {
+            CoreEvent::Room {
+                change: RoomChange::Joined { device, .. },
+                ..
+            } => *device == who,
+            _ => false,
+        }
+    };
+    wait_for(&mut events_a, "Bea in the room", joined(bea.me())).await;
+    // Bea may list Ana from an earlier session still: what matters is that Ana's room has
+    // her, and that Bea's lists Ana.
+    let me = ana.me();
+    eventually("Ana in Bea's room", 60, || async {
+        bea.room(group, FIRST_ROOM)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.participants.iter().any(|(p, _)| p.device == me))
+    })
+    .await;
+    cut.store(true, Ordering::SeqCst);
+    ana.say(group, text).await.unwrap();
+    ana.shutdown().await.unwrap();
+    drop((ana, events_a));
+    let_go(dir).await;
+    let room = bea.room(group, FIRST_ROOM).await.unwrap().unwrap();
+    assert!(
+        !room.chat.iter().any(|l| l.text == text),
+        "Bea got {text:?}"
+    );
+}
+
+/// A room line kept on the old computer's disk (said while the only other member was out of
+/// reach) stays behind when the account moves: the new computer gets none, the old one has
+/// none once it stopped for good, and no folder of the move holds one. Started on the new
+/// computer, the account keeps a line it says out of reach there, sealed with the new
+/// folder's key.
+#[tokio::test(flavor = "multi_thread")]
+async fn room_lines_kept_stay_behind_when_the_account_moves() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    keys();
+    let base = base("lines");
+    let (dir_a, dir_b, dir_new) = (base.join("ana"), base.join("bea"), base.join("new"));
+    Core::create_profile(&dir_a, "Ana", None).unwrap();
+    Core::create_profile(&dir_b, "Bea", None).unwrap();
+    // The group is in both folders from the start: neither learns the other's address
+    // from an invite, and Ana reaches Bea only through the forwarder.
+    let ana_identity = Store::open(dir_a.clone()).unwrap().identity().unwrap().0;
+    let bea_key = Store::open(dir_b.clone())
+        .unwrap()
+        .identity()
+        .unwrap()
+        .0
+        .public_key();
+    let mut log = GroupLog::create(&ana_identity, "crew", 1).unwrap();
+    log.add(&ana_identity, bea_key, "Bea", 2).unwrap();
+    let group = log.group_id();
+    for dir in [&dir_a, &dir_b] {
+        Store::open(dir.clone())
+            .unwrap()
+            .save_group_log(&log, "crew")
+            .unwrap();
+    }
+    let port_b = free_port();
+    let cut = Arc::new(AtomicBool::new(false));
+    let via = forwarder(port_b, cut.clone()).await;
+    let (bea, _events_b) = Core::start(dir_b.clone(), net(port_b, &[])).unwrap();
+    say_out_of_reach(&dir_a, via, &cut, &bea, group, "before the move").await;
+    assert_eq!(kept_lines_under(&dir_a), [dir_a.join("room-lines.bin")]);
+
+    let port_n = free_port();
+    let mut receiving = transfer::receive(dir_new.clone(), options(port_n, &[], "new")).unwrap();
+    let code = code_of(&mut receiving).await;
+    let sending = transfer::send(dir_a.clone(), &code, options(0, &[port_n], "old")).unwrap();
+    let ((_, got), (_, sent)) =
+        tokio::join!(follow(receiving, Some(true)), follow(sending, Some(true)));
+    assert!(matches!(sent, TransferEvent::Done { .. }), "{sent:?}");
+    assert!(matches!(got, TransferEvent::Done { .. }), "{got:?}");
+    let_go(&dir_a).await;
+    let_go(&dir_new).await;
+    assert_eq!(kept_lines_under(&dir_new), Vec::<PathBuf>::new(), "moved");
+    assert_eq!(
+        kept_lines_under(&dir_a),
+        Vec::<PathBuf>::new(),
+        "left behind"
+    );
+
+    // The account on the new computer keeps what it says out of reach, with its own key.
+    say_out_of_reach(&dir_new, via, &cut, &bea, group, "after the move").await;
+    let bytes = std::fs::read(dir_new.join("room-lines.bin")).expect("not kept on the new");
+    let key = Store::open(dir_new.clone())
+        .unwrap()
+        .data_key()
+        .unwrap()
+        .unwrap();
+    assert!(key.open_whole("room lines", &bytes).is_ok());
+    bea.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&base);
 }
