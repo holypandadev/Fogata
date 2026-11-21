@@ -860,7 +860,11 @@ A group message goes once to each member, not to everyone from everyone:
   10 s after the first as long as the application's event loop runs (`quitOnSignals`); one
   that comes before the window has set up its quitting still ends it at once, and Windows
   watches none. Still ended at once: SIGKILL and SIGHUP, and SIGTERM and SIGINT again once
-  the window is being destroyed.
+  the window is being destroyed. Every other quit (the tray's Quit, closing the window when
+  it quits, Cmd+Q, an update or a restart) is ended the same way 10 s after it began, once
+  however many quits come, on every system (`LastResort`; Windows ends it with
+  TerminateProcess): destroying the window leaves the process's end to the system, which
+  once did not come.
 - A line of this device's is kept besides, in a sealed folder, until each member owed it has
   taken it (`node::kept`): those in its room when it was said, listed there or let go of it
   without a leave (cut off, or not heard from for the grace) since the room opened on this

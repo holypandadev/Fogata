@@ -50,6 +50,9 @@ String? placeOf(StackTrace? stack) {
 /// The data folder whose day's log takes the window's errors and prints, once it is known.
 String? _logDir;
 
+/// The data folder whose day's log takes the window's errors, once it is known.
+String? get consoleLogDir => _logDir;
+
 /// What came before the data folder was known, to note in its day's log then: at most
 /// [_waitingMost], and how many more there were.
 final _waiting = <void Function(String dataDir)>[];

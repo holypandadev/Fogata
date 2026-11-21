@@ -16,7 +16,8 @@ import 'host.dart';
 import 'icons.dart';
 import 'l10n.dart';
 import 'moving.dart';
-import 'report.dart' show flushAppErrors, noteAppError;
+import 'console.dart' show consoleLogDir;
+import 'report.dart' show flushAppErrors, noteAppError, noteAppErrorNow;
 import 'rust/api/tray.dart' as linux_tray;
 import 'shown.dart';
 import 'test_switches.dart';
@@ -217,13 +218,20 @@ class _ShownWatcher with WindowListener {
 /// system), then lets it go. The room is left this way, so the others see this device
 /// leave at once rather than when it stops answering. Closing the window only hides it
 /// while [keepRunning] says so: the application goes on in the tray, which brings the
-/// window back; otherwise closing it quits.
+/// window back; otherwise closing it quits. However quitting begins, [lastResort] ends the
+/// process if it is still there at its limit.
 Future<void> beforeQuitting(
   Future<void> Function() before, {
   required bool Function() keepRunning,
+  @visibleForTesting LastResort? lastResort,
 }) async {
+  final limit = lastResort ?? _lastResort;
   Future<void>? leaving;
   Future<void> leave() => leaving ??= () async {
+    // Every way of quitting comes here, and only quitting does. Past this point the
+    // process's end is up to the system (the window destroyed, the exit request answered),
+    // which has once been seen not to come.
+    limit.arm();
     // Off the screen at once, out of full screen first (up to 2 s on macOS, which would
     // otherwise leave an empty black space until the process ends), alongside the
     // shutdown rather than before it. Both get 6 s, for what the core runs one step after
@@ -240,6 +248,7 @@ Future<void> beforeQuitting(
     try {
       await flushAppErrors().timeout(const Duration(seconds: 1));
     } catch (_) {}
+    limit.left = true;
   }();
   // Whether closing the window hides it now: not once quitting has begun.
   bool hides() => leaving == null && _inTray && keepRunning();
@@ -262,12 +271,17 @@ Future<void> beforeQuitting(
         return AppExitResponse.cancel;
       }
       await leave();
+      limit.exitAnswered = true;
       return AppExitResponse.exit;
     },
   );
   // Ended from outside (`kill`, the session ending): quits as the tray's Quit does,
   // through [quitApplication] as it is by the time the signal comes.
-  quitOnSignals(_endingSignals(), quit: () => quitApplication());
+  quitOnSignals(
+    _endingSignals(),
+    quit: () => quitApplication(),
+    lastResort: limit,
+  );
   if (!ownTitleBar) {
     quitApplication = () async {
       await leave();
@@ -288,7 +302,9 @@ Future<void> beforeQuitting(
         await trayManager.destroy();
       }
     } catch (_) {}
+    limit.trayGone = true;
     _stopWatchingSignals();
+    limit.destroyAsked = true;
     await windowManager.destroy();
   }
 
@@ -309,33 +325,111 @@ Future<void> beforeQuitting(
 /// Quits the application as the tray's menu does: leaving the room first.
 Future<void> Function() quitApplication = () async => exit(0);
 
-/// Quits with [quit] at the first of [signals], and ends the process with [end] at once if
-/// [quit] fails, or if it has not ended it [within] of the signal, as long as the
-/// application's event loop runs: the 6 s leaving gives the shutdown, the second for the
-/// window's last errors, and three for the tray and the window to go, which have no limit
-/// of their own. A signal that comes while quitting changes nothing.
+/// Quits with [quit] at the first of [signals], and has [lastResort] end the process at
+/// once if [quit] fails, or at its limit from the signal if [quit] has not ended it. A
+/// signal that comes while quitting changes nothing.
 @visibleForTesting
 void quitOnSignals(
   Stream<ProcessSignal> signals, {
   required Future<void> Function() quit,
-  void Function() end = _killNow,
-  Duration within = const Duration(seconds: 10),
+  LastResort? lastResort,
 }) {
+  final limit = lastResort ?? _lastResort;
   var quitting = false;
   signals.listen((_) async {
     if (quitting) return;
     quitting = true;
-    final late = Timer(within, end);
+    limit.arm();
     try {
       await quit();
     } catch (_) {
-      late.cancel();
-      end();
+      limit.now();
     }
   });
 }
 
-// Not exit(): it runs the exit handlers that the runner itself avoids (main.cc).
+/// Ends the process with [end] [within] of the first [arm], as long as the application's
+/// event loop runs, once however many times it is armed or told to end [now]. Armed as
+/// quitting begins, whichever way (the tray's Quit, the window's close, Cmd+Q, a signal,
+/// [quitApplication]): the window's destruction and the system's answer to it end the
+/// process only as long as nothing stalls there, and one quit from the tray was once seen
+/// to leave it running. [within] covers the 6 s leaving gives the shutdown, the second for
+/// the window's last errors, and three for the tray and the window to go, which have no
+/// limit of their own: once leaving's 6 s and 1 s are over, the tray's and the window's
+/// going and the engine's own teardown get the remaining 3 s. Past them a slow teardown is
+/// ended (status 137 on macOS and Linux) where before it would have ended by itself a
+/// little later; nothing is lost by it, the shutdown and the errors' flush having finished
+/// within leaving. Never armed while the application is not quitting, so it never ends
+/// one that goes on (a close that only hides the window, Windows' exit request turned down
+/// for it).
+///
+/// Before ending the process it has [note] write one line, at once, of why and of how far
+/// quitting had come ([left], [trayGone], [destroyAsked], [exitAnswered]): a case it ends
+/// was never explained, and would otherwise leave no trace.
+@visibleForTesting
+class LastResort {
+  LastResort({
+    this.end = _killNow,
+    this.note = _noteNow,
+    this.within = const Duration(seconds: 10),
+  });
+
+  final void Function() end;
+  final void Function(String line) note;
+  final Duration within;
+  Timer? _late;
+  var _ended = false;
+
+  /// Whether leaving (the shutdown, hiding the window, the errors' flush) had finished.
+  var left = false;
+
+  /// Whether the tray's icon had been taken away.
+  var trayGone = false;
+
+  /// Whether the window's destruction had been asked for.
+  var destroyAsked = false;
+
+  /// Whether the system's request to exit had been answered with exit (Cmd+Q, Windows'
+  /// own), a way of quitting that neither takes the tray away nor destroys the window.
+  var exitAnswered = false;
+
+  /// Starts the wait, the first time.
+  void arm() {
+    if (_late != null || _ended) return;
+    _late = Timer(within, () => _end(late: true));
+  }
+
+  /// Ends the process now, unless it was ended already.
+  void now() => _end(late: false);
+
+  void _end({required bool late}) {
+    if (_ended) return;
+    _ended = true;
+    _late?.cancel();
+    String yes(bool done) => done ? 'yes' : 'no';
+    try {
+      note(
+        '${late ? 'quitting was still running ${within.inSeconds} s after it began' : 'quitting failed'}'
+        ' and the process was ended (leaving finished: ${yes(left)}, tray taken away: '
+        '${yes(trayGone)}, window destruction asked: ${yes(destroyAsked)}, '
+        'exit request answered: ${yes(exitAnswered)})',
+      );
+    } catch (_) {}
+    end();
+  }
+}
+
+final _lastResort = LastResort();
+
+/// Writes [line] in the day's log of the window's errors, handed to the system before this
+/// returns. A quit before the data folder is known writes nothing.
+void _noteNow(String line) {
+  final dir = consoleLogDir;
+  if (dir != null) noteAppErrorNow(dir, line);
+}
+
+// Not exit(): it runs the exit handlers that the runner itself avoids (main.cc). On
+// Windows, which has no SIGKILL, Dart ends the process with TerminateProcess.
 void _killNow() => Process.killPid(pid, ProcessSignal.sigkill);
 
 /// SIGTERM and SIGINT, which end the process at once unless watched. Not SIGHUP: watching

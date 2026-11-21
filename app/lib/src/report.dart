@@ -514,6 +514,25 @@ Future<void> flushAppErrors() {
   return _appended;
 }
 
+/// Notes [text] in the day's log as [noteAppError] does, but at once and on this thread:
+/// handed to the system before this returns, for what is written just before the process
+/// ends.
+/// [text] is written as it is, without being scrubbed, so it must carry nothing personal;
+/// a failure to write is let go. Not flushed to the disk: a disk that hangs would hold up
+/// what follows, and the system's file cache keeps the line when the process ends.
+void noteAppErrorNow(String dataDir, String text) {
+  try {
+    final now = DateTime.now().toUtc();
+    final dir = Directory('$dataDir${Platform.pathSeparator}$logFolder')
+      ..createSync(recursive: true);
+    File('${dir.path}${Platform.pathSeparator}app-${_date(now)}.log')
+        .writeAsStringSync(
+          '${now.toIso8601String()} ERROR app: $text\n',
+          mode: FileMode.append,
+        );
+  } catch (_) {}
+}
+
 /// [said] scrubbed, each after [stamp]: off the window's thread, as is asking the system
 /// for this computer's names.
 Future<String> _scrubAppErrors(
