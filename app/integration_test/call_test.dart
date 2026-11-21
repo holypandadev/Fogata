@@ -461,6 +461,11 @@ void main() {
 }
 
 Future<void> _call(WidgetTester tester) async {
+  // The kept-lines case's second start of copy a, on the data folder of its first.
+  if (_env['FOGATA_TEST_KEPT_AGAIN'] == '1') {
+    await _keptAgain(tester);
+    return;
+  }
   final others = _names.keys.take(_copies).where((r) => r != _role).toList();
   await app.main();
   await _until(
@@ -775,6 +780,10 @@ Future<void> _call(WidgetTester tester) async {
     }
     // Judged once the others are done too, so that they end as well.
     if (_swapFailed case final why?) throw StateError('output swap: $why');
+    return;
+  }
+  if (_env['FOGATA_TEST_MIC_CASE'] == 'kept') {
+    await _kept(tester, state);
     return;
   }
   final micCase = _env['FOGATA_TEST_MIC_CASE'];
@@ -6967,4 +6976,115 @@ Future<void> _farEcho(WidgetTester tester, AppState state) async {
     sent.cancel();
     heard.cancel();
   }
+}
+
+/// FOGATA_TEST_MIC_CASE=kept, two copies, microphones off: this device's own room lines
+/// kept for a member out of reach (fogata-net's kept.rs). Once both are in the room, each
+/// marks `ready`. Copy a waits for the rig's `rig-say` (the rig may have stopped b's process
+/// meanwhile, as a closed lid would), says FOGATA_TEST_KEPT_LINES lines (1 when left out),
+/// `kept <n> <FOGATA_TEST_KEPT_TAG>`, logging each one's time, marks `said`, and with
+/// FOGATA_TEST_KEPT_QUIT=menu quits as the tray's Quit does at the rig's `rig-quit`;
+/// otherwise it stays until the rig ends it (a signal). Copy b writes, whenever they
+/// change, the lines of others its room shows (`b-lines.txt`: id, time in milliseconds,
+/// text) until `rig-end`; copy a writes those it gets too (`a-lines.txt`). Both write
+/// `ran`: the rig's script judges.
+Future<void> _kept(WidgetTester tester, AppState state) async {
+  _ended = 'ran';
+  _mark('ready');
+  if (_role == 'a') {
+    // What a gets from the others meanwhile (a-lines.txt), without pumping: written every
+    // half second for as long as this copy runs.
+    final got = File('$_dir/$_role-lines.txt');
+    var shown = '';
+    Timer.periodic(const Duration(milliseconds: 500), (_) {
+      final now = [
+        for (final UiChatLine line
+            in state.roomState.room?.chat ?? const <UiChatLine>[])
+          if (!line.mine) '${line.id} ${line.timestampMs} ${line.text}',
+      ].join('\n');
+      if (now != shown) {
+        shown = now;
+        got.writeAsStringSync(now.isEmpty ? '' : '$now\n');
+      }
+    });
+    await _rig(tester, 'rig-say', seconds: 900);
+    _log(
+      'kept: others in the room as the lines are said: '
+      '${state.roomState.room?.participants.where((p) => !p.me).length ?? 0}',
+    );
+    final lines = int.tryParse(_env['FOGATA_TEST_KEPT_LINES'] ?? '') ?? 1;
+    final tag = _env['FOGATA_TEST_KEPT_TAG'] ?? '';
+    for (var n = 1; n <= lines; n++) {
+      final text = 'kept $n $tag';
+      final sent = await state.sendChat(text);
+      _log('kept line $n said: $sent');
+      File('$_dir/a-said.txt').writeAsStringSync(
+        '${DateTime.now().millisecondsSinceEpoch} $text\n',
+        mode: FileMode.append,
+      );
+      await _wait(tester, const Duration(milliseconds: 300));
+    }
+    _mark('said');
+    if (_env['FOGATA_TEST_KEPT_QUIT'] == 'menu') {
+      await _rig(tester, 'rig-quit', seconds: 900);
+      _mark('quit');
+      File('$_dir/$_role-result.txt').writeAsStringSync('quit\n');
+      await quitApplication();
+      _mark('quit-returned');
+    }
+    await _wait(tester, const Duration(minutes: 15));
+    return;
+  }
+  await _keptLines(tester, state);
+}
+
+/// Writes the lines of others the room shows to `b-lines.txt` whenever they change, until
+/// the rig's `rig-end` (15 minutes at most).
+Future<void> _keptLines(WidgetTester tester, AppState state) async {
+  final file = File('$_dir/$_role-lines.txt');
+  var last = '';
+  final end = DateTime.now().add(const Duration(minutes: 15));
+  while (!File('$_dir/rig-end').existsSync() && DateTime.now().isBefore(end)) {
+    final now = [
+      for (final UiChatLine line
+          in state.roomState.room?.chat ?? const <UiChatLine>[])
+        if (!line.mine) '${line.id} ${line.timestampMs} ${line.text}',
+    ].join('\n');
+    if (now != last) {
+      last = now;
+      file.writeAsStringSync(now.isEmpty ? '' : '$now\n');
+      _log('lines shown: ${now.isEmpty ? 0 : now.split('\n').length}');
+    }
+    await _wait(tester, const Duration(milliseconds: 500));
+  }
+}
+
+/// The kept-lines case's second start of copy a (FOGATA_TEST_KEPT_AGAIN=1) on the data
+/// folder of its first: home without the welcome, then into the group's room, marking
+/// `again-in-room`; it stays until the rig's `rig-end`, writing `ran`.
+Future<void> _keptAgain(WidgetTester tester) async {
+  _ended = 'ran';
+  await app.main();
+  await _until(
+    tester,
+    'home again',
+    () => find.byType(Shell).evaluate().isNotEmpty,
+    seconds: 120,
+  );
+  final state = _state(tester);
+  await _until(
+    tester,
+    'the group again',
+    () => state.contacts.groups.isNotEmpty,
+    seconds: 60,
+  );
+  await state.openRoom(state.contacts.groups.first.id);
+  await _until(
+    tester,
+    'in the room again',
+    () => state.roomState.room != null,
+    seconds: 60,
+  );
+  _mark('again-in-room');
+  await _keptLines(tester, state);
 }
