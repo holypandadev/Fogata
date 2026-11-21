@@ -6801,7 +6801,7 @@ Future<void> _churn(WidgetTester tester, AppState state) async {
   _log('churn: $events joins and leaves by $_role');
 }
 
-/// FOGATA_TEST_MIC_CASE=far-echo, two copies on one Mac (the rig's script): how much of the
+/// FOGATA_TEST_MIC_CASE=far-echo, two copies on one computer (the rig's script): how much of the
 /// other's voice copy a sends back when it plays it on speakers its own microphone hears.
 /// b's voice is a shared window's sound: b shares the window whose name has
 /// FOGATA_TEST_ECHO_WINDOW in it ("macplay" when left out), whose program plays speech,
@@ -6810,7 +6810,9 @@ Future<void> _churn(WidgetTester tester, AppState state) async {
 /// watching while it is not, until `rig-end`; a number in `rig-volume` sets how loud b's
 /// screen plays here, in percent, and a part of an output's name in `rig-output` chooses
 /// that output: what it plays of b then goes through the
-/// call's own playback, which its echo canceller takes as what it plays. a logs what it
+/// call's own playback, which its echo canceller takes as what it plays; a part of an
+/// input's name in `rig-input` chooses that input, and `on` or `off` in `rig-mic` turns
+/// the microphone on or off as the call's button does. a logs what it
 /// sends ([_logSent]) and b what it receives of a ([_logReceived]); whatever runs the
 /// copies plays the same speech, or other speech, into the room itself in stretches it
 /// marks, and judges.
@@ -6827,10 +6829,18 @@ Future<void> _farEcho(WidgetTester tester, AppState state) async {
     _log(
       'sources: ${sources.map((s) => '${s.type.name}:${s.name}').join(' | ')}',
     );
+    // FOGATA_TEST_ECHO_WINDOW=screen shares the whole screen instead (Linux shares a
+    // window without its sound).
     await call.shareScreen(
       sources.firstWhere(
-        (s) => s.type == SourceType.Window && s.name.contains(name),
-        orElse: () => throw StateError('no window called $name to share'),
+        (s) => name == 'screen'
+            ? s.type == SourceType.Screen
+            : s.type == SourceType.Window && s.name.contains(name),
+        orElse: () => throw StateError(
+          name == 'screen'
+              ? 'no screen to share'
+              : 'no window called $name to share',
+        ),
       ),
     );
     if (!call.sharing) throw StateError('not sharing: ${call.problem}');
@@ -6890,6 +6900,8 @@ Future<void> _farEcho(WidgetTester tester, AppState state) async {
     final end = DateTime.now().add(const Duration(minutes: 30));
     int? shownVolume = volume;
     String? shownOutput;
+    String? shownInput;
+    String? shownMic;
     while (!File('$_dir/rig-end').existsSync()) {
       if (DateTime.now().isAfter(end)) throw StateError('no rig-end in time');
       // A volume the rig asks for in percent (`rig-volume`), set as the call's control does.
@@ -6916,6 +6928,30 @@ Future<void> _farEcho(WidgetTester tester, AppState state) async {
         await state.setAudioOutput(found.deviceId);
         _mark('output-${name.replaceAll(' ', '-')}');
         _log('output chosen by the rig: ${found.label}');
+      }
+      // An input the rig asks for by a part of its name (`rig-input`), chosen as the
+      // call's menu does.
+      final input = File('$_dir/rig-input');
+      final inName = input.existsSync() ? input.readAsStringSync().trim() : '';
+      if (inName.isNotEmpty && inName != shownInput) {
+        shownInput = inName;
+        final devices = await navigator.mediaDevices.enumerateDevices();
+        final found = devices
+            .where((d) => d.kind == 'audioinput' && d.label.contains(inName))
+            .firstOrNull;
+        if (found == null) throw StateError('no audioinput called $inName');
+        await state.setAudioInput(found.deviceId);
+        _mark('input-${inName.replaceAll(' ', '-')}');
+        _log('input chosen by the rig: ${found.label}');
+      }
+      // The microphone on or off as the rig asks (`rig-mic`), as the call's button does.
+      final micFile = File('$_dir/rig-mic');
+      final mic = micFile.existsSync() ? micFile.readAsStringSync().trim() : '';
+      if ((mic == 'on' || mic == 'off') && mic != shownMic) {
+        shownMic = mic;
+        await state.setMic(mic == 'on');
+        _mark('mic-$mic');
+        _log('microphone $mic by the rig');
       }
       final want = File('$_dir/rig-watch').existsSync();
       if (want && call.watching != otherId) {
