@@ -42,13 +42,6 @@ class FlutterWebRTC : public FlutterWebRTCBase,
   void HandleMethodCall(const MethodCallProxy& method_call,
                         std::unique_ptr<MethodResultProxy> result);
 
-  // Fogata: whether answers of checks running on threads of their own (the sound
-  // server's) may still be given; closed, under its lock, when the plugin goes.
-  struct AnswerGate {
-    std::mutex lock;
-    bool open = true;
-  };
-
  private:
   // Fogata: asks for the cameras where they come through a portal (see
   // RTCVideoDevice::RequestCameraAccess), then runs [then] on the platform
@@ -59,8 +52,6 @@ class FlutterWebRTC : public FlutterWebRTCBase,
 
   void initLoggerCallback(RTCLoggingSeverity severity);
   RTCLoggingSeverity str2LogSeverity(std::string str);
-
-  std::shared_ptr<AnswerGate> answer_gate_ = std::make_shared<AnswerGate>();
 };
 
 }  // namespace flutter_webrtc_plugin

@@ -6,6 +6,8 @@
 #include "rtc_dtmf_sender.h"
 #include "rtc_rtp_parameters.h"
 
+#include <optional>
+
 #ifdef _WIN32
 // Worker thread for off-platform-thread track publish
 // (see AddTransceiver / AddTrack).
@@ -672,31 +674,41 @@ void FlutterPeerConnection::AddTransceiver(
   // application can close and dispose of the connection meanwhile, and the map
   // entry that kept it was its last hold.
   scoped_refptr<RTCPeerConnection> held(pc);
+  // Fogata: answered only while the plugin is there: on Windows the call below runs
+  // on a thread of its own, which the application can outlive (quitting while a
+  // transceiver is being added), and its answer goes through the plugin's task runner.
+  std::shared_ptr<AnswerGate> gate = base_->answer_gate_;
 
   // The actual libwebrtc call + result completion. pc->AddTransceiver() is a
   // proxy that BLOCKS the caller until the signaling thread finishes it.
-  auto do_add = [held, track, type, has_init, init, result_ptr]() {
+  auto do_add = [held, track, type, has_init, init, result_ptr, gate]() {
     RTCPeerConnection* pc = held.get();
+    scoped_refptr<RTCRtpTransceiver> transceiver;
     if (has_init) {
-      auto transceiver = track.get() != nullptr
-                             ? pc->AddTransceiver(track.get(), init)
-                             : pc->AddTransceiver(type, init);
-      if (nullptr != transceiver.get()) {
-        result_ptr->Success(EncodableValue(transceiverToMap(transceiver)));
-        return;
-      }
-      result_ptr->Error("AddTransceiver(track | mediaType, init)",
-                        "AddTransceiver error");
+      transceiver = track.get() != nullptr ? pc->AddTransceiver(track.get(), init)
+                                           : pc->AddTransceiver(type, init);
     } else {
-      auto transceiver = track.get() != nullptr ? pc->AddTransceiver(track.get())
-                                                : pc->AddTransceiver(type);
-      if (nullptr != transceiver.get()) {
-        result_ptr->Success(EncodableValue(transceiverToMap(transceiver)));
-        return;
-      }
-      result_ptr->Error("AddTransceiver(track, mediaType)",
-                        "AddTransceiver error");
+      transceiver = track.get() != nullptr ? pc->AddTransceiver(track.get())
+                                           : pc->AddTransceiver(type);
     }
+    // Fogata: the answer's map asks libwebrtc (and waits on its signalling thread),
+    // so it is made before the gate's lock: the plugin closing the gate never waits
+    // for it.
+    std::optional<EncodableValue> answer;
+    if (nullptr != transceiver.get()) {
+      answer = EncodableValue(transceiverToMap(transceiver));
+    }
+    AnswerIfOpen(*gate, [&] {
+      if (answer) {
+        result_ptr->Success(std::move(*answer));
+      } else if (has_init) {
+        result_ptr->Error("AddTransceiver(track | mediaType, init)",
+                          "AddTransceiver error");
+      } else {
+        result_ptr->Error("AddTransceiver(track, mediaType)",
+                          "AddTransceiver error");
+      }
+    });
   };
 
 #ifdef _WIN32
@@ -1213,25 +1225,34 @@ void FlutterPeerConnection::AddTrack(
   // first audio track, includes the cold RTP-sender/encoder/APM init).
   // Fogata: held for the call, as in AddTransceiver.
   scoped_refptr<RTCPeerConnection> held(pc);
-  auto do_add = [held, track, streamIds, result_ptr]() {
+  // Fogata: answered only while the plugin is there, as in AddTransceiver.
+  std::shared_ptr<AnswerGate> gate = base_->answer_gate_;
+  auto do_add = [held, track, streamIds, result_ptr, gate]() {
     RTCPeerConnection* pc = held.get();
     std::string kind = track->kind().std_string();
+    scoped_refptr<RTCRtpSender> sender;
     if (0 == kind.compare("audio")) {
-      auto sender =
+      sender =
           pc->AddTrack(reinterpret_cast<RTCAudioTrack*>(track.get()), streamIds);
-      if (sender.get() != nullptr) {
-        result_ptr->Success(EncodableValue(rtpSenderToMap(sender)));
-        return;
-      }
     } else if (0 == kind.compare("video")) {
-      auto sender =
+      sender =
           pc->AddTrack(reinterpret_cast<RTCVideoTrack*>(track.get()), streamIds);
-      if (sender.get() != nullptr) {
-        result_ptr->Success(EncodableValue(rtpSenderToMap(sender)));
-        return;
-      }
     }
-    result_ptr->Success();  // was result->Success() — a use-after-release bug
+    // Fogata: made before the gate's lock, as for addTransceiver.
+    std::optional<EncodableValue> answer;
+    if (sender.get() != nullptr) {
+      answer = EncodableValue(rtpSenderToMap(sender));
+    }
+    AnswerIfOpen(*gate, [&] {
+      if (answer) {
+        result_ptr->Success(std::move(*answer));
+      } else {
+        // Fogata: no sender (a closed connection, a track of another kind) is an
+        // error, as for addTransceiver: an empty success made the Dart side read a
+        // sender from nothing (a TypeError instead of the plugin's error).
+        result_ptr->Error("AddTrack", "AddTrack error");
+      }
+    });
   };
 
 #ifdef _WIN32

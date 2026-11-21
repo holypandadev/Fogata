@@ -1719,6 +1719,14 @@ access violation in `WebRtcVideoSendChannel`'s constructor, once in some 30 call
 Linux and macOS call the connection on the platform thread only, where a close cannot
 come in the middle of a call.
 
+Those two Windows threads answer only while the plugin is there: the application may quit
+while one waits (the first audio sender's set-up), and its answer went through the
+plugin's task runner after the plugin had gone. They answer under the plugin's gate, as
+the sound server's checks do (`common/cpp/include/fogata_answer_gate.h`, tested by
+`common/cpp/test/answer_gate_test.cc`). And `addTrack` without a sender answers with an
+error, as `addTransceiver` does; its empty success made the Dart side read a sender from
+nothing.
+
 ## The voice engine stays (all platforms)
 
 WebRTC M156 starts its voice engine with the first connection and stops it when the last

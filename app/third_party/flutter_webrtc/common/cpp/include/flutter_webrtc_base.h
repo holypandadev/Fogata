@@ -2,6 +2,7 @@
 #define FLUTTER_WEBRTC_BASE_HXX
 
 #include "flutter_common.h"
+#include "fogata_answer_gate.h"
 #include "fogata_denoise.h"
 #include "fogata_track_owner.h"
 
@@ -253,6 +254,10 @@ class FlutterWebRTCBase {
   TaskRunner* task_runner_;
   TextureRegistrar* textures_;
   std::unique_ptr<EventChannelProxy> event_channel_;
+  // Fogata: whether answers given from threads of their own (the sound server's checks,
+  // a connection's additions on Windows) may still go out; FlutterWebRTC's destructor
+  // closes it (fogata_answer_gate.h).
+  std::shared_ptr<AnswerGate> answer_gate_ = std::make_shared<AnswerGate>();
 };
 
 }  // namespace flutter_webrtc_plugin

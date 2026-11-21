@@ -35,7 +35,7 @@ void Check(bool ok, const std::string& what) {
   }
 }
 
-// The plugin's gate for answers (FlutterWebRTC::AnswerGate): closed when it goes.
+// The plugin's gate for answers (AnswerGate, fogata_answer_gate.h): closed when it goes.
 struct Gate {
   std::mutex lock;
   bool open = true;

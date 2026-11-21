@@ -38,8 +38,7 @@ FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
 FlutterWebRTC::~FlutterWebRTC() {
   // A sound server check still running answers no more: its result's task
   // runner and channel go with the plugin.
-  std::lock_guard<std::mutex> guard(answer_gate_->lock);
-  answer_gate_->open = false;
+  CloseGate(*answer_gate_);
 }
 
 void FlutterWebRTC::AskCameraAccess(std::function<void()> then) {
