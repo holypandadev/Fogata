@@ -2530,7 +2530,29 @@ class Call extends ChangeNotifier {
     // at most (see [CallPeer.offerEvery]); the newest of those that come meanwhile is the
     // one taken.
     if (message['t'] == 'offer') {
+      // A late copy of an earlier offer of their call (an offer goes again as a copy)
+      // that comes while a later one waits: replacing that one, it would be answered in
+      // its place, and the later one, which their side waits on, not at all. Their
+      // numbers only rise when their signals say they answer a copy (`w`).
+      final pending = peer._offerPending;
+      final number = message['n'];
+      final before = pending?['n'];
+      if (pending != null &&
+          message['w'] == 1 &&
+          pending['w'] == 1 &&
+          message['c'] is String &&
+          message['c'] == pending['c'] &&
+          number is int &&
+          before is int &&
+          number < before) {
+        _trace(
+          'offer $number from ${from.substring(0, 8)} older than $before waiting: '
+          'dropped',
+        );
+        return;
+      }
       final mine = ++peer._offersIn;
+      peer._offerPending = message;
       // Waiting its turn, or being answered, until its step is over: the side that asks
       // for offers does not ask meanwhile ([_watch]).
       peer._offersWaiting++;
@@ -2539,10 +2561,13 @@ class Call extends ChangeNotifier {
         if (mine != peer._offersIn) return;
         peer._offerTaken = callClock();
         await peer._inTurn(() async {
-          if (mine == peer._offersIn) await _handleSafely(peer, from, message);
+          if (mine != peer._offersIn) return;
+          peer._offerPending = null;
+          await _handleSafely(peer, from, message);
         });
       } finally {
         peer._offersWaiting--;
+        if (mine == peer._offersIn) peer._offerPending = null;
       }
     } else if (message['t'] == 'sound') {
       final mine = ++peer._soundOffersIn;

@@ -218,6 +218,10 @@ class CallPeer {
   /// waiting is taken, as it replaces those before it.
   int _offersIn = 0;
 
+  /// The newest of their offers waiting its turn, until it is handled: a late copy of an
+  /// earlier one that comes meanwhile does not replace it ([Call.handleSignal]).
+  Map<String, dynamic>? _offerPending;
+
   /// Offers of theirs received and not yet answered or dropped: waiting their turn, or
   /// being answered.
   int _offersWaiting = 0;

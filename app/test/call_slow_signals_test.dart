@@ -356,6 +356,55 @@ void main() {
     },
   );
 
+  test('a late copy of an earlier first offer that comes while a later one waits its '
+      'turn leaves that one to be answered', () async {
+    net = FakeNet()..install();
+    await inCallTime(() async {
+      await connect();
+      final small = net.calls[_small]!;
+      final large = net.calls[_large]!;
+      Iterable<Map<String, dynamic>> firstOffers() => [
+        for (final s in net.sent)
+          if (s.from == _small &&
+              s.type == 'offer' &&
+              s.message['update'] != true)
+            s.message,
+      ];
+      final first = firstOffers().last;
+      // The smaller side's offers from now on go only as the test hands them over.
+      net.lose(
+        (sender, to, message) => sender == _small && message['t'] == 'offer',
+        times: 1000,
+      );
+      net.madeBy(_small).single.fail();
+      net.madeBy(_large).single.fail();
+      await until(
+        () => firstOffers().any((m) => m['n'] != first['n']),
+        what: 'a later offer',
+      );
+      final later = firstOffers().last;
+      expect(later['n'] as int, greaterThan(first['n'] as int));
+      // A late copy of the first offer is taken; the later one comes within the second
+      // after it, and waits its turn; another late copy of the first comes meanwhile.
+      unawaited(large.onSignal(_small, jsonEncode(first)));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      unawaited(large.onSignal(_small, jsonEncode(later)));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+      unawaited(large.onSignal(_small, jsonEncode(first)));
+      await Future<void>.delayed(const Duration(seconds: 2));
+      expect(
+        net.sent.any(
+          (s) =>
+              s.from == _large &&
+              s.type == 'answer' &&
+              s.message['n'] == later['n'],
+        ),
+        isTrue,
+      );
+      expect(up(small, large), isTrue);
+    }, stop: net.stop);
+  });
+
   test("a participant's first offer after it was made anew is taken", () async {
     net = FakeNet()..install();
     await inCallTime(() async {
