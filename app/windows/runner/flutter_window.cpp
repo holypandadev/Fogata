@@ -61,7 +61,16 @@ LSTATUS SetAutostart(bool on) {
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
 
-FlutterWindow::~FlutterWindow() {}
+// A window still there when this runs (main.cpp destroys it after the message loop, so
+// this is only the last line of defence) must not be left to the members' own
+// destruction: the controller would take its view's window down while
+// `flutter_controller_` still pointed at it, and the message that sends to this window
+// would be handed to a view half gone, an access violation. Released as OnDestroy does,
+// the pointer is null before the controller goes.
+FlutterWindow::~FlutterWindow() {
+  autostart_channel_ = nullptr;
+  flutter_controller_ = nullptr;
+}
 
 bool FlutterWindow::OnCreate() {
   if (!Win32Window::OnCreate()) {
@@ -144,7 +153,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
 
   switch (message) {
     case WM_FONTCHANGE:
-      flutter_controller_->engine()->ReloadSystemFonts();
+      if (flutter_controller_) {
+        flutter_controller_->engine()->ReloadSystemFonts();
+      }
       break;
   }
 

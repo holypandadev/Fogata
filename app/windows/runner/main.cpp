@@ -59,6 +59,11 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
+  // Quitting ends the loop with the window still there (window_manager's destroy only
+  // posts the quit message): destroy it here, while the window object is whole and COM
+  // is still up, so that the engine, the view and the plugins go in OnDestroy.
+  window.Destroy();
+
   ::CoUninitialize();
   return EXIT_SUCCESS;
 }
