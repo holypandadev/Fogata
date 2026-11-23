@@ -1224,11 +1224,12 @@ mod tests {
     /// A member dropped from a group after its device was no longer known here lets go of
     /// what is known of what it reads there, and of what went to it, as one whose device is
     /// known does; what is known of a member still connected stays, also of a device still
-    /// connected through another of its sessions.
+    /// connected through another of its sessions, and of a member of another group.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_member_dropped_without_its_device_known_is_not_known_to_read() {
         let (ana, mut log, _) = group();
-        let (bea, cai, dan) = (someone(), someone(), someone());
+        let (bea, cai, dan, eve) = (someone(), someone(), someone(), someone());
+        let ana_too = ana.clone();
         log.add(&ana, bea, "bea", 2).unwrap();
         log.add(&ana, cai, "cai", 3).unwrap();
         log.add(&ana, dan, "dan", 4).unwrap();
@@ -1255,16 +1256,26 @@ mod tests {
                 let line = n.kept_lines.lines.iter().find(|l| l.id == id).unwrap();
                 [bea, cai, dan].map(|d| line.sent.contains_key(&d))
             };
+            // Eve is a member of another group of Ana's only, connected there.
+            let mut other = GroupLog::create(&ana_too, "h", 1).unwrap();
+            other.add(&ana_too, eve, "eve", 2).unwrap();
+            let elsewhere = other.group_id();
+            let other_epoch = other.current_keys(&ana_too).unwrap().epoch();
+            n.add_group(GroupSetup::Member(other));
+            let to_eve = connect(n, elsewhere, eve);
+            n.kept_proved(elsewhere, to_eve, other_epoch);
             let before = (known(n), went(n));
             for peer in [to_bea, to_dan] {
                 n.members.remove(&peer);
                 n.drop_member(group, peer);
             }
-            (before, (known(n), went(n)), n.kept_lines.reads.len())
+            let eve_known = n.kept_lines.knows(elsewhere, &eve, other_epoch);
+            let after = (known(n), went(n), eve_known);
+            (before, after, n.kept_lines.reads.len())
         })
         .await;
         let (all, bea_gone) = ([true; 3], [false, true, true]);
-        assert_eq!(found, ((all, all), (bea_gone, bea_gone), 2));
+        assert_eq!(found, ((all, all), (bea_gone, bea_gone, true), 3));
         node.shutdown().await.unwrap();
     }
 }
