@@ -103,6 +103,7 @@ Every finding fixed gets a test seeded from its (shrunk) input, next to the code
 ## Adding a target
 
 Write the function (and its seeds) next to the decoder, behind the `fuzzing` feature when
-it needs the crate's private items; add it to `TARGETS` and to the `long_runs!` list in
-`crates/fogata-core/src/fuzzing.rs`; add `fuzz/fuzz_targets/<name>.rs` and its `[[bin]]` in
-`fuzz/Cargo.toml`. `tools/check.sh` fails until the libFuzzer target exists.
+it needs the crate's private items; add it to `TARGETS` in `crates/fogata-core/src/fuzzing.rs`
+and to the `long_runs!` list in `crates/fogata-core/src/measures/fuzzing.rs`; add
+`fuzz/fuzz_targets/<name>.rs` and its `[[bin]]` in `fuzz/Cargo.toml`. `tools/check.sh`
+fails until the libFuzzer target exists.
