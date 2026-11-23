@@ -145,6 +145,8 @@ impl Node {
                 device,
                 peer,
             });
+        } else {
+            self.kept_unknown_member_gone(group);
         }
     }
 
