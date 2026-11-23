@@ -51,7 +51,7 @@ done
 if ! $libfuzzer; then
     filters=()
     for target in "${targets[@]}"; do
-        filters+=("fuzzing::runs::$target")
+        filters+=("fuzzing::measures::$target")
     done
     FOGATA_FUZZ_SECS=$seconds nice -n 10 cargo test -p fogata-core --lib -- \
         --ignored --exact --test-threads "$jobs" --nocapture "${filters[@]}"
@@ -60,7 +60,7 @@ fi
 
 # The seeds every target starts from, written fresh; the corpora keep what libFuzzer found.
 FOGATA_FUZZ_SEEDS="$PWD/fuzz/seeds" nice -n 10 cargo test -p fogata-core --lib -- \
-    --ignored --exact fuzzing::runs::write_seeds
+    --ignored --exact fuzzing::measures::write_seeds
 cd fuzz
 toolchain=+${FOGATA_FUZZ_TOOLCHAIN:-nightly}
 nice -n 10 cargo "$toolchain" fuzz build --fuzz-dir .
