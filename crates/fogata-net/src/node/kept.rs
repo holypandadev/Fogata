@@ -934,6 +934,12 @@ mod tests {
         let now = Instant::now();
         assert!(kept.due_to(group, &bea, now).is_empty());
         kept.member_gone(group, &bea);
+        // What went to her counts no more there, and still does in her other group.
+        let went = |kept: &KeptLines, g: GroupId| {
+            (kept.lines.iter()).any(|l| l.group == g && l.sent.contains_key(&bea))
+        };
+        assert!(!went(&kept, group));
+        assert!(went(&kept, elsewhere));
         assert!(!kept.knows(group, &bea, keys.epoch()));
         assert!(kept.due_to(group, &bea, now).is_empty());
         kept.answered(&id, &bea, true);
