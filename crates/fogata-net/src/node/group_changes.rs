@@ -340,8 +340,9 @@ impl Node {
         }
     }
 
-    /// Charges member `peer` for a record of `bytes` sent to it again unasked.
-    fn charge_sent_again(&mut self, peer: PeerId, bytes: usize) {
+    /// Charges member `peer` for a record of `bytes` sent to it again unasked: after a loss,
+    /// or a newer one once the one on its way is answered (see `on_banner_answer`).
+    pub(super) fn charge_sent_again(&mut self, peer: PeerId, bytes: usize) {
         if bytes == 0 {
             return;
         }

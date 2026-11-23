@@ -191,7 +191,8 @@ impl Node {
                 }
             }
             // Failed on its way: it may have got there, and only its answer be what was lost
-            // (see `record_lost`). One dropped unsent goes to `request_unsent` instead.
+            // (see `record_lost`). One dropped unsent, or whose dial failed, goes to
+            // `request_unsent` instead.
             Pending::Banner(..) | Pending::Picture(..) => self.record_lost(peer, kind, false),
             // Sent again at the next roster that asks for them.
             Pending::Sync(group) => {
@@ -215,8 +216,9 @@ impl Node {
     }
 
     /// A member request to `peer` dropped before it went: past the outbox's bounds, or its
-    /// last connection closed while it waited. A banner or picture record never got there.
-    fn request_unsent(&mut self, peer: PeerId, kind: Pending) {
+    /// last connection closed while it waited, or, for a banner or picture record, its dial
+    /// failed. A banner or picture record never got there.
+    pub(super) fn request_unsent(&mut self, peer: PeerId, kind: Pending) {
         match kind {
             Pending::Banner(..) | Pending::Picture(..) => self.record_lost(peer, kind, true),
             kind => self.request_dropped(peer, kind),
@@ -332,7 +334,8 @@ mod tests {
 
     use fogata_crypto::GroupId;
 
-    use libp2p::PeerId;
+    use fogata_proto::MemberResponse;
+    use libp2p::{PeerId, request_response};
 
     use super::*;
     use crate::node::{
@@ -434,6 +437,9 @@ mod tests {
         assert_eq!(found, ([false; 7], true));
         node.shutdown().await.unwrap();
     }
+
+    /// What a member's budget may refill while a test charges it: a few milliseconds.
+    const SLACK: usize = 1024;
 
     /// A group with a banner and a picture record, and member Bea, whose version keeps
     /// both, connected to it.
@@ -879,13 +885,114 @@ mod tests {
             (before.0 == before.1, charged, went)
         })
         .await;
-        // Each record of 500 bytes counts as the least an answer counts.
+        // Each record of 500 bytes counts as the least an answer counts, less what the
+        // budget refills meanwhile (256 bytes a millisecond): far less than one record.
         let least = super::super::limits::SERVED_LEAST;
         let (same, (bea, cai), went) = found;
         assert!(same);
-        assert!((2 * least - 8..=2 * least).contains(&bea), "{bea}");
-        assert!((least - 8..=least).contains(&cai), "{cai}");
+        assert!((2 * least - SLACK..=2 * least).contains(&bea), "{bea}");
+        assert!((least - SLACK..=least).contains(&cai), "{cai}");
         assert_eq!(went, ((1, 1), (1, 0)));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A newer record chosen while one was on its way goes once that one is answered, and
+    /// is charged to the member it goes to, as one sent again after a loss is. An answer
+    /// with nothing newer to send charges nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_newer_record_sent_at_an_answer_is_charged_to_its_member() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let (bea, cai) = (with_records(n, group), with_records(n, group));
+            let left = |n: &Node, peer: PeerId| n.limits.served_left(n.members[&peer].device);
+            let key = |n: &Node, banner: bool| {
+                let ctx = &n.groups[&group].ctx;
+                super::super::group_changes::banner_key(&if banner {
+                    ctx.banner_digest()
+                } else {
+                    ctx.picture_digest()
+                })
+            };
+            n.send_banner_to(group, &[bea, cai]);
+            n.send_picture_to(group, &[bea, cai]);
+            let (banner, picture) = (key(n, true), key(n, false));
+            // Cai's are answered with nothing newer chosen.
+            let cai_before = left(n, cai);
+            n.on_response(cai, Pending::Banner(group, banner), MemberResponse::Ack);
+            n.on_response(cai, Pending::Picture(group, picture), MemberResponse::Ack);
+            let cai_after = left(n, cai);
+            // Newer ones are chosen while Bea's are on their way, and go at their answers.
+            let png = |fill: u8| {
+                let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+                png.resize(500, fill);
+                png
+            };
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_banner(png(5), crate::node::now_ms()).unwrap();
+            slot.ctx.set_picture(png(6), crate::node::now_ms()).unwrap();
+            let bea_before = left(n, bea);
+            // Answered: no longer on their way.
+            n.pending.retain(|_, (p, _)| *p != bea);
+            n.on_response(bea, Pending::Banner(group, banner), MemberResponse::Ack);
+            n.on_response(bea, Pending::Picture(group, picture), MemberResponse::Ack);
+            let charged = |before: f64, after: f64| (before - after).round() as usize;
+            let charged = (
+                charged(bea_before, left(n, bea)),
+                charged(cai_before, cai_after),
+            );
+            (charged, records_to(n, bea))
+        })
+        .await;
+        let least = super::super::limits::SERVED_LEAST;
+        // As in the test above.
+        let ((bea, cai), went) = found;
+        assert!((2 * least - SLACK..=2 * least).contains(&bea), "{bea}");
+        assert_eq!(cai, 0);
+        assert_eq!(went, (1, 1));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A record whose dial failed never left: it goes again unasked as one dropped before
+    /// it left, a little later, not held back as one that may have got there. One whose
+    /// connection closed on its way still waits for the member's roster.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_whose_dial_failed_goes_again_as_one_that_never_left() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let (bea, cai) = (with_records(n, group), with_records(n, group));
+            n.send_banner_to(group, &[bea, cai]);
+            n.send_picture_to(group, &[bea, cai]);
+            let failed: Vec<_> = (n.pending.iter())
+                .filter(|(_, (p, _))| *p == bea || *p == cai)
+                .map(|(id, (p, _))| (*id, *p))
+                .collect();
+            for (request_id, peer) in failed {
+                let error = if peer == bea {
+                    request_response::OutboundFailure::DialFailure
+                } else {
+                    request_response::OutboundFailure::ConnectionClosed
+                };
+                n.on_member_event(request_response::Event::OutboundFailure {
+                    peer,
+                    connection_id: libp2p::swarm::ConnectionId::new_unchecked(1),
+                    request_id,
+                    error,
+                });
+            }
+            let counts = |n: &Node, peer: PeerId| {
+                let slot = &n.groups[&group];
+                let (b, p) = (slot.banner_sent[&peer], slot.picture_sent[&peer]);
+                ((b.lost, b.unsent), (p.lost, p.unsent))
+            };
+            let kept = (counts(n, bea), counts(n, cai));
+            records_age(n, group, bea, Duration::from_secs(2));
+            records_age(n, group, cai, Duration::from_secs(2));
+            n.send_lost_records();
+            (kept, records_to(n, bea), records_to(n, cai))
+        })
+        .await;
+        let (unsent, lost) = (((0, 1), (0, 1)), ((1, 0), (1, 0)));
+        assert_eq!(found, ((unsent, lost), (1, 1), (0, 0)));
         node.shutdown().await.unwrap();
     }
 }

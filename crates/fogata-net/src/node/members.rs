@@ -179,6 +179,14 @@ impl Node {
                         self.request_dropped(to, kind);
                         self.challenge_with(peer, group, None);
                     }
+                    // A banner or picture record whose dial failed never left: it goes
+                    // again as one dropped before it left, not as one that may have got
+                    // there (see `request_unsent`).
+                    kind @ (Pending::Banner(..) | Pending::Picture(..))
+                        if matches!(error, request_response::OutboundFailure::DialFailure) =>
+                    {
+                        self.request_unsent(to, kind)
+                    }
                     // A room event of this device's goes again once (see own.rs).
                     Pending::Own(group, id, again) => {
                         self.kept_unsent(to, id);
@@ -1389,8 +1397,10 @@ impl Node {
                 && s.members.contains(&peer)
                 && s.banner_peers.contains(&peer)
         });
+        // Unasked, it is charged to the member, as one sent again after a loss is.
         if newer {
-            self.send_banner_to(group, &[peer]);
+            let bytes = self.send_banner_to(group, &[peer]);
+            self.charge_sent_again(peer, bytes);
         }
     }
 
@@ -1418,7 +1428,8 @@ impl Node {
                 && s.picture_peers.contains(&peer)
         });
         if newer {
-            self.send_picture_to(group, &[peer]);
+            let bytes = self.send_picture_to(group, &[peer]);
+            self.charge_sent_again(peer, bytes);
         }
     }
 }
