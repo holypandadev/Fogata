@@ -5,6 +5,9 @@
 #include "task_runner.h"
 
 #include "flutter_webrtc/flutter_web_r_t_c_plugin.h"
+
+#include <chrono>
+#include <iostream>
 #ifdef __linux__
 #include <future>
 #include <thread>
@@ -25,6 +28,10 @@ namespace flutter_webrtc_plugin {
 
 static EventChannelProxy* eventChannelProxy = nullptr;
 
+// Fogata: how long the plugin, as it goes, waits for a connection's addition still
+// running on a thread of its own: the first audio sender's set-up takes about 600 ms.
+constexpr std::chrono::milliseconds kWorkerWaitLimit(2000);
+
 FlutterWebRTC::FlutterWebRTC(FlutterWebRTCPlugin* plugin)
     : FlutterWebRTCBase::FlutterWebRTCBase(plugin->messenger(),
                                            plugin->textures(),
@@ -39,6 +46,14 @@ FlutterWebRTC::~FlutterWebRTC() {
   // A sound server check still running answers no more: its result's task
   // runner and channel go with the plugin.
   CloseGate(*answer_gate_);
+  // Fogata: a connection's addition still running on a thread of its own (Windows)
+  // holds the connection and its track; libwebrtc ends after this
+  // (~FlutterWebRTCBase), so it is waited for here. One still in its call after the
+  // limit keeps them for good (fogata_worker_fence.h): the process is quitting.
+  if (!worker_fence_->CloseAndWait(kWorkerWaitLimit)) {
+    std::cerr << "[FlutterWebRTC] a connection's addition was still running after "
+              << kWorkerWaitLimit.count() << " ms; what it holds is kept" << std::endl;
+  }
 }
 
 void FlutterWebRTC::AskCameraAccess(std::function<void()> then) {

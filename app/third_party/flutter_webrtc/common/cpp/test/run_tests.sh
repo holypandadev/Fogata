@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds and runs the native tests of the plugin's shared C++ code (Linux): the video
-# renderer's, a connection's received tracks', the answers' gate's, a reply's response
+# renderer's, a connection's received tracks', the answers' gate's, the wait for the threads
+# that hold libwebrtc's objects, a reply's response
 # handle, the retired textures', a shared screen's sound
 # and the silent input against a PipeWire server of the tests' own (no daemon is reached),
 # an event channel's, a desktop capture's end and the Windows screen sound's start
@@ -45,6 +46,13 @@ TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/remote_tracks_test"
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/common/cpp/include" \
   "$here/answer_gate_test.cc" -lpthread -o "$out/answer_gate_test"
 TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/answer_gate_test"
+# The threads of their own that hold libwebrtc's objects (the Windows connection's
+# addTransceiver and addTrack) waited for as the plugin goes, and what one still in its call
+# at the limit holds kept, never let go of once libwebrtc ended (fogata_worker_fence.h):
+# ThreadSanitizer, plain C++.
+"${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -fsanitize=thread -I"$root/common/cpp/include" \
+  "$here/worker_fence_test.cc" -lpthread -o "$out/worker_fence_test"
+TSAN_OPTIONS="halt_on_error=1 exitcode=66" "$out/worker_fence_test"
 # A message's response handle let go of once its reply is sent (linux/flutter/binary_reply.h):
 # plain C++.
 "${CXX:-clang++}" -std=c++17 -g -O1 -Wall -Werror -I"$root/linux/flutter" \

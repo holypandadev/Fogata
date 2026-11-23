@@ -5,6 +5,7 @@
 #include "fogata_answer_gate.h"
 #include "fogata_denoise.h"
 #include "fogata_track_owner.h"
+#include "fogata_worker_fence.h"
 
 #include <string.h>
 #include <atomic>
@@ -258,6 +259,10 @@ class FlutterWebRTCBase {
   // a connection's additions on Windows) may still go out; FlutterWebRTC's destructor
   // closes it (fogata_answer_gate.h).
   std::shared_ptr<AnswerGate> answer_gate_ = std::make_shared<AnswerGate>();
+  // Fogata: the threads of their own that hold libwebrtc's objects (a connection's
+  // additions on Windows), which FlutterWebRTC's destructor waits for before libwebrtc
+  // ends (fogata_worker_fence.h).
+  std::shared_ptr<WorkerFence> worker_fence_ = std::make_shared<WorkerFence>();
 };
 
 }  // namespace flutter_webrtc_plugin

@@ -1727,6 +1727,33 @@ the sound server's checks do (`common/cpp/include/fogata_answer_gate.h`, tested 
 error, as `addTransceiver` does; its empty success made the Dart side read a sender from
 nothing.
 
+They also held the connection, its track and what the call returned after the plugin
+went: quitting while one waited, the plugin's `FlutterWebRTC` went, libwebrtc ended in
+`~FlutterWebRTCBase` (`LibWebRTC::Terminate`, then its factory and threads), and the
+thread, once its call returned, read the transceiver or sender for its answer and let go
+of all it held, on libwebrtc already ended. The plugin now waits for them as it goes
+(`common/cpp/include/fogata_worker_fence.h`, tested by `common/cpp/test/worker_fence_test.cc`
+under ThreadSanitizer):
+
+- `common/cpp/src/flutter_peerconnection.cc` (`AddTransceiver`, `AddTrack`): everything
+  of libwebrtc's a call holds (the connection, the track, the init, the transceiver or
+  sender it returns) and its result are in one place. A thread that starts after the
+  plugin started going makes no call and keeps them; one whose call returns after the
+  plugin stopped waiting for it reads nothing, answers nobody and keeps them; any other
+  lets go of them before the plugin's wait returns.
+- `common/cpp/src/flutter_webrtc.cc`: `~FlutterWebRTC`, after closing the gate and before
+  libwebrtc ends, refuses every later thread and waits up to 2 s for those in their call
+  (the first audio sender's set-up takes about 600 ms). One still in its call then is
+  left in it (nothing can take it out, and libwebrtc ends under that call as before),
+  with a line on standard error; once the call returns, it keeps what it holds for good.
+  The wait covers a call that takes up to 2 s, which a stalled signalling thread can
+  exceed. One whose call had returned is
+  waited for to its end, with no limit of the plugin's own: its call returned, so
+  libwebrtc's signalling thread was answering, and the application ends the process 10 s
+  after a quit begins in any case.
+- These two are the plugin's only threads that hold libwebrtc's objects. On Linux they
+  run on the platform thread, so there is never one to wait for.
+
 ## The voice engine stays (all platforms)
 
 WebRTC M156 starts its voice engine with the first connection and stops it when the last

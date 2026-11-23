@@ -672,43 +672,71 @@ void FlutterPeerConnection::AddTransceiver(
 
   // Fogata: held for the call, which may run on a thread of its own (below): the
   // application can close and dispose of the connection meanwhile, and the map
-  // entry that kept it was its last hold.
-  scoped_refptr<RTCPeerConnection> held(pc);
+  // entry that kept it was its last hold. Everything of libwebrtc's the call holds is
+  // in one place, let go of while the plugin is there or never: the plugin waits for
+  // the call as it goes, before libwebrtc ends, and one still running at its limit
+  // keeps what it holds (fogata_worker_fence.h).
+  struct Held {
+    scoped_refptr<RTCPeerConnection> pc;
+    scoped_refptr<RTCMediaTrack> track;
+    scoped_refptr<RTCRtpTransceiverInit> init;
+    scoped_refptr<RTCRtpTransceiver> transceiver;
+    std::shared_ptr<MethodResultProxy> result;
+  };
+  auto held = std::make_unique<Held>();
+  held->pc = pc;
+  held->track = track;
+  held->init = init;
+  held->result = std::move(result_ptr);
   // Fogata: answered only while the plugin is there: on Windows the call below runs
   // on a thread of its own, which the application can outlive (quitting while a
   // transceiver is being added), and its answer goes through the plugin's task runner.
   std::shared_ptr<AnswerGate> gate = base_->answer_gate_;
+  std::shared_ptr<WorkerFence> fence = base_->worker_fence_;
 
   // The actual libwebrtc call + result completion. pc->AddTransceiver() is a
   // proxy that BLOCKS the caller until the signaling thread finishes it.
-  auto do_add = [held, track, type, has_init, init, result_ptr, gate]() {
-    RTCPeerConnection* pc = held.get();
-    scoped_refptr<RTCRtpTransceiver> transceiver;
+  auto do_add = [held = std::move(held), type, has_init, gate, fence]() mutable {
+    if (!fence->Enter()) {
+      // The plugin is going and libwebrtc may already have ended: no call, and
+      // nothing let go of.
+      WorkerFence::Keep(std::move(held));
+      return;
+    }
+    RTCPeerConnection* pc = held->pc.get();
+    RTCMediaTrack* track = held->track.get();
     if (has_init) {
-      transceiver = track.get() != nullptr ? pc->AddTransceiver(track.get(), init)
-                                           : pc->AddTransceiver(type, init);
+      held->transceiver = track != nullptr ? pc->AddTransceiver(track, held->init)
+                                           : pc->AddTransceiver(type, held->init);
     } else {
-      transceiver = track.get() != nullptr ? pc->AddTransceiver(track.get())
-                                           : pc->AddTransceiver(type);
+      held->transceiver =
+          track != nullptr ? pc->AddTransceiver(track) : pc->AddTransceiver(type);
+    }
+    if (!fence->Returned()) {
+      // The plugin stopped waiting for this call: libwebrtc may have ended. Nothing of
+      // it is read or let go of, and nobody is answered.
+      WorkerFence::Keep(std::move(held));
+      return;
     }
     // Fogata: the answer's map asks libwebrtc (and waits on its signalling thread),
     // so it is made before the gate's lock: the plugin closing the gate never waits
     // for it.
     std::optional<EncodableValue> answer;
-    if (nullptr != transceiver.get()) {
-      answer = EncodableValue(transceiverToMap(transceiver));
+    if (nullptr != held->transceiver.get()) {
+      answer = EncodableValue(transceiverToMap(held->transceiver));
     }
+    MethodResultProxy* result = held->result.get();
     AnswerIfOpen(*gate, [&] {
       if (answer) {
-        result_ptr->Success(std::move(*answer));
+        result->Success(std::move(*answer));
       } else if (has_init) {
-        result_ptr->Error("AddTransceiver(track | mediaType, init)",
-                          "AddTransceiver error");
+        result->Error("AddTransceiver(track | mediaType, init)",
+                      "AddTransceiver error");
       } else {
-        result_ptr->Error("AddTransceiver(track, mediaType)",
-                          "AddTransceiver error");
+        result->Error("AddTransceiver(track, mediaType)", "AddTransceiver error");
       }
     });
+    fence->Leave(std::move(held));
   };
 
 #ifdef _WIN32
@@ -1223,36 +1251,57 @@ void FlutterPeerConnection::AddTrack(
   // The actual libwebrtc call + result completion. pc->AddTrack() is a proxy
   // that BLOCKS the caller until the signaling thread finishes it (which, for a
   // first audio track, includes the cold RTP-sender/encoder/APM init).
-  // Fogata: held for the call, as in AddTransceiver.
-  scoped_refptr<RTCPeerConnection> held(pc);
+  // Fogata: held for the call, and let go of while the plugin is there or never, as
+  // in AddTransceiver.
+  struct Held {
+    scoped_refptr<RTCPeerConnection> pc;
+    scoped_refptr<RTCMediaTrack> track;
+    scoped_refptr<RTCRtpSender> sender;
+    std::shared_ptr<MethodResultProxy> result;
+  };
+  auto held = std::make_unique<Held>();
+  held->pc = pc;
+  held->track = track;
+  held->result = std::move(result_ptr);
   // Fogata: answered only while the plugin is there, as in AddTransceiver.
   std::shared_ptr<AnswerGate> gate = base_->answer_gate_;
-  auto do_add = [held, track, streamIds, result_ptr, gate]() {
-    RTCPeerConnection* pc = held.get();
+  std::shared_ptr<WorkerFence> fence = base_->worker_fence_;
+  auto do_add = [held = std::move(held), streamIds, gate, fence]() mutable {
+    if (!fence->Enter()) {
+      WorkerFence::Keep(std::move(held));
+      return;
+    }
+    RTCPeerConnection* pc = held->pc.get();
+    RTCMediaTrack* track = held->track.get();
     std::string kind = track->kind().std_string();
-    scoped_refptr<RTCRtpSender> sender;
     if (0 == kind.compare("audio")) {
-      sender =
-          pc->AddTrack(reinterpret_cast<RTCAudioTrack*>(track.get()), streamIds);
+      held->sender =
+          pc->AddTrack(reinterpret_cast<RTCAudioTrack*>(track), streamIds);
     } else if (0 == kind.compare("video")) {
-      sender =
-          pc->AddTrack(reinterpret_cast<RTCVideoTrack*>(track.get()), streamIds);
+      held->sender =
+          pc->AddTrack(reinterpret_cast<RTCVideoTrack*>(track), streamIds);
+    }
+    if (!fence->Returned()) {
+      WorkerFence::Keep(std::move(held));
+      return;
     }
     // Fogata: made before the gate's lock, as for addTransceiver.
     std::optional<EncodableValue> answer;
-    if (sender.get() != nullptr) {
-      answer = EncodableValue(rtpSenderToMap(sender));
+    if (held->sender.get() != nullptr) {
+      answer = EncodableValue(rtpSenderToMap(held->sender));
     }
+    MethodResultProxy* result = held->result.get();
     AnswerIfOpen(*gate, [&] {
       if (answer) {
-        result_ptr->Success(std::move(*answer));
+        result->Success(std::move(*answer));
       } else {
         // Fogata: no sender (a closed connection, a track of another kind) is an
         // error, as for addTransceiver: an empty success made the Dart side read a
         // sender from nothing (a TypeError instead of the plugin's error).
-        result_ptr->Error("AddTrack", "AddTrack error");
+        result->Error("AddTrack", "AddTrack error");
       }
     });
+    fence->Leave(std::move(held));
   };
 
 #ifdef _WIN32
