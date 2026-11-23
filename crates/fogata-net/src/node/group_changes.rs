@@ -299,19 +299,22 @@ impl Node {
         self.emit(NodeEvent::GroupChanged(group));
     }
 
-    /// At each check of the links: after a banner or picture record was lost on its way to
-    /// a member that still keeps them, the record to send goes to it once it is due (see
-    /// `RecordSent::due_again`).
+    /// At each check of the links: after a banner or picture record was lost to a member
+    /// that still keeps them, the record to send goes to it once it is due (see
+    /// `RecordSent::due_again`): one dropped before it left once the member's outbox has
+    /// none waiting, so that it pushes out no other request, a newer one at once.
     pub(super) fn send_lost_records(&mut self) {
         let groups: Vec<GroupId> = self.groups.keys().copied().collect();
         for group in groups {
             let Some(slot) = self.groups.get(&group) else {
                 continue;
             };
+            let outbox = &self.outbox;
+            let room = |p: &PeerId| outbox.get(p).is_none_or(|o| o.waiting.is_empty());
             let due = |peers: &HashSet<PeerId>, sent: &HashMap<PeerId, RecordSent>, digest| {
                 (peers.iter())
                     .filter(|p| slot.members.contains(p))
-                    .filter(|p| sent.get(p).is_some_and(|s| s.due_again(&digest)))
+                    .filter(|p| sent.get(p).is_some_and(|s| s.due_again(&digest, room(p))))
                     .copied()
                     .collect::<Vec<PeerId>>()
             };

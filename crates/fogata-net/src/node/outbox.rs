@@ -120,7 +120,7 @@ impl Node {
                 dropped.push(kind);
             }
             for kind in dropped {
-                self.request_dropped(peer, kind);
+                self.request_unsent(peer, kind);
             }
             return;
         }
@@ -188,19 +188,9 @@ impl Node {
                     slot.room_asked.remove(&peer);
                 }
             }
-            // No longer on its way: the same banner or picture goes again a little later, a
-            // newer one chosen meanwhile at once, at the next check of the links (see
-            // `RecordSent::due_again`), or at the member's next roster.
-            Pending::Banner(group, digest) => {
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.banner_lost(peer, digest);
-                }
-            }
-            Pending::Picture(group, digest) => {
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.picture_lost(peer, digest);
-                }
-            }
+            // Failed on its way: it may have got there, and only its answer be what was lost
+            // (see `record_lost`). One dropped unsent goes to `request_unsent` instead.
+            Pending::Banner(..) | Pending::Picture(..) => self.record_lost(peer, kind, false),
             // Sent again at the next roster that asks for them.
             Pending::Sync(group) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
@@ -222,6 +212,37 @@ impl Node {
         }
     }
 
+    /// A member request to `peer` dropped before it went: past the outbox's bounds, or its
+    /// last connection closed while it waited. A banner or picture record never got there.
+    fn request_unsent(&mut self, peer: PeerId, kind: Pending) {
+        match kind {
+            Pending::Banner(..) | Pending::Picture(..) => self.record_lost(peer, kind, true),
+            kind => self.request_dropped(peer, kind),
+        }
+    }
+
+    /// A banner or picture record's request to `peer` was lost. One that failed on its way
+    /// (no answer in time, its connection closed) may have got there, and only its answer
+    /// be what was lost: the same record goes again a little later only at a roster of the
+    /// member that names another. One dropped before it left (`unsent`) goes again unasked
+    /// at a check of the links once the peer's outbox has room; a newer one chosen meanwhile
+    /// at once either way (see `RecordSent::due_again`).
+    fn record_lost(&mut self, peer: PeerId, kind: Pending, unsent: bool) {
+        match kind {
+            Pending::Banner(group, digest) => {
+                if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.banner_lost(peer, digest, unsent);
+                }
+            }
+            Pending::Picture(group, digest) => {
+                if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.picture_lost(peer, digest, unsent);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// `peer`'s last connection closed: the member requests waiting for it are dropped,
     /// and this device's presence is sent anew when it is a member again.
     pub(super) fn requests_peer_gone(&mut self, peer: PeerId) {
@@ -234,7 +255,7 @@ impl Node {
             })
             .unwrap_or_default();
         for (_, kind) in waiting {
-            self.request_dropped(peer, kind);
+            self.request_unsent(peer, kind);
         }
         if let Some(outbox) = self.outbox.get_mut(&peer) {
             outbox.direct.clear();
@@ -463,6 +484,43 @@ mod tests {
         }
     }
 
+    /// The banners and picture records waiting their turn to go to `peer`.
+    fn records_waiting(n: &Node, peer: PeerId) -> (usize, usize) {
+        let waiting = n.outbox.get(&peer).map(|o| &o.waiting);
+        let count = |banner: bool| {
+            (waiting.into_iter().flatten())
+                .filter(|(_, kind)| {
+                    if banner {
+                        matches!(kind, Pending::Banner(..))
+                    } else {
+                        matches!(kind, Pending::Picture(..))
+                    }
+                })
+                .count()
+        };
+        (count(true), count(false))
+    }
+
+    /// A roster ask of `peer`'s, naming the banner and picture record it has: the group's
+    /// own when `has_them`, others when not.
+    fn roster_of(n: &mut Node, group: GroupId, peer: PeerId, has_them: bool) {
+        let slot = &n.groups[&group];
+        let named = |digest: Vec<u8>| {
+            Some(serde_bytes::ByteBuf::from(if has_them {
+                digest
+            } else {
+                vec![0; 16]
+            }))
+        };
+        let ask = MemberRequest::Roster {
+            group_id: group.as_bytes().to_vec(),
+            heads: None,
+            banner: named(slot.ctx.banner_digest().to_vec()),
+            picture: named(slot.ctx.picture_digest().to_vec()),
+        };
+        n.on_request(peer, ask);
+    }
+
     /// Takes `ago` off when the records to `peer` last went or were lost, as if that much
     /// time had passed since.
     fn records_age(n: &mut Node, group: GroupId, peer: PeerId, ago: Duration) {
@@ -513,18 +571,13 @@ mod tests {
             n.send_picture_to(group, &[bea]);
             lose_records(n, bea);
             records_age(n, group, bea, Duration::from_secs(2));
-            n.send_lost_records();
+            roster_of(n, group, bea, false);
             let again = records_to(n, bea);
-            let roster = || MemberRequest::Roster {
-                group_id: group.as_bytes().to_vec(),
-                heads: None,
-                banner: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
-                picture: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
-            };
             let mut at_rosters = Vec::new();
+            // 61 s after it went again, then 301 s.
             for ago in [61, 60 * 4] {
                 records_age(n, group, bea, Duration::from_secs(ago));
-                n.on_request(bea, roster());
+                roster_of(n, group, bea, false);
                 n.send_lost_records();
                 at_rosters.push(records_to(n, bea));
             }
@@ -535,10 +588,10 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
-    /// A record lost on its way goes again unasked, at the next check of the links once it
-    /// is due: 2, 4, 8 and 16 s after each loss in a row, not before; past four losses in a
-    /// row only as a record that got there does. One that gets there, answered, starts the
-    /// count afresh.
+    /// A record lost on its way goes again at a roster of the member that names another
+    /// one, once it is due: 2, 4, 8 and 16 s after each loss in a row, not before; past four
+    /// losses in a row only as a record that got there does. One that gets there, answered,
+    /// starts the count afresh.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_record_lost_on_its_way_goes_again_soon_a_few_times() {
         let (node, group) = lone_member();
@@ -551,10 +604,10 @@ mod tests {
                 lose_records(n, bea);
                 // Not before its time.
                 records_age(n, group, bea, Duration::from_secs(wait - 1));
-                n.send_lost_records();
+                roster_of(n, group, bea, false);
                 let early = records_to(n, bea);
                 records_age(n, group, bea, Duration::from_secs(1));
-                n.send_lost_records();
+                roster_of(n, group, bea, false);
                 tries.push((early, records_to(n, bea)));
             }
             // Answered at last: the next loss counts as the first again.
@@ -572,7 +625,7 @@ mod tests {
             n.send_banner_to(group, &[bea]);
             lose_records(n, bea);
             records_age(n, group, bea, Duration::from_secs(2));
-            n.send_lost_records();
+            roster_of(n, group, bea, false);
             (tries, after_answer, records_to(n, bea).0)
         })
         .await;
@@ -597,7 +650,7 @@ mod tests {
             for wait in [2, 4, 8, 16] {
                 lose_records(n, bea);
                 records_age(n, group, bea, Duration::from_secs(wait));
-                n.send_lost_records();
+                roster_of(n, group, bea, false);
             }
             // The fifth try is lost once the request timed out, 20 s after it went: the
             // five minutes run from when it went.
@@ -643,6 +696,104 @@ mod tests {
         .await;
         let (none, both) = ((0, 0), (1, 1));
         assert_eq!(found, (vec![none, both, none, none, both, none], (1, 0)));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A record that failed on its way may have got there, only its answer lost: it is not
+    /// sent again unasked, however often the copy it would send fails too, and goes again
+    /// only to a member whose roster names another record, never to one whose roster names
+    /// it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_that_may_have_got_there_goes_again_only_to_a_member_without_it() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let (bea, cai) = (with_records(n, group), with_records(n, group));
+            n.send_banner_to(group, &[bea, cai]);
+            n.send_picture_to(group, &[bea, cai]);
+            // Bea took both, and each answer was lost; the links are checked every 2 s.
+            let mut copies = (0, 0);
+            for _ in 0..30 {
+                lose_records(n, bea);
+                records_age(n, group, bea, Duration::from_secs(2));
+                n.send_lost_records();
+                let (banners, pictures) = records_to(n, bea);
+                copies = (copies.0 + banners, copies.1 + pictures);
+            }
+            // Its roster names both: nothing goes.
+            roster_of(n, group, bea, true);
+            let bea_roster = records_to(n, bea);
+            // Cai lacks both: they go at its roster.
+            lose_records(n, cai);
+            records_age(n, group, cai, Duration::from_secs(20));
+            n.send_lost_records();
+            let unasked = records_to(n, cai);
+            roster_of(n, group, cai, false);
+            (copies, bea_roster, unasked, records_to(n, cai))
+        })
+        .await;
+        assert_eq!(found, ((0, 0), (0, 0), (0, 0), (1, 1)));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A record dropped before it left, from a member's full outbox, is counted apart from
+    /// one that failed on its way: it goes again unasked 2 s later once nothing waits for
+    /// that member, so that it pushes out no other request, however often it was dropped,
+    /// and its quick tries stay as they were.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_dropped_from_a_full_outbox_goes_again_once_there_is_room() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.outbox.entry(bea).or_default().in_flight = IN_FLIGHT;
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            let fill = |n: &mut Node| {
+                for _ in 0..MAX_WAITING {
+                    n.request(bea, empty_push(group), Pending::Push);
+                }
+            };
+            let drain = |n: &mut Node| {
+                let outbox = n.outbox.get_mut(&bea).unwrap();
+                outbox.waiting.clear();
+                outbox.waiting_bytes = 0;
+            };
+            let second = Duration::from_secs(1);
+            let mut rounds = Vec::new();
+            for _ in 0..6 {
+                // Requests that fill the outbox push both out.
+                fill(n);
+                let pushed_out = records_waiting(n, bea);
+                // A second after: not yet, though nothing waits.
+                records_age(n, group, bea, second);
+                drain(n);
+                n.send_lost_records();
+                let early = records_waiting(n, bea);
+                // Two seconds after: not while the outbox is full, which would push out
+                // another request.
+                fill(n);
+                records_age(n, group, bea, second);
+                n.send_lost_records();
+                let full = records_waiting(n, bea);
+                let others = n.outbox[&bea].waiting.len();
+                // Once it drained, both go, waiting their turn.
+                drain(n);
+                n.send_lost_records();
+                rounds.push((pushed_out, early, full, others, records_waiting(n, bea)));
+            }
+            let slot = &n.groups[&group];
+            let sent = (slot.banner_sent[&bea], slot.picture_sent[&bea]);
+            (
+                rounds,
+                (sent.0.lost, sent.0.unsent),
+                (sent.1.lost, sent.1.unsent),
+            )
+        })
+        .await;
+        let (rounds, banner, picture) = found;
+        let none = (0, 0);
+        let round = (none, none, none, MAX_WAITING, (1, 1));
+        assert_eq!(rounds, vec![round; 6]);
+        assert_eq!((banner, picture), ((0, 6), (0, 6)));
         node.shutdown().await.unwrap();
     }
 }

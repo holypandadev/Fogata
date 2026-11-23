@@ -652,16 +652,20 @@ struct PartsIn {
 }
 
 /// A group's banner or picture record sent to a member: its digest, when it went (or was
-/// lost on its way), whether it is no longer on its way, and how many times in a row it was
-/// lost before it got there. Each is up to a few hundred KiB, and a member's roster ask
-/// names the digest it has: a member could otherwise name another one at every ask and have
-/// this device upload the record for each.
+/// lost), whether it is no longer on its way, how many times in a row it failed on its way
+/// before it got there, and how many times in a row it was dropped before it left. Each is
+/// up to a few hundred KiB, and a member's roster ask names the digest it has: a member
+/// could otherwise name another one at every ask and have this device upload the record for
+/// each.
 #[derive(Clone, Copy, Debug)]
 struct RecordSent {
     digest: [u8; 32],
     at: Instant,
     answered: bool,
     lost: u8,
+    /// Dropped before it left, past the outbox's bounds or with the peer's last connection:
+    /// a count of its own, which does not hold the record back as a failure does.
+    unsent: u8,
 }
 
 /// How long a record sent to a member is not sent to it again with the same digest: a
@@ -671,11 +675,12 @@ const RECORD_AGAIN: Duration = Duration::from_secs(5 * 60);
 /// How long a request is taken to be still on its way at most: past the member protocol's
 /// request timeout (see behaviour.rs), whatever happened to it.
 const ON_ITS_WAY_AT_MOST: Duration = Duration::from_secs(60);
-/// A record lost on its way to a member (its connection closed, no answer in time, dropped
-/// unsent) goes to it again this long after, at the next check of the links, doubled at each
-/// loss in a row: 2, 4, 8 and 16 s. Past [`RECORD_LOST_TRIES`] losses, only after
-/// [`RECORD_AGAIN`], as one that got there; a member that has every request fail gets it
-/// a few more times, not once per check.
+/// A record that failed on its way to a member (its connection closed, no answer in time)
+/// may go to it again this long after, at a roster of the member that names another one,
+/// doubled at each failure in a row: 2, 4, 8 and 16 s. Past [`RECORD_LOST_TRIES`]
+/// failures, only after [`RECORD_AGAIN`], as one that got there; a member that has every
+/// request fail gets it a few more times, not at every roster. One dropped before it left
+/// goes again unasked, this long after, once the peer's outbox has room.
 const RECORD_LOST_AGAIN: Duration = Duration::from_secs(2);
 const RECORD_LOST_TRIES: u8 = 4;
 /// How long what is kept of a record lost on its way still counts, sent or lost last that
@@ -688,11 +693,13 @@ impl RecordSent {
     /// One sent now, not answered yet, `before` being what was sent before: the losses in a
     /// row of the same record still count.
     fn now(digest: [u8; 32], before: Option<&Self>) -> Self {
+        let before = before.filter(|b| b.digest == digest);
         Self {
             digest,
             at: Instant::now(),
             answered: false,
-            lost: before.filter(|b| b.digest == digest).map_or(0, |b| b.lost),
+            lost: before.map_or(0, |b| b.lost),
+            unsent: before.map_or(0, |b| b.unsent),
         }
     }
 
@@ -700,18 +707,33 @@ impl RecordSent {
     fn answered(&mut self) {
         self.answered = true;
         self.lost = 0;
+        self.unsent = 0;
     }
 
-    /// The record did not get there: it goes again a little later (see
-    /// [`RECORD_LOST_AGAIN`]), counted from now; past its quick tries, [`RECORD_AGAIN`]
-    /// after it went, as one that got there.
+    /// The record failed on its way: it may have got there all the same, and only its
+    /// answer be what was lost, so it goes again only at a roster of the member that names
+    /// another record, a little later (see [`RECORD_LOST_AGAIN`]), counted from now; past
+    /// its quick tries, [`RECORD_AGAIN`] after it went, as one that got there. Sent again
+    /// unasked, a member that has it would be sent a copy at each try.
     fn lost(&mut self) {
         if !self.answered {
             self.answered = true;
+            self.unsent = 0;
             self.lost = self.lost.saturating_add(1);
             if self.lost <= RECORD_LOST_TRIES {
                 self.at = Instant::now();
             }
+        }
+    }
+
+    /// The record was dropped before it left: it never got there, and goes again unasked
+    /// once the peer's outbox has room (see [`Self::due_again`]). Its failures on the way
+    /// stay as they were.
+    fn unsent(&mut self) {
+        if !self.answered {
+            self.answered = true;
+            self.unsent = self.unsent.saturating_add(1);
+            self.at = Instant::now();
         }
     }
 
@@ -724,16 +746,18 @@ impl RecordSent {
         }
     }
 
-    /// Whether a record should go now, unasked, after this one was lost on its way: the
-    /// same one (`digest` is still the one to send) once it is due, a newer one at once.
-    fn due_again(&self, digest: &[u8; 32]) -> bool {
-        if !self.answered || self.lost == 0 {
+    /// Whether a record should go now, unasked, `digest` being the one to send and `room`
+    /// whether the peer's outbox has none waiting: after this one was dropped before it
+    /// left, once there is room, [`RECORD_LOST_AGAIN`] later, without pushing out another
+    /// request; after it failed on its way, only a newer one, at once.
+    fn due_again(&self, digest: &[u8; 32], room: bool) -> bool {
+        if !self.answered {
             return false;
         }
-        if self.digest != *digest {
-            return true;
+        if self.unsent > 0 {
+            return room && self.at.elapsed() >= RECORD_LOST_AGAIN;
         }
-        self.lost <= RECORD_LOST_TRIES && self.at.elapsed() >= self.lost_again()
+        self.lost > 0 && self.digest != *digest
     }
 
     /// Whether a record with `digest` may go to a member that was sent `sent`, `refused`
@@ -746,6 +770,7 @@ impl RecordSent {
             Some(s) if !s.answered && s.at.elapsed() < ON_ITS_WAY_AT_MOST => false,
             // One that went and was never answered, nor lost, may still wait in the outbox.
             Some(s) if s.digest == *digest && !s.answered => s.at.elapsed() >= RECORD_AGAIN,
+            Some(s) if s.digest == *digest && s.unsent > 0 => s.at.elapsed() >= RECORD_LOST_AGAIN,
             Some(s) if s.digest == *digest => s.at.elapsed() >= s.lost_again(),
             Some(_) => true,
             None => true,
@@ -754,7 +779,7 @@ impl RecordSent {
 
     /// Whether what is kept of a record sent still counts.
     fn counts(&self) -> bool {
-        let kept = if self.lost > 0 {
+        let kept = if self.lost > 0 || self.unsent > 0 {
             RECORD_LOST_KEPT
         } else {
             RECORD_AGAIN
@@ -893,22 +918,22 @@ impl GroupSlot {
         }
     }
 
-    /// The banner with `digest` sent to member `peer` was lost on its way: it goes again
-    /// a little later (see [`RECORD_LOST_AGAIN`]).
-    fn banner_lost(&mut self, peer: PeerId, digest: [u8; 32]) {
+    /// The banner with `digest` sent to member `peer` failed on its way, or was dropped
+    /// before it left (`unsent`) (see [`RecordSent::lost`] and [`RecordSent::unsent`]).
+    fn banner_lost(&mut self, peer: PeerId, digest: [u8; 32], unsent: bool) {
         if let Some(sent) = self.banner_sent.get_mut(&peer)
             && sent.digest == digest
         {
-            sent.lost();
+            if unsent { sent.unsent() } else { sent.lost() }
         }
     }
 
-    /// The picture record with `digest` sent to member `peer` was lost on its way.
-    fn picture_lost(&mut self, peer: PeerId, digest: [u8; 32]) {
+    /// The picture record with `digest` sent to member `peer` was lost, as the banner.
+    fn picture_lost(&mut self, peer: PeerId, digest: [u8; 32], unsent: bool) {
         if let Some(sent) = self.picture_sent.get_mut(&peer)
             && sent.digest == digest
         {
-            sent.lost();
+            if unsent { sent.unsent() } else { sent.lost() }
         }
     }
 
