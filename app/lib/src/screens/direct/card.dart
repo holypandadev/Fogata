@@ -148,8 +148,11 @@ class _Card extends StatelessWidget {
   }
 }
 
-/// A bar split by what takes the space, each part in its colour.
-class _UsageBar extends StatelessWidget {
+/// A bar split by what takes the space, each part in its colour. The parts move together:
+/// each from where it was to its new share, so a part that appears grows from nothing, and
+/// what shows never takes more than the bar, nor less than nothing, while the springy curve
+/// overshoots.
+class _UsageBar extends StatefulWidget {
   const _UsageBar({
     required this.parts,
     required this.total,
@@ -162,25 +165,82 @@ class _UsageBar extends StatelessWidget {
   final double height;
 
   @override
+  State<_UsageBar> createState() => _UsageBarState();
+}
+
+class _UsageBarState extends State<_UsageBar>
+    with SingleTickerProviderStateMixin {
+  late final _move = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 450),
+  );
+  late List<double> _from = _shares();
+  late List<double> _to = _from;
+
+  /// Each part's share of the bar.
+  List<double> _shares() => [
+    for (final (size, _) in widget.parts)
+      size > 0 && widget.total > 0 ? math.min(1.0, size / widget.total) : 0.0,
+  ];
+
+  /// The shares shown now: between where they were and where they go, none below
+  /// nothing, and all together never past the whole bar.
+  List<double> _shown() {
+    final t = spring.transform(_move.value);
+    final shown = [
+      for (var i = 0; i < _to.length; i++)
+        math.max(
+          0.0,
+          (i < _from.length ? _from[i] : 0.0) * (1 - t) + _to[i] * t,
+        ),
+    ];
+    final sum = shown.fold(0.0, (a, b) => a + b);
+    return sum > 1 ? [for (final s in shown) s / sum] : shown;
+  }
+
+  @override
+  void didUpdateWidget(_UsageBar old) {
+    super.didUpdateWidget(old);
+    final next = _shares();
+    if (next.length == _to.length &&
+        Iterable.generate(next.length).every((i) => next[i] == _to[i])) {
+      return;
+    }
+    _from = _shown();
+    _to = next;
+    _move.forward(from: 0);
+  }
+
+  @override
+  void dispose() {
+    _move.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final c = context.fg;
     return ClipRRect(
       borderRadius: BorderRadius.circular(999),
       child: Container(
-        height: height,
+        height: widget.height,
         color: c.border,
         child: LayoutBuilder(
-          builder: (context, box) => Row(
-            children: [
-              for (final (size, color) in parts)
-                if (size > 0 && total > 0)
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 450),
-                    curve: spring,
-                    width: box.maxWidth * math.min(1, size / total),
-                    color: color,
-                  ),
-            ],
+          builder: (context, box) => AnimatedBuilder(
+            animation: _move,
+            builder: (context, _) {
+              final shown = _shown();
+              return Row(
+                children: [
+                  for (var i = 0; i < shown.length; i++)
+                    if (shown[i] > 0)
+                      Container(
+                        width: box.maxWidth * shown[i],
+                        color: widget.parts[i].$2,
+                      ),
+                ],
+              );
+            },
           ),
         ),
       ),
