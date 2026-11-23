@@ -909,6 +909,89 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// A member no longer connected in a group is no longer known to read that group's
+    /// keys: a line of the group does not go to it, and its `Ack` lets it go of nothing,
+    /// until it proves itself again; then the line goes at once, whatever went to it before.
+    /// What is known of it in another group, and what went to it there, stays.
+    #[test]
+    fn a_member_gone_is_known_to_read_again_only_once_it_proves_itself() {
+        let (ana, log, keys) = group();
+        let other = GroupLog::create(&ana, "h", 1).unwrap();
+        let other_keys = other.current_keys(&ana).unwrap();
+        let (group, elsewhere) = (log.group_id(), other.group_id());
+        let bea = someone();
+        let file = TempFile::new("gone");
+        let key = DataKey::generate().unwrap();
+        let mut kept = KeptLines::open(file.0.clone(), key, true, now_ms());
+        let (id, wire) = line(&keys, &ana, "here", now_ms());
+        let (other_id, other_wire) = line(&other_keys, &ana, "there", now_ms());
+        let to_bea = BTreeSet::from([bea]);
+        kept.read(group, bea, vec![keys.epoch()]);
+        kept.read(elsewhere, bea, vec![other_keys.epoch()]);
+        // Both went to her just now.
+        kept.keep(group, id, &wire, to_bea.clone(), &to_bea);
+        kept.keep(elsewhere, other_id, &other_wire, to_bea.clone(), &to_bea);
+        let now = Instant::now();
+        assert!(kept.due_to(group, &bea, now).is_empty());
+        kept.member_gone(group, &bea);
+        assert!(!kept.knows(group, &bea, keys.epoch()));
+        assert!(kept.due_to(group, &bea, now).is_empty());
+        kept.answered(&id, &bea, true);
+        assert_eq!(owed(&kept, group, &bea), 1);
+        // Her other group is as it was: known, and not due again before its time.
+        assert!(kept.knows(elsewhere, &bea, other_keys.epoch()));
+        assert!(kept.due_to(elsewhere, &bea, now).is_empty());
+        assert_eq!(owed(&kept, elsewhere, &bea), 1);
+        // She proves herself again: the line is due at once, not a minute after it went.
+        kept.read(group, bea, vec![keys.epoch()]);
+        let due: Vec<[u8; 16]> = (kept.due_to(group, &bea, Instant::now()).into_iter())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(due, vec![id]);
+        kept.answered(&id, &bea, true);
+        assert_eq!(owed(&kept, group, &bea), 0);
+    }
+
+    /// A line whose request to a member did not get there goes to it again at the next
+    /// heartbeat, not a minute after it went, and only once; a request to another member,
+    /// or of a peer that is no member, changes nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_that_did_not_get_there_goes_again_at_the_next_heartbeat() {
+        let (ana, mut log, _) = group();
+        let (bea, cai) = (someone(), someone());
+        log.add(&ana, bea, "bea", 2).unwrap();
+        log.add(&ana, cai, "cai", 3).unwrap();
+        let group = log.group_id();
+        let keys = log.current_keys(&ana).unwrap();
+        let epoch = keys.epoch();
+        let (node, _events) = node(&ana, log);
+        let file = TempFile::new("unsent");
+        let (path, key) = (file.0.clone(), DataKey::generate().unwrap());
+        let (id, wire) = line(&keys, &ana, "lost on the way", now_ms());
+        let found = inspect(&node, move |n| {
+            n.keep_own_lines(path, key, true);
+            let to_bea = connect(n, group, bea);
+            let to_cai = connect(n, group, cai);
+            n.kept_proved(group, to_bea, epoch);
+            n.kept_proved(group, to_cai, epoch);
+            // Said while both are connected: it goes to them now.
+            n.keep_line(group, FIRST_ROOM, id, &wire);
+            n.kept_heartbeat();
+            let before = [sent(n, to_bea, id), sent(n, to_cai, id)];
+            n.kept_unsent(to_bea, id);
+            n.kept_unsent(to_cai, [9; 16]);
+            n.kept_unsent(PeerId::random(), id);
+            n.kept_heartbeat();
+            let after = [sent(n, to_bea, id), sent(n, to_cai, id)];
+            n.kept_heartbeat();
+            let once = [sent(n, to_bea, id), sent(n, to_cai, id)];
+            (before, after, once)
+        })
+        .await;
+        assert_eq!(found, ([0, 0], [1, 0], [1, 0]));
+        node.shutdown().await.unwrap();
+    }
+
     /// A line is owed to the members in its room: one listed there, or let go of it without
     /// a leave (cut off, as a closed lid is), but not one that never entered it nor one that
     /// left it saying so; and one that comes back and leaves saying so is let go of it.
