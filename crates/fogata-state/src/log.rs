@@ -14,11 +14,11 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     banner::GroupBanner,
-    budget::{RUN_ROOM, RunRoom},
+    budget::{CEILING, RUN_ROOM, RunRoom},
     cache::{Cache, View},
     entry::{
-        Body, Entry, EntryHash, EpochId, InviteToken, MAX_ENTRY_BYTES, NamedInvite, Rotation,
-        Ticket, VoiceRoomId, commitment, epoch_number, secret_context,
+        Body, Entry, EntryHash, EpochId, InviteToken, MAX_ENTRY_BYTES, Moved, NamedInvite,
+        Rotation, Ticket, VoiceRoomId, commitment, epoch_number, secret_context,
     },
     picture::{GroupPicture, is_group_picture},
     record::{MAX_RECORD_AHEAD_MS, RecordStamp},
@@ -318,6 +318,8 @@ pub struct GroupLog {
     spare_room: Room,
     /// How much a device writes in a run ([`crate::budget`]; smaller in tests).
     pub(crate) run_room: RunRoom,
+    /// The most a log holds from level five ([`crate::budget`]; smaller in tests).
+    pub(crate) ceiling: RunRoom,
     /// Entries kept before they could be judged: they came before a parent, or on one not
     /// judged yet. Each is judged once all its parents are (see [`Self::insert`]).
     pub(crate) unjudged: BTreeSet<EntryHash>,
@@ -376,6 +378,7 @@ impl GroupLog {
             arrivals: 0,
             spare_room: SPARE_ROOM,
             run_room: RUN_ROOM,
+            ceiling: CEILING,
             unjudged: BTreeSet::new(),
             cache: Box::default(),
             ahead: None,
@@ -881,7 +884,11 @@ impl GroupLog {
                 continue;
             }
             if work.judged.contains(&hash) {
+                let orders_higher = self.orders_higher(entry);
                 self.unjudged.remove(&hash);
+                if orders_higher {
+                    self.work_out_again();
+                }
                 continue;
             }
             let view = match self.kept_view(entry) {
@@ -899,11 +906,16 @@ impl GroupLog {
                 },
             };
             let verdict = self.judge_in(entry, &view);
+            let entry = self.entries[&hash].clone();
             self.unjudged.remove(&hash);
+            // A `Level` entry judged now counts in the level the order is worked out at.
+            if verdict.is_ok() && self.orders_higher(&entry) {
+                self.work_out_again();
+            }
             if let Err(why) = verdict {
                 // Whatever batch brought it: those that waited from an earlier one were
                 // never judged then, so nobody answered for them yet.
-                work.refuse(entry, why);
+                work.refuse(&entry, why);
                 blocked.insert(hash);
                 refused.push(hash);
             }
@@ -939,7 +951,7 @@ impl GroupLog {
             // Levels three and four change none of that: the entries left out still change
             // no member, and the invites of level three are part of their runs.
             match state.level {
-                Level::Two | Level::Three | Level::Four => {
+                Level::Two | Level::Three | Level::Four | Level::Five => {
                     return Some(self.judge_on(entry, &state, &self.full().budget));
                 }
             }
@@ -961,10 +973,30 @@ impl GroupLog {
         view: &GroupState,
         budget: &crate::budget::Budget,
     ) -> Result<(), &'static str> {
+        // Level five, in a log ordered at it, whatever level its group is at: a `Moved`,
+        // which earlier levels keep as a kind they do not know, is judged as the move it is,
+        // and nothing is kept whose author saw the group move. (The ceiling is part of the
+        // runs: see [`crate::budget`].)
+        if view.moved.is_some() {
+            return Err(crate::state::MOVED_AWAY);
+        }
+        if let Some(moved) = Moved::of(&entry.body) {
+            // Whether its author could move the group where it wrote it, noted for where it
+            // goes: any other is a kind its author's level did not know, kept as one.
+            let moves = view.could_move(entry.author, &moved);
+            self.note_move(entry, moves.is_ok());
+            if view.log_level >= Level::Five {
+                moves?;
+                budget.allows(self, entry)?;
+                let place = &self.full().order.place;
+                let before = |h: &EntryHash| self.is_before(place, &entry.parents, h);
+                return view.allows(entry, None, &before);
+            }
+        }
         match view.level {
             Level::Two => self.judge_at_two(entry, view, budget),
             Level::Three => self.judge_at_three(entry, view, budget),
-            Level::Four => self.judge_at_four(entry, view, budget),
+            Level::Four | Level::Five => self.judge_at_four(entry, view, budget),
         }
     }
 
@@ -1580,6 +1612,38 @@ impl GroupLog {
         *judged
             .entry(*hash)
             .or_insert_with(|| view.seen_by(&self.entries[hash]))
+    }
+
+    /// Whether `Moved` entry `hash` is a move: its author saw the group at level five, and
+    /// could move it there (see [`GroupState::could_move`]). Any other is a kind its
+    /// author's level did not know, which never applies nor counts. Worked out once per
+    /// entry, where it is judged, and kept with what was judged of the log (as what a
+    /// rotation's author saw, [`Seen::needed`]).
+    pub(crate) fn moves(&self, hash: &EntryHash) -> bool {
+        let noted = (self.cache.judged.lock().unwrap_or_else(PoisonError::into_inner))
+            .get(hash)
+            .map(|seen| seen.needed);
+        if let Some(moves) = noted {
+            return moves;
+        }
+        let entry = &self.entries[hash];
+        let Some(moved) = Moved::of(&entry.body) else {
+            return false;
+        };
+        let moves = self.state_before(hash).could_move(entry.author, &moved).is_ok();
+        self.note_move(entry, moves);
+        moves
+    }
+
+    /// Notes whether `entry`, a `Moved`, is a move (see [`Self::moves`]).
+    fn note_move(&self, entry: &Entry, moves: bool) {
+        (self.cache.judged.lock().unwrap_or_else(PoisonError::into_inner))
+            .entry(entry.hash())
+            .or_insert(Seen {
+                needed: moves,
+                for_all: false,
+                bound: false,
+            });
     }
 
     /// The group as entry `hash` saw it: the state of the log made of everything before it
@@ -2419,12 +2483,15 @@ fn invite_ticket(body: &Body) -> Option<Ticket> {
     }
 }
 
+mod moved;
 mod verdicts;
 
+pub use moved::{ApartFromMove, LogFill, NOT_THE_SAME_GROUP, same_group};
 pub use verdicts::Verdicts;
 
 #[cfg(test)]
 mod tests {
+    mod ceiling;
     mod hostile;
     mod level;
 
@@ -5917,10 +5984,12 @@ mod tests {
             self
         }
 
-        /// A log that knows only the group, with the room for runs of this world's.
+        /// A log that knows only the group, with the room for runs and the ceiling of this
+        /// world's.
         fn empty_log(&self) -> GroupLog {
             let mut log = GroupLog::empty(self.logs[0].group_id());
             log.set_run_room(self.logs[0].run_room.entries, self.logs[0].run_room.bytes);
+            log.set_ceiling(self.logs[0].ceiling.entries, self.logs[0].ceiling.bytes);
             log
         }
 

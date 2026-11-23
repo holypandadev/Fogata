@@ -1832,7 +1832,7 @@ kept, never part of a group's log or a room's events, and nothing forwards it.
 ### 3.15 Capability levels
 
 Each version of Fogata's protocols has a level: every version before levels is 1, the one
-that brought them 2, the one of level three of the group log 3, this one 4 (level four of the group log, 5.1). A device lists `/fogata/caps/<level>` among its protocols (identify); a stream opened on
+that brought them 2, the one of level three of the group log 3, the one of level four 4, this one 5 (level five of the group log, 5.1). A device lists `/fogata/caps/<level>` among its protocols (identify); a stream opened on
 it is closed at once, so nothing new goes on the wire and earlier versions only see one more
 protocol name. A peer that lists none is level 1; the highest level named counts. Like every
 Fogata protocol, it is listed only to members and friends: a peer that dialled this device

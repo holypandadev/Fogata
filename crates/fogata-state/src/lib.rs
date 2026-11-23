@@ -22,17 +22,19 @@ pub mod work;
 
 pub use activity::{Activity, Did, UndoneBy};
 pub use banner::{BannerKind, GroupBanner, MAX_BANNER_BYTES, is_banner_picture};
-pub use budget::{MAX_RUN_BYTES, MAX_RUN_ENTRIES, PAST_RUN};
+pub use budget::{
+    CEILING_BYTES, CEILING_ENTRIES, MAX_RUN_BYTES, MAX_RUN_ENTRIES, PAST_CEILING, PAST_RUN,
+};
 pub use chain::{Chain, Link, MIN_UPDATE_GAP_MS, Verdict};
 pub use entry::{
     Body, Changes, Entry, EntryHash, EpochId, EpochLink, FIRST_MLS_KIND, FIRST_ROOM, InviteToken,
-    MAX_KEY_PACKAGE_BYTES, NAMED_INVITE_KIND, NamedInvite, PayloadDigest, Rotation, Ticket,
-    VoiceRoomId, commitment, epoch_number, invite_rendezvous, payload_digest,
+    MAX_KEY_PACKAGE_BYTES, MOVED_KIND, Moved, NAMED_INVITE_KIND, NamedInvite, PayloadDigest,
+    Rotation, Ticket, VoiceRoomId, commitment, epoch_number, invite_rendezvous, payload_digest,
 };
 pub use fogata_crypto::codec::DecodeError;
 pub use log::{
-    GroupLog, JOIN_ON_SPARE, KeyProblem, RAISE_LEVEL_ONLY, StateError, TICKET_EXPIRED, Taken,
-    Verdicts,
+    ApartFromMove, GroupLog, JOIN_ON_SPARE, KeyProblem, LogFill, NOT_THE_SAME_GROUP, RAISE_LEVEL_ONLY, StateError,
+    TICKET_EXPIRED, Taken, Verdicts, same_group,
 };
 pub use picture::{
     GroupPicture, MAX_RECORD_PICTURE_BYTES, PictureKind, is_group_picture, is_record_picture,
@@ -46,6 +48,7 @@ pub use room::{
 pub use state::{
     Barrier, Caps, Epoch, GroupState, KeptOut, LEVEL_NOT_HIGHER, LEVEL_UNKNOWN, Level,
     MAX_GROUP_NAME_CHARS, MAX_IN_ROOM, MAX_MEMBER_NAME_CHARS, MAX_MEMBERS, MAX_PICTURE_BYTES,
-    MAX_ROOM_NAME_CHARS, MAX_ROOMS, MLS_NOT_YET, Managers, Member, ROTATE_NOT_NEEDED, RoomRules,
-    VoiceRoom, WELCOME_NOT_MANAGER, fair_name, hiding_mark,
+    MAX_ROOM_NAME_CHARS, MAX_ROOMS, MLS_NOT_YET, MOVED_AWAY, MOVED_NOT_FIRST, NOT_A_MOVE,
+    Managers, Member, ROTATE_NOT_NEEDED, RoomRules, VoiceRoom, WELCOME_NOT_MANAGER, fair_name,
+    hiding_mark,
 };

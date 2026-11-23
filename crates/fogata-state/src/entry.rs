@@ -49,6 +49,11 @@ const LEVEL_KIND: u8 = 25;
 /// the kinds it does not know; only a group judged at level three or later reads it.
 pub const NAMED_INVITE_KIND: u8 = 26;
 
+/// The kind of a [`Moved`]: the group moved to a new log. Levels before five do not know it,
+/// so it stays a [`Body::Unknown`] as it reads, judged as a kind they do not know; only a
+/// group judged at level five or later reads it.
+pub const MOVED_KIND: u8 = 27;
+
 /// Digest of an MLS message kept beside the log (a Commit, a Welcome): the entry that
 /// carries it signs this, not the bytes, which can go once nobody needs them.
 pub type PayloadDigest = [u8; 32];
@@ -983,6 +988,55 @@ impl NamedInvite {
     /// Whether `device` may let in the device invited: the issuer or a manager named.
     pub fn lets_in(&self, device: &DevicePublicKey) -> bool {
         *device == self.ticket.issuer || self.welcomers.contains(device)
+    }
+}
+
+/// The group moved to a new log: the first member, in a group judged at level five or later,
+/// wrote a new group that starts as this one is where this entry is signed (the same
+/// members, names, ladder, managers, rooms and rules, with new keys), so that a log grown
+/// full, or too long, starts small again. Nothing applies here after it; the members
+/// follow to the new group (see [`crate::GroupLog::moved`]).
+///
+/// It travels as a [`Body::Unknown`] of kind [`MOVED_KIND`], like a [`NamedInvite`]: copies
+/// before level five keep it as a kind they do not know, and never see it applied, since
+/// they stop at the raise to five before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Moved {
+    /// The new group's id.
+    pub to: GroupId,
+    /// The last entry the new log starts with, which every entry of that start is before:
+    /// it fixes the start, so a member takes no other.
+    pub setup: EntryHash,
+}
+
+impl Moved {
+    /// The body that carries this move.
+    pub fn body(&self) -> Body {
+        let mut w = Writer::default();
+        w.raw(self.to.as_bytes()).raw(&self.setup);
+        Body::Unknown {
+            kind: MOVED_KIND,
+            bytes: w.into_bytes(),
+        }
+    }
+
+    /// The move `body` carries, if it is one in the one encoding [`Self::body`] writes.
+    pub fn of(body: &Body) -> Option<Self> {
+        let Body::Unknown {
+            kind: MOVED_KIND,
+            bytes,
+        } = body
+        else {
+            return None;
+        };
+        let mut r = Reader::new(bytes);
+        let to: [u8; 16] = r.array().ok()?;
+        let setup = r.array().ok()?;
+        r.finish().ok()?;
+        Some(Self {
+            to: GroupId::from_bytes(&to).ok()?,
+            setup,
+        })
     }
 }
 

@@ -7,7 +7,7 @@ pub use fogata_crypto::names::hiding_mark;
 use fogata_crypto::{DevicePublicKey, GroupId, names::tidy};
 
 use crate::entry::{
-    Body, Entry, EntryHash, EpochId, FIRST_ROOM, InviteToken, NamedInvite, Rotation, Ticket,
+    Body, Entry, EntryHash, EpochId, FIRST_ROOM, InviteToken, Moved, NamedInvite, Rotation, Ticket,
     VoiceRoomId, epoch_number,
 };
 
@@ -55,6 +55,17 @@ pub const LEVEL_UNKNOWN: &str = "a level this version does not judge at";
 
 /// Why a `Level` entry that does not raise the group's level is ignored.
 pub const LEVEL_NOT_HIGHER: &str = "not above the group's level";
+
+/// Why, from level five, nothing applies after the group moved to a new log (see
+/// [`Moved`]), nor is kept where its author saw it move.
+pub const MOVED_AWAY: &str = "the group moved to a new log";
+
+/// Why, from level five, a [`Moved`] by anyone but the first member is ignored.
+pub const MOVED_NOT_FIRST: &str = "only the first member moves the group";
+
+/// Why, from level five, a [`Moved`] is ignored where its author could not move the group as
+/// it saw it (not its first member, or not at five), or left the group anywhere in the log.
+pub const NOT_A_MOVE: &str = "its author could not move the group";
 
 /// Why, from level three, an invite that does not name who lets its device in is ignored.
 pub const INVITE_NAMES_NOBODY: &str = "an invite names who may let its device in";
@@ -147,12 +158,37 @@ pub enum Level {
     /// the raise is signed on: every copy comes to the same answer whatever order the
     /// entries came in.
     Four,
+    /// Level four, and (see the architecture document, 5.1), in a log ordered at five (one
+    /// where a `Level` entry naming it is part of a run, as the order goes):
+    /// - a log holds at most [`crate::budget::CEILING_ENTRIES`] entries that count, all
+    ///   authors together, [`crate::budget::CEILING_BYTES`] of them: an entry that would
+    ///   pass that, as the common order counts, is past the ceiling like one past its
+    ///   author's run (see [`crate::budget`]). Removals and leaves of devices that are in go
+    ///   a little past it, and the first `Level` entry to name a level and a move a little
+    ///   past that: they are what gets a full group out. So a log stays under what every
+    ///   release takes from a friend or a joining device, whatever two devices that sign on
+    ///   each other's entries write;
+    /// - the first member on the ladder may move the group to a new log ([`Moved`]), judged
+    ///   on the group its author saw: nothing applies after the first `Moved` in the order,
+    ///   room rules it is not signed on neither, and nothing is kept whose author saw it.
+    ///   Members follow to the new group, which starts as the group the move saw: what was
+    ///   written apart from it changes nothing there, and what the order puts before it
+    ///   only this log, so a move once made stays made. A `Moved` written where its author
+    ///   saw a lower level is a kind that level did not know, and a move by a device that
+    ///   left, anywhere in the log, never applies ([`NOT_A_MOVE`]).
+    Five,
 }
 
 impl Level {
     /// The highest level this version judges at, and the one the groups it creates start
     /// at.
-    pub const CURRENT: Level = Level::Four;
+    pub const CURRENT: Level = Level::Five;
+
+    /// The highest level a manager's device raises its groups to, by itself or anyway: four
+    /// until a member's device follows a group that moved (see [`Moved`]) and the
+    /// application offers the move. This version judges at five already, so a group a newer
+    /// one raised goes on here.
+    pub const RAISED_TO: Level = Level::Four;
 
     /// The number this level has in a `Level` entry and among the network's capability
     /// levels: a level of judgment comes with the capability level of its number, so a
@@ -162,6 +198,7 @@ impl Level {
             Level::Two => 2,
             Level::Three => 3,
             Level::Four => 4,
+            Level::Five => 5,
         }
     }
 
@@ -171,6 +208,7 @@ impl Level {
             2 => Level::Two,
             3 => Level::Three,
             4 => Level::Four,
+            5 => Level::Five,
             _ => return None,
         };
         (level <= Level::highest()).then_some(level)
@@ -190,11 +228,12 @@ impl Level {
     }
 
     /// The limits judging at this level reads. Judging reads them as the constants they are
-    /// at level two, and levels three and four keep them; a level with other limits has
-    /// judging read them from here instead.
+    /// at level two, and levels three to five keep them; a level with other limits has
+    /// judging read them from here instead. (The ceiling of level five is its own rule,
+    /// not a limit of the earlier levels changed.)
     pub fn caps(self) -> Caps {
         match self {
-            Level::Two | Level::Three | Level::Four => Caps {
+            Level::Two | Level::Three | Level::Four | Level::Five => Caps {
                 members: MAX_MEMBERS,
                 in_room: MAX_IN_ROOM,
                 rooms: MAX_ROOMS,
@@ -378,6 +417,14 @@ pub struct GroupState {
     pub managers: Managers,
     /// The level the group is judged at from here on (see [`Level`]).
     pub level: Level,
+    /// The level the log is ordered at (see [`crate::GroupLog::ordered`]): from five, only
+    /// where a `Level` entry naming it is part of a run. It may be above [`Self::level`]
+    /// where that entry did not apply. From five, the log has
+    /// a ceiling and the group may move (see [`Level::Five`]).
+    pub log_level: Level,
+    /// From level five, the [`Moved`] that moved the group to a new log, and its entry:
+    /// nothing applies after it.
+    pub moved: Option<(EntryHash, Moved)>,
     /// Valid epochs in the order they started; the last one is current.
     pub epochs: Vec<Epoch>,
     pub used_tickets: BTreeSet<[u8; 16]>,
@@ -809,7 +856,9 @@ impl GroupState {
     /// [`Level`]), and what it changes if so.
     fn check_rule(&mut self, entry: &Entry, stand: RuleStand) -> Result<(), &'static str> {
         match self.level {
-            Level::Two | Level::Three | Level::Four => self.check_rule_at_two(entry, stand),
+            Level::Two | Level::Three | Level::Four | Level::Five => {
+                self.check_rule_at_two(entry, stand)
+            }
         }
     }
 
@@ -905,12 +954,36 @@ impl GroupState {
     ///
     /// A `Join` that would wait for a manager's `Welcome` is one its author could make;
     /// `before` as for [`Self::apply`].
+    /// Whether `author` may write `moved` on this group: it is at level five (as its log is
+    /// ordered), has not moved yet, and `author` is its first member; the new log is
+    /// another group.
+    pub(crate) fn could_move(&self, author: DevicePublicKey, moved: &Moved) -> Result<(), &'static str> {
+        if self.log_level < Level::Five {
+            return Err("a group moves from level five");
+        }
+        if self.moved.is_some() {
+            return Err(MOVED_AWAY);
+        }
+        if self.ladder.first() != Some(&author) {
+            return Err(MOVED_NOT_FIRST);
+        }
+        if Some(moved.to) == self.group_id {
+            return Err("a group moves to a new one");
+        }
+        Ok(())
+    }
+
     pub(crate) fn allows(
         &self,
         entry: &Entry,
         seen: Option<Seen>,
         before: &dyn Fn(&EntryHash) -> bool,
     ) -> Result<(), &'static str> {
+        // Where its author saw the group move, nothing more is kept (room rules too, which
+        // otherwise apply on top of the group wherever they go).
+        if self.moved.is_some() {
+            return Err(MOVED_AWAY);
+        }
         let mut trial = self.for_judging(false, entry.body.is_room_rule());
         if entry.body.is_room_rule() {
             // Every loss here is before it: it is the last entry.
@@ -970,6 +1043,8 @@ impl GroupState {
             ladder: self.ladder.clone(),
             managers: self.managers,
             level: self.level,
+            log_level: self.log_level,
+            moved: self.moved,
             epochs: self.epochs.clone(),
             used_tickets: self.used_tickets.clone(),
             open_invites: self.open_invites.clone(),
@@ -1006,6 +1081,8 @@ impl GroupState {
             ladder: self.ladder.clone(),
             managers: self.managers,
             level: self.level,
+            log_level: self.log_level,
+            moved: self.moved,
             epochs: self.epochs.clone(),
             used_tickets: self.used_tickets.clone(),
             open_invites: BTreeMap::new(),
@@ -1077,11 +1154,28 @@ impl GroupState {
                 _ => {}
             }
         }
+        // Level five, in a log ordered at it, whatever level the group is at where it goes
+        // (a raise to five that did not apply still orders the log at five).
+        if self.log_level >= Level::Five {
+            if self.moved.is_some() {
+                return Err(MOVED_AWAY);
+            }
+            // Judged on the group its author saw ([`Self::could_move`], by the log): it
+            // applies wherever it goes, if no move came before it.
+            if let Some(moved) = Moved::of(&entry.body) {
+                if Some(moved.to) == self.group_id {
+                    return Err("a group moves to a new one");
+                }
+                self.moved = Some((hash, moved));
+                return Ok(Applied::Yes);
+            }
+        }
         match self.level {
             Level::Two => self.check_and_apply_at_two(hash, entry, seen, before),
             Level::Three => self.check_and_apply_at_three(hash, entry, seen, before),
-            // What level four changes is held above, for the whole log raised to it.
-            Level::Four => self.check_and_apply_at_three(hash, entry, seen, before),
+            // What level four changes is held above, for the whole log raised to it, and what
+            // level five changes, here above.
+            Level::Four | Level::Five => self.check_and_apply_at_three(hash, entry, seen, before),
         }
     }
 

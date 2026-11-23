@@ -14,8 +14,8 @@ use std::{
 use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupSecret};
 
 use crate::{
-    budget::{Budget, Entries, PAST_RUN},
-    entry::{Body, EntryHash, NamedInvite, secret_context},
+    budget::{Budget, Entries},
+    entry::{Body, EntryHash, Moved, NamedInvite, secret_context},
     log::{GroupLog, raises_to_four},
     state::{GroupState, Level, OUTRANKED, RuleStand},
 };
@@ -222,7 +222,7 @@ impl GroupLog {
     pub(crate) fn settled_cache(&self) -> &Settled {
         self.cache.settled.get_or_init(|| {
             let full = self.full();
-            Arc::new(self.settle(&full.order, &full.budget.over))
+            Arc::new(self.settle(&full.order, &full.budget))
         })
     }
 
@@ -248,13 +248,18 @@ impl GroupLog {
             }
             let stands = self.stands_cache();
             let mut state = GroupState::clone(settled);
+            // Once the group moved, only the rules the move is signed on apply: those are
+            // the group the new log starts as.
+            let moved = settled.moved.map(|(h, _)| self.ancestors(&h));
             for hash in &full.order.hashes {
                 let entry = &self.entries[hash];
                 if !entry.body.is_room_rule() {
                     continue;
                 }
                 if full.budget.over.contains(hash) {
-                    state.refuse(*hash, PAST_RUN);
+                    state.refuse(*hash, full.budget.why_over(hash));
+                } else if moved.as_ref().is_some_and(|before| !before.contains(hash)) {
+                    state.refuse(*hash, crate::state::MOVED_AWAY);
                 } else {
                     state.apply_rule(*hash, entry, stands.of(hash));
                 }
@@ -310,6 +315,15 @@ impl GroupLog {
             .collect()
     }
 
+    /// Whether `entry`, judged now, is a `Level` entry naming a level above the one the log
+    /// worked out so far is ordered at: then the whole log is ordered again at it.
+    pub(crate) fn orders_higher(&self, entry: &crate::entry::Entry) -> bool {
+        let Body::Level { level } = entry.body else {
+            return false;
+        };
+        (self.cache.full.get()).is_some_and(|f| Level::numbered(level) > Some(f.budget.level()))
+    }
+
     /// Forgets everything worked out: the entries changed in a way not carried forward.
     pub(crate) fn work_out_again(&mut self) {
         *self.cache = self.cache.kept();
@@ -341,6 +355,13 @@ impl GroupLog {
             return;
         };
         let entry = &self.entries[&hash];
+        // A `Level` entry naming a level above the one the log is ordered at changes how the
+        // whole log is ordered (from five, under a ceiling).
+        if matches!(entry.body, Body::Level { level } if Level::numbered(level) > Some(full.budget.level()))
+        {
+            *self.cache = self.cache.kept();
+            return;
+        }
         // An entry that waited for this one may now go anywhere after it.
         if full
             .waiting
@@ -459,7 +480,7 @@ impl GroupLog {
             };
             let losses_before = lost.map_or(0, |d| state.loss_count(&d));
             if budget.over.contains(&hash) {
-                state.refuse(hash, PAST_RUN);
+                state.refuse(hash, budget.why_over(&hash));
             } else {
                 // Placed last, it is before nothing: a raise to level four that applied did
                 // not see it (see `held_to_four`).
@@ -605,6 +626,15 @@ impl GroupLog {
             |h| order.place.get(h).copied().filter(|i| *i < from),
             rest,
         );
+        if after.level() != budget.level() {
+            // A `Level` entry ordered again went past a run, or back into one: the entries
+            // before were placed at another level.
+            let all = order.hashes.iter().copied().chain([hash]).collect();
+            let (hashes, after) = self.order_after(&[], |_| None, all);
+            *order = Order::of(hashes);
+            *budget = Arc::new(after);
+            return;
+        }
         order.replace_from(from, tail);
         *budget = Arc::new(after);
     }
@@ -619,11 +649,45 @@ impl GroupLog {
     /// is ranked against the others when its last parent is placed, with the comings in up
     /// to there; and who came in when and each device's run after the whole order (see
     /// [`Budget`]). An entry past its author's run counts in neither.
+    ///
+    /// It is worked out at the level of the order (see [`Self::order_levels`]): the highest
+    /// one a `Level` entry this copy judged names, but for five, which only a `Level` entry
+    /// part of a run when the log is ordered at five orders at. One past its author's run,
+    /// or past the ceiling, is spare: a copy may never have it, and lets it go, and from
+    /// five the order decides what fits under the ceiling, and whether a group moved. (The
+    /// levels before keep the rule they were written with.)
     pub(crate) fn order_after(
         &self,
         before: &[EntryHash],
         placed: impl Fn(&EntryHash) -> Option<usize>,
         rest: Vec<EntryHash>,
+    ) -> (Vec<EntryHash>, Budget) {
+        for level in self.order_levels(before, &rest) {
+            let (order, budget) = self.order_at(before, &placed, rest.clone(), level);
+            let names = |h: &EntryHash| match self.entries[h].body {
+                Body::Level { level: named } => {
+                    Level::numbered(named).is_some_and(|named| named >= level)
+                }
+                _ => false,
+            };
+            // Levels before five order as they always did: by every `Level` entry judged.
+            if level < Level::Five
+                || (before.iter().chain(&order)).any(|h| budget.live.contains(h) && names(h))
+            {
+                return (order, budget);
+            }
+        }
+        // Level two is always among the levels, and orders.
+        self.order_at(before, &placed, rest, Level::Two)
+    }
+
+    /// [`Self::order_after`] at `level`.
+    fn order_at(
+        &self,
+        before: &[EntryHash],
+        placed: &impl Fn(&EntryHash) -> Option<usize>,
+        rest: Vec<EntryHash>,
+        level: Level,
     ) -> (Vec<EntryHash>, Budget) {
         let in_rest: HashSet<EntryHash> = rest.iter().copied().collect();
         let mut waiting: HashMap<EntryHash, usize> = HashMap::new();
@@ -659,11 +723,10 @@ impl GroupLog {
                 }
             }
         }
-        let level = self.order_level(before, &rest);
-        let mut budget = Budget::new(self.run_room, level);
+        let mut budget = Budget::new(self.run_room, self.ceiling, level);
         let mut ready: BTreeSet<(Reverse<u64>, EntryHash)> = BTreeSet::new();
         let key = |hash: &EntryHash, budget: &Budget| match level {
-            Level::Two | Level::Three | Level::Four => {
+            Level::Two | Level::Three | Level::Four | Level::Five => {
                 budget.key(&self.entries[hash].author, *hash)
             }
         };
@@ -690,22 +753,20 @@ impl GroupLog {
         (order, budget)
     }
 
-    /// The level the common order of `before` and `rest` is worked out at: the highest one a
-    /// `Level` entry among them that this copy judged names, or level two. The order places
-    /// every entry at once, those before a `Level` entry too, so a level that orders
-    /// otherwise orders so the whole log of a group raised to it; every level so far orders
-    /// as level two does.
-    fn order_level(&self, before: &[EntryHash], rest: &[EntryHash]) -> Level {
-        before
-            .iter()
-            .chain(rest)
+    /// The levels the common order of `before` and `rest` may be worked out at, highest
+    /// first: those `Level` entries among them that this copy judged name, and level two.
+    /// The order places every entry at once, those before a `Level` entry too, so a level
+    /// that orders otherwise orders so the whole log of a group raised to it.
+    fn order_levels(&self, before: &[EntryHash], rest: &[EntryHash]) -> Vec<Level> {
+        let named: BTreeSet<Level> = (before.iter().chain(rest))
             .filter(|h| !self.unjudged.contains(*h))
             .filter_map(|h| match self.entries[h].body {
                 Body::Level { level } => Level::numbered(level),
                 _ => None,
             })
-            .max()
-            .unwrap_or_default()
+            .chain([Level::Two])
+            .collect();
+        named.into_iter().rev().collect()
     }
 
     /// The group without its room rules that the entries `before` make on their own, every
@@ -720,7 +781,7 @@ impl GroupLog {
     pub(crate) fn view_of(&self, before: Vec<EntryHash>) -> View {
         let (hashes, budget) = self.order_after(&[], |_| None, before);
         let order = Order::of(hashes);
-        let state = GroupState::clone(&self.settle(&order, &budget.over).state);
+        let state = GroupState::clone(&self.settle(&order, &budget).state);
         (state, budget)
     }
 
@@ -733,8 +794,8 @@ impl GroupLog {
     /// raises apply is taken from the group worked out holding none, so that what the rule
     /// refuses (a removal of the raise's author, say) never decides whether it holds. The
     /// group is worked out again holding them only when one of them leaves someone out.
-    fn settle(&self, order: &Order, over: &Entries) -> Settled {
-        let free = self.settle_holding(order, over, Arc::default());
+    fn settle(&self, order: &Order, budget: &Budget) -> Settled {
+        let free = self.settle_holding(order, budget, Arc::default());
         let raises: Vec<&EntryHash> = (free.state.applied.iter())
             .filter(|h| raises_to_four(&self.entries[*h]))
             .collect();
@@ -748,22 +809,23 @@ impl GroupLog {
                 ..free
             };
         }
-        self.settle_holding(order, over, Arc::new(held))
+        self.settle_holding(order, budget, Arc::new(held))
     }
 
     /// [`Self::settle`] holding to level four the rotations and removals in `held`.
     fn settle_holding(
         &self,
         order: &Order,
-        over: &Entries,
+        budget: &Budget,
         held: Arc<BTreeSet<EntryHash>>,
     ) -> Settled {
+        let over = &budget.over;
         #[cfg(any(test, feature = "counts"))]
         crate::work::settled();
         let hashes = &order.hashes;
         let graph = OnceCell::new();
         let mut outranked = BTreeMap::new();
-        let mut state = self.apply_in_order(order, &outranked, over, &held);
+        let mut state = self.apply_in_order(order, &outranked, budget, &held);
         // Losses come from what applied, and what applies depends on what was refused: go on
         // until nothing changes. A loss is only ever signed by someone above, so that comes
         // within a round for each loss; past that, the last round stands, the same everywhere.
@@ -785,7 +847,7 @@ impl GroupLog {
                 break;
             }
             outranked = next;
-            state = self.apply_in_order(order, &outranked, over, &held);
+            state = self.apply_in_order(order, &outranked, budget, &held);
         }
         Settled {
             state: Arc::new(state),
@@ -799,17 +861,34 @@ impl GroupLog {
         &self,
         order: &Order,
         outranked: &BTreeMap<EntryHash, EntryHash>,
-        over: &Entries,
+        budget: &Budget,
         held: &BTreeSet<EntryHash>,
     ) -> GroupState {
         let mut state = GroupState::default();
+        state.log_level = budget.level();
+        // Who left, anywhere in the log: a move by one of them never applies, so that a
+        // first member that left cannot move the group on what it saw before (see
+        // [`Level::Five`]).
+        let left = std::cell::OnceCell::new();
+        let leavers = || -> BTreeSet<DevicePublicKey> {
+            (order.hashes.iter())
+                .filter(|h| !budget.over.contains(*h))
+                .filter(|h| matches!(self.entries[*h].body, Body::Leave))
+                .map(|h| self.entries[h].author)
+                .collect()
+        };
         for hash in &order.hashes {
             let entry = &self.entries[hash];
             if entry.body.is_room_rule() {
                 continue;
             }
-            if over.contains(hash) {
-                state.refuse(*hash, PAST_RUN);
+            if budget.over.contains(hash) {
+                state.refuse(*hash, budget.why_over(hash));
+            } else if state.log_level >= Level::Five
+                && Moved::of(&entry.body).is_some()
+                && !(self.moves(hash) && !left.get_or_init(leavers).contains(&entry.author))
+            {
+                state.refuse(*hash, crate::state::NOT_A_MOVE);
             } else if outranked.contains_key(hash) {
                 state.refuse_kept(*hash, entry, OUTRANKED);
             } else {
@@ -946,8 +1025,11 @@ impl GroupLog {
     ) -> BTreeMap<EntryHash, EntryHash> {
         // What a demotion outranks: from level three, an invite that names who lets its
         // device in too, which level two reads as a kind it does not know.
+        // And from level five, a move, which only the first member writes.
         let needs_rank = |body: &Body| {
-            body.needs_rank() || (state.level >= Level::Three && NamedInvite::of(body).is_some())
+            body.needs_rank()
+                || (state.level >= Level::Three && NamedInvite::of(body).is_some())
+                || (state.log_level >= Level::Five && Moved::of(body).is_some())
         };
         // The device that lost something, the entry, and whether it lost only its place.
         let losses: Vec<(DevicePublicKey, EntryHash, bool)> = state

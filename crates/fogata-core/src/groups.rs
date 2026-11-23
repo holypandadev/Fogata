@@ -134,8 +134,8 @@ impl Core {
                 .map(|(_, room)| summary(room));
             // Before the lock below: a person's name takes it too.
             let level_behind: Vec<Person> =
-                if state.is_manager(&me) && state.level < fogata_state::Level::CURRENT {
-                    self.behind_level(state, fogata_state::Level::CURRENT)
+                if state.is_manager(&me) && state.level < fogata_state::Level::RAISED_TO {
+                    self.behind_level(state, fogata_state::Level::RAISED_TO)
                         .into_iter()
                         .map(|device| self.person_with(device, None, book.as_ref(), state))
                         .collect()
@@ -741,7 +741,7 @@ impl Core {
         group: GroupId,
         behind: Vec<DevicePublicKey>,
     ) -> Result<()> {
-        let level = fogata_state::Level::CURRENT;
+        let level = fogata_state::Level::RAISED_TO;
         let since = self
             .inner
             .lock()

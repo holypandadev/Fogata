@@ -1031,7 +1031,7 @@ impl GroupContext {
     }
 
     /// Managers: raises the group to the highest level of judgment this version knows that
-    /// every other member's copy was seen judging at (up to `fogata_state::Level::CURRENT`):
+    /// every other member's copy was seen judging at (up to `fogata_state::Level::RAISED_TO`):
     /// `seen` gives the highest capability level each device was seen at (see
     /// [`crate::caps`]), which says the levels it judges at. A copy below a level would
     /// refuse the `Level` entry and wait on everything signed after it, so one member never
@@ -1057,7 +1057,7 @@ impl GroupContext {
                 .iter()
                 .all(|seen| crate::caps::judges_at(*seen, *level))
         };
-        let Some(level) = (crate::caps::FIRST_LEVEL..=fogata_state::Level::CURRENT.number())
+        let Some(level) = (crate::caps::FIRST_LEVEL..=fogata_state::Level::RAISED_TO.number())
             .rev()
             .filter_map(fogata_state::Level::numbered)
             .find(judged_by_all)
@@ -2163,7 +2163,7 @@ mod tests {
         let luis = Arc::new(DeviceIdentity::generate().unwrap());
         let mut log = GroupLog::create(&ana, "g", 1).unwrap();
         log.add(&ana, luis.public_key(), "luis", 2).unwrap();
-        let level = fogata_state::Level::CURRENT;
+        let level = fogata_state::Level::RAISED_TO;
         let before = fogata_state::Level::numbered(level.number() - 1).unwrap();
         let mut at_ana = ctx(&ana, &log);
         let luis_key = luis.public_key();
@@ -2198,9 +2198,10 @@ mod tests {
             1
         );
         assert_eq!(at_ana.log().level(), level);
+        // Seen at the level this version judges at, past the one it raises to: no further.
         assert!(
             at_ana
-                .raise_level_when_all_judge(5, false, seen_at(level.number()))
+                .raise_level_when_all_judge(5, false, seen_at(crate::caps::CAPS_LEVEL))
                 .is_empty()
         );
         // Luis does not manage once the managers are the first one.

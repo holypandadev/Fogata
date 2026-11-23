@@ -233,8 +233,11 @@ leaving or removed, the new one joining with an invite and welcomed), its run ho
 
 What no rule on an entry and what is before it can bound: two devices that sign on each
 other's entries (a manager with a second device of its own) end each other's runs, as two
-honest managers would; only the network budget (3.6) bounds them, and removing either ends
-it. The time an author puts on its entries is not used: it chooses it, and making times go
+honest managers would. Up to level four only the network budget (3.6) bounds them, and
+removing either ends it, but what they wrote stays for good: in minutes it can take a log past
+what a friend's offer (4,096 entries, 4 MiB) or a join (16 MiB) carries, and the group can no
+longer be offered nor joined. From level five a ceiling on the whole log bounds them, and a
+full log moves the group to a new one (below). The time an author puts on its entries is not used: it chooses it, and making times go
 only forward would let one device push everyone's clocks (ticket expiry, time outs, the
 weekly rotation).
 
@@ -473,10 +476,101 @@ when it signs on a view that leaves out members it did not know of, which the ru
 count against it) is told nothing; while someone gone still holds the key, it rotates again
 at its next heartbeat, on what it has then.
 
+**Level five** (capability level 5) adds a ceiling on a log and a way out of a full one, in
+a log ordered at five (one where a `Level` entry naming it is part of a run when the log is
+ordered at five, whatever level its group is at: `GroupState::log_level`), and nothing else:
+
+- *the ceiling*: what counts in a log, every author together, is at most 3,584 entries and
+  3.5 MiB (`CEILING_ENTRIES`, `CEILING_BYTES`), counted in the common order as runs are. It
+  holds every entry of the log, wherever it goes in the order, as the order of a level holds
+  every entry: holding only those signed on the raise would let two devices flood on
+  entries from before it. A log under the ceiling when it is raised (every honest group for
+  about ten years) keeps and applies the same; one past it keeps what fits, in the order,
+  and what does not applies to nothing. An entry that would go past it is treated as one
+  past its author's run: refused where its author saw the log full, spare otherwise
+  (`PAST_CEILING`).
+- *what gets a full group out*: a removal or leave of a device that is in goes up to 256
+  entries and 256 KiB past the ceiling (`SLACK`), with what it brings in (entries part of
+  no run it is signed on, which honest devices never sign on): so that a removal written
+  while the log filled up, on an entry of its author's that the order then puts past the
+  ceiling, still applies. The first `Level` entry in the order to name a level, and the
+  first move, go 64 entries and 64 KiB past that (`RESERVE`), for themselves alone (what
+  they bring in only into the slack): whatever filled the slack, a full group can still be raised
+  and moved, and the removals it still needs are written in the new log. A later `Level`
+  entry naming no higher level is held like the rest, so that a manager cannot fill the log
+  with them.
+- *`Moved`*: the first member on the ladder may write one, naming a new log, judged on the
+  group its author saw (`GroupState::could_move`). Whether it is a move (its author saw the
+  group at five, as its first member) is noted where it is judged, and kept with the log's
+  verdicts (`GroupLog::moves`): a `Moved` written where its author saw a lower level is a
+  kind that level did not know, which never counts, applies nor orders, so a member cannot
+  fill the log with moves forged on entries from before the raise. A move is part of its
+  author's run, so that every copy keeps it and passes it on. From the first in the order
+  on, nothing else applies, room rules it is not signed on neither; later entries are still
+  kept, so every copy keeps the same. A move by a device that left, anywhere in the log,
+  never applies (`NOT_A_MOVE`): otherwise a first member that left could move the group
+  afterwards on what it saw before, which the order may put before its leave.
+  What was written apart from it changes only the old log, wherever the order puts it, so a
+  move once made stays made: entries of devices that came in after the first member go
+  first in the order, and a rule that undid the move for them would undo it after members
+  had followed.
+
+So a log at five never holds more than the ceiling, `SLACK` and `RESERVE` together (3,904
+entries, 3.8 MiB): under what every release takes from a friend (4,096 entries, 4 MiB).
+
+A log is ordered at five only where a `Level` entry naming it is part of a run when the log
+is ordered at five. One past its author's run, or past the ceiling, is spare: a copy may
+never have it and lets it go, so it orders nothing (were it to, copies with and without it
+would judge the entries after it apart, for good, on what fits under the ceiling and whether
+the group moved). Levels before five keep the rule they were written with: the highest
+level any `Level` entry judged names.
+
+*The new log.* The first member writes it with entries every release knows
+(`GroupLog::new_log_for_move`): `Create`, a raise to this level, who manages, the icon,
+picture and rooms, an `Add` for every other member in ladder order with its name (which gives
+each the new key), the limits, and the room rules in force (who may enter each room, and the
+time outs not run out), all as the group is on the heads `Moved` will be signed on. Open
+invites do not move. It then writes `Moved` signed on those heads (`GroupLog::move_to`): at
+most 64 of them, which is enough, since what the move did not see stays in the old log. A
+member follows only to a log whose start, written by the author of `Moved` alone, gives back
+exactly the group the move saw (`GroupLog::follows`, `same_group`): the same ladder, members
+and names, managers, name, icon, picture, limits, rooms, who may enter each room, and time
+outs in force; only keys and history differ. So nobody removed before the move is ever in
+the new log. Removals, leaves and adds written apart from the move (kept and part of a run)
+are named by `GroupLog::apart_from_move`, for the first member to write again in the new
+log. A
+device knows how full a log is (`GroupLog::fill`) and who wrote most of it
+(`GroupLog::writers`). How the new log reaches the members, the removals written again, and
+how the application offers the move, are not in this version yet: until they are, a
+manager's device raises its groups to four at most (`Level::RAISED_TO`), and judges at five
+a group a newer version raised.
+
+Two first members could each move the group apart from each other (a ladder change racing a
+move): every copy applies the first in the order, and a member that followed the other
+follows again once it has both. Only a leave of the first member itself can make its move
+not apply.
+
+*Why every copy agrees.* The ceiling is counted in the common order, which every copy with
+the same entries works out alike, at the level the order is at, from entries no copy lets go;
+a `Moved` is judged on its author's view, and applies by whether a move came before it in
+the order. A property test checks it with random histories raised to three, four and five
+with a small ceiling and ended by a flood of two devices, given to fresh copies in any order;
+and tests pin each way past the ceiling and around a move found so far (a flood apart from
+the raise, a leave on entries part of no run, adds and their removals filling the slack,
+moves forged on entries from before the raise, a removal or room rule written apart from the
+move, entries the order puts before a move after members followed, a move by a first member
+that left, a raise that does not apply, a raise past its author's run (and one before five,
+which orders as it always did), a removal on its author's entry past the ceiling, a full log
+with more heads than an entry is signed on).
+
+*What an older copy sees.* As for four: a copy of level four refuses the `Level` entry naming
+five, waits on everything signed after it, and is told to update; a release that brings level
+five sets its `min_build`. A `Moved` and the new log come only after the raise.
+
 The order of the entries, the shortcut that judges an entry signed on every head on the
 group as the log has it, and the limits judging reads (members, rooms, names, picture,
 entry, parents, runs: `Level::caps`) are behind the level too: the order is worked out at
-the highest level a `Level` entry this copy judged names, the shortcut is taken only where
+the highest level a `Level` entry this copy judged names (one part of a run, above), the shortcut is taken only where
 the group's level says the entries it leaves out change nothing, and each level lists its
 limits. A level that changes the order changes it for every entry of a group raised to it,
 those before its `Level` entry too. How entries are read is not judged by level: a change
@@ -559,6 +653,7 @@ is joining with an invite) takes the log a manager sends only if the issuing man
 | `RoomAccess { room, members }` | manager | Room rule: who may enter a voice room, everyone or only these members (the author and those above it always may). |
 | `KeepOut { room, member, until }` | a member above `member` | Room rule: keeps a member out of a voice room until a time by the author's clock, or until let back. |
 | `LetBack { room, member }` | as `KeepOut` | Room rule: ends a time out before it runs out. |
+| `Moved { to, setup }` | the first member on the ladder; from level five (kind 27, which earlier levels keep as a kind they do not know) | The group moves to the new log `to` (a group id), whose start ends with the entry `setup`: it applies only where every entry applied before it is one it is signed on, and nothing applies in this log after it (level five, below). |
 
 `Promote` and `Demote` keep the kind byte (3) of the entry that appointed and demoted admins
 in versions before the ladder, with the same flag (1 up, 0 down; any other flag does not
