@@ -6996,7 +6996,9 @@ Future<void> _farEcho(WidgetTester tester, AppState state) async {
 Future<void> _kept(WidgetTester tester, AppState state) async {
   _ended = 'ran';
   _mark('ready');
-  if (_role == 'a') {
+  // The copy that says the lines: a, or the one FOGATA_TEST_KEPT_SPEAKER names (b when
+  // only it may make the friendship's request, as from a VM to this computer).
+  if (_role == (_env['FOGATA_TEST_KEPT_SPEAKER'] ?? 'a')) {
     // What a gets from the others meanwhile (a-lines.txt), without pumping: written every
     // half second for as long as this copy runs.
     final got = File('$_dir/$_role-lines.txt');
