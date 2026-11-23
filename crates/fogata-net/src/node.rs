@@ -728,12 +728,25 @@ impl RecordSent {
 
     /// The record was dropped before it left: it never got there, and goes again unasked
     /// once the peer's outbox has room (see [`Self::due_again`]). Its failures on the way
-    /// stay as they were.
+    /// stay as they were, and so does the wait they ask for: past its quick tries, still
+    /// counted from when it went.
     fn unsent(&mut self) {
         if !self.answered {
             self.answered = true;
             self.unsent = self.unsent.saturating_add(1);
-            self.at = Instant::now();
+            if self.lost <= RECORD_LOST_TRIES {
+                self.at = Instant::now();
+            }
+        }
+    }
+
+    /// How long after it was dropped before it left the same record may go again:
+    /// [`RECORD_LOST_AGAIN`], or as long as its failures on the way before ask for.
+    fn unsent_again(&self) -> Duration {
+        if self.lost > 0 {
+            self.lost_again()
+        } else {
+            RECORD_LOST_AGAIN
         }
     }
 
@@ -748,14 +761,14 @@ impl RecordSent {
 
     /// Whether a record should go now, unasked, `digest` being the one to send and `room`
     /// whether the peer's outbox has none waiting: after this one was dropped before it
-    /// left, once there is room, [`RECORD_LOST_AGAIN`] later, without pushing out another
+    /// left, once there is room, [`Self::unsent_again`] later, without pushing out another
     /// request; after it failed on its way, only a newer one, at once.
     fn due_again(&self, digest: &[u8; 32], room: bool) -> bool {
         if !self.answered {
             return false;
         }
         if self.unsent > 0 {
-            return room && self.at.elapsed() >= RECORD_LOST_AGAIN;
+            return room && self.at.elapsed() >= self.unsent_again();
         }
         self.lost > 0 && self.digest != *digest
     }
@@ -770,7 +783,7 @@ impl RecordSent {
             Some(s) if !s.answered && s.at.elapsed() < ON_ITS_WAY_AT_MOST => false,
             // One that went and was never answered, nor lost, may still wait in the outbox.
             Some(s) if s.digest == *digest && !s.answered => s.at.elapsed() >= RECORD_AGAIN,
-            Some(s) if s.digest == *digest && s.unsent > 0 => s.at.elapsed() >= RECORD_LOST_AGAIN,
+            Some(s) if s.digest == *digest && s.unsent > 0 => s.at.elapsed() >= s.unsent_again(),
             Some(s) if s.digest == *digest => s.at.elapsed() >= s.lost_again(),
             Some(_) => true,
             None => true,

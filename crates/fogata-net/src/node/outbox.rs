@@ -150,9 +150,11 @@ impl Node {
     }
 
     /// A member request to `peer` that will not go: the oldest of a full queue, or one
-    /// waiting when `peer` went. What waits for its answer is let go as when one fails on
-    /// its way, but nothing is sent again now: it would only wait in the same queue, or
-    /// dial a peer that just went. Each is asked or sent again later as after a refusal.
+    /// waiting when `peer` went, or one that failed on its way. What waits for its answer is
+    /// let go as when one fails on its way, but nothing is sent again now: it would only
+    /// wait in the same queue, or dial a peer that just went. Each is asked or sent again
+    /// later as after a refusal; a banner or picture record dropped before it left goes
+    /// again unasked once the peer's outbox has room (see `request_unsent`).
     pub(super) fn request_dropped(&mut self, peer: PeerId, kind: Pending) {
         match kind {
             Pending::Challenge(group, challenge) => {
@@ -794,6 +796,50 @@ mod tests {
         let round = (none, none, none, MAX_WAITING, (1, 1));
         assert_eq!(rounds, vec![round; 6]);
         assert_eq!((banner, picture), ((0, 6), (0, 6)));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A record dropped before it left, after it failed on its way three times in a row,
+    /// goes again as late as those failures ask, 8 s after, not 2 s, unasked or at a
+    /// roster: a drop neither raises nor cuts their wait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_dropped_after_failures_waits_as_long_as_they_ask() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            for wait in [2, 4] {
+                lose_records(n, bea);
+                records_age(n, group, bea, Duration::from_secs(wait));
+                roster_of(n, group, bea, false);
+            }
+            lose_records(n, bea);
+            records_age(n, group, bea, Duration::from_secs(8));
+            roster_of(n, group, bea, false);
+            // The fourth try is dropped before it left.
+            let dropped: Vec<_> = (n.pending.iter())
+                .filter(|(_, (p, _))| *p == bea)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in dropped {
+                let (to, kind) = n.pending.remove(&id).unwrap();
+                n.request_done(to);
+                n.request_unsent(to, kind);
+            }
+            let mut seen = Vec::new();
+            for wait in [2, 5, 1] {
+                records_age(n, group, bea, Duration::from_secs(wait));
+                roster_of(n, group, bea, false);
+                n.send_lost_records();
+                seen.push(records_to(n, bea));
+            }
+            let sent = n.groups[&group].banner_sent[&bea];
+            (seen, (sent.lost, sent.unsent))
+        })
+        .await;
+        let none = (0, 0);
+        assert_eq!(found, (vec![none, none, (1, 1)], (3, 1)));
         node.shutdown().await.unwrap();
     }
 
