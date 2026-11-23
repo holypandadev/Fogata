@@ -501,6 +501,40 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// A record sent again after a loss that is neither answered nor lost a minute later,
+    /// as one still waiting in the outbox behind other requests is, does not go once more at
+    /// each roster: it goes again only once [`super::super::RECORD_AGAIN`] passed, as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_sent_again_and_not_yet_answered_is_not_sent_once_more() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            lose_records(n, bea);
+            records_age(n, group, bea, Duration::from_secs(2));
+            n.send_lost_records();
+            let again = records_to(n, bea);
+            let roster = || MemberRequest::Roster {
+                group_id: group.as_bytes().to_vec(),
+                heads: None,
+                banner: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
+                picture: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
+            };
+            let mut at_rosters = Vec::new();
+            for ago in [61, 60 * 4] {
+                records_age(n, group, bea, Duration::from_secs(ago));
+                n.on_request(bea, roster());
+                n.send_lost_records();
+                at_rosters.push(records_to(n, bea));
+            }
+            (again, at_rosters)
+        })
+        .await;
+        assert_eq!(found, ((1, 1), vec![(1, 1), (2, 2)]));
+        node.shutdown().await.unwrap();
+    }
+
     /// A record lost on its way goes again unasked, at the next check of the links once it
     /// is due: 2, 4, 8 and 16 s after each loss in a row, not before; past four losses in a
     /// row only as a record that got there does. One that gets there, answered, starts the

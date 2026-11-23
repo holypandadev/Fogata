@@ -744,6 +744,8 @@ impl RecordSent {
         }
         match sent {
             Some(s) if !s.answered && s.at.elapsed() < ON_ITS_WAY_AT_MOST => false,
+            // One that went and was never answered, nor lost, may still wait in the outbox.
+            Some(s) if s.digest == *digest && !s.answered => s.at.elapsed() >= RECORD_AGAIN,
             Some(s) if s.digest == *digest => s.at.elapsed() >= s.lost_again(),
             Some(_) => true,
             None => true,
