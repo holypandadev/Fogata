@@ -466,6 +466,11 @@ Future<void> _call(WidgetTester tester) async {
     await _keptAgain(tester);
     return;
   }
+  // The kept-lines case's new computer, which the account moves to.
+  if (_role == 'n') {
+    await _keptNew(tester);
+    return;
+  }
   final others = _names.keys.take(_copies).where((r) => r != _role).toList();
   await app.main();
   await _until(
@@ -7025,6 +7030,10 @@ Future<void> _kept(WidgetTester tester, AppState state) async {
       await _wait(tester, const Duration(milliseconds: 300));
     }
     _mark('said');
+    if (_env['FOGATA_TEST_KEPT_MOVE'] == '1') {
+      await _keptMove(tester, state);
+      return;
+    }
     if (_env['FOGATA_TEST_KEPT_QUIT'] == 'menu') {
       await _rig(tester, 'rig-quit', seconds: 900);
       _mark('quit');
@@ -7086,5 +7095,121 @@ Future<void> _keptAgain(WidgetTester tester) async {
     seconds: 60,
   );
   _mark('again-in-room');
+  await _keptLines(tester, state);
+}
+
+/// FOGATA_TEST_KEPT_MOVE=1 (copy a, after its lines): out of the room, then Settings →
+/// Move account to copy n with the code n leaves in `code.txt`. Writes whether this
+/// device's kept-lines file was there before the move (`a-kept-before.txt`) and after it
+/// (`a-kept-after.txt`), marks `moved` and stays until the rig's `rig-end`.
+Future<void> _keptMove(WidgetTester tester, AppState state) async {
+  final kept = File('${state.dataDir}/room-lines.bin');
+  await _wait(tester, const Duration(seconds: 4));
+  final before = kept.existsSync() ? '${kept.lengthSync()} bytes' : 'none';
+  _log('kept-move: the kept file before the move: $before');
+  File('$_dir/a-kept-before.txt').writeAsStringSync('$before\n');
+  await state.leaveRoom();
+  await _wait(tester, const Duration(seconds: 2));
+  state.openSettings(SettingsSection.move);
+  await _until(
+    tester,
+    'the move page',
+    () => find.byKey(const ValueKey('move-code-field')).evaluate().isNotEmpty,
+    seconds: 60,
+  );
+  final code = File('$_dir/code.txt');
+  await _until(tester, 'the code from n', code.existsSync, seconds: 300);
+  final field = find.descendant(
+    of: find.byKey(const ValueKey('move-code-field')),
+    matching: find.byType(TextField),
+  );
+  tester.widget<TextField>(field).controller!.text = code
+      .readAsStringSync()
+      .trim();
+  await _wait(tester, const Duration(milliseconds: 300));
+  await _tap(tester, find.byKey(const ValueKey('move-continue')));
+  await _until(
+    tester,
+    'the question',
+    () => find.byKey(const ValueKey('move-confirm')).evaluate().isNotEmpty,
+    seconds: 240,
+  );
+  await _shot(tester, 'a-move-confirm');
+  await _tap(tester, find.byKey(const ValueKey('move-yes')));
+  await _until(
+    tester,
+    'moved',
+    () => find.byKey(const ValueKey('move-forget')).evaluate().isNotEmpty,
+    seconds: 240,
+  );
+  await _shot(tester, 'a-moved');
+  final after = kept.existsSync() ? 'present' : 'gone';
+  _log('kept-move: the kept file after the move: $after');
+  File('$_dir/a-kept-after.txt').writeAsStringSync('$after\n');
+  _mark('moved');
+  await _rig(tester, 'rig-end', seconds: 900);
+}
+
+/// The kept-lines case's new computer (FOGATA_ROLE=n): "Bring your account" on the welcome
+/// page, its code left in `code.txt`, the move taken and the app opened as the account.
+/// Writes whether a kept-lines file is in its data folder 30 s later (`n-kept.txt`), then
+/// enters the group's room (`n-in-room`) and writes the lines of others it shows until the
+/// rig's `rig-end`.
+Future<void> _keptNew(WidgetTester tester) async {
+  _ended = 'ran';
+  await app.main();
+  await _until(
+    tester,
+    'welcome',
+    () => find.byKey(const ValueKey('bring-link')).evaluate().isNotEmpty,
+    seconds: 120,
+  );
+  await continueUnencryptedIfAsked(tester);
+  await _tap(tester, find.byKey(const ValueKey('bring-link')));
+  await _until(
+    tester,
+    'the code',
+    () => find.byKey(const ValueKey('move-code')).evaluate().isNotEmpty,
+    seconds: 60,
+  );
+  File('$_dir/code.txt').writeAsStringSync(
+    tester.widget<Text>(find.byKey(const ValueKey('move-code'))).data!,
+  );
+  await _until(
+    tester,
+    'the new computer\'s question',
+    () => find.byKey(const ValueKey('move-take')).evaluate().isNotEmpty,
+    seconds: 300,
+  );
+  await _tap(tester, find.byKey(const ValueKey('move-take')));
+  await _until(
+    tester,
+    'welcome back',
+    () => find.byKey(const ValueKey('move-open')).evaluate().isNotEmpty,
+    seconds: 240,
+  );
+  await _shot(tester, 'n-welcome-back');
+  await _tap(tester, find.byKey(const ValueKey('move-open')));
+  await _until(
+    tester,
+    'the app',
+    () => find.byType(Shell).evaluate().isNotEmpty,
+    seconds: 60,
+  );
+  final state = _state(tester);
+  await _until(
+    tester,
+    'the group here',
+    () => state.contacts.groups.isNotEmpty,
+    seconds: 60,
+  );
+  _mark('n-in');
+  await _wait(tester, const Duration(seconds: 30));
+  final kept = File('${state.dataDir}/room-lines.bin');
+  final here = kept.existsSync() ? 'present' : 'none';
+  _log('kept-move: a kept file on the new computer 30 s on: $here');
+  File('$_dir/n-kept.txt').writeAsStringSync('$here\n');
+  await state.openRoom(state.contacts.groups.first.id);
+  _mark('n-in-room');
   await _keptLines(tester, state);
 }
