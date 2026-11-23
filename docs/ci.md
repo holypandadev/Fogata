@@ -373,12 +373,12 @@ token that can only read; a failure there is for the maintainers to look at, it 
 - `previous-release`: the command line built at the last release tag before the commit (or
   the tag given), against this commit's core:
   `crates/fogata-core/tests/previous_release.rs` (what this version writes to a group, the
-  last release takes in whole, and both meet in its voice room). The tests of
-  `crates/fogata-core/tests/old_copy.rs` are not run there: each needs a copy from before a
-  given feature (banners, MLS, picture records...), older than every published tag, so they
-  run only where such a build is at hand. `tools/previous-release.sh` runs the same test on
-  your computer and records it; `tools/beta/release.py` takes a release only of a commit
-  for which this job, or that record, passed (docs/releasing-beta.md, step 1).
+  last release takes in whole, and both meet in its voice room). The test of
+  `crates/fogata-core/tests/old_copy.rs` is not run there: it needs the command line of
+  0.1.0-beta.9 and the newest release's folder, so it runs only where both are at hand.
+  `tools/previous-release.sh` runs the same test on your computer and records it;
+  `tools/beta/release.py` takes a release only of a commit for which this job, or that
+  record, passed (docs/releasing-beta.md, step 1).
 - `vendor`: `tools/vendor_diff.py`, each vendored crate against the one published on
   crates.io at the version it records, and each forked Dart package of `app/third_party`
   (flutter_webrtc, tray_manager, desktop_drop) against pub.dev at the version its
