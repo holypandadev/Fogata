@@ -172,4 +172,33 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     expect(state.toasts.list, isEmpty);
   });
+
+  testWidgets('what is said while the splash shows waits for the main window', (
+    tester,
+  ) async {
+    final board = ToastBoard()..hold();
+    addTearDown(board.dispose);
+    board.say('Fogata stopped working and started again.');
+    for (var i = 0; i < ToastBoard.maxShown + 1; i++) {
+      board.say('line $i');
+    }
+    // Longer than a toast lasts, as a splash that asks for updates does.
+    await tester.pump(const Duration(seconds: 6));
+    expect(board.list, isEmpty);
+
+    board.release();
+    // The newest few, each for its whole time from the main window on.
+    expect(board.list.map((t) => t.text), [
+      for (var i = 1; i < ToastBoard.maxShown + 1; i++) 'line $i',
+    ]);
+    await tester.pump(const Duration(seconds: 3));
+    expect(board.list, hasLength(ToastBoard.maxShown));
+    await tester.pump(const Duration(seconds: 2));
+    expect(board.list, isEmpty);
+
+    // Not held any more: said and shown at once.
+    board.say('Saved.');
+    expect(board.list.single.text, 'Saved.');
+    await tester.pump(const Duration(seconds: 5));
+  });
 }

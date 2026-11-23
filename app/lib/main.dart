@@ -75,6 +75,8 @@ Future<void> main([List<String> args = const []]) async {
   }
   if (!only) exit(0);
   final state = AppState(dataDir);
+  // What is said while the splash shows waits for the main window.
+  state.toasts.hold();
   // The window's errors written to the log lose the names it knows, as the core's do.
   appErrorNames = () => reportNames(state);
   // The language and the theme, before the splash says anything.
@@ -87,7 +89,7 @@ Future<void> main([List<String> args = const []]) async {
   runApp(FogataApp(state: state));
   final shownAt = DateTime.now();
   await state.boot();
-  await finishSplash(
+  final shown = await finishSplash(
     splash: state.splash,
     updates: state.updates,
     started: state.started,
@@ -97,6 +99,8 @@ Future<void> main([List<String> args = const []]) async {
     say: state.say,
     nameOf: (device) => state.contacts.friendPerson(device)?.name,
   );
+  // Not when Fogata quits to start again into an update.
+  if (shown) state.toasts.release();
 }
 
 /// Fogata cannot start, and never will as things are: the window says [why], and nothing

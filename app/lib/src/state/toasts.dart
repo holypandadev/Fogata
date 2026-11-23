@@ -39,8 +39,36 @@ class ToastBoard extends Piece {
     _timers.add(timer);
   }
 
+  /// Toasts said while the splash shows wait for the main window ([release]): in the
+  /// small splash they were cut short, and most were gone before the main window came.
+  bool _held = false;
+  final List<Toast> _waiting = [];
+
+  /// Keeps what is said from showing until [release].
+  void hold() => _held = true;
+
+  /// Shows what was said while held, each for its whole time from now.
+  void release() {
+    if (!_held) return;
+    _held = false;
+    final waiting = [..._waiting];
+    _waiting.clear();
+    waiting.forEach(_show);
+  }
+
   void say(String text, {bool error = false, String? path}) {
     final toast = Toast(text, error: error, path: path);
+    if (_held) {
+      _waiting.add(toast);
+      if (_waiting.length > maxShown) _waiting.removeAt(0);
+      return;
+    }
+    _show(toast);
+  }
+
+  void _show(Toast toast) {
+    final error = toast.error;
+    final path = toast.path;
     list.add(toast);
     while (list.length > maxShown) {
       list.removeAt(0);
