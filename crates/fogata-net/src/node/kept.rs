@@ -1222,33 +1222,49 @@ mod tests {
     }
 
     /// A member dropped from a group after its device was no longer known here lets go of
-    /// what is known of what it reads there, as one whose device is known does; what is
-    /// known of a member still connected stays.
+    /// what is known of what it reads there, and of what went to it, as one whose device is
+    /// known does; what is known of a member still connected stays, also of a device still
+    /// connected through another of its sessions.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_member_dropped_without_its_device_known_is_not_known_to_read() {
         let (ana, mut log, _) = group();
-        let (bea, cai) = (someone(), someone());
+        let (bea, cai, dan) = (someone(), someone(), someone());
         log.add(&ana, bea, "bea", 2).unwrap();
         log.add(&ana, cai, "cai", 3).unwrap();
+        log.add(&ana, dan, "dan", 4).unwrap();
         let group = log.group_id();
-        let epoch = log.current_keys(&ana).unwrap().epoch();
+        let keys = log.current_keys(&ana).unwrap();
+        let epoch = keys.epoch();
         let (node, _events) = node(&ana, log);
         let file = TempFile::new("unknown");
         let (path, key) = (file.0.clone(), DataKey::generate().unwrap());
+        let (id, wire) = line(&keys, &ana, "to all", now_ms());
         let found = inspect(&node, move |n| {
             n.keep_own_lines(path, key, true);
             let to_bea = connect(n, group, bea);
             let to_cai = connect(n, group, cai);
-            n.kept_proved(group, to_bea, epoch);
-            n.kept_proved(group, to_cai, epoch);
-            let before = [bea, cai].map(|d| n.kept_lines.knows(group, &d, epoch));
-            n.members.remove(&to_bea);
-            n.drop_member(group, to_bea);
-            let after = [bea, cai].map(|d| n.kept_lines.knows(group, &d, epoch));
-            (before, after, n.kept_lines.reads.len())
+            let to_dan = connect(n, group, dan);
+            let to_dan_too = connect(n, group, dan);
+            for peer in [to_bea, to_cai, to_dan, to_dan_too] {
+                n.kept_proved(group, peer, epoch);
+            }
+            // Said while all are connected: it goes to each now.
+            n.keep_line(group, FIRST_ROOM, id, &wire);
+            let known = |n: &Node| [bea, cai, dan].map(|d| n.kept_lines.knows(group, &d, epoch));
+            let went = |n: &Node| {
+                let line = n.kept_lines.lines.iter().find(|l| l.id == id).unwrap();
+                [bea, cai, dan].map(|d| line.sent.contains_key(&d))
+            };
+            let before = (known(n), went(n));
+            for peer in [to_bea, to_dan] {
+                n.members.remove(&peer);
+                n.drop_member(group, peer);
+            }
+            (before, (known(n), went(n)), n.kept_lines.reads.len())
         })
         .await;
-        assert_eq!(found, ([true, true], [false, true], 1));
+        let (all, bea_gone) = ([true; 3], [false, true, true]);
+        assert_eq!(found, ((all, all), (bea_gone, bea_gone), 2));
         node.shutdown().await.unwrap();
     }
 }
