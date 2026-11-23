@@ -703,12 +703,15 @@ impl RecordSent {
     }
 
     /// The record did not get there: it goes again a little later (see
-    /// [`RECORD_LOST_AGAIN`]).
+    /// [`RECORD_LOST_AGAIN`]), counted from now; past its quick tries, [`RECORD_AGAIN`]
+    /// after it went, as one that got there.
     fn lost(&mut self) {
         if !self.answered {
             self.answered = true;
             self.lost = self.lost.saturating_add(1);
-            self.at = Instant::now();
+            if self.lost <= RECORD_LOST_TRIES {
+                self.at = Instant::now();
+            }
         }
     }
 

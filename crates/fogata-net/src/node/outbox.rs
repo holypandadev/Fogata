@@ -565,6 +565,10 @@ mod tests {
                 records_age(n, group, bea, Duration::from_secs(wait));
                 n.send_lost_records();
             }
+            // The fifth try is lost once the request timed out, 20 s after it went: the
+            // five minutes run from when it went.
+            let on_its_way = Duration::from_secs(20);
+            records_age(n, group, bea, on_its_way);
             lose_records(n, bea);
             let roster = |n: &mut Node| {
                 n.on_request(
@@ -580,8 +584,9 @@ mod tests {
             };
             let second = Duration::from_secs(1);
             let mut seen = Vec::new();
-            // Since the last loss: nothing yet, then the 2 s of the try that did not go.
-            for since in [Duration::ZERO, Duration::from_secs(2)] {
+            // Since the last record went: the time it was on its way, then the 2 s of the
+            // try that did not go.
+            for since in [on_its_way, Duration::from_secs(2)] {
                 records_age(n, group, bea, super::super::RECORD_AGAIN - second - since);
                 n.send_lost_records();
                 seen.push(roster(n));
