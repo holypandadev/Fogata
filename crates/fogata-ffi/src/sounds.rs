@@ -1405,16 +1405,20 @@ fn stream<T: SizedSample + FromSample<f32>>(
 }
 
 #[cfg(test)]
+#[path = "measures/sounds.rs"]
+mod measures;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    fn peak(frames: &[Frame]) -> f32 {
+    pub(super) fn peak(frames: &[Frame]) -> f32 {
         frames
             .iter()
             .fold(0.0f32, |m, f| m.max(f[0].abs()).max(f[1].abs()))
     }
 
-    fn widened(frames: &[Frame]) -> Vec<[f64; 2]> {
+    pub(super) fn widened(frames: &[Frame]) -> Vec<[f64; 2]> {
         frames
             .iter()
             .map(|f| [f64::from(f[0]), f64::from(f[1])])
@@ -1422,7 +1426,7 @@ mod tests {
     }
 
     /// Seconds until the sound falls for good to `db` under its peak.
-    fn heard_for(frames: &[Frame], rate: u32, db: f32) -> f32 {
+    pub(super) fn heard_for(frames: &[Frame], rate: u32, db: f32) -> f32 {
         let floor = peak(frames) * 10f32.powf(db / 20.0);
         let last = frames
             .iter()
@@ -1432,7 +1436,7 @@ mod tests {
     }
 
     /// Every variant of every sound.
-    fn every_variant() -> impl Iterator<Item = (Sound, Variant)> {
+    pub(super) fn every_variant() -> impl Iterator<Item = (Sound, Variant)> {
         Sound::ALL
             .into_iter()
             .flat_map(|s| variants(s).iter().map(move |&v| (s, v)))
@@ -1616,7 +1620,7 @@ mod tests {
 
     /// How often the rings would start again while a call rings: the player does it every
     /// bar ([`RING_EVERY`]), which a ring played on an instrument needs.
-    fn every(sound: Sound, variant: Variant) -> Option<f64> {
+    pub(super) fn every(sound: Sound, variant: Variant) -> Option<f64> {
         match sound {
             _ if songs::song(sound, variant).is_some() => Some(songs::SONG_EVERY),
             Sound::Ring => Some(2.6),
@@ -1735,7 +1739,7 @@ mod tests {
 
     /// The sound's spectral centroid (Hz, power-weighted) and the share of its power
     /// between 2 and 5 kHz, over both sides, in Hann windows of 4096 half overlapping.
-    fn spectrum(frames: &[Frame], rate: f64) -> (f64, f64) {
+    pub(super) fn spectrum(frames: &[Frame], rate: f64) -> (f64, f64) {
         const N: usize = 4096;
         let mut power = vec![0.0f64; N / 2];
         for side in 0..2 {
@@ -1785,7 +1789,7 @@ mod tests {
         assert!(band > 0.99, "{band}");
     }
 
-    fn wav(frames: &[Frame]) -> Vec<u8> {
+    pub(super) fn wav(frames: &[Frame]) -> Vec<u8> {
         let mut wav = Vec::with_capacity(44 + frames.len() * 4);
         let data = (frames.len() * 4) as u32;
         wav.extend_from_slice(b"RIFF");
@@ -1800,64 +1804,6 @@ mod tests {
             wav.extend_from_slice(&((s * 32_767.0).round() as i16).to_le_bytes());
         }
         wav
-    }
-
-    /// Writes every variant of every sound as a 48 kHz stereo WAV file into the folder
-    /// named by `FOGATA_SOUNDS_OUT`, to listen to them side by side (the rings twice, as
-    /// they repeat), with `measures.tsv`: each one's length, how long it is heard, its
-    /// loudness, peak, spectral centroid and share of power between 2 and 5 kHz.
-    #[test]
-    #[ignore = "writes files; run by hand with FOGATA_SOUNDS_OUT set and --ignored"]
-    fn writes_every_variant() {
-        let dir = std::path::PathBuf::from(
-            std::env::var("FOGATA_SOUNDS_OUT").expect("FOGATA_SOUNDS_OUT names a folder"),
-        );
-        std::fs::create_dir_all(&dir).unwrap();
-        let mut measures = String::from(
-            "sound\tvariant\tseconds\theard_s\tlufs\tpeak_dbfs\tcentroid_hz\tshare_2_5k\n",
-        );
-        for (sound, variant) in every_variant() {
-            let frames = render_as(sound, variant, 48_000);
-            let (centroid, band) = spectrum(&frames, 48_000.0);
-            measures.push_str(&format!(
-                "{sound:?}\t{variant:?}\t{:.3}\t{:.3}\t{:.2}\t{:.2}\t{centroid:.0}\t{band:.4}\n",
-                frames.len() as f32 / 48_000.0,
-                heard_for(&frames, 48_000, -30.0),
-                loudness(&widened(&frames), 48_000.0),
-                20.0 * peak(&frames).log10(),
-            ));
-            let played: Vec<Frame> = match every(sound, variant) {
-                Some(every) => {
-                    let mut queue = VecDeque::new();
-                    mix_into(&mut queue, &frames);
-                    let later = (every * 48_000.0) as usize;
-                    let mut second = vec![[0.0; 2]; later];
-                    second.extend_from_slice(&frames);
-                    mix_into(&mut queue, &second);
-                    queue.into_iter().collect()
-                }
-                None => frames,
-            };
-            std::fs::write(dir.join(format!("{sound:?}-{variant:?}.wav")), wav(&played)).unwrap();
-        }
-        std::fs::write(dir.join("measures.tsv"), measures).unwrap();
-    }
-
-    /// Plays every sound on this computer's default output the way the application does,
-    /// one every 1.5 s, then a ring with a message and a notice over it.
-    #[test]
-    #[ignore = "makes noise; run by hand with --ignored"]
-    fn plays_on_the_default_output() {
-        for sound in Sound::ALL {
-            play(sound);
-            thread::sleep(Duration::from_millis(1500));
-        }
-        play(Sound::Ring);
-        thread::sleep(Duration::from_millis(300));
-        play(Sound::Message);
-        thread::sleep(Duration::from_millis(300));
-        play(Sound::Notice);
-        thread::sleep(Duration::from_millis(1500));
     }
 
     #[test]
