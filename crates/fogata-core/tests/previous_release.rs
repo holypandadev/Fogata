@@ -2,8 +2,8 @@
 //! version writes to a group's log, the previous release takes in whole (nothing left
 //! waiting, nothing put aside as damaged), and the two meet in the group's voice room. A
 //! change of what a version accepts or writes that splits a group between two releases fails
-//! here. Unlike tests/old_copy.rs, whose copies must come from before a given feature, this
-//! takes the newest release, whatever it is. Needs that binary: run with
+//! here. Unlike tests/old_copy.rs, whose copy must be 0.1.0-beta.9, this takes the newest
+//! release, whatever it is. Needs that binary: run with
 //! `FOGATA_OLD_CLI=<path to fogata> cargo test -p fogata-core --test previous_release -- --ignored`
 //! (.github/workflows/weekly.yml builds it from the last release tag; docs/releasing-beta.md).
 
