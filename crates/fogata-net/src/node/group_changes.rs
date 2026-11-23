@@ -299,8 +299,9 @@ impl Node {
         self.emit(NodeEvent::GroupChanged(group));
     }
 
-    /// At each check of the links: a banner or picture record lost on its way to a member
-    /// that still keeps them goes again once it is due (see `RecordSent::due_again`).
+    /// At each check of the links: after a banner or picture record was lost on its way to
+    /// a member that still keeps them, the record to send goes to it once it is due (see
+    /// `RecordSent::due_again`).
     pub(super) fn send_lost_records(&mut self) {
         let groups: Vec<GroupId> = self.groups.keys().copied().collect();
         for group in groups {

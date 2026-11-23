@@ -678,6 +678,11 @@ const ON_ITS_WAY_AT_MOST: Duration = Duration::from_secs(60);
 /// a few more times, not once per check.
 const RECORD_LOST_AGAIN: Duration = Duration::from_secs(2);
 const RECORD_LOST_TRIES: u8 = 4;
+/// How long what is kept of a record lost on its way still counts, sent or lost last that
+/// long ago: the losses in a row outlast [`RECORD_AGAIN`], so that a member whose requests
+/// keep failing is sent the record once each [`RECORD_AGAIN`] after its few quick tries, not
+/// those tries again each time.
+const RECORD_LOST_KEPT: Duration = Duration::from_secs(30 * 60);
 
 impl RecordSent {
     /// One sent now, not answered yet, `before` being what was sent before: the losses in a
@@ -716,13 +721,16 @@ impl RecordSent {
         }
     }
 
-    /// Whether this record, lost on its way and still the one to send (`digest`), is due
-    /// to go again now, unasked.
+    /// Whether a record should go now, unasked, after this one was lost on its way: the
+    /// same one (`digest` is still the one to send) once it is due, a newer one at once.
     fn due_again(&self, digest: &[u8; 32]) -> bool {
-        self.digest == *digest
-            && self.answered
-            && (1..=RECORD_LOST_TRIES).contains(&self.lost)
-            && self.at.elapsed() >= self.lost_again()
+        if !self.answered || self.lost == 0 {
+            return false;
+        }
+        if self.digest != *digest {
+            return true;
+        }
+        self.lost <= RECORD_LOST_TRIES && self.at.elapsed() >= self.lost_again()
     }
 
     /// Whether a record with `digest` may go to a member that was sent `sent`, `refused`
@@ -741,7 +749,12 @@ impl RecordSent {
 
     /// Whether what is kept of a record sent still counts.
     fn counts(&self) -> bool {
-        self.at.elapsed() < RECORD_AGAIN
+        let kept = if self.lost > 0 {
+            RECORD_LOST_KEPT
+        } else {
+            RECORD_AGAIN
+        };
+        self.at.elapsed() < kept
     }
 }
 

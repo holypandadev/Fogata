@@ -188,9 +188,9 @@ impl Node {
                     slot.room_asked.remove(&peer);
                 }
             }
-            // No longer on its way: another banner or picture may go to it at once, the same
-            // one again a little later, at the next check of the links or the member's next
-            // roster (see `RecordSent::lost`).
+            // No longer on its way: the same banner or picture goes again a little later, a
+            // newer one chosen meanwhile at once, at the next check of the links (see
+            // `RecordSent::due_again`), or at the member's next roster.
             Pending::Banner(group, digest) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
                     slot.banner_lost(peer, digest);
@@ -546,6 +546,64 @@ mod tests {
         let went = ((0, 0), (1, 1));
         assert_eq!(tries, vec![went, went, went, went, ((0, 0), (0, 0))]);
         assert_eq!((after_answer, again), (0, 1));
+        node.shutdown().await.unwrap();
+    }
+
+    /// Past its quick tries, a record lost again and again goes once each
+    /// [`super::super::RECORD_AGAIN`], at the member's roster, for as long as it goes on:
+    /// what is kept of its losses outlasts that while, and its quick tries do not start
+    /// again. A newer record chosen after a loss goes at the next check of the links.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_lost_over_and_over_goes_once_each_while() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            for wait in [2, 4, 8, 16] {
+                lose_records(n, bea);
+                records_age(n, group, bea, Duration::from_secs(wait));
+                n.send_lost_records();
+            }
+            lose_records(n, bea);
+            let roster = |n: &mut Node| {
+                n.on_request(
+                    bea,
+                    MemberRequest::Roster {
+                        group_id: group.as_bytes().to_vec(),
+                        heads: None,
+                        banner: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
+                        picture: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
+                    },
+                );
+                records_to(n, bea)
+            };
+            let second = Duration::from_secs(1);
+            let mut seen = Vec::new();
+            // Since the last loss: nothing yet, then the 2 s of the try that did not go.
+            for since in [Duration::ZERO, Duration::from_secs(2)] {
+                records_age(n, group, bea, super::super::RECORD_AGAIN - second - since);
+                n.send_lost_records();
+                seen.push(roster(n));
+                records_age(n, group, bea, second);
+                n.groups.get_mut(&group).unwrap().forget_sent();
+                n.send_lost_records();
+                seen.push(roster(n));
+                lose_records(n, bea);
+                records_age(n, group, bea, Duration::from_secs(2));
+                n.send_lost_records();
+                seen.push(records_to(n, bea));
+            }
+            let mut newer = b"\x89PNG\r\n\x1a\n".to_vec();
+            newer.resize(500, 3);
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_banner(newer, crate::node::now_ms()).unwrap();
+            n.send_lost_records();
+            (seen, records_to(n, bea))
+        })
+        .await;
+        let (none, both) = ((0, 0), (1, 1));
+        assert_eq!(found, (vec![none, both, none, none, both, none], (1, 0)));
         node.shutdown().await.unwrap();
     }
 }
