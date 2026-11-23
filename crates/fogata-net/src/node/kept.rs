@@ -252,6 +252,15 @@ impl KeptLines {
         }
     }
 
+    /// The members of `group` that are not `connected` are no longer connected in it, their
+    /// devices not known here any more: as for [`Self::member_gone`], for each of them.
+    fn members_gone_but(&mut self, group: GroupId, connected: &BTreeSet<DevicePublicKey>) {
+        (self.reads).retain(|(g, device), _| *g != group || connected.contains(device));
+        for line in self.lines.iter_mut().filter(|l| l.group == group) {
+            line.sent.retain(|device, _| connected.contains(device));
+        }
+    }
+
     /// Line `id` went to `device` at `now`.
     fn sent(&mut self, id: &[u8; 16], device: DevicePublicKey, now: Instant) {
         if let Some(line) = self.lines.iter_mut().find(|l| l.id == *id) {
@@ -590,6 +599,20 @@ impl Node {
     /// `drop_member`).
     pub(super) fn kept_member_gone(&mut self, group: GroupId, device: &DevicePublicKey) {
         self.kept_lines.member_gone(group, device);
+    }
+
+    /// A member of `group` is no longer connected in it, and its device is not known here
+    /// any more (see `drop_member`): what is known of those of its devices not connected in
+    /// it goes.
+    pub(super) fn kept_unknown_member_gone(&mut self, group: GroupId) {
+        let Some(slot) = self.groups.get(&group) else {
+            return;
+        };
+        let connected = (slot.members.iter())
+            .filter_map(|p| self.members.get(p))
+            .map(|m| m.device)
+            .collect();
+        self.kept_lines.members_gone_but(group, &connected);
     }
 
     /// A request carrying this device's room event `id` to `peer` did not get there.
@@ -1196,5 +1219,36 @@ mod tests {
         kept.follow(true);
         assert!(path.exists());
         assert!(KeptLines::open(path, key, true, now_ms()).lines.is_empty());
+    }
+
+    /// A member dropped from a group after its device was no longer known here lets go of
+    /// what is known of what it reads there, as one whose device is known does; what is
+    /// known of a member still connected stays.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_dropped_without_its_device_known_is_not_known_to_read() {
+        let (ana, mut log, _) = group();
+        let (bea, cai) = (someone(), someone());
+        log.add(&ana, bea, "bea", 2).unwrap();
+        log.add(&ana, cai, "cai", 3).unwrap();
+        let group = log.group_id();
+        let epoch = log.current_keys(&ana).unwrap().epoch();
+        let (node, _events) = node(&ana, log);
+        let file = TempFile::new("unknown");
+        let (path, key) = (file.0.clone(), DataKey::generate().unwrap());
+        let found = inspect(&node, move |n| {
+            n.keep_own_lines(path, key, true);
+            let to_bea = connect(n, group, bea);
+            let to_cai = connect(n, group, cai);
+            n.kept_proved(group, to_bea, epoch);
+            n.kept_proved(group, to_cai, epoch);
+            let before = [bea, cai].map(|d| n.kept_lines.knows(group, &d, epoch));
+            n.members.remove(&to_bea);
+            n.drop_member(group, to_bea);
+            let after = [bea, cai].map(|d| n.kept_lines.knows(group, &d, epoch));
+            (before, after, n.kept_lines.reads.len())
+        })
+        .await;
+        assert_eq!(found, ([true, true], [false, true], 1));
+        node.shutdown().await.unwrap();
     }
 }
