@@ -796,4 +796,50 @@ mod tests {
         assert_eq!((banner, picture), ((0, 6), (0, 6)));
         node.shutdown().await.unwrap();
     }
+
+    /// A record sent again unasked is charged to the member it goes to, as one its roster
+    /// asks for is: one dropped before it left, and a newer one chosen after a loss. One
+    /// sent at a change to the log is not charged, as before.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_sent_again_unasked_is_charged_to_its_member() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let (bea, cai) = (with_records(n, group), with_records(n, group));
+            let left = |n: &Node, peer: PeerId| n.limits.served_left(n.members[&peer].device);
+            n.send_banner_to(group, &[bea, cai]);
+            n.send_picture_to(group, &[bea, cai]);
+            let before = (left(n, bea), left(n, cai));
+            // Bea's both dropped before they left.
+            let dropped: Vec<_> = (n.pending.iter())
+                .filter(|(_, (p, _))| *p == bea)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in dropped {
+                let (to, kind) = n.pending.remove(&id).unwrap();
+                n.request_done(to);
+                n.request_unsent(to, kind);
+            }
+            records_age(n, group, bea, Duration::from_secs(2));
+            // Cai's failed on their way, and a newer banner was chosen since.
+            lose_records(n, cai);
+            let mut newer = b"\x89PNG\r\n\x1a\n".to_vec();
+            newer.resize(500, 3);
+            let slot = n.groups.get_mut(&group).unwrap();
+            slot.ctx.set_banner(newer, crate::node::now_ms()).unwrap();
+            n.send_lost_records();
+            let charged = |n: &Node, peer, before: f64| (before - left(n, peer)).round() as usize;
+            let charged = (charged(n, bea, before.0), charged(n, cai, before.1));
+            let went = (records_to(n, bea), records_to(n, cai));
+            (before.0 == before.1, charged, went)
+        })
+        .await;
+        // Each record of 500 bytes counts as the least an answer counts.
+        let least = super::super::limits::SERVED_LEAST;
+        let (same, (bea, cai), went) = found;
+        assert!(same);
+        assert!((2 * least - 8..=2 * least).contains(&bea), "{bea}");
+        assert!((least - 8..=least).contains(&cai), "{cai}");
+        assert_eq!(went, ((1, 1), (1, 0)));
+        node.shutdown().await.unwrap();
+    }
 }

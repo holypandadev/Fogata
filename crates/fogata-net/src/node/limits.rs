@@ -591,6 +591,14 @@ impl Limits {
         bucket.tokens = (bucket.tokens - bytes.max(SERVED_LEAST) as f64).max(-SERVED_BYTES_BURST);
     }
 
+    /// What member `device` has left to be served, in bytes, as last counted.
+    #[cfg(test)]
+    pub(super) fn served_left(&self, device: DevicePublicKey) -> f64 {
+        self.served
+            .get(&device)
+            .map_or(SERVED_BYTES_BURST, |bucket| bucket.tokens)
+    }
+
     /// Whether a group's banner or picture record of `bytes` that member `device` handed
     /// over is looked at now (see [`GROUP_RECORD_BYTES_BURST`]).
     pub(super) fn take_group_record(

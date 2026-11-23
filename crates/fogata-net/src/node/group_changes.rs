@@ -302,7 +302,8 @@ impl Node {
     /// At each check of the links: after a banner or picture record was lost to a member
     /// that still keeps them, the record to send goes to it once it is due (see
     /// `RecordSent::due_again`): one dropped before it left once the member's outbox has
-    /// none waiting, so that it pushes out no other request, a newer one at once.
+    /// none waiting, so that it pushes out no other request, a newer one at once. Each is
+    /// charged to the member it goes to, as one its roster asks for is.
     pub(super) fn send_lost_records(&mut self) {
         let groups: Vec<GroupId> = self.groups.keys().copied().collect();
         for group in groups {
@@ -328,12 +329,24 @@ impl Node {
                 &slot.picture_sent,
                 banner_key(&slot.ctx.picture_digest()),
             );
-            if !banners.is_empty() {
-                self.send_banner_to(group, &banners);
+            for peer in banners {
+                let bytes = self.send_banner_to(group, &[peer]);
+                self.charge_sent_again(peer, bytes);
             }
-            if !pictures.is_empty() {
-                self.send_picture_to(group, &pictures);
+            for peer in pictures {
+                let bytes = self.send_picture_to(group, &[peer]);
+                self.charge_sent_again(peer, bytes);
             }
+        }
+    }
+
+    /// Charges member `peer` for a record of `bytes` sent to it again unasked.
+    fn charge_sent_again(&mut self, peer: PeerId, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        if let Some(member) = self.members.get(&peer) {
+            (self.limits).charge_served(member.device, bytes, Instant::now());
         }
     }
 
