@@ -2,7 +2,10 @@
 //! them), keys and rooms brought up to date, the change pushed to the other members, and
 //! the group's banner and picture sent to those that keep them.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
 use fogata_crypto::GroupId;
 use fogata_proto::{MemberRequest, SharedBytes};
@@ -296,6 +299,40 @@ impl Node {
         self.emit(NodeEvent::GroupChanged(group));
     }
 
+    /// At each check of the links: a banner or picture record lost on its way to a member
+    /// that still keeps them goes again once it is due (see `RecordSent::due_again`).
+    pub(super) fn send_lost_records(&mut self) {
+        let groups: Vec<GroupId> = self.groups.keys().copied().collect();
+        for group in groups {
+            let Some(slot) = self.groups.get(&group) else {
+                continue;
+            };
+            let due = |peers: &HashSet<PeerId>, sent: &HashMap<PeerId, RecordSent>, digest| {
+                (peers.iter())
+                    .filter(|p| slot.members.contains(p))
+                    .filter(|p| sent.get(p).is_some_and(|s| s.due_again(&digest)))
+                    .copied()
+                    .collect::<Vec<PeerId>>()
+            };
+            let banners = due(
+                &slot.banner_peers,
+                &slot.banner_sent,
+                banner_key(&slot.ctx.banner_digest()),
+            );
+            let pictures = due(
+                &slot.picture_peers,
+                &slot.picture_sent,
+                banner_key(&slot.ctx.picture_digest()),
+            );
+            if !banners.is_empty() {
+                self.send_banner_to(group, &banners);
+            }
+            if !pictures.is_empty() {
+                self.send_picture_to(group, &pictures);
+            }
+        }
+    }
+
     /// Sends the group's banner to those of `peers` that may be sent it now: not to one that
     /// refused it, nor to one it went to lately or is on its way to (see [`RecordSent`]).
     /// Returns the bytes sent, to charge the member that asked.
@@ -315,7 +352,9 @@ impl Node {
             return 0;
         };
         for peer in &to {
-            slot.banner_sent.insert(*peer, RecordSent::now(digest));
+            let before = slot.banner_sent.get(peer);
+            slot.banner_sent
+                .insert(*peer, RecordSent::now(digest, before));
         }
         for peer in &to {
             self.request(
@@ -352,7 +391,9 @@ impl Node {
             return 0;
         };
         for peer in &to {
-            slot.picture_sent.insert(*peer, RecordSent::now(digest));
+            let before = slot.picture_sent.get(peer);
+            slot.picture_sent
+                .insert(*peer, RecordSent::now(digest, before));
         }
         for peer in &to {
             self.request(

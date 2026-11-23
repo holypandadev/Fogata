@@ -189,15 +189,16 @@ impl Node {
                 }
             }
             // No longer on its way: another banner or picture may go to it at once, the same
-            // one only after a while (see `RecordSent`), as after an answer.
+            // one again a little later, at the next check of the links or the member's next
+            // roster (see `RecordSent::lost`).
             Pending::Banner(group, digest) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.banner_answered(peer, digest);
+                    slot.banner_lost(peer, digest);
                 }
             }
             Pending::Picture(group, digest) => {
                 if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.picture_answered(peer, digest);
+                    slot.picture_lost(peer, digest);
                 }
             }
             // Sent again at the next roster that asks for them.
@@ -306,6 +307,8 @@ impl Node {
 mod tests {
     use std::{collections::VecDeque, time::Instant};
 
+    use fogata_crypto::GroupId;
+
     use libp2p::PeerId;
 
     use super::*;
@@ -406,6 +409,143 @@ mod tests {
         })
         .await;
         assert_eq!(found, ([false; 7], true));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A group with a banner and a picture record, and member Bea, whose version keeps
+    /// both, connected to it.
+    fn with_records(n: &mut Node, group: GroupId) -> PeerId {
+        let bea = PeerId::random();
+        add_member(n, group, bea);
+        let png = |fill: u8| {
+            let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+            png.resize(500, fill);
+            png
+        };
+        let slot = n.groups.get_mut(&group).unwrap();
+        slot.banner_peers.insert(bea);
+        slot.picture_peers.insert(bea);
+        slot.ctx.set_banner(png(1), crate::node::now_ms()).unwrap();
+        slot.ctx.set_picture(png(2), crate::node::now_ms()).unwrap();
+        bea
+    }
+
+    /// The banners and picture records on their way to `peer`.
+    fn records_to(n: &Node, peer: PeerId) -> (usize, usize) {
+        let count = |banner: bool| {
+            (n.pending.values())
+                .filter(|(p, kind)| {
+                    *p == peer
+                        && if banner {
+                            matches!(kind, Pending::Banner(..))
+                        } else {
+                            matches!(kind, Pending::Picture(..))
+                        }
+                })
+                .count()
+        };
+        (count(true), count(false))
+    }
+
+    /// The banner and the picture record on their way to `peer` fail, as a request whose
+    /// connection closed or that got no answer in time does (see `on_member_event`).
+    fn lose_records(n: &mut Node, peer: PeerId) {
+        let lost: Vec<_> = (n.pending.iter())
+            .filter(|(_, (p, kind))| {
+                *p == peer && matches!(kind, Pending::Banner(..) | Pending::Picture(..))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in lost {
+            let (to, kind) = n.pending.remove(&id).unwrap();
+            n.request_done(to);
+            n.request_dropped(to, kind);
+        }
+    }
+
+    /// Takes `ago` off when the records to `peer` last went or were lost, as if that much
+    /// time had passed since.
+    fn records_age(n: &mut Node, group: GroupId, peer: PeerId, ago: Duration) {
+        let slot = n.groups.get_mut(&group).unwrap();
+        for sent in [&mut slot.banner_sent, &mut slot.picture_sent] {
+            let sent = sent.get_mut(&peer).unwrap();
+            sent.at = sent.at.checked_sub(ago).unwrap();
+        }
+    }
+
+    /// A banner or picture record whose request to a member was lost on its way goes to it
+    /// again at its next roster, not only once [`super::super::RECORD_AGAIN`] passed, as
+    /// one it took does.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_lost_on_its_way_goes_again_at_the_next_roster() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            let first = records_to(n, bea);
+            lose_records(n, bea);
+            // Its next roster, a heartbeat later, names neither.
+            records_age(n, group, bea, Duration::from_secs(20));
+            let ask = MemberRequest::Roster {
+                group_id: group.as_bytes().to_vec(),
+                heads: None,
+                banner: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
+                picture: Some(serde_bytes::ByteBuf::from(vec![0; 16])),
+            };
+            n.on_request(bea, ask);
+            (first, records_to(n, bea))
+        })
+        .await;
+        assert_eq!(found, ((1, 1), (1, 1)));
+        node.shutdown().await.unwrap();
+    }
+
+    /// A record lost on its way goes again unasked, at the next check of the links once it
+    /// is due: 2, 4, 8 and 16 s after each loss in a row, not before; past four losses in a
+    /// row only as a record that got there does. One that gets there, answered, starts the
+    /// count afresh.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_lost_on_its_way_goes_again_soon_a_few_times() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            let mut tries = Vec::new();
+            for wait in [2, 4, 8, 16, 60] {
+                lose_records(n, bea);
+                // Not before its time.
+                records_age(n, group, bea, Duration::from_secs(wait - 1));
+                n.send_lost_records();
+                let early = records_to(n, bea);
+                records_age(n, group, bea, Duration::from_secs(1));
+                n.send_lost_records();
+                tries.push((early, records_to(n, bea)));
+            }
+            // Answered at last: the next loss counts as the first again.
+            records_age(n, group, bea, super::super::RECORD_AGAIN);
+            n.send_banner_to(group, &[bea]);
+            let id = (n.pending.iter())
+                .find(|(_, (p, kind))| *p == bea && matches!(kind, Pending::Banner(..)))
+                .map(|(id, _)| *id)
+                .unwrap();
+            let (to, kind) = n.pending.remove(&id).unwrap();
+            n.request_done(to);
+            n.on_response(to, kind, fogata_proto::MemberResponse::Ack);
+            let after_answer = records_to(n, bea).0;
+            records_age(n, group, bea, super::super::RECORD_AGAIN);
+            n.send_banner_to(group, &[bea]);
+            lose_records(n, bea);
+            records_age(n, group, bea, Duration::from_secs(2));
+            n.send_lost_records();
+            (tries, after_answer, records_to(n, bea).0)
+        })
+        .await;
+        let (tries, after_answer, again) = found;
+        let went = ((0, 0), (1, 1));
+        assert_eq!(tries, vec![went, went, went, went, ((0, 0), (0, 0))]);
+        assert_eq!((after_answer, again), (0, 1));
         node.shutdown().await.unwrap();
     }
 }

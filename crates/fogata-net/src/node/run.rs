@@ -516,6 +516,7 @@ impl Node {
                 self.push_shown_again();
                 self.retry_mdns_dials();
                 self.check_member_links();
+                self.send_lost_records();
                 self.redial_let_go();
                 self.take_held_updates();
             }
