@@ -96,3 +96,43 @@ async fn a_new_log_left_leaves_the_old_group_stopped() {
     core.shutdown().await.unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A device that left the new log and was added to it again since, which waits for the
+/// person's yes, runs neither the old group nor the new log: following the move would run
+/// the invitation without asking.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_log_offered_again_leaves_the_old_group_stopped() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-offered-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    let new_id = {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let t = 1_000;
+        let mut old = GroupLog::create(&ana, "Campfire", t).unwrap();
+        old.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        old.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let mut new = old.new_log_for_move(&ana, t + 3).unwrap();
+        old.move_to(&ana, &new, t + 4).unwrap();
+        new.append(&me, Body::Leave, t + 5).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        store.save_group_log(&new, "Campfire").unwrap();
+        store.record_move(&old.group_id(), &new, now_ms()).unwrap();
+        // Ana adds Bea again: an invitation, waiting.
+        new.add(&ana, me.public_key(), "Bea", t + 6).unwrap();
+        let offered = store.save_offered_group(&new, &ana.public_key()).unwrap();
+        assert!(matches!(offered, fogata_core::Offered::Pending(_)));
+        new.group_id()
+    };
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    assert!(core.groups().await.unwrap().is_empty());
+    let stored = core.store().groups().unwrap();
+    let new = (stored.iter())
+        .find(|g| g.group_id == hex::encode(new_id.as_bytes()))
+        .unwrap();
+    assert!(new.pending);
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

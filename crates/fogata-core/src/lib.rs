@@ -900,11 +900,18 @@ impl Core {
         let listed: HashSet<String> = stored_groups.iter().map(|g| g.group_id.clone()).collect();
         // Groups that moved, run for a while, and the log each moved to.
         let mut moved_to = Vec::new();
-        // Groups read and not run: left, or removed from.
+        // Groups read and not run: left, removed from, or offered again and waiting.
         let mut left = HashSet::new();
         for stored in stored_groups {
-            // Invitations wait for the person; nothing of them runs or is announced.
+            // Invitations wait for the person; nothing of them runs or is announced. A group
+            // that moved to one stays stopped too, or following it would run the invitation.
             if stored.pending {
+                if let Some(id) = hex::decode(&stored.group_id)
+                    .ok()
+                    .and_then(|b| GroupId::from_bytes(&b).ok())
+                {
+                    left.insert(id);
+                }
                 continue;
             }
             if stored
@@ -970,8 +977,9 @@ impl Core {
                 left.insert(log.group_id());
             }
         }
-        // A group that moved runs only beside the log it moved to: one this device left, or
-        // was removed from, leaves the old one stopped too, or it would be followed again.
+        // A group that moved runs only beside the log it moved to: one this device left, was
+        // removed from, or was offered again, leaves the old one stopped too, or it would be
+        // followed again.
         // One that could not be read this time leaves it running.
         let stopped: Vec<GroupId> = (moved_to.iter())
             .filter(|(_, to)| left.contains(to))

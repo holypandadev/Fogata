@@ -309,15 +309,20 @@ impl Node {
             Verdict::Moved(verdict) => self.start_judged(peer, group, verdict),
             Verdict::Failed { moved } => {
                 // The new log of a group that moved may be asked for again, of another member.
+                let local = peer == self.local_peer();
                 if moved && let Some(slot) = self.groups.get_mut(&group) {
-                    slot.following_judged(peer);
+                    slot.following_judged(peer, local);
                 }
-                tracing::error!(
-                    %peer,
-                    "judging a log a peer sent failed with an internal error; the peer is \
-                     disconnected"
-                );
-                let _ = self.swarm.disconnect_peer_id(peer);
+                if local {
+                    tracing::error!("judging a log run here failed with an internal error");
+                } else {
+                    tracing::error!(
+                        %peer,
+                        "judging a log a peer sent failed with an internal error; the peer is \
+                         disconnected"
+                    );
+                    let _ = self.swarm.disconnect_peer_id(peer);
+                }
             }
         }
     }

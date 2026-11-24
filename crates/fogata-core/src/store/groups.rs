@@ -195,8 +195,13 @@ impl Store {
         // A new log saved here already may hold what this one lacks (a leave of this device
         // in it, say), or lack what it holds (one kept as an invitation): never written
         // over, the two are kept together.
-        let known = list.groups.iter().any(|g| g.group_id == new_id);
-        if known && let Ok(mut kept) = self.read_log(new.group_id()) {
+        // One that cannot be read this time is not written over either: the move is noted
+        // at a later try. One listed with no file at all (stopped before it was written) is.
+        if list.groups.iter().any(|g| g.group_id == new_id)
+            && !matches!(self.log_path(&new.group_id()).try_exists(), Ok(false))
+        {
+            let mut kept = (self.read_log(new.group_id()))
+                .context("cannot read the log the group moved to")?;
             let before = kept.len();
             kept.insert_all(new.entries().cloned());
             if kept.len() != before {
@@ -829,6 +834,38 @@ mod tests {
         let other = GroupLog::create(&me, "Other", 3).unwrap();
         assert!(store.record_move(&other.group_id(), &new, 11).is_err());
         assert_eq!(store.groups().unwrap().len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A new log listed here whose file cannot be read this time is not written over with
+    /// what follows: the move is not noted, and is at a later try.
+    #[cfg(unix)]
+    #[test]
+    fn a_new_log_that_cannot_be_read_is_not_written_over() {
+        let dir = std::env::temp_dir().join(format!("fogata-store-unread-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let old = GroupLog::create(&me, "Campfire", 1).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        let incoming = GroupLog::create(&me, "Campfire", 2).unwrap();
+        let mut new = incoming.clone();
+        new.append(&me, Body::Leave, 3).unwrap();
+        store.save_group_log(&new, "Campfire").unwrap();
+        // Out of reach for a moment (a link to itself where the file was), though a file
+        // could be written in its place.
+        let path = store.log_path(&new.group_id());
+        let kept = fs::read(&path).unwrap();
+        fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+        assert!(store.record_move(&old.group_id(), &incoming, 10).is_err());
+        assert!(fs::symlink_metadata(&path).unwrap().is_symlink());
+        assert!(store.groups().unwrap().iter().all(|g| g.moved.is_none()));
+        fs::remove_file(&path).unwrap();
+        fs::write(&path, kept).unwrap();
+        store.record_move(&old.group_id(), &incoming, 10).unwrap();
+        let log = store.load_log_of(&new.group_id()).unwrap();
+        assert!(!log.shared_state().is_member(&me.public_key()));
         fs::remove_dir_all(&dir).unwrap();
     }
 
