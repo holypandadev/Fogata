@@ -136,42 +136,39 @@ void main() {
     expect(verdict(refused), isNull);
   });
 
-  test(
-    'a restart of the recording is asked only where the refusal lost it',
-    () {
-      const name =
-          'the other output, the microphone on again (2), $swapRefusedForTest';
-      // The numbers of a device run with the unmute refused: the recording went on (the
-      // first reading after any unmute has no packets).
-      const voice = <double>[0, 88, 99, 77, 99, 100, 100, 100, 100, 102];
-      const read = <double?>[1.8, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.1, 2.0];
-      bool unmute(List<double?> read) => swapRecordingLost(
-        segment(name, voice, read: read),
-        startFailed: false,
-      );
-      expect(unmute(read), isFalse);
-      // A slow change to the system's devices, within the allowance: no restart asked.
-      expect(unmute([...read]..[2] = 0.0), isFalse);
-      // Nothing read past the allowance: one asked.
-      expect(unmute([...read]..[swapExcusedRefused] = 0.0), isTrue);
-      // A failed start always loses the recording, whatever was read.
-      expect(
-        swapRecordingLost(segment(name, voice, read: read), startFailed: true),
-        isTrue,
-      );
-      expect(
-        swapRecordingLost(
-          segment(
-            name,
-            [0, 0, 0, 0, 73, 86, 100, 101, 101, 100],
-            read: [0.1, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
-          ),
-          startFailed: true,
+  test('a restart of the recording is asked only where the refusal lost it', () {
+    const name =
+        'the other output, the microphone on again (2), $swapRefusedForTest';
+    // The numbers of a device run with the unmute refused: the recording went on (the
+    // first reading after any unmute has no packets).
+    const voice = <double>[0, 88, 99, 77, 99, 100, 100, 100, 100, 102];
+    const read = <double?>[1.8, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.1, 2.0];
+    bool unmute(List<double?> read) =>
+        swapRecordingLost(segment(name, voice, read: read), startFailed: false);
+    expect(unmute(read), isFalse);
+    // A slow change to the system's devices, within the allowance: no restart asked.
+    expect(unmute([...read]..[2] = 0.0), isFalse);
+    // Nothing read past the allowance: one asked.
+    expect(unmute([...read]..[swapExcusedRefused] = 0.0), isTrue);
+    // A failed start always loses the recording, whatever was read.
+    expect(
+      swapRecordingLost(segment(name, voice, read: read), startFailed: true),
+      isTrue,
+    );
+    // A start that did not fail, its recording slow to come but read after the
+    // allowance: not lost, so no restart asked.
+    expect(
+      swapRecordingLost(
+        segment(
+          name,
+          [0, 0, 0, 0, 73, 86, 100, 101, 101, 100],
+          read: [0.1, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0],
         ),
-        isTrue,
-      );
-    },
-  );
+        startFailed: false,
+      ),
+      isFalse,
+    );
+  });
 
   test('devices not those chosen 6 s after a choice fail', () {
     expect(

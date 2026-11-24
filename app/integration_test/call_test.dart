@@ -4491,6 +4491,9 @@ class _OutputSwap {
   /// Whether a notice of an output chosen not used was given.
   bool _outputNoticeSeen = false;
 
+  /// How many times the call had started the recording again before the refusal.
+  int _recoveriesBefore = 0;
+
   /// At the end of the other output's time, with FOGATA_TEST_REFUSE: the fall back must
   /// have happened. =unmute and =start: the facts say the pair cannot be put together any
   /// more, the engine follows the system's devices and records, and the call started the
@@ -4499,11 +4502,12 @@ class _OutputSwap {
     final how = _env['FOGATA_TEST_REFUSE'];
     if (!Platform.isMacOS || how == null) return;
     final facts = await _engineFacts();
-    final recoveries = state.callState.call?.voiceRecoveries ?? 0;
+    final recoveries =
+        (state.callState.call?.voiceRecoveries ?? 0) - _recoveriesBefore;
     _log(
       'output swap, fall back ($how): can be put together ${facts['combinable']}, playing '
       'on ${facts['inUseName']}, recording ${facts['recording']}, recording started again '
-      '$recoveries times, an output notice ${_outputNoticeSeen ? 'given' : 'not given'}',
+      '$recoveries times since the refusal, an output notice ${_outputNoticeSeen ? 'given' : 'not given'}',
     );
     if (how == 'unmute' || how == 'start') {
       if (facts['combinable'] != false) {
@@ -4585,7 +4589,11 @@ class _OutputSwap {
     final refuse = on && _offs == 2 && (how == 'unmute' || how == 'start');
     // =unmute: the pair refused in either order; =start: the engine's start with the pair
     // failing, the formats read.
-    if (refuse) await _testRefuse(how == 'unmute' ? 2 : 3);
+    if (refuse) {
+      // Only the restarts after the refusal count for it.
+      _recoveriesBefore = state.callState.call?.voiceRecoveries ?? 0;
+      await _testRefuse(how == 'unmute' ? 2 : 3);
+    }
     _log('output swap: ${_state()}; microphone ${on ? 'on again' : 'off'}');
     await state.setMic(on);
     _micOff = !on;
