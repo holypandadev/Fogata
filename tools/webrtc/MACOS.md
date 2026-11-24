@@ -65,6 +65,11 @@ device module, desktop capture, audio processing...), not the C++ wrapper.
    starting or stopping, the end of an interruption, the engine started again around a
    change of its configuration), so that the echo controller aligns again with the new
    engine's delay.
+11. `0011-build-the-default-audio-processing-with-the-configured-field-trials`:
+   `RTCDefaultAudioProcessingModule` builds its audio processing with the environment the
+   factory takes, made from the field trials given to `configureFieldTrials:`, not one with
+   none; so Fogata's trials (the echo canceller's transparent mode) reach it. The plugin
+   gives them before it makes its `AudioManager`.
 
 The macOS framework is all these patches are for: the iOS framework and WebRTC's own
 Objective-C tests, which still name the VideoToolbox codecs, are not built from them.
