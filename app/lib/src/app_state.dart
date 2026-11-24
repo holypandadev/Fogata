@@ -1110,6 +1110,7 @@ class AppState extends ChangeNotifier {
               (g) => contacts.group(g) == null && callState.callIn(g) == null,
             )
             .toList();
+    var unlisted = false;
     for (final from in open) {
       String? to;
       try {
@@ -1118,49 +1119,52 @@ class AppState extends ChangeNotifier {
         continue;
       }
       if (to == null) continue;
-      // Listed since the groups were read: read again.
-      if (contacts.group(to) == null) {
-        try {
-          contacts.groups = await api.groups();
-        } catch (_) {}
+      if (contacts.group(to) != null) {
+        await followGroup(from, to);
+      } else {
+        unlisted = true;
       }
-      if (contacts.group(to) != null) followGroup(from, to);
+    }
+    // A group it moved to that runs but was not listed when the groups were read: read
+    // them again, once, as any change of the groups does.
+    if (unlisted && !_followingAgain) {
+      _followingAgain = true;
+      unawaited(refreshGroups().whenComplete(() => _followingAgain = false));
     }
   }
 
+  bool _followingAgain = false;
+
   /// What the window shows of [from] shows [to] instead: the group moved to a fresh
   /// history. A call in [from]'s room ends, as that room does, and this device goes into
-  /// [to]'s room with its microphone as it was; so does one that showed that room.
+  /// [to]'s room with its microphone as the person left it; so does one that showed that
+  /// room. What was kept of [from] goes, as when leaving it.
   @visibleForTesting
-  void followGroup(String from, String to) {
+  Future<void> followGroup(String from, String to) async {
     if (nav.selectedGroup == from) nav.selectedGroup = to;
     if (nav.membersGroup == from) nav.membersGroup = to;
     if (nav.groupSettings == from) nav.groupSettings = to;
     final inCall = call?.group == from;
-    final mic = call?.mic;
-    if (inCall) _endCall();
-    if (roomState.roomGroup == from || inCall) {
-      final rejoin = inCall || nav.page == Screen.room;
-      if (roomState.roomGroup == from) {
-        roomState.roomGroup = null;
-        roomState.room = null;
-        roomState.dropPreviews();
-        _dropVideos();
-      }
-      roomState.memories.remove(from);
-      roomState.outgoing.remove(from);
-      contacts.paths.remove(from);
-      contacts.carriers.remove(from);
-      if (rejoin) {
-        if (mic != null) prefs.joinWithMic = mic;
-        unawaited(openRoom(to));
-      } else {
-        // The new group's voice rooms are its own: shown from its first one.
-        roomState.roomGroup = to;
-        roomState.roomVoice = firstRoom;
-      }
+    final shown = roomState.roomGroup == from;
+    final rejoin = inCall || (shown && nav.page == Screen.room);
+    if (shown) {
+      roomState.roomGroup = null;
+      roomState.room = null;
+      roomState.dropPreviews();
+    }
+    if (shown || inCall) _dropVideos();
+    roomState.memories.remove(from);
+    roomState.outgoing.remove(from);
+    contacts.paths.remove(from);
+    contacts.carriers.remove(from);
+    if (shown && !rejoin) {
+      // The new group's voice rooms are its own: shown from its first one.
+      roomState.roomGroup = to;
+      roomState.roomVoice = firstRoom;
     }
     nav.changed();
+    if (inCall) await _endCall();
+    if (rejoin) await openRoom(to);
   }
 
   /// Moves [group], whose history is nearly full, to a fresh one (its first member: see
@@ -1169,7 +1173,7 @@ class AppState extends ChangeNotifier {
     final to = await attempt(() => api.moveGroup(groupId: group));
     await refreshGroups();
     if (to == null) return false;
-    if (contacts.group(to) != null) followGroup(group, to);
+    if (contacts.group(to) != null) await followGroup(group, to);
     return true;
   }
 

@@ -122,14 +122,14 @@ void main() {
     expect(s.nav.groupSettings, 'g');
   });
 
-  test('a group shown that moved stays shown under its new id', () {
+  test('a group shown that moved stays shown under its new id', () async {
     final s = AppState('/nonexistent/fogata-history-fill-follow')
       ..contacts.groups = [_group(id: 'new')]
       ..nav.selectedGroup = 'old'
       ..nav.membersGroup = 'old'
       ..nav.groupSettings = 'old'
       ..nav.page = Screen.members;
-    s.followGroup('old', 'new');
+    await s.followGroup('old', 'new');
     expect(s.nav.selectedGroup, 'new');
     expect(s.nav.membersGroup, 'new');
     expect(s.nav.groupSettings, 'new');
@@ -138,7 +138,7 @@ void main() {
 
   test(
     'a room shown, not entered, is shown from the new group\'s first one',
-    () {
+    () async {
       final s = AppState('/nonexistent/fogata-history-fill-room')
         ..contacts.groups = [_group(id: 'new')]
         ..nav.page = Screen.members;
@@ -146,19 +146,19 @@ void main() {
         ..roomGroup = 'old'
         ..roomVoice = 'ffffffffffffffff'
         ..memories['old'] = RoomMemory(0);
-      s.followGroup('old', 'new');
+      await s.followGroup('old', 'new');
       expect(s.roomState.roomGroup, 'new');
       expect(s.roomState.roomVoice, AppState.firstRoom);
       expect(s.roomState.memories.containsKey('old'), isFalse);
     },
   );
 
-  test('another group shown is left as it was', () {
+  test('another group shown is left as it was', () async {
     final s = AppState('/nonexistent/fogata-history-fill-other')
       ..contacts.groups = [_group(id: 'new'), _group(id: 'other')]
       ..nav.selectedGroup = 'other'
       ..nav.groupSettings = 'other';
-    s.followGroup('old', 'new');
+    await s.followGroup('old', 'new');
     expect(s.nav.selectedGroup, 'other');
     expect(s.nav.groupSettings, 'other');
   });
