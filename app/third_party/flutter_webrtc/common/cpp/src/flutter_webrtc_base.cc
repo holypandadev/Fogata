@@ -89,7 +89,8 @@ const char kFieldTrialZeroPlayoutDelayValue[] = "min_ms:0,max_ms:0";
 // classifier (`WebRTC-Aec3TransparentModeHmm`): at a call's start with a headset while
 // the other side talks, the near end came through held down for a median of 4 s (0-9 s)
 // with the older one, 2.3 s (0-3 s) with it; with speakers, at an unmute and with a
-// headset taken off while muted, no more echo (measured with tools/call-lab, Nov 24).
+// headset taken off while muted, no more echo let through than with the older one
+// (measured on Linux with tools/call-lab, Nov 24).
 const char kFogataFieldTrials[] =
     "WebRTC-Bwe-LossBasedBweV2/Enabled:false/"
     "WebRTC-VideoEncoderSettings/encoder_thread_limit:1/"
