@@ -261,6 +261,23 @@ impl Node {
         }
     }
 
+    /// See [`crate::NodeHandle::hold_move`].
+    pub(super) fn hold_move(&mut self, group: GroupId) {
+        let Some(to) = (self.groups.get(&group))
+            .and_then(|s| s.ctx.moved())
+            .map(|(_, m)| m.to)
+        else {
+            return;
+        };
+        if let Some(slot) = self.groups.get_mut(&group) {
+            slot.following.followed = false;
+            slot.following.waits = true;
+            slot.following.asking = None;
+            slot.following.local_for = None;
+        }
+        self.drop_group(to);
+    }
+
     /// See [`Self::follow_moves`].
     fn again_after_move(&mut self, group: GroupId, to: GroupId) {
         let (Some(old), Some(new)) = (self.groups.get(&group), self.groups.get(&to)) else {
@@ -1368,6 +1385,65 @@ mod tests {
         assert!(waits && !asked);
         assert_eq!(moved_told(&mut bea_events), (None, None));
         // Taken: run another way, and followed.
+        inspect(&bea_node, move |n| {
+            n.add_group(GroupSetup::Member(new));
+            n.follow_moves();
+        })
+        .await;
+        for _ in 0..200 {
+            if inspect(&bea_node, move |n| n.groups[&x].following.followed).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(moved_told(&mut bea_events), (Some(to), None));
+        ana_node.shutdown().await.unwrap();
+        bea_node.shutdown().await.unwrap();
+    }
+
+    /// A move followed before core learned that its new log is an invitation here (one
+    /// that came at the same time): held, the new log stops running and is not asked for
+    /// again; taken, it is followed and told again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_held_for_an_invitation_is_followed_once_taken() {
+        let (ana, bea, log) = group();
+        let x = log.group_id();
+        let (ana_node, _) = node(&ana, &log);
+        let (bea_node, mut bea_events) = node(&bea, &log);
+        let (ana_peer, bea_peer) = (PeerId::random(), PeerId::random());
+        let bea_key = bea.public_key();
+        let (to, moved, new, answer) = inspect(&ana_node, move |n| {
+            member(n, x, bea_peer, bea_key);
+            let to = n.move_group(x, keep()).unwrap();
+            let answer = n.on_request(
+                bea_peer,
+                MemberRequest::MovedLog {
+                    group_id: x.as_bytes().to_vec(),
+                    from: 0,
+                },
+            );
+            (
+                to,
+                n.groups[&x].ctx.log().clone(),
+                n.groups[&to].ctx.log().clone(),
+                answer,
+            )
+        })
+        .await;
+        bea_gets_the_move(&bea_node, x, ana_peer, ana.public_key(), moved).await;
+        bea_takes(&bea_node, x, ana_peer, answer).await;
+        assert!(runs(&bea_node, x, to).await);
+        assert_eq!(moved_told(&mut bea_events), (Some(to), None));
+        bea_node.hold_move(x).await.unwrap();
+        let (runs_now, asked) = inspect(&bea_node, move |n| {
+            n.follow_moves();
+            (
+                n.groups.contains_key(&to),
+                n.groups[&x].following.asking.is_some(),
+            )
+        })
+        .await;
+        assert!(!runs_now && !asked);
         inspect(&bea_node, move |n| {
             n.add_group(GroupSetup::Member(new));
             n.follow_moves();

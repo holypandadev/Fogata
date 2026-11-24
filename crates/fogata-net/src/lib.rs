@@ -666,6 +666,8 @@ enum Command {
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     DropGroup(GroupId),
+    /// Stops running the new log `group` moved to, which waits for the person after all.
+    HoldMove(GroupId),
     /// Moves a full group to a new log, as its first member (see [`NodeHandle::move_group`]).
     MoveGroup {
         group: GroupId,
@@ -900,6 +902,7 @@ impl fmt::Debug for Command {
             Command::AddDirect(_) => "AddDirect",
             Command::SendDirect { .. } => "SendDirect",
             Command::DropGroup(_) => "DropGroup",
+            Command::HoldMove(_) => "HoldMove",
             Command::MoveGroup { .. } => "MoveGroup",
             Command::GiveEntries { .. } => "GiveEntries",
             Command::Typing { .. } => "Typing",
@@ -1171,6 +1174,14 @@ impl NodeHandle {
         self.ask(|reply| Command::MoveGroup { group, keep, reply })
             .await?
             .map_err(NetError::Refused)
+    }
+
+    /// Stops running the new log `group` moved to, followed before core learned that it
+    /// waits for the person here (an invitation that came at the same time, see
+    /// [`WaitsForYes`]): the old group goes on, and the move is followed once the new log
+    /// runs another way (the invitation taken).
+    pub async fn hold_move(&self, group: GroupId) -> Result<(), NetError> {
+        self.tell(Command::HoldMove(group)).await
     }
 
     /// Stops running a group without leaving it, as when a call ends.

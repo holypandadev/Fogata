@@ -397,7 +397,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
         NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
         NodeEvent::Removed { group, log } => handle_removed(inner, group, log).await,
-        NodeEvent::GroupMoved { from, log } => handle_group_moved(inner, from, log),
+        NodeEvent::GroupMoved { from, log } => handle_group_moved(inner, from, log).await,
         NodeEvent::MoveRefused { group } => {
             tracing::warn!("{group:?} moved to a log that is not the same group; staying");
         }
@@ -689,7 +689,17 @@ async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
 /// Group `from` moved to the new log `log`, which this device runs now: it is saved under
 /// the old one's local name, and the old one is no longer shown. The old one runs on,
 /// writing nothing, until a start after `MOVED_RUNS_MS`.
-fn handle_group_moved(inner: &Arc<Inner>, from: GroupId, log: fogata_state::GroupLog) {
+async fn handle_group_moved(inner: &Arc<Inner>, from: GroupId, log: fogata_state::GroupLog) {
+    // Followed while an invitation to it came (an offer taken just before): it waits for
+    // the person after all. Done here, in the order events come, so nothing of the new log
+    // is saved meanwhile.
+    if inner.store.waits_for_yes(&log) {
+        tracing::info!("{from:?} moved to an invitation here: held until it is taken");
+        if let Err(e) = inner.node.hold_move(from).await {
+            tracing::warn!("cannot hold the move of {from:?}: {e:#}");
+        }
+        return;
+    }
     let store = inner.store.clone();
     // The list changes once the new log has the group's name. Only the sender is held, so
     // the core never ends on the writer's thread.
@@ -960,6 +970,12 @@ async fn handle_group_offered(
     // Being joined with an invite: only the log a manager sends counts.
     if inner.lock().joining.contains_key(&group) {
         tracing::info!("a friend offered a group this device is joining; ignored");
+        return;
+    }
+    // Run here already, not listed yet: the new log of a group that moved, followed just
+    // now, which core lists in the group's place; not an invitation.
+    if !inner.store.lists_group(&group) && matches!(inner.node.group(group).await, Ok(Some(_))) {
+        tracing::info!("a friend offered a group this device follows a move into; ignored");
         return;
     }
     match inner.store.save_offered_group(&log, &by) {
@@ -1374,5 +1390,120 @@ mod tests {
         assert_eq!(read_again(tries, read).await, Some(2));
         let never = || async { Err::<(), ()>(()) };
         assert_eq!(read_again(tries, never).await, None);
+    }
+
+    /// A group with a move in its log, the new log made by Ana, for Bea's core at `dir`.
+    fn moved_group(
+        dir: &std::path::Path,
+    ) -> (
+        fogata_crypto::DeviceIdentity,
+        GroupId,
+        fogata_state::GroupLog,
+    ) {
+        use fogata_state::{GroupLog, Level};
+        Core::create_profile(dir, "Bea", None).unwrap();
+        let store = crate::Store::open(dir.to_path_buf()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = fogata_crypto::DeviceIdentity::generate().unwrap();
+        let t = crate::now_ms() - 10_000;
+        let mut old = GroupLog::create(&ana, "Campfire", t).unwrap();
+        old.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        old.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let new = old.new_log_for_move(&ana, t + 3).unwrap();
+        old.move_to(&ana, &new, t + 4).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        (ana, old.group_id(), new)
+    }
+
+    fn quiet() -> NetOptions {
+        NetOptions {
+            listen_port: 0,
+            use_dht: false,
+            use_mdns: false,
+            ..Default::default()
+        }
+    }
+
+    /// A move followed just as an invitation to its new log came: the new log waits for the
+    /// person, so it stops running and the old group stays as it was.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_followed_into_an_invitation_is_held() {
+        let dir = std::env::temp_dir().join(format!("fogata-move-held-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (ana, old, new) = moved_group(&dir);
+        let to = new.group_id();
+        let (core, _events) = Core::start(dir.clone(), quiet()).unwrap();
+        let inner = core.inner.clone();
+        // The invitation, saved; the new log, run as if followed a moment before.
+        inner
+            .store
+            .save_offered_group(&new, &ana.public_key())
+            .unwrap();
+        inner
+            .node
+            .add_group(GroupSetup::Member(new.clone()))
+            .await
+            .unwrap();
+        handle(
+            &inner,
+            NodeEvent::GroupMoved {
+                from: old,
+                log: new,
+            },
+        )
+        .await;
+        let mut runs = true;
+        for _ in 0..100 {
+            runs = matches!(inner.node.group(to).await, Ok(Some(_)));
+            if !runs {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!runs);
+        assert!(matches!(inner.node.group(old).await, Ok(Some(_))));
+        let stored = inner.store.groups().unwrap();
+        let was = (stored.iter())
+            .find(|g| g.group_id == hex::encode(old.as_bytes()))
+            .unwrap();
+        assert!(was.moved.is_none());
+        assert!((stored.iter()).any(|g| g.group_id == hex::encode(to.as_bytes()) && g.pending));
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A friend's offer of a log this device runs without listing it (the new log of a
+    /// group it follows a move into, listed in a moment) is not an invitation.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_offer_of_a_log_run_here_is_not_an_invitation() {
+        let dir = std::env::temp_dir().join(format!("fogata-offer-run-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        Core::create_profile(&dir, "Bea", None).unwrap();
+        let (core, _events) = Core::start(dir.clone(), quiet()).unwrap();
+        let inner = core.inner.clone();
+        let (me, _) = inner.store.identity().unwrap();
+        let ana = fogata_crypto::DeviceIdentity::generate().unwrap();
+        let mut log = fogata_state::GroupLog::create(&ana, "Campfire", 1).unwrap();
+        log.add(&ana, me.public_key(), "Bea", 2).unwrap();
+        let group = log.group_id();
+        inner
+            .node
+            .add_group(GroupSetup::Member(log.clone()))
+            .await
+            .unwrap();
+        while !matches!(inner.node.group(group).await, Ok(Some(_))) {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        handle(
+            &inner,
+            NodeEvent::GroupOffered {
+                log,
+                by: ana.public_key(),
+            },
+        )
+        .await;
+        assert!(!inner.store.lists_group(&group));
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

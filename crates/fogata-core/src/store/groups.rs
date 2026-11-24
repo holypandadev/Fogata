@@ -214,11 +214,14 @@ impl Store {
         } else {
             self.write_log(new)?;
         }
+        // Noted whole already. One only marked (its new log declined, and taken since) is
+        // noted now: the new log takes the group's name and what it saw.
         if list.groups[at]
             .moved
             .as_ref()
             .is_some_and(|m| m.to == new_id)
             && let Some(known) = list.groups.iter().find(|g| g.group_id == new_id)
+            && known.moved_from.as_deref() == Some(old_id.as_str())
         {
             return Ok(known.name.clone());
         }
@@ -292,6 +295,13 @@ impl Store {
             ms: now_ms,
         });
         self.write_groups(&held, &list)
+    }
+
+    /// Whether group `id` is listed here, as an invitation or not.
+    pub fn lists_group(&self, id: &GroupId) -> bool {
+        let held = self.lock();
+        let id = hex::encode(id.as_bytes());
+        (self.read_groups(&held)).is_ok_and(|list| list.groups.iter().any(|g| g.group_id == id))
     }
 
     /// Ids (hex) of the groups whose invitation was declined here.
@@ -937,6 +947,35 @@ mod tests {
         let groups = store.groups().unwrap();
         assert!(groups.iter().all(|g| g.moved.is_none()));
         assert!(groups.iter().any(|g| g.group_id == id && g.pending));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A group marked moved because its new log was declined, whose new log was taken
+    /// since: once the move is followed, it is noted whole, with the name passed on.
+    #[test]
+    fn a_move_only_marked_is_noted_whole_once_followed() {
+        let dir = std::env::temp_dir().join(format!("fogata-store-marked-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let old = GroupLog::create(&me, "Campfire", 1).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        let new = GroupLog::create(&me, "Campfire", 2).unwrap();
+        store
+            .note_moved_away(&old.group_id(), &new.group_id(), 5)
+            .unwrap();
+        // Taken since: listed under its own name.
+        store.save_group_log(&new, "Campfire").unwrap();
+        assert_eq!(
+            store.record_move(&old.group_id(), &new, 10).unwrap(),
+            "Our fire"
+        );
+        let groups = store.groups().unwrap();
+        let is = (groups.iter())
+            .find(|g| g.group_id == hex::encode(new.group_id().as_bytes()))
+            .unwrap();
+        assert_eq!(is.name, "Our fire");
+        assert_eq!(is.moved_from, Some(hex::encode(old.group_id().as_bytes())));
         fs::remove_dir_all(&dir).unwrap();
     }
 
