@@ -307,6 +307,26 @@ mod tests {
         );
     }
 
+    /// The version the window shows (app/lib/src/version.dart) is THIS_VERSION, pre-release
+    /// part and all, so that a beta says which beta it is.
+    #[test]
+    fn the_window_shows_this_version() {
+        let dart = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../app/lib/src/version.dart"
+        ))
+        .unwrap();
+        let shown = dart
+            .lines()
+            .find_map(|line| line.strip_prefix("const appVersion = '"))
+            .and_then(|rest| rest.strip_suffix("';"))
+            .expect("app/lib/src/version.dart names appVersion");
+        assert_eq!(
+            shown, THIS_VERSION,
+            "set appVersion in app/lib/src/version.dart to {THIS_VERSION}, as THIS_VERSION says"
+        );
+    }
+
     /// A build that trusts a release key trusts a rescue key too, so a release key that
     /// leaks can be replaced; no key has two roles.
     #[test]

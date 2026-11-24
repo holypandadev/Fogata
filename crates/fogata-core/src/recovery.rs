@@ -460,7 +460,7 @@ fn export_in(
     let manifest = Manifest {
         device,
         name,
-        build: env!("CARGO_PKG_VERSION").to_string(),
+        build: fogata_update::THIS_VERSION.to_string(),
         made_ms: now_ms(),
         attachments,
         files: listed,
