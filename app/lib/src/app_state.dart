@@ -1120,7 +1120,9 @@ class AppState extends ChangeNotifier {
       }
       if (to == null) continue;
       if (contacts.group(to) != null) {
-        await followGroup(from, to);
+        // Not waited for: the rest of the refresh goes on while the new room is entered
+        // (the old call ends first, inside it).
+        unawaited(followGroup(from, to).catchError((Object _) {}));
       } else {
         unlisted = true;
       }
