@@ -5,8 +5,11 @@
 //! address. Public DHT nodes drop private addresses from announcements, and those addresses
 //! are nobody else's business anyway. So they travel sealed inside a name,
 //! `/dns4/<sealed, in hex>.fogata/udp/<port>/quic-v1`: one name for friends, under a key from
-//! this device's friend rendezvous secret, and one for each group, under a key from the
-//! group's current rendezvous secret. The names only go into DHT announcements (never to
+//! this device's friend rendezvous secret; one for each group (up to five), under a key from
+//! the group's current rendezvous secret; and one for each friend link or code shown or used
+//! here and an account move's code (up to five), under a key from its own secret, for the
+//! device at its other end (anyone who saw the link or code can open that one; a link used
+//! here opens only its maker's names). The names only go into DHT announcements (never to
 //! identify or to other peers); DHT nodes see random hex, and whoever knows one of the
 //! secrets opens the name back into addresses. A name is never looked up in DNS.
 //!
@@ -30,8 +33,22 @@ use libp2p::{Multiaddr, PeerId, multiaddr::Protocol};
 
 use crate::addr;
 
-/// Names announced: one for friends and the rest for groups, padded with random ones.
-pub(crate) const MAX_NAMES: usize = 6;
+/// Names for groups, at most: a device in more groups seals its local addresses for the first
+/// ones only.
+pub(crate) const GROUP_NAMES: usize = 5;
+/// Names for the friend link and code shown here, the ones used here and an account move's
+/// code: room for all of them at once.
+pub(crate) const INVITE_NAMES: usize = 5;
+/// Names announced: one for friends, [`GROUP_NAMES`] for groups and [`INVITE_NAMES`] for links,
+/// codes and a move, padded with random ones, so that a group never loses its name to a link.
+pub(crate) const MAX_NAMES: usize = 1 + GROUP_NAMES + INVITE_NAMES;
+/// Addresses the DHT announces for this device at most (libp2p's `ExternalAddresses`, which
+/// lets the oldest go past them): the names, the proof and its real public addresses share
+/// them.
+pub(crate) const ANNOUNCED_ADDRESSES: usize = 20;
+// Every name and the proof leave room for eight real public addresses, more than a device
+// confirms (one or two of each kind of address).
+const _: () = assert!(MAX_NAMES + 1 + 8 <= ANNOUNCED_ADDRESSES);
 /// Most local addresses in one name (a DNS label holds 63 characters).
 const MAX_IPS: usize = 3;
 const DOMAIN: &str = ".fogata";
@@ -222,30 +239,33 @@ pub(crate) fn proven(
 
 /// The addresses in `name` if one of `keys` opens it.
 pub(crate) fn open(name: &Multiaddr, keys: &[[u8; 32]]) -> Vec<Multiaddr> {
+    open_keyed(name, keys)
+        .map(|(_, addresses)| addresses)
+        .unwrap_or_default()
+}
+
+/// As [`open`], with the key that opened the name.
+fn open_keyed(name: &Multiaddr, keys: &[[u8; 32]]) -> Option<([u8; 32], Vec<Multiaddr>)> {
     let mut parts = name.iter();
     let (Some(Protocol::Dns4(host)), Some(Protocol::Udp(port)), Some(Protocol::QuicV1)) =
         (parts.next(), parts.next(), parts.next())
     else {
-        return Vec::new();
+        return None;
     };
     if !PORTS.contains(&port) {
-        return Vec::new();
+        return None;
     }
     let peer = parts.next().filter(|p| matches!(p, Protocol::P2p(_)));
-    let Some(sealed) = host
+    let sealed = host
         .to_ascii_lowercase()
         .strip_suffix(DOMAIN)
-        .and_then(|h| hex::decode(h).ok())
-    else {
-        return Vec::new();
-    };
-    let Some(plain) = keys
-        .iter()
-        .find_map(|key| fogata_crypto::open_short(key, CONTEXT, &sealed).ok())
-    else {
-        return Vec::new();
-    };
-    plain
+        .and_then(|h| hex::decode(h).ok())?;
+    let (key, plain) = keys.iter().find_map(|key| {
+        fogata_crypto::open_short(key, CONTEXT, &sealed)
+            .ok()
+            .map(|plain| (*key, plain))
+    })?;
+    let addresses = plain
         .as_chunks::<4>()
         .0
         .iter()
@@ -261,26 +281,55 @@ pub(crate) fn open(name: &Multiaddr, keys: &[[u8; 32]]) -> Vec<Multiaddr> {
             }
             address
         })
-        .collect()
+        .collect();
+    Some((key, addresses))
 }
 
-/// Keys this device opens names with (those of its friends and of its groups), shared with
-/// the code that picks the addresses of a dial.
+/// Local addresses opened from names, each with the keys that opened it.
+pub(crate) type Opened = Vec<(Multiaddr, Vec<[u8; 32]>)>;
+
+/// A key that opens names, and the one peer whose names alone it opens when it is tied to one
+/// (a friend link used here opens only its maker's).
+pub(crate) type OpeningKey = ([u8; 32], Option<PeerId>);
+
+/// Keys this device opens names with (those of its friends, of its groups, and of a friend
+/// link or code or a move), shared with the code that picks the addresses of a dial.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct LanKeys(Arc<Mutex<Vec<[u8; 32]>>>);
+pub(crate) struct LanKeys(Arc<Mutex<Vec<OpeningKey>>>);
 
 impl LanKeys {
-    pub(crate) fn set(&self, keys: Vec<[u8; 32]>) {
+    pub(crate) fn set(&self, keys: Vec<OpeningKey>) {
         *crate::locked(&self.0) = keys;
     }
 
-    /// The addresses in every name one of the keys opens.
-    pub(crate) fn open_all(&self, names: &[Multiaddr]) -> Vec<Multiaddr> {
-        let keys = crate::locked(&self.0);
-        let mut out: Vec<Multiaddr> = Vec::new();
-        for address in names.iter().flat_map(|name| open(name, &keys)) {
-            if !out.contains(&address) {
-                out.push(address);
+    /// Every key held, with the peer it is tied to.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> Vec<OpeningKey> {
+        crate::locked(&self.0).clone()
+    }
+
+    /// The keys that open names for a dial to `peer`.
+    pub(crate) fn for_peer(&self, peer: Option<PeerId>) -> Vec<[u8; 32]> {
+        crate::locked(&self.0)
+            .iter()
+            .filter(|(_, only)| only.is_none_or(|only| Some(only) == peer))
+            .map(|(key, _)| *key)
+            .collect()
+    }
+
+    /// The addresses in every name one of the keys opens, for a dial to `peer`, each with the
+    /// keys that opened it: what they opened is not dialled once they are all gone (a link
+    /// that expired or was used).
+    pub(crate) fn open_all(&self, names: &[Multiaddr], peer: Option<PeerId>) -> Opened {
+        let keys = self.for_peer(peer);
+        let mut out = Opened::new();
+        for (key, addresses) in names.iter().filter_map(|name| open_keyed(name, &keys)) {
+            for address in addresses {
+                match out.iter_mut().find(|(a, _)| *a == address) {
+                    Some((_, by)) if !by.contains(&key) => by.push(key),
+                    Some(_) => {}
+                    None => out.push((address, vec![key])),
+                }
             }
         }
         out
@@ -295,6 +344,52 @@ mod tests {
 
     fn quic(text: &str) -> Multiaddr {
         text.parse().unwrap()
+    }
+
+    /// The DHT keeps [`ANNOUNCED_ADDRESSES`] addresses of this device, the oldest going first
+    /// (libp2p's `ExternalAddresses`), which the room left for the names counts on.
+    #[test]
+    fn the_names_leave_room_for_the_public_addresses() {
+        use libp2p::swarm::{ExternalAddresses, FromSwarm, behaviour::ExternalAddrConfirmed};
+        let mut kept = ExternalAddresses::default();
+        let all: Vec<Multiaddr> = (0..ANNOUNCED_ADDRESSES + 1)
+            .map(|i| quic(&format!("/ip4/203.0.113.{i}/udp/4001/quic-v1")))
+            .collect();
+        for addr in &all[..ANNOUNCED_ADDRESSES] {
+            kept.on_swarm_event(&FromSwarm::ExternalAddrConfirmed(ExternalAddrConfirmed {
+                addr,
+            }));
+        }
+        assert_eq!(kept.iter().count(), ANNOUNCED_ADDRESSES);
+        kept.on_swarm_event(&FromSwarm::ExternalAddrConfirmed(ExternalAddrConfirmed {
+            addr: &all[ANNOUNCED_ADDRESSES],
+        }));
+        assert_eq!(kept.iter().count(), ANNOUNCED_ADDRESSES);
+        assert!(!kept.iter().any(|a| *a == all[0]));
+    }
+
+    /// An address in two names under two keys comes once, with both keys, so that it stays
+    /// dialled while either is held.
+    #[test]
+    fn an_address_in_two_names_comes_once_with_both_keys() {
+        let (friends, group) = (key_of(&[3u8; 32]), key_of(&[4u8; 32]));
+        let shared = Ipv4Addr::new(192, 168, 1, 3);
+        let names = [
+            seal(&friends, 31234, &[shared]).unwrap(),
+            seal(&group, 31234, &[shared, Ipv4Addr::new(10, 0, 0, 9)]).unwrap(),
+        ];
+        let keys = LanKeys::default();
+        keys.set(vec![(friends, None), (group, None)]);
+        assert_eq!(
+            keys.open_all(&names, None),
+            vec![
+                (
+                    quic("/ip4/192.168.1.3/udp/31234/quic-v1"),
+                    vec![friends, group]
+                ),
+                (quic("/ip4/10.0.0.9/udp/31234/quic-v1"), vec![group]),
+            ]
+        );
     }
 
     #[test]

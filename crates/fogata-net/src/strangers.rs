@@ -478,8 +478,8 @@ pub(crate) struct StrangerDials<B> {
     to_close: VecDeque<(PeerId, ConnectionId)>,
     /// Local addresses opened for each peer, so that a later dial (a scheduled punch, or a
     /// lookup whose first answer came from a DHT node that had not heard the name yet)
-    /// still tries them.
-    lan_opened: HashMap<PeerId, Vec<Multiaddr>>,
+    /// still tries them; each with the keys that opened it, so that it goes with them.
+    lan_opened: HashMap<PeerId, lan::Opened>,
 }
 
 impl<B> StrangerDials<B> {
@@ -809,8 +809,8 @@ impl<B: NetworkBehaviour> NetworkBehaviour for StrangerDials<B> {
                 for_stranger(found, now)
             }
             _ => {
-                let mut opened = self.lan.open_all(&names);
-                opened.retain(may_dial);
+                let mut opened = self.lan.open_all(&names, maybe_peer);
+                opened.retain(|(a, _)| may_dial(a));
                 if !names.is_empty() {
                     tracing::debug!(
                         peer = ?maybe_peer,
@@ -828,19 +828,23 @@ impl<B: NetworkBehaviour> NetworkBehaviour for StrangerDials<B> {
                         if self.lan_opened.len() >= PRUNE_AT {
                             self.lan_opened.clear();
                         }
-                        self.lan_opened.insert(peer, opened.clone());
-                        opened
+                        let out: Vec<Multiaddr> = opened.iter().map(|(a, _)| a.clone()).collect();
+                        self.lan_opened.insert(peer, opened);
+                        out
                     }
-                    // Checked again: this device may have left the network since.
-                    Some(peer) => self
-                        .lan_opened
-                        .get(&peer)
-                        .into_iter()
-                        .flatten()
-                        .filter(|a| may_dial(a))
-                        .cloned()
-                        .collect(),
-                    None => opened,
+                    // Checked again: this device may have left the network since, and an
+                    // address opened with a key that went since is not dialled again.
+                    Some(peer) => {
+                        let keys = self.lan.for_peer(Some(peer));
+                        self.lan_opened
+                            .get(&peer)
+                            .into_iter()
+                            .flatten()
+                            .filter(|(a, by)| may_dial(a) && by.iter().any(|k| keys.contains(k)))
+                            .map(|(a, _)| a.clone())
+                            .collect()
+                    }
+                    None => opened.into_iter().map(|(a, _)| a).collect(),
                 };
                 out.extend(found);
                 out
@@ -1858,7 +1862,7 @@ mod tests {
         ]));
         let lan = LanKeys::default();
         let key = lan::key_of(&[7u8; 32]);
-        lan.set(vec![key]);
+        lan.set(vec![(key, None)]);
         let sealed = lan::seal(
             &key,
             31234,
@@ -1920,6 +1924,72 @@ mod tests {
             )
             .unwrap();
         assert_eq!(dialled, [a("/ip4/10.0.0.9/udp/4001/quic-v1")]);
+    }
+
+    /// A key tied to one peer (a friend link used here, tied to its maker) opens that peer's
+    /// sealed names only: anyone else who saw the link and announces there with local
+    /// addresses of its choosing is not dialled at them. And what a key opened is not
+    /// dialled again once the key is gone (the link expired or was used), while what another
+    /// key opened stays when a third one changes (a rendezvous window rolls).
+    #[test]
+    fn a_tied_key_opens_its_peer_only_and_nothing_stays_after_it_goes() {
+        let wanted = Wanted::default();
+        wanted.set_own(OwnNetworks::of(&[a("/ip4/192.168.1.20/udp/31000/quic-v1")]));
+        let lan = LanKeys::default();
+        let key = lan::key_of(&[9u8; 32]);
+        let (maker, other) = (PeerId::random(), PeerId::random());
+        lan.set(vec![(key, Some(maker))]);
+        let sealed = lan::seal(&key, 31234, &[std::net::Ipv4Addr::new(192, 168, 7, 5)]).unwrap();
+        let mut dials = StrangerDials::new(Supplies(vec![sealed]), wanted.clone(), lan.clone());
+        let mut dial = |peer: PeerId, id: usize| {
+            dials
+                .handle_pending_outbound_connection(
+                    ConnectionId::new_unchecked(id),
+                    Some(peer),
+                    &[],
+                    Endpoint::Dialer,
+                )
+                .unwrap()
+        };
+        wanted.want(maker);
+        wanted.want(other);
+        let local = a("/ip4/192.168.7.5/udp/31234/quic-v1");
+        assert_eq!(dial(maker, 1), std::slice::from_ref(&local));
+        assert_eq!(dial(other, 2), Vec::<Multiaddr>::new());
+        // While the key is there, a dial that finds no name now still goes where it opened.
+        let dials_again = |dials: &mut StrangerDials<Supplies>, id: usize| {
+            dials
+                .handle_pending_outbound_connection(
+                    ConnectionId::new_unchecked(id),
+                    Some(maker),
+                    &[],
+                    Endpoint::Dialer,
+                )
+                .unwrap()
+        };
+        let mut no_names = StrangerDials::new(Supplies(Vec::new()), wanted.clone(), lan.clone());
+        let friends = lan::key_of(&[5u8; 32]);
+        let by_friends = a("/ip4/192.168.7.6/udp/31234/quic-v1");
+        let by_both = a("/ip4/192.168.7.7/udp/31234/quic-v1");
+        no_names.lan_opened.insert(
+            maker,
+            vec![
+                (local.clone(), vec![key]),
+                (by_friends.clone(), vec![friends]),
+                (by_both.clone(), vec![key, friends]),
+            ],
+        );
+        lan.set(vec![(key, Some(maker)), (friends, None)]);
+        let all = [local.clone(), by_friends.clone(), by_both.clone()];
+        assert_eq!(dials_again(&mut no_names, 3), all);
+        // Another key changes: what these opened stays.
+        let window = lan::key_of(&[6u8; 32]);
+        lan.set(vec![(key, Some(maker)), (friends, None), (window, None)]);
+        lan.set(vec![(key, Some(maker)), (friends, None)]);
+        assert_eq!(dials_again(&mut no_names, 4), all);
+        // The link's key goes: what it alone opened is not dialled any more.
+        lan.set(vec![(friends, None)]);
+        assert_eq!(dials_again(&mut no_names, 5), [by_friends, by_both]);
     }
 
     #[test]
