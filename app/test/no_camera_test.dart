@@ -103,9 +103,9 @@ void main() {
       ),
     );
     final printed = <String>[];
-    final print = debugPrint;
+    final printBefore = debugPrint;
     debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
-    addTearDown(() => debugPrint = print);
+    addTearDown(() => debugPrint = printBefore);
     await expectLater(openCameraStream(null), throwsA(isA<CameraBusy>()));
     // The cause, for the day's log: the device and the system's answer.
     expect(
