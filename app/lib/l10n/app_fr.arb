@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "L’activer quand même",
   "groupSettingsRaiseAnywayTitle": "Activer la protection plus forte maintenant ?",
   "groupSettingsRaiseAnywayText": "{names} devront mettre Fogata à jour avant de pouvoir participer à nouveau à ce groupe : d’ici là, ils ne verront pas ce qui y change. Le groupe les a attendus une semaine.",
-  "groupSettingsRaiseAnywayConfirm": "L’activer"
+  "groupSettingsRaiseAnywayConfirm": "L’activer",
+  "groupSettingsHistoryNearlyFull": "L’historique de ce groupe est presque plein.",
+  "groupSettingsHistoryFull": "L’historique de ce groupe est plein : tant qu’il n’est pas déplacé vers un nouveau, seuls retirer des membres, quitter et le déplacement fonctionnent encore.",
+  "groupSettingsHistoryMoveHint": "Déplacez le groupe vers un nouvel historique : tout le monde garde le groupe, son nom et ce qu’il contient.",
+  "groupSettingsHistoryFirstMoves": "Son premier membre peut le déplacer vers un nouvel historique.",
+  "groupSettingsMoveGroup": "Déplacer vers un nouvel historique",
+  "groupSettingsMoveTitle": "Déplacer ce groupe vers un nouvel historique ?",
+  "groupSettingsMoveText": "Tout le monde garde le groupe, son nom et son historique. Les autres le suivent en se connectant ; les membres absents depuis plus de 30 jours devront peut-être être ajoutés à nouveau.",
+  "groupSettingsMoveConfirm": "Le déplacer"
 }

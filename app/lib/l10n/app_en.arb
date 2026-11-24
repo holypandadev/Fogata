@@ -9094,5 +9094,37 @@
   "groupSettingsRaiseAnywayConfirm": "Turn it on",
   "@groupSettingsRaiseAnywayConfirm": {
     "description": "The confirming button of the confirmation asked after groupSettingsRaiseAnyway."
+  },
+  "groupSettingsHistoryNearlyFull": "This group’s history is nearly full.",
+  "@groupSettingsHistoryNearlyFull": {
+    "description": "Group settings › Members, a note shown to every member when the group's history (the record every member keeps of who is in it and what changed) holds three quarters or more of what it can hold."
+  },
+  "groupSettingsHistoryFull": "This group’s history is full: until it moves to a fresh one, only removing members, leaving and the move still work.",
+  "@groupSettingsHistoryFull": {
+    "description": "Group settings › Members, a note shown instead of groupSettingsHistoryNearlyFull once the group's history is full: until the group is moved to a fresh history, only removing members, leaving the group and moving it still work."
+  },
+  "groupSettingsHistoryMoveHint": "Move the group to a fresh history: everyone keeps the group, its name and what it holds.",
+  "@groupSettingsHistoryMoveHint": {
+    "description": "Group settings › Members, under groupSettingsHistoryNearlyFull or groupSettingsHistoryFull, shown to the group's first member, the only one who can move it: moving it starts a fresh history that everyone follows."
+  },
+  "groupSettingsHistoryFirstMoves": "Its first member can move it to a fresh history.",
+  "@groupSettingsHistoryFirstMoves": {
+    "description": "Group settings › Members, under groupSettingsHistoryNearlyFull or groupSettingsHistoryFull, shown to members who are not first in the group: only the first member can move the group to a fresh history."
+  },
+  "groupSettingsMoveGroup": "Move to a fresh history",
+  "@groupSettingsMoveGroup": {
+    "description": "Group settings › Members, the button under groupSettingsHistoryMoveHint that moves the group to a fresh history (its first member only)."
+  },
+  "groupSettingsMoveTitle": "Move this group to a fresh history?",
+  "@groupSettingsMoveTitle": {
+    "description": "Title of the confirmation asked after groupSettingsMoveGroup."
+  },
+  "groupSettingsMoveText": "Everyone keeps the group, its name and its history. The others follow it as they connect; members away for more than 30 days may have to be added again.",
+  "@groupSettingsMoveText": {
+    "description": "Text of the confirmation asked after groupSettingsMoveGroup: what moving the group to a fresh history means for everyone in it."
+  },
+  "groupSettingsMoveConfirm": "Move it",
+  "@groupSettingsMoveConfirm": {
+    "description": "The confirming button of the confirmation asked after groupSettingsMoveGroup."
   }
 }

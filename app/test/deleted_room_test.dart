@@ -17,6 +17,7 @@ UiGroup group(List<UiVoiceRoom> rooms) => UiGroup(
   voiceRooms: rooms,
   openInvites: 0,
   needsUpdate: false,
+  mayMove: false,
   raiseAnyway: false,
 );
 
