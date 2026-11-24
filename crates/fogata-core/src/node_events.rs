@@ -397,11 +397,7 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
         NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
         NodeEvent::Removed { group, log } => handle_removed(inner, group, log).await,
-        // The new group is saved as any; the old one runs on, writing nothing, until it is
-        // dropped.
-        NodeEvent::GroupMoved { log, .. } => {
-            handle_group_changed(inner, log.group_id()).await;
-        }
+        NodeEvent::GroupMoved { from, log } => handle_group_moved(inner, from, log),
         NodeEvent::MoveRefused { group } => {
             tracing::warn!("{group:?} moved to a log that is not the same group; staying");
         }
@@ -687,6 +683,19 @@ async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
     inner.lock().joining.remove(&group);
     inner.forget_join(group);
     inner.emit(CoreEvent::Joined { group, name });
+    inner.emit(CoreEvent::GroupsChanged);
+}
+
+/// Group `from` moved to the new log `log`, which this device runs now: it is saved under
+/// the old one's local name, and the old one is no longer shown. The old one runs on,
+/// writing nothing, until a start after `MOVED_RUNS_MS`.
+fn handle_group_moved(inner: &Arc<Inner>, from: GroupId, log: fogata_state::GroupLog) {
+    let store = inner.store.clone();
+    inner.writer.after(move || {
+        if let Err(e) = store.record_move(&from, &log, now_ms()) {
+            tracing::warn!("cannot save the group {from:?} moved to: {e:#}");
+        }
+    });
     inner.emit(CoreEvent::GroupsChanged);
 }
 

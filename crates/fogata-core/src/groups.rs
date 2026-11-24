@@ -69,11 +69,15 @@ impl Core {
         let me = self.me();
         let groups = self.inner.node.groups().await?;
         let book = self.inner.node.friends().await?;
+        let running: HashSet<GroupId> = groups.iter().map(|g| g.group_id).collect();
         let mut out = Vec::new();
         for group in groups {
             let id = group.group_id;
             let state = &group.state;
+            // A group that moved shows as the new one, once that runs here.
+            let followed = (state.moved.as_ref()).is_some_and(|(_, m)| running.contains(&m.to));
             if !state.is_member(&me)
+                || followed
                 || self.inner.is_call(id)
                 || self.inner.direct.is_chat_group(&id)
             {
@@ -280,6 +284,41 @@ impl Core {
             .context("this device does not run that group")
     }
 
+    /// Moves `group`, whose log is near its ceiling, to a new log, as its first member: the
+    /// new group takes its place here at once, and its members follow as they get the move.
+    /// Returns the new group's id.
+    pub async fn move_group(&self, group: GroupId) -> Result<GroupId> {
+        Ok(self.inner.node.move_group(group).await?)
+    }
+
+    /// The log `group` (whose log is `log`) is the new log of, when it is one, and the
+    /// entries of `log` that make its start.
+    async fn moved_from(
+        &self,
+        group: GroupId,
+        log: &GroupLog,
+    ) -> Option<(Option<GroupLog>, HashSet<fogata_state::EntryHash>)> {
+        let id = hex::encode(group.as_bytes());
+        let stored = self.inner.store.groups().ok()?;
+        let from = stored
+            .iter()
+            .find(|g| g.group_id == id)?
+            .moved_from
+            .as_deref()
+            .and_then(|h| hex::decode(h).ok())
+            .and_then(|b| GroupId::from_bytes(&b).ok())?;
+        let old = match self.inner.node.group(from).await {
+            Ok(Some(old)) => old,
+            _ => self.inner.store.load_log_of(&from).ok()?,
+        };
+        let (_, moved) = old.moved().filter(|(_, m)| m.to == group)?;
+        let mover = log.get(&moved.setup)?.author;
+        let start = (log.start_for_move(&moved.setup, &mover).iter())
+            .map(|e| e.hash())
+            .collect();
+        Some((Some(old), start))
+    }
+
     /// What the members of `group` did, the newest first: `take` lines after the first
     /// `skip`, and whether there are more. Built from the log, the same on every member,
     /// with the changes of the banner and picture this device saw arrive.
@@ -313,8 +352,14 @@ impl Core {
         // Worked out once for each change of the log (each line is told from the group
         // before it), and read from its end: only the page's lines are copied.
         let lines = log.shared_activity();
+        // A new log a group moved to goes on from the old one's past: the start the first
+        // member wrote to make it the same group is left out.
+        let (before, start) = self.moved_from(group, &log).await.unwrap_or_default();
+        let old_lines = before.as_ref().map(|old| old.shared_activity());
         let (page, more) = page_by_time(
-            lines.iter().rev(),
+            (lines.iter().rev())
+                .filter(|a| !start.contains(&a.entry))
+                .chain(old_lines.iter().flat_map(|old| old.iter().rev())),
             |a| a.time_ms,
             seen,
             |(_, r)| r.time_ms,

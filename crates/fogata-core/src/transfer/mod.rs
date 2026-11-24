@@ -2471,7 +2471,9 @@ fn choose(
 /// What moves, counted for the person's yes.
 fn summarize(store: &Store, items: &[Item]) -> Result<Summary> {
     let book = store.require_friends()?;
-    let groups = store.groups()?.iter().filter(|g| !g.pending).count() as u32;
+    let groups = (store.groups()?.iter())
+        .filter(|g| !g.pending && g.moved.is_none())
+        .count() as u32;
     let chats: HashSet<&str> = items
         .iter()
         .filter_map(|i| {

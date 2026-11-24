@@ -81,6 +81,10 @@ pub fn now_ms() -> u64 {
 /// How long a group this device left still runs at start, so that its leave reaches the
 /// members who were away; as long as members look up the keys of older epochs.
 const LEAVE_DELIVERY_MS: u64 = 14 * 24 * 3600 * 1000;
+/// How long a group that moved to another log still runs at start, writing nothing: its
+/// last entries reach the members who were away, and they find the new log through this
+/// device. Its log stays after, for the new group's past.
+const MOVED_RUNS_MS: u64 = 30 * 24 * 3600 * 1000;
 /// How long a group this device manages waits to go up to the level of judgment this
 /// version gives, held back by members never seen at it, before a manager may raise it
 /// anyway ([`Core::raise_group_level_anyway`]): those members must then update before they
@@ -896,6 +900,19 @@ impl Core {
         for stored in stored_groups {
             // Invitations wait for the person; nothing of them runs or is announced.
             if stored.pending {
+                continue;
+            }
+            if stored
+                .moved
+                .as_ref()
+                .is_some_and(|m| now_ms() > m.ms.saturating_add(MOVED_RUNS_MS))
+            {
+                if let Some(id) = hex::decode(&stored.group_id)
+                    .ok()
+                    .and_then(|b| GroupId::from_bytes(&b).ok())
+                {
+                    store.forget_group_pictures(&id);
+                }
                 continue;
             }
             let log = match store.load_log(&stored) {

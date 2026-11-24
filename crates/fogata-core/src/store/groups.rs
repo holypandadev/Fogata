@@ -38,6 +38,22 @@ pub struct StoredGroup {
     /// The friend that added this device (device key in hex), while pending.
     #[serde(default)]
     pub invited_by: Option<String>,
+    /// The group moved to another log (see [`fogata_state::Moved`]): it is not shown, and
+    /// runs for members that were away only for a while (see `MOVED_RUNS_MS`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved: Option<MovedGroup>,
+    /// The group this one is the new log of (id in hex), whose past it shows too.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<String>,
+}
+
+/// Where and when a group moved.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct MovedGroup {
+    /// The new group's id in hex.
+    pub to: String,
+    /// When this device followed it.
+    pub ms: u64,
 }
 
 /// A group invitation the person declined. Friends in the group offer its log again each
@@ -162,6 +178,61 @@ fn check_offer(
 }
 
 impl Store {
+    /// Notes that group `old` moved to `new`, which this device runs from now on: `new` is
+    /// saved and takes the local name of `old`, which gets another and is marked moved, so
+    /// that it is no longer shown; the banner and picture changes seen in `old` are kept
+    /// with `new`. Done again, it changes nothing. Returns `new`'s local name.
+    pub fn record_move(&self, old: &GroupId, new: &GroupLog, now_ms: u64) -> Result<String> {
+        let held = self.lock();
+        let mut list = self.read_groups(&held)?;
+        let (old_id, new_id) = (
+            hex::encode(old.as_bytes()),
+            hex::encode(new.group_id().as_bytes()),
+        );
+        let at = (list.groups.iter())
+            .position(|g| g.group_id == old_id)
+            .context("no such group")?;
+        self.write_log(new)?;
+        if list.groups[at]
+            .moved
+            .as_ref()
+            .is_some_and(|m| m.to == new_id)
+            && let Some(known) = list.groups.iter().find(|g| g.group_id == new_id)
+        {
+            return Ok(known.name.clone());
+        }
+        // Saved already as a group of its own (a change of it came first): it is registered
+        // again as the new log of `old`.
+        list.groups.retain(|g| g.group_id != new_id);
+        let at = (list.groups.iter())
+            .position(|g| g.group_id == old_id)
+            .context("no such group")?;
+        let name = list.groups[at].name.clone();
+        let before = free_name(&list.groups, &format!("{name} (before moving)"));
+        let old_group = &mut list.groups[at];
+        old_group.name = before;
+        old_group.moved = Some(MovedGroup {
+            to: new_id.clone(),
+            ms: now_ms,
+        });
+        list.groups.push(StoredGroup {
+            name: name.clone(),
+            group_id: new_id,
+            pending: false,
+            invited_by: None,
+            moved: None,
+            moved_from: Some(old_id),
+        });
+        let (from, to) = (self.history_path(old), self.history_path(&new.group_id()));
+        if !to.exists()
+            && let Ok(history) = fs::read(&from)
+        {
+            write_private(&to, &history)?;
+        }
+        self.write_groups(&held, &list)?;
+        Ok(name)
+    }
+
     /// A local name not used by another group here: `base`, or `base (2)` and so on.
     pub fn free_group_name(&self, base: &str) -> Result<String> {
         let held = self.lock();
@@ -247,6 +318,8 @@ impl Store {
                 group_id: hex::encode(id.as_bytes()),
                 pending: !ran_here,
                 invited_by,
+                moved: None,
+                moved_from: None,
             });
         }
         if let Err(e) = self.write_groups(held, &list) {
@@ -480,6 +553,8 @@ impl Store {
             group_id: id,
             pending: true,
             invited_by: Some(hex::encode(by.as_bytes())),
+            moved: None,
+            moved_from: None,
         });
         self.write_groups(&held, &list)?;
         Ok(Offered::Pending(name))
@@ -607,6 +682,8 @@ impl Store {
             group_id: id,
             pending: false,
             invited_by: None,
+            moved: None,
+            moved_from: None,
         });
         self.write_groups(held, &list)?;
         Ok(name)
@@ -647,6 +724,55 @@ mod tests {
 
     use super::*;
     use crate::store::{Store, faults};
+
+    /// A group that moved: the new log takes the old one's local name and its banner and
+    /// picture changes seen here, the old one is marked; done again, or after the new group
+    /// was saved on its own first, the list is the same.
+    #[test]
+    fn a_group_that_moved_gives_its_name_to_the_new_log() {
+        let dir = std::env::temp_dir().join(format!("fogata-store-moved-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let old = GroupLog::create(&me, "Campfire", 1).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        fs::write(store.history_path(&old.group_id()), b"[]").unwrap();
+        let new = GroupLog::create(&me, "Campfire", 2).unwrap();
+        // A change of the new group saved before the move was noted.
+        assert_eq!(store.save_group_log(&new, "Campfire").unwrap(), "Campfire");
+        let ids = |g: &StoredGroup| g.group_id.clone();
+        for _ in 0..2 {
+            assert_eq!(
+                store.record_move(&old.group_id(), &new, 10).unwrap(),
+                "Our fire"
+            );
+            let groups = store.groups().unwrap();
+            assert_eq!(groups.len(), 2);
+            let (was, is) = (&groups[0], &groups[1]);
+            assert_eq!(ids(was), hex::encode(old.group_id().as_bytes()));
+            assert_eq!(was.name, "Our fire (before moving)");
+            assert_eq!(
+                was.moved,
+                Some(MovedGroup {
+                    to: ids(is),
+                    ms: 10
+                })
+            );
+            assert_eq!(is.name, "Our fire");
+            assert_eq!(is.moved_from, Some(ids(was)));
+            assert!(!is.pending && is.moved.is_none());
+        }
+        assert!(store.history_path(&new.group_id()).exists());
+        assert_eq!(
+            store.load_log_of(&new.group_id()).unwrap().group_id(),
+            new.group_id()
+        );
+        // Not a group here: nothing is noted.
+        let other = GroupLog::create(&me, "Other", 3).unwrap();
+        assert!(store.record_move(&other.group_id(), &new, 11).is_err());
+        assert_eq!(store.groups().unwrap().len(), 2);
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn writes_at_once_keep_every_group() {
