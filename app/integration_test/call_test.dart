@@ -4507,7 +4507,7 @@ class _OutputSwap {
     _log(
       'output swap, fall back ($how): can be put together ${facts['combinable']}, playing '
       'on ${facts['inUseName']}, recording ${facts['recording']}, recording started again '
-      '$recoveries times since the refusal, an output notice ${_outputNoticeSeen ? 'given' : 'not given'}',
+      '$recoveries times${how == 'pair' ? '' : ' since the refusal'}, an output notice ${_outputNoticeSeen ? 'given' : 'not given'}',
     );
     if (how == 'unmute' || how == 'start') {
       if (facts['combinable'] != false) {
