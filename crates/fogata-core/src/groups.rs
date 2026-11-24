@@ -63,6 +63,10 @@ fn page_by_time<L, S>(
     (page, more)
 }
 
+/// Logs of a group that moved more than once whose past its activity reads, past the
+/// newest: each move needs a full log, so a group moves a handful of times at most.
+const MAX_MOVES_READ: usize = 16;
+
 impl Core {
     /// Every group, live rooms first, then by name.
     pub async fn groups(&self) -> Result<Vec<GroupView>> {
@@ -288,7 +292,12 @@ impl Core {
     /// new group takes its place here at once, and its members follow as they get the move.
     /// Returns the new group's id.
     pub async fn move_group(&self, group: GroupId) -> Result<GroupId> {
-        Ok(self.inner.node.move_group(group).await?)
+        // The new log is on the disk before the move that points to it goes out: a device
+        // that stops in between still has it when it starts again (see `Core::start`).
+        let store = self.inner.store.clone();
+        let keep: fogata_net::KeepNewLog =
+            Box::new(move |log| store.keep_new_log(log).map_err(|e| format!("{e:#}")));
+        Ok(self.inner.node.move_group(group, keep).await?)
     }
 
     /// The log `group` (whose log is `log`) is the new log of, when it is one, and the
@@ -354,12 +363,24 @@ impl Core {
         let lines = log.shared_activity();
         // A new log a group moved to goes on from the old one's past: the start the first
         // member wrote to make it the same group is left out.
-        let (before, start) = self.moved_from(group, &log).await.unwrap_or_default();
-        let old_lines = before.as_ref().map(|old| old.shared_activity());
+        // So on for a group that moved more than once, each log's start left out.
+        let (mut before, start) = self.moved_from(group, &log).await.unwrap_or_default();
+        let mut olds = Vec::new();
+        while let Some(old) = before.take() {
+            if olds.len() == MAX_MOVES_READ {
+                break;
+            }
+            let (earlier, its_start) =
+                (self.moved_from(old.group_id(), &old).await).unwrap_or_default();
+            olds.push((old.shared_activity(), its_start));
+            before = earlier;
+        }
         let (page, more) = page_by_time(
             (lines.iter().rev())
                 .filter(|a| !start.contains(&a.entry))
-                .chain(old_lines.iter().flat_map(|old| old.iter().rev())),
+                .chain(olds.iter().flat_map(|(lines, start)| {
+                    (lines.iter().rev()).filter(move |a| !start.contains(&a.entry))
+                })),
             |a| a.time_ms,
             seen,
             |(_, r)| r.time_ms,

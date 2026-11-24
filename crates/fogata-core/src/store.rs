@@ -926,6 +926,27 @@ impl Store {
             .unwrap_or_default()
     }
 
+    /// The banner and picture changes seen of the group `old` go with those of `new`, the
+    /// log it moved to: by time, each once.
+    fn merge_history(&self, old: &GroupId, new: &GroupId) -> Result<()> {
+        let mut history = self.record_history(old);
+        if history.is_empty() {
+            return Ok(());
+        }
+        let before = self.record_history(new);
+        for record in &before {
+            if !history.iter().any(|h| h.signature == record.signature) {
+                history.push(record.clone());
+            }
+        }
+        if history.len() == before.len() {
+            return Ok(());
+        }
+        history.sort_by_key(|h| h.time_ms);
+        trim_history(&mut history);
+        write_private(&self.history_path(new), &serde_json::to_vec(&history)?)
+    }
+
     /// Notes the banner and picture records of `log` this device had not seen yet.
     fn note_records(&self, log: &GroupLog) -> Result<()> {
         let mut seen = Vec::new();
@@ -945,17 +966,7 @@ impl Store {
         if history.len() == before {
             return Ok(());
         }
-        // The oldest go, but never the newest of a kind: it would be noted again as new.
-        while history.len() > MAX_RECORDS_SEEN {
-            let Some(at) = (0..history.len()).find(|i| {
-                history[i + 1..]
-                    .iter()
-                    .any(|later| later.kind == history[*i].kind)
-            }) else {
-                break;
-            };
-            history.remove(at);
-        }
+        trim_history(&mut history);
         write_private(
             &self.history_path(&log.group_id()),
             &serde_json::to_vec(&history)?,
@@ -1417,6 +1428,21 @@ fn sync_folder(path: &Path) {
     }
     #[cfg(not(unix))]
     let _ = path;
+}
+
+/// The oldest changes seen go past [`MAX_RECORDS_SEEN`], but never the newest of a kind: it
+/// would be noted again as new.
+fn trim_history(history: &mut Vec<RecordSeen>) {
+    while history.len() > MAX_RECORDS_SEEN {
+        let Some(at) = (0..history.len()).find(|i| {
+            history[i + 1..]
+                .iter()
+                .any(|later| later.kind == history[*i].kind)
+        }) else {
+            break;
+        };
+        history.remove(at);
+    }
 }
 
 #[cfg(test)]

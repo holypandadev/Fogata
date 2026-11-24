@@ -381,10 +381,24 @@ impl GroupLog {
         old: &GroupLog,
         now_ms: u64,
     ) -> Result<Vec<Entry>, StateError> {
+        let mut written = Vec::new();
+        self.again_after_move_into(identity, old, now_ms, &mut written)?;
+        Ok(written)
+    }
+
+    /// [`Self::again_after_move`], with what it wrote in `written` even when a later entry
+    /// cannot be written: those are in this log already, and are to be sent.
+    pub fn again_after_move_into(
+        &mut self,
+        identity: &DeviceIdentity,
+        old: &GroupLog,
+        now_ms: u64,
+        written: &mut Vec<Entry>,
+    ) -> Result<(), StateError> {
         let me = identity.public_key();
         let moved_here = old.moved().is_some_and(|(_, m)| m.to == self.group_id);
         if !moved_here || self.state().first() != Some(me) {
-            return Ok(Vec::new());
+            return Ok(());
         }
         let apart = old.apart_from_move();
         // Who this log already took out, let go or let in, by any entry it keeps.
@@ -406,7 +420,6 @@ impl GroupLog {
                 _ => {}
             }
         }
-        let mut written = Vec::new();
         for member in apart.removed.iter().copied() {
             if member != me && !out.contains(&member) && self.state().is_member(&member) {
                 written.push(self.remove(identity, member, now_ms)?);
@@ -424,7 +437,7 @@ impl GroupLog {
                 written.push(self.add(identity, member, &name, now_ms)?);
             }
         }
-        Ok(written)
+        Ok(())
     }
 
     /// The group, room rules too, as the entries `parents` and every entry before them

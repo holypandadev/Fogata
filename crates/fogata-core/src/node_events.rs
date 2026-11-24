@@ -691,12 +691,14 @@ async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
 /// writing nothing, until a start after `MOVED_RUNS_MS`.
 fn handle_group_moved(inner: &Arc<Inner>, from: GroupId, log: fogata_state::GroupLog) {
     let store = inner.store.clone();
+    let after = inner.clone();
+    // The list changes once the new log has the group's name.
     inner.writer.after(move || {
         if let Err(e) = store.record_move(&from, &log, now_ms()) {
             tracing::warn!("cannot save the group {from:?} moved to: {e:#}");
         }
+        after.emit(CoreEvent::GroupsChanged);
     });
-    inner.emit(CoreEvent::GroupsChanged);
 }
 
 /// This device was taken out of a group.

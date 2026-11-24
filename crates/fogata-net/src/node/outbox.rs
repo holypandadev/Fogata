@@ -214,7 +214,7 @@ impl Node {
             // dialled. Only one that failed on its way goes again (see own.rs).
             Pending::Own(_, id, _) => self.own_answered(id),
             // Another member is asked at the next heartbeat.
-            Pending::MovedLog(group, _) => self.moved_log_lost(group, peer),
+            Pending::MovedLog(group, _) => self.moved_log_lost(group, peer, false),
             _ => {}
         }
     }

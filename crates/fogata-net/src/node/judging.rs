@@ -158,8 +158,9 @@ pub(super) enum Verdict {
     },
     /// What the start of the log a group moved to came to.
     Moved(super::moves::StartVerdict),
-    /// Judging it failed (a panic): the peer that sent it is let go.
-    Failed,
+    /// Judging it failed (a panic): the peer that sent it is let go. Whether it was the
+    /// start of a log the group moved to.
+    Failed { moved: bool },
 }
 
 /// A job judged: from whom, for which group, and what it came to.
@@ -240,10 +241,11 @@ impl Judging {
             };
             self.running.push(peer);
             let done = self.done_tx.clone();
+            let moved = matches!(job, Job::Moved { .. });
             tokio::task::spawn_blocking(move || {
                 let verdict =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| job.judge(group)))
-                        .unwrap_or(Verdict::Failed);
+                        .unwrap_or(Verdict::Failed { moved });
                 // Fails only once the node is gone, which no longer wants it.
                 let _ = done.try_send(Judged {
                     peer,
@@ -305,10 +307,10 @@ impl Node {
                 self.admitted_judged(group, peer, entries, taken, log)
             }
             Verdict::Moved(verdict) => self.start_judged(peer, group, verdict),
-            Verdict::Failed => {
-                // Whatever was judged, a new log being judged for the group is no more.
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.following_judged();
+            Verdict::Failed { moved } => {
+                // The new log of a group that moved may be asked for again, of another member.
+                if moved && let Some(slot) = self.groups.get_mut(&group) {
+                    slot.following_judged(peer);
                 }
                 tracing::error!(
                     %peer,

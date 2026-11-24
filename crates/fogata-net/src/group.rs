@@ -282,10 +282,16 @@ impl GroupContext {
     /// Moves the group to a new log, as its first member (see
     /// [`GroupLog::new_log_for_move`]): returns the new log and the `Moved` entry written
     /// here, signed on every entry this device has.
-    pub(crate) fn move_group(&mut self, now_ms: u64) -> Result<(GroupLog, EntryHash), String> {
+    pub(crate) fn move_group(
+        &mut self,
+        now_ms: u64,
+        keep: crate::KeepNewLog,
+    ) -> Result<(GroupLog, EntryHash), String> {
         let new = (self.log)
             .new_log_for_move(&self.identity, now_ms)
             .map_err(|e| e.to_string())?;
+        // On the disk before the move that points to it, which may go out at once.
+        keep(&new)?;
         let moved = (self.log)
             .move_to(&self.identity, &new, now_ms)
             .map_err(|e| e.to_string())?;
@@ -321,27 +327,21 @@ impl GroupContext {
 
     /// Writes again in this log, the one the group moved to from `old`, who entries
     /// written apart from the move took out or brought in there (see
-    /// [`GroupLog::again_after_move`]): the first member only. Returns the new hashes, or
-    /// nothing when it could not be written.
-    pub(crate) fn again_after_move(
-        &mut self,
-        old: &GroupLog,
-        now_ms: u64,
-    ) -> Option<Vec<EntryHash>> {
-        match self.log.again_after_move(&self.identity, old, now_ms) {
-            Ok(written) if !written.is_empty() => {
-                self.refresh();
-                Some(written.iter().map(Entry::hash).collect())
-            }
-            Ok(_) => Some(Vec::new()),
-            Err(e) => {
-                tracing::warn!(
-                    "cannot write again in {:?} what was written apart from its move: {e}",
-                    self.group_id()
-                );
-                None
-            }
+    /// [`GroupLog::again_after_move`]): the first member only. Returns the new hashes:
+    /// those written before an entry that could not be, too.
+    pub(crate) fn again_after_move(&mut self, old: &GroupLog, now_ms: u64) -> Vec<EntryHash> {
+        let mut written = Vec::new();
+        if let Err(e) = (self.log).again_after_move_into(&self.identity, old, now_ms, &mut written)
+        {
+            tracing::warn!(
+                "cannot write again in {:?} all that was written apart from its move: {e}",
+                self.group_id()
+            );
         }
+        if !written.is_empty() {
+            self.refresh();
+        }
+        written.iter().map(Entry::hash).collect()
     }
 
     pub(crate) fn name(&self) -> &str {

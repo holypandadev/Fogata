@@ -897,6 +897,9 @@ impl Core {
             Vec::new()
         });
         let mut groups = Vec::new();
+        let listed: HashSet<String> = stored_groups.iter().map(|g| g.group_id.clone()).collect();
+        // Groups that moved, run for a while, and the log each moved to.
+        let mut moved_to = Vec::new();
         for stored in stored_groups {
             // Invitations wait for the person; nothing of them runs or is announced.
             if stored.pending {
@@ -930,6 +933,30 @@ impl Core {
             let leaving = log
                 .entries()
                 .any(|e| e.author == me && matches!(e.body, Body::Leave) && e.time_ms > since);
+            // Moved by this device, which stopped before the new log was listed: it is on the
+            // disk (kept before the move was written), and listed now.
+            if stored.moved.is_none()
+                && let Some((_, moved)) = log.moved()
+                && !listed.contains(&hex::encode(moved.to.as_bytes()))
+                && let Ok(new) = store.load_log_of(&moved.to)
+            {
+                match store.record_move(&log.group_id(), &new, now_ms()) {
+                    Ok(_) => {
+                        moved_to.push((log.group_id(), moved.to));
+                        if new.shared_state().is_member(&me) {
+                            groups.push(GroupSetup::Member(new));
+                        }
+                    }
+                    Err(e) => tracing::warn!("cannot list the log a group moved to: {e:#}"),
+                }
+            }
+            if let Some(moved) = &stored.moved
+                && let Some(to) = hex::decode(&moved.to)
+                    .ok()
+                    .and_then(|b| GroupId::from_bytes(&b).ok())
+            {
+                moved_to.push((log.group_id(), to));
+            }
             if log.shared_state().is_member(&me) || leaving {
                 groups.push(GroupSetup::Member(log));
             } else {
@@ -937,6 +964,22 @@ impl Core {
                 store.forget_group_pictures(&log.group_id());
             }
         }
+        // A group that moved runs only beside the log it moved to: one this device left, or
+        // was removed from, leaves the old one stopped too, or it would be followed again.
+        let runs = |id: &GroupId| {
+            groups.iter().any(|g| match g {
+                GroupSetup::Member(log) => log.group_id() == *id,
+                _ => false,
+            })
+        };
+        let stopped: Vec<GroupId> = (moved_to.iter())
+            .filter(|(_, to)| !runs(to) && listed.contains(&hex::encode(to.as_bytes())))
+            .map(|(from, _)| *from)
+            .collect();
+        groups.retain(|g| match g {
+            GroupSetup::Member(log) => !stopped.contains(&log.group_id()),
+            _ => true,
+        });
         // Joins with an invite that were still waiting for a manager go on.
         let mut joining = HashMap::new();
         let mut invite_addrs = Vec::new();

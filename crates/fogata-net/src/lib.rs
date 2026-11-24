@@ -549,6 +549,11 @@ pub struct RoomView {
     pub chat: Vec<ChatLine>,
 }
 
+/// Keeps a new log on the disk, before a move to it is written: run once, in the node's
+/// loop, by [`NodeHandle::move_group`]. A move whose new log could not be kept is not made,
+/// so no member is left following a log nobody has.
+pub type KeepNewLog = Box<dyn FnOnce(&GroupLog) -> Result<(), String> + Send>;
+
 enum Command {
     AddGroup(GroupSetup),
     MergeGroup(GroupLog),
@@ -658,6 +663,7 @@ enum Command {
     /// Moves a full group to a new log, as its first member (see [`NodeHandle::move_group`]).
     MoveGroup {
         group: GroupId,
+        keep: KeepNewLog,
         reply: tokio::sync::oneshot::Sender<Result<GroupId, String>>,
     },
     GiveEntries {
@@ -1154,8 +1160,8 @@ impl NodeHandle {
     /// five: for a log near its ceiling (see [`fogata_state::LogFill`]). The node runs the
     /// new group at once and tells [`NodeEvent::GroupMoved`]; the members follow it as they
     /// get the move. Returns the new group's id.
-    pub async fn move_group(&self, group: GroupId) -> Result<GroupId, NetError> {
-        self.ask(|reply| Command::MoveGroup { group, reply })
+    pub async fn move_group(&self, group: GroupId, keep: KeepNewLog) -> Result<GroupId, NetError> {
+        self.ask(|reply| Command::MoveGroup { group, keep, reply })
             .await?
             .map_err(NetError::Refused)
     }

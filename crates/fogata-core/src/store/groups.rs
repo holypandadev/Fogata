@@ -192,7 +192,12 @@ impl Store {
         let at = (list.groups.iter())
             .position(|g| g.group_id == old_id)
             .context("no such group")?;
-        self.write_log(new)?;
+        // A new log saved here already is as new as this one or newer (a leave of this
+        // device in it, say): never written over.
+        let known = list.groups.iter().any(|g| g.group_id == new_id);
+        if !known {
+            self.write_log(new)?;
+        }
         if list.groups[at]
             .moved
             .as_ref()
@@ -223,14 +228,17 @@ impl Store {
             moved: None,
             moved_from: Some(old_id),
         });
-        let (from, to) = (self.history_path(old), self.history_path(&new.group_id()));
-        if !to.exists()
-            && let Ok(history) = fs::read(&from)
-        {
-            write_private(&to, &history)?;
-        }
+        self.merge_history(old, &new.group_id())?;
         self.write_groups(&held, &list)?;
         Ok(name)
+    }
+
+    /// Keeps the log a group is moving to on the disk, not listed yet: before the move that
+    /// points to it is written (see [`Self::record_move`], and `Core::start` for a device
+    /// that stopped in between).
+    pub fn keep_new_log(&self, log: &GroupLog) -> Result<()> {
+        let _held = self.lock();
+        self.write_log(log)
     }
 
     /// A local name not used by another group here: `base`, or `base (2)` and so on.
@@ -726,8 +734,9 @@ mod tests {
     use crate::store::{Store, faults};
 
     /// A group that moved: the new log takes the old one's local name and its banner and
-    /// picture changes seen here, the old one is marked; done again, or after the new group
-    /// was saved on its own first, the list is the same.
+    /// picture changes seen here (with those already noted of the new log, by time), the old
+    /// one is marked; done again, or after the new group was saved on its own first, the list
+    /// is the same, and the new log saved here is never written over.
     #[test]
     fn a_group_that_moved_gives_its_name_to_the_new_log() {
         let dir = std::env::temp_dir().join(format!("fogata-store-moved-{}", std::process::id()));
@@ -736,10 +745,33 @@ mod tests {
         let (me, _) = store.identity().unwrap();
         let old = GroupLog::create(&me, "Campfire", 1).unwrap();
         store.save_group_log(&old, "Our fire").unwrap();
-        fs::write(store.history_path(&old.group_id()), b"[]").unwrap();
-        let new = GroupLog::create(&me, "Campfire", 2).unwrap();
-        // A change of the new group saved before the move was noted.
-        assert_eq!(store.save_group_log(&new, "Campfire").unwrap(), "Campfire");
+        use crate::store::{RecordKind, RecordSeen};
+        let seen = |time_ms, signature: &str| RecordSeen {
+            kind: RecordKind::Picture,
+            author: "ab".into(),
+            time_ms,
+            taken_away: false,
+            signature: signature.into(),
+        };
+        let write = |id: &GroupId, history: &[RecordSeen]| {
+            let bytes = serde_json::to_vec(history).unwrap();
+            fs::write(store.history_path(id), bytes).unwrap();
+        };
+        write(&old.group_id(), &[seen(4, "a"), seen(6, "b")]);
+        let mut new = GroupLog::create(&me, "Campfire", 2).unwrap();
+        store.keep_new_log(&new).unwrap();
+        // A change of the new group saved before the move was noted, with the new log's
+        // picture: its history is written first.
+        let mut newer = new.clone();
+        let rename = Body::Rename {
+            name: "Campfire 2".into(),
+        };
+        newer.append(&me, rename, 3).unwrap();
+        assert_eq!(
+            store.save_group_log(&newer, "Campfire").unwrap(),
+            "Campfire"
+        );
+        write(&new.group_id(), &[seen(6, "b"), seen(5, "c")]);
         let ids = |g: &StoredGroup| g.group_id.clone();
         for _ in 0..2 {
             assert_eq!(
@@ -762,11 +794,14 @@ mod tests {
             assert_eq!(is.moved_from, Some(ids(was)));
             assert!(!is.pending && is.moved.is_none());
         }
-        assert!(store.history_path(&new.group_id()).exists());
-        assert_eq!(
-            store.load_log_of(&new.group_id()).unwrap().group_id(),
-            new.group_id()
-        );
+        let signatures: Vec<String> = (store.record_history(&new.group_id()).into_iter())
+            .map(|r| r.signature)
+            .collect();
+        assert_eq!(signatures, ["a", "c", "b"]);
+        // The newer copy stays.
+        let kept = store.load_log_of(&new.group_id()).unwrap();
+        assert_eq!(kept.shared_state().name, "Campfire 2");
+        new = kept;
         // Not a group here: nothing is noted.
         let other = GroupLog::create(&me, "Other", 3).unwrap();
         assert!(store.record_move(&other.group_id(), &new, 11).is_err());

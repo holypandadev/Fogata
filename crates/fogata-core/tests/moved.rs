@@ -1,0 +1,98 @@
+//! A group that moved to a new log, as a device starts: the new log is run and listed in the
+//! group's place, and a new log this device left leaves the old group stopped too.
+
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use fogata_core::{Core, NetOptions, Store};
+use fogata_crypto::DeviceIdentity;
+use fogata_state::{Body, GroupLog, Level};
+
+/// One test at a time: each starts a device that listens on this computer's network.
+static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+fn options() -> NetOptions {
+    NetOptions {
+        use_dht: false,
+        use_mdns: false,
+        ..Default::default()
+    }
+}
+
+/// A device that moved a group and stopped before the new log was listed (it was kept on the
+/// disk first) lists it at its next start, under the group's name, in the old one's place.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_log_kept_before_a_stop_is_listed_at_the_next_start() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-kept-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Ana", None).unwrap();
+    let (old, new) = {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let t = now_ms() - 10_000;
+        let mut old = GroupLog::create(&me, "Campfire", t).unwrap();
+        old.raise_level(&me, Level::Five, t + 1).unwrap();
+        let new = old.new_log_for_move(&me, t + 2).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        store.keep_new_log(&new).unwrap();
+        // The move written and saved, and then the device stopped.
+        old.move_to(&me, &new, t + 3).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        (old.group_id(), new.group_id())
+    };
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    let groups = core.groups().await.unwrap();
+    let listed: Vec<_> = groups
+        .iter()
+        .map(|g| (g.id, g.local_name.as_str()))
+        .collect();
+    assert_eq!(listed, [(new, "Our fire")]);
+    let stored = core.store().groups().unwrap();
+    let was = (stored.iter())
+        .find(|g| g.group_id == hex::encode(old.as_bytes()))
+        .unwrap();
+    assert_eq!(
+        was.moved.as_ref().map(|m| m.to.clone()),
+        Some(hex::encode(new.as_bytes()))
+    );
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A device that left the new log long ago does not run the old group either: it would be
+/// listed again, and follow the move again into the group it left.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_log_left_leaves_the_old_group_stopped() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-left-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        // Long ago: the leave is past the while a leave keeps a group running.
+        let t = 1_000;
+        let mut old = GroupLog::create(&ana, "Campfire", t).unwrap();
+        old.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        old.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let mut new = old.new_log_for_move(&ana, t + 3).unwrap();
+        old.move_to(&ana, &new, t + 4).unwrap();
+        new.append(&me, Body::Leave, t + 5).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        store.save_group_log(&new, "Campfire").unwrap();
+        // Moved here not long ago: the old group would still run for a while.
+        store.record_move(&old.group_id(), &new, now_ms()).unwrap();
+    }
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    assert!(core.groups().await.unwrap().is_empty());
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
