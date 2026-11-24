@@ -884,6 +884,16 @@ class UiGroup {
   /// changes since. Said again after a restart, until Fogata is updated.
   final bool needsUpdate;
 
+  /// How much of its history's ceiling the group holds, from 0 to 1, from protection level
+  /// five; None below it. From three quarters on its first member is told to move it to a
+  /// fresh history ([`super::app::move_group`]); from 1 only removals, leaves and the move
+  /// still apply.
+  final double? fill;
+
+  /// This device may move the group to a fresh history: it is first on the group's list,
+  /// the group is at level five or higher, and it has not moved.
+  final bool mayMove;
+
   const UiGroup({
     required this.id,
     required this.name,
@@ -907,6 +917,8 @@ class UiGroup {
     this.levelBehind,
     required this.raiseAnyway,
     required this.needsUpdate,
+    this.fill,
+    required this.mayMove,
   });
 
   @override
@@ -932,7 +944,9 @@ class UiGroup {
       keptOut.hashCode ^
       levelBehind.hashCode ^
       raiseAnyway.hashCode ^
-      needsUpdate.hashCode;
+      needsUpdate.hashCode ^
+      fill.hashCode ^
+      mayMove.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -960,7 +974,9 @@ class UiGroup {
           keptOut == other.keptOut &&
           levelBehind == other.levelBehind &&
           raiseAnyway == other.raiseAnyway &&
-          needsUpdate == other.needsUpdate;
+          needsUpdate == other.needsUpdate &&
+          fill == other.fill &&
+          mayMove == other.mayMove;
 }
 
 /// A group a friend added this device to, waiting for the person to join or decline.
