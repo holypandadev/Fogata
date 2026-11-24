@@ -192,6 +192,10 @@ impl Core {
                 level_behind,
                 raise_anyway,
                 level_ahead: group.level_ahead,
+                fill: group.fill.map(|fill| fill.share()),
+                may_move: state.log_level >= fogata_state::Level::Five
+                    && state.moved.is_none()
+                    && state.ladder.first() == Some(&me),
             });
         }
         out.sort_by(|a, b| {

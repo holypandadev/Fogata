@@ -311,3 +311,45 @@ async fn a_new_log_taken_is_followed_in_the_same_run() {
     core.shutdown().await.unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A group shows how full its log is from level five, and whether this device may move it:
+/// only as the first on its ladder, and only from level five.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_group_shows_its_fill_and_who_may_move_it() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-fill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let t = now_ms() - 10_000;
+        let mut mine = GroupLog::create(&me, "Mine", t).unwrap();
+        mine.raise_level(&me, Level::Five, t + 1).unwrap();
+        store.save_group_log(&mine, "Mine").unwrap();
+        let mut hers = GroupLog::create(&ana, "Hers", t).unwrap();
+        hers.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        hers.raise_level(&ana, Level::Five, t + 2).unwrap();
+        store.save_group_log(&hers, "Hers").unwrap();
+        let below = GroupLog::create(&me, "Below", t).unwrap();
+        if below.state().log_level >= Level::Five {
+            panic!("a new group starts below level five");
+        }
+        store.save_group_log(&below, "Below").unwrap();
+    }
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    let groups = core.groups().await.unwrap();
+    let of = |name: &str| groups.iter().find(|g| g.local_name == name).unwrap();
+    let mine = of("Mine");
+    assert!(mine.fill.is_some_and(|f| f > 0.0 && f < 0.01));
+    assert!(mine.may_move);
+    let hers = of("Hers");
+    assert!(hers.fill.is_some());
+    assert!(!hers.may_move);
+    let below = of("Below");
+    assert_eq!(below.fill, None);
+    assert!(!below.may_move);
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

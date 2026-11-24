@@ -517,6 +517,9 @@ pub struct GroupSummary {
     /// A level above every one this version judges at that a manager raised the group to
     /// (see [`GroupLog::level_ahead`]): this device needs a newer Fogata to follow it.
     pub level_ahead: Option<u32>,
+    /// How full the log is, for a group judged at level five or higher (see
+    /// [`GroupLog::fill`]); None below it, where no ceiling holds.
+    pub fill: Option<fogata_state::LogFill>,
 }
 
 impl GroupSummary {
@@ -530,6 +533,7 @@ impl GroupSummary {
             picture: log.picture_in(&state, now_ms).map(<[u8]>::to_vec),
             banner: log.banner().map(fogata_state::GroupBanner::digest),
             level_ahead: log.level_ahead(),
+            fill: (state.log_level >= fogata_state::Level::Five).then(|| log.fill()),
             state,
         }
     }

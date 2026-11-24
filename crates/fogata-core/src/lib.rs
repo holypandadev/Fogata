@@ -209,6 +209,14 @@ pub struct GroupView {
     /// (see [`fogata_state::GroupLog::level_ahead`]): this device follows the group only once Fogata is
     /// updated. Kept with the log, so it is told again after a restart, until then.
     pub level_ahead: Option<u32>,
+    /// How much of its log's ceiling the group holds, from 0 to 1, from level five (see
+    /// [`fogata_state::LogFill::share`]); None below it. From three quarters on, its first
+    /// member is told to move it ([`Self::may_move`]), and from 1 only removals, leaves and the
+    /// move still apply.
+    pub fill: Option<f64>,
+    /// This device may move the group to a new log ([`Core::move_group`]): it is first on the
+    /// group's ladder, the group judges at level five or higher, and it has not moved.
+    pub may_move: bool,
 }
 
 /// A voice room of a group: its own people, chat and files.
