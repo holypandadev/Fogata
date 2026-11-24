@@ -1304,7 +1304,7 @@ class Call extends ChangeNotifier {
   DateTime _micAskedAt = DateTime(0);
 
   /// Tells everyone the microphone's state (unless [tell] says it was told already) and
-  /// to it.
+  /// has every participant's channels brought to it.
   void _micToPeers({bool tell = true}) {
     if (_closed) return;
     if (tell) _sendState();
