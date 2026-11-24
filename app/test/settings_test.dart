@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fogata/src/version.dart';
 import 'package:fogata/src/app_state.dart';
 import 'package:fogata/src/screens/settings.dart';
 import 'package:fogata/src/screens/shell.dart';
@@ -89,6 +90,8 @@ void main() {
       await _settle(tester);
       expect(find.text('USER'), findsOneWidget);
       expect(find.text('APP'), findsOneWidget);
+      // The version, which names its beta.
+      expect(find.text('Fogata $appVersion'), findsOneWidget);
       for (final section in SettingsSection.values) {
         // The tray's part only where there is a tray (none in tests).
         if (section == SettingsSection.behaviour) continue;
