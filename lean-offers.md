@@ -24,3 +24,5 @@ Local runs on this commit:
 - `cargo fmt --check` and `cargo clippy -D warnings` (fogata-state, fogata-net, fogata-core, all targets): clean.
 - fogata-state: 210 passed. fogata-net: 342 passed and every integration test file passes. fogata-core: 323 passed, and every integration test file but two passes.
 - The only local failures fail the same way on main on the test machine, because they need a folder to be read-only and root ignores that: `files::tests::what_an_earlier_run_left_and_cannot_go_is_left`, `transfer::tests::a_move_that_cannot_be_committed_stays_staged`, `tests/readmitted.rs` and `tests/sealed.rs`. All of these run in CI.
+
+CI on this commit: CI (Linux, macOS, Windows and the Linux checks), call checks, the network lab and the Flatpak drop all pass. The macOS job was not started once for lack of a GitHub runner and passed when run again.
