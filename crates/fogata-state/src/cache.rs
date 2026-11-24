@@ -626,7 +626,16 @@ impl GroupLog {
             |h| order.place.get(h).copied().filter(|i| *i < from),
             rest,
         );
-        if after.level() != budget.level() {
+        // Below a judged `Level` entry naming five, the entries before were placed at the
+        // level below, and whether that entry is part of a run at five depends on the whole
+        // order at five: worked out from the start, as a fresh copy does.
+        let below_five = after.level() < Level::Five
+            && (order.hashes.iter().chain([&hash])).any(|h| {
+                !self.unjudged.contains(h)
+                    && matches!(self.entries[h].body, Body::Level { level }
+                        if Level::numbered(level) >= Some(Level::Five))
+            });
+        if below_five || after.level() != budget.level() {
             // A `Level` entry ordered again went past a run, or back into one: the entries
             // before were placed at another level.
             let all = order.hashes.iter().copied().chain([hash]).collect();

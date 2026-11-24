@@ -898,3 +898,93 @@ fn before_five_a_raise_past_its_run_still_orders() {
     let copy = found.expect("the raise goes past Ana's run");
     assert_eq!(copy.full().budget.level(), Level::Three);
 }
+
+/// A copy fresh from nothing, given `from`'s entries in its order.
+fn fresh(from: &GroupLog) -> GroupLog {
+    let mut log = GroupLog::empty(from.group_id());
+    log.insert_all(from.entries_in_order().into_iter().cloned());
+    log
+}
+
+/// Whether a `Moved` is a move is judged on its author's view, whenever its entries come:
+/// a copy that orders the log while the move and the raise before it still wait on an
+/// entry they are signed on moves the group all the same once that entry comes.
+#[test]
+fn a_move_counts_the_same_whatever_came_first() {
+    let (mut base, ana, _, bea) = group(Level::Four);
+    base.set_ceiling(CEILING.entries, CEILING.bytes);
+    // Bea raises to five; Ana, apart, writes a rename, a raise of her own and a move.
+    let mut beas = base.clone();
+    beas.raise_level(&bea.id, Level::Five, 10).unwrap();
+    let mut anas = base.clone();
+    let renamed = rename(&mut anas, &ana, 20).unwrap();
+    let raise = anas.raise_level(&ana.id, Level::Five, 21).unwrap();
+    let new = anas.new_log_for_move(&ana.id, 22).unwrap();
+    let moved = anas.move_to(&ana.id, &new, 23).unwrap();
+    // In the order written.
+    let mut a = fresh(&beas);
+    a.insert_all([renamed.clone(), raise.clone(), moved.clone()]);
+    // The raise and the move first: they wait on the rename, and the log is ordered (at
+    // five, by Bea's raise) while they wait.
+    let mut b = fresh(&beas);
+    b.insert_some([raise.clone(), moved.clone()]);
+    assert!(b.unjudged.contains(&moved.hash()));
+    let _ = b.fill();
+    b.insert_some([renamed.clone()]);
+    assert_eq!(a.moved().map(|(h, _)| h), Some(moved.hash()));
+    assert_eq!(b.moved(), a.moved());
+    assert_eq!(b.ordered(), a.ordered());
+    assert_eq!(b.state().applied, a.state().applied);
+    assert_eq!(b.fill(), a.fill());
+    // And read again from nothing.
+    assert_eq!(fresh(&b).moved(), a.moved());
+}
+
+/// A first member that writes a move apart from its own leave takes nothing from the move
+/// that will apply: its move never applies, and the reserve stays for the next first
+/// member's, on a log full to the ceiling.
+#[test]
+fn a_move_by_a_leaver_leaves_the_reserve() {
+    let (mut log, ana, laptop, bea) = group(Level::Five);
+    for n in 0..u64::from(SMALL) * 2 {
+        let who = if n % 2 == 0 { &laptop } else { &bea };
+        if rename(&mut log, who, 100 + n).is_err() {
+            break;
+        }
+    }
+    assert!(log.fill().full(), "{:?}", log.fill());
+    let heads = log.heads();
+    let group_id = log.group_id();
+    let new = log.new_log_for_move(&ana.id, 1_000).unwrap();
+    let forged = Moved {
+        to: new.group_id(),
+        setup: new.heads()[0],
+    };
+    let moved = Entry::sign(&ana.id, group_id, heads.clone(), 1_001, forged.body());
+    let leave = Entry::sign(&ana.id, group_id, heads, 1_002, Body::Leave);
+    log.insert_all([moved.clone(), leave.clone()]);
+    let state = log.state();
+    assert!(state.applied.contains(&leave.hash()));
+    // Past the ceiling with no reserve, or refused for its author's leave: either way it
+    // moves nothing.
+    assert!(
+        state.rejected.iter().any(|(h, _)| *h == moved.hash()),
+        "{state:?}"
+    );
+    assert_eq!(log.moved(), None);
+    // The next first member moves the group, whoever it is.
+    let next = [&laptop, &bea]
+        .into_iter()
+        .find(|d| log.new_log_for_move(&d.id, 2_000).is_ok())
+        .unwrap_or_else(|| {
+            panic!(
+                "{:?} {:?}",
+                log.new_log_for_move(&laptop.id, 2_000).err(),
+                log.new_log_for_move(&bea.id, 2_000).err()
+            )
+        });
+    let new = log.new_log_for_move(&next.id, 2_000).unwrap();
+    let theirs = log.move_to(&next.id, &new, 2_001).unwrap();
+    assert_eq!(log.moved().map(|(h, _)| h), Some(theirs.hash()));
+    assert_eq!(fresh(&log).moved(), log.moved());
+}

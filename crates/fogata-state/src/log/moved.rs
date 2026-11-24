@@ -320,12 +320,22 @@ impl GroupLog {
     }
 }
 
-/// Whether `new` is the group `old` is, for a member: the same ladder, members and names,
-/// who manages, name, icon, picture, limits, rooms and level, and who may enter each room at
+/// Whether `new` is the group `old` is, for a member: the same ladder, members and names
+/// (the first member's may be blank: a new log starts with a `Create`, which names
+/// nobody), who manages, name, icon, picture, limits, rooms and level, and who may enter each room at
 /// `now_ms`, time outs and their ends included. Keys and history differ.
 pub fn same_group(old: &GroupState, new: &GroupState, now_ms: u64) -> Result<(), &'static str> {
+    // A new log starts with a `Create`, which names its author nobody: the first member,
+    // who writes it, keeps its name only where it had none (the one that made the group).
+    let first = old.ladder.first();
+    let same_names = old.members.len() == new.members.len()
+        && old.members.iter().all(|(key, member)| {
+            new.members.get(key).is_some_and(|now| {
+                now.name == member.name || (Some(key) == first && now.name.is_empty())
+            })
+        });
     let same = old.ladder == new.ladder
-        && old.members == new.members
+        && same_names
         && old.managers == new.managers
         && old.name == new.name
         && old.icon == new.icon

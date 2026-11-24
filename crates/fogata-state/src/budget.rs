@@ -303,6 +303,13 @@ impl Budget {
         }
     }
 
+    /// Whether `entry` is the move that goes into the reserve: the first counted, by an
+    /// author that did not leave. One by an author that left never applies (see
+    /// [`crate::state::NOT_A_MOVE`]), so it must not take the room of the move that will.
+    fn takes_reserve(&self, log: &GroupLog, entry: &Entry) -> bool {
+        Moved::of(&entry.body).is_some() && !self.moved && !log.left(&entry.author)
+    }
+
     fn kind(&self, log: &GroupLog, entry: &Entry) -> Kind {
         match &entry.body {
             Body::Create { .. } => Kind::Exempt,
@@ -410,7 +417,7 @@ impl Budget {
                 entries: SLACK.entries + RESERVE.entries,
                 bytes: SLACK.bytes + RESERVE.bytes,
             };
-            let first_move = Moved::of(&entry.body).is_some() && !self.moved;
+            let first_move = self.takes_reserve(log, entry);
             let held = if first_move || (gets_out && kind != Kind::Out) {
                 past(slack_and_reserve) || (!brings.is_empty() && past(SLACK))
             } else if gets_out {
@@ -500,7 +507,7 @@ impl Budget {
         {
             self.highest_named = self.highest_named.max(level);
         }
-        if kind == Kind::Counted && Moved::of(&entry.body).is_some() {
+        if kind == Kind::Counted && self.takes_reserve(log, entry) {
             self.moved = true;
         }
         if kind != Kind::Inert {

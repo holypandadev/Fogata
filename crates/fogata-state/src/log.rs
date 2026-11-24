@@ -832,8 +832,12 @@ impl GroupLog {
         if !ready {
             self.unjudged.insert(hash);
         }
+        let changes_a_move = ready && self.changes_a_move(&entry);
         Arc::make_mut(&mut self.entries).insert(hash, Arc::new(entry));
         self.note_new(hash);
+        if changes_a_move {
+            self.work_out_again();
+        }
         Ok(Some(hash))
     }
 
@@ -884,7 +888,7 @@ impl GroupLog {
                 continue;
             }
             if work.judged.contains(&hash) {
-                let orders_higher = self.orders_higher(entry);
+                let orders_higher = self.orders_higher(entry) || self.changes_a_move(entry);
                 self.unjudged.remove(&hash);
                 if orders_higher {
                     self.work_out_again();
@@ -909,7 +913,7 @@ impl GroupLog {
             let entry = self.entries[&hash].clone();
             self.unjudged.remove(&hash);
             // A `Level` entry judged now counts in the level the order is worked out at.
-            if verdict.is_ok() && self.orders_higher(&entry) {
+            if verdict.is_ok() && (self.orders_higher(&entry) || self.changes_a_move(&entry)) {
                 self.work_out_again();
             }
             if let Err(why) = verdict {
@@ -1638,8 +1642,37 @@ impl GroupLog {
             .state_before(hash)
             .could_move(entry.author, &moved)
             .is_ok();
-        self.note_move(entry, moves);
+        // Kept only once the entry and every entry before it are judged: before, what is
+        // before it is not yet what its author saw, and the answer may change. Judging it
+        // notes the answer on its author's view, and works the order out again.
+        let settled = !self.unjudged.contains(hash)
+            && (self.unjudged.is_empty() || self.ancestors(hash).is_disjoint(&self.unjudged));
+        if settled {
+            self.note_move(entry, moves);
+        }
         moves
+    }
+
+    /// Whether `author` left: a `Leave` of theirs is kept and judged.
+    pub(crate) fn left(&self, author: &DevicePublicKey) -> bool {
+        self.entries.iter().any(|(hash, entry)| {
+            entry.author == *author
+                && matches!(entry.body, Body::Leave)
+                && !self.unjudged.contains(hash)
+        })
+    }
+
+    /// Whether judging `entry` changes what moves the log holds: a `Moved` (whether it is
+    /// one is noted on its author's view as it is judged), or a `Leave` of an author of
+    /// one (whose move then never applies, nor takes the reserve). The order is then
+    /// worked out again.
+    fn changes_a_move(&self, entry: &Entry) -> bool {
+        match &entry.body {
+            body if Moved::of(body).is_some() => true,
+            Body::Leave => (self.entries.values())
+                .any(|e| e.author == entry.author && Moved::of(&e.body).is_some()),
+            _ => false,
+        }
     }
 
     /// Notes whether `entry`, a `Moved`, is a move (see [`Self::moves`]).
@@ -1649,12 +1682,14 @@ impl GroupLog {
             .judged
             .lock()
             .unwrap_or_else(PoisonError::into_inner))
-        .entry(entry.hash())
-        .or_insert(Seen {
-            needed: moves,
-            for_all: false,
-            bound: false,
-        });
+        .insert(
+            entry.hash(),
+            Seen {
+                needed: moves,
+                for_all: false,
+                bound: false,
+            },
+        );
     }
 
     /// The group as entry `hash` saw it: the state of the log made of everything before it
