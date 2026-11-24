@@ -263,17 +263,18 @@ impl Node {
 
     /// See [`crate::NodeHandle::hold_move`].
     pub(super) fn hold_move(&mut self, from: GroupId, to: GroupId) {
-        // Taken meanwhile (the person said yes before this came): followed, kept running.
-        // Either log may be the invitation: the new one, or the one it moved from.
-        let check = crate::locked(&self.waits_for_yes);
-        let waits = |group: &GroupId| {
-            (self.groups.get(group))
-                .is_some_and(|slot| check.as_ref().is_none_or(|w| w(slot.ctx.log())))
-        };
-        let waits = !self.groups.contains_key(&to) || waits(&to) || waits(&from);
-        drop(check);
-        if self.groups.contains_key(&from) && !waits {
+        // Taken meanwhile (the person said yes before this came): kept running, and the move
+        // told again if it was followed, so that it is noted.
+        let taken = self.groups.contains_key(&to)
+            && (crate::locked(&self.waits_for_yes).taken)
+                .as_ref()
+                .is_some_and(|t| t(&to));
+        if taken {
             tracing::info!("{to:?} was taken before its hold came: it keeps running");
+            if (self.groups.get(&from)).is_some_and(|s| s.following.followed) {
+                let log = self.groups[&to].ctx.log().clone();
+                self.emit(NodeEvent::GroupMoved { from, log });
+            }
             return;
         }
         if let Some(slot) = self.groups.get_mut(&from) {
@@ -483,7 +484,7 @@ impl Node {
         // A new log not run here that waits for the person is not run by following it.
         let waits = matches!(&verdict, StartVerdict::Follows(new)
             if !self.groups.contains_key(&new.group_id())
-                && crate::locked(&self.waits_for_yes).as_ref().is_some_and(|w| w(new)));
+                && crate::locked(&self.waits_for_yes).waits.as_ref().is_some_and(|w| w(new)));
         let Some(slot) = self.groups.get_mut(&group) else {
             return;
         };
@@ -1468,8 +1469,8 @@ mod tests {
     }
 
     /// A hold that comes once the person took the new log (their yes before core's hold
-    /// reached the node) holds nothing; one for a group no longer run here drops the new
-    /// log all the same (the group it moved from waits for the person too).
+    /// reached the node) holds nothing, and the move is told again; one for a log not taken
+    /// whose old group no longer runs here drops it (that group waits for the person too).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_hold_after_the_yes_holds_nothing() {
         let (ana, bea, log) = group();
@@ -1495,15 +1496,21 @@ mod tests {
         bea_takes(&bea_node, x, ana_peer, answer).await;
         assert!(runs(&bea_node, x, to).await);
         assert_eq!(moved_told(&mut bea_events), (Some(to), None));
-        // Taken: no longer waits.
-        bea_node.set_waits_for_yes(Box::new(|_| false));
+        // Taken meanwhile: kept, and the move told again so that it is noted.
+        let taken = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let is_taken = taken.clone();
+        bea_node.set_taken(Box::new(move |id| {
+            *id == to && is_taken.load(std::sync::atomic::Ordering::SeqCst)
+        }));
         bea_node.hold_move(x, to).await.unwrap();
         let (runs_now, followed) = inspect(&bea_node, move |n| {
             (n.groups.contains_key(&to), n.groups[&x].following.followed)
         })
         .await;
         assert!(runs_now && followed);
-        // The old group no longer run: the new log goes too.
+        assert_eq!(moved_told(&mut bea_events), (Some(to), None));
+        // Not taken, and the old group no longer run: the new log goes.
+        taken.store(false, std::sync::atomic::Ordering::SeqCst);
         bea_node.drop_group(x).await.unwrap();
         bea_node.hold_move(x, to).await.unwrap();
         assert!(!inspect(&bea_node, move |n| n.groups.contains_key(&to)).await);

@@ -787,7 +787,7 @@ struct State {
     /// Groups stopped at the start beside the new log they moved to, which waited for the
     /// person then, by that new log: run once it is taken, so the move is followed in this
     /// run (see [`Core::accept_group_invitation`]).
-    held_moves: HashMap<GroupId, GroupId>,
+    held_moves: HashMap<GroupId, Vec<GroupId>>,
     /// Devices waiting for this manager to let them in, with the name they asked under and
     /// since when.
     join_asks: BTreeMap<(GroupId, DevicePublicKey), (String, u64)>,
@@ -1010,10 +1010,10 @@ impl Core {
             GroupSetup::Member(log) => !stopped.contains(&log.group_id()),
             _ => true,
         });
-        let held_moves: HashMap<GroupId, GroupId> = (moved_to.iter())
-            .filter(|(from, _)| stopped.contains(from))
-            .map(|(from, to)| (*to, *from))
-            .collect();
+        let mut held_moves: HashMap<GroupId, Vec<GroupId>> = HashMap::new();
+        for (from, to) in moved_to.iter().filter(|(from, _)| stopped.contains(from)) {
+            held_moves.entry(*to).or_default().push(*from);
+        }
         // Joins with an invite that were still waiting for a manager go on.
         let mut joining = HashMap::new();
         let mut invite_addrs = Vec::new();
@@ -1189,6 +1189,8 @@ impl Core {
         // before anything the node does is taken: a start a member sends takes longer.
         let waits = inner.store.clone();
         node.set_waits_for_yes(Box::new(move |log| waits.waits_for_yes(log)));
+        let taken = inner.store.clone();
+        node.set_taken(Box::new(move |id| taken.is_taken(id)));
         let weak = Arc::downgrade(&inner);
         files::serve(node, inner.shared.clone(), move |group, id| {
             if let Some(inner) = weak.upgrade() {

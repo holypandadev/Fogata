@@ -200,6 +200,14 @@ impl Store {
         if Self::waits_in(&list, new) {
             bail!("the log the group moved to is an invitation, which waits for the person");
         }
+        // The new log of another group already: two groups never move to one log.
+        if (list.groups.iter())
+            .find(|g| g.group_id == new_id)
+            .and_then(|g| g.moved_from.as_deref())
+            .is_some_and(|from| from != old_id)
+        {
+            bail!("the log the group moved to is the new log of another group");
+        }
         // A new log saved here already may hold what this one lacks (a leave of this device
         // in it, say), or lack what it holds (one accepted after an invitation): never
         // written over, the two are kept together.
@@ -228,14 +236,6 @@ impl Store {
             && known.moved_from.as_deref() == Some(old_id.as_str())
         {
             return Ok(known.name.clone());
-        }
-        // The new log of another group already: two groups never move to one log.
-        if (list.groups.iter())
-            .find(|g| g.group_id == new_id)
-            .and_then(|g| g.moved_from.as_deref())
-            .is_some_and(|from| from != old_id)
-        {
-            bail!("the log the group moved to is the new log of another group");
         }
         let name = list.groups[at].name.clone();
         let before = free_name(&list.groups, &format!("{name} (before moving)"));
@@ -307,6 +307,14 @@ impl Store {
             ms: now_ms,
         });
         self.write_groups(&held, &list)
+    }
+
+    /// Whether group `id` is listed here and taken: not an invitation waiting for the person.
+    pub fn is_taken(&self, id: &GroupId) -> bool {
+        let held = self.lock();
+        let id = hex::encode(id.as_bytes());
+        (self.read_groups(&held))
+            .is_ok_and(|list| list.groups.iter().any(|g| g.group_id == id && !g.pending))
     }
 
     /// Whether group `id` is listed here as an invitation that waits for the person.

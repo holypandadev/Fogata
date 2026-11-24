@@ -558,7 +558,19 @@ pub type KeepNewLog = Box<dyn FnOnce(&GroupLog) -> Result<(), String> + Send>;
 /// answered, or declined): the node does not run it by following the move, only once it is
 /// run another way (the invitation accepted). See [`NodeHandle::set_waits_for_yes`].
 pub type WaitsForYes = Box<dyn Fn(&GroupLog) -> bool + Send>;
-pub(crate) type WaitsCheck = Arc<std::sync::Mutex<Option<WaitsForYes>>>;
+
+/// Whether group `id` was taken here: listed, and not as an invitation waiting for the
+/// person. A move held for an invitation taken meanwhile is followed after all. See
+/// [`NodeHandle::set_taken`].
+pub type TakenHere = Box<dyn Fn(&GroupId) -> bool + Send>;
+
+/// What the application tells the node of the groups it lists (see moves.rs).
+#[derive(Default)]
+pub(crate) struct MoveChecks {
+    pub(crate) waits: Option<WaitsForYes>,
+    pub(crate) taken: Option<TakenHere>,
+}
+pub(crate) type WaitsCheck = Arc<std::sync::Mutex<MoveChecks>>;
 
 enum Command {
     AddGroup(GroupSetup),
@@ -1183,9 +1195,9 @@ impl NodeHandle {
     /// Stops running the new log `to` that group `from` moved to, followed before core
     /// learned that it waits for the person here (an invitation that came at the same time,
     /// or `from` one itself, see [`WaitsForYes`]): the old group goes on, and the move is
-    /// followed once the new log runs another way (the invitation taken). Nothing is held
-    /// when `from` runs and the new log no longer waits by the time this is done (the
-    /// invitation taken meanwhile).
+    /// followed once the new log runs another way (the invitation taken). A new log taken
+    /// by the time this is done (see [`TakenHere`]) keeps running, and the move into it is
+    /// told again.
     pub async fn hold_move(&self, from: GroupId, to: GroupId) -> Result<(), NetError> {
         self.tell(Command::HoldMove { from, to }).await
     }
@@ -1573,7 +1585,13 @@ impl NodeHandle {
     /// Tells the node which new logs wait for the person here (see [`WaitsForYes`]); none
     /// until this is called.
     pub fn set_waits_for_yes(&self, check: WaitsForYes) {
-        *locked(&self.waits_for_yes) = Some(check);
+        locked(&self.waits_for_yes).waits = Some(check);
+    }
+
+    /// Tells the node which groups were taken here (see [`TakenHere`]); none until this is
+    /// called.
+    pub fn set_taken(&self, check: TakenHere) {
+        locked(&self.waits_for_yes).taken = Some(check);
     }
 
     /// Levels kept from earlier sessions ([`NodeEvent::LevelSeen`]); a lower one never

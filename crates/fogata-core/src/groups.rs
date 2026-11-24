@@ -256,24 +256,24 @@ impl Core {
     /// new log takes the group's name and what it saw in this run, not at the next start.
     async fn run_held_moves(&self, taken: GroupId) {
         let me = self.inner.identity.public_key();
-        let mut to = taken;
-        loop {
-            let Some(from) = self.inner.lock().held_moves.remove(&to) else {
-                return;
-            };
-            let id = hex::encode(from.as_bytes());
-            let log = (self.inner.store.groups().ok())
-                .and_then(|groups| groups.into_iter().find(|g| g.group_id == id && !g.pending))
-                .and_then(|stored| self.inner.store.load_log(&stored).ok());
-            let Some(log) = log.filter(|log| log.shared_state().is_member(&me)) else {
-                tracing::info!("{from:?} moved to a group taken now, but is not run here");
-                return;
-            };
-            if let Err(e) = self.inner.node.add_group(GroupSetup::Member(log)).await {
-                tracing::warn!("cannot run {from:?}, which moved to a group taken now: {e:#}");
-                return;
+        let mut taken = vec![taken];
+        while let Some(to) = taken.pop() {
+            let held = self.inner.lock().held_moves.remove(&to).unwrap_or_default();
+            for from in held {
+                let id = hex::encode(from.as_bytes());
+                let log = (self.inner.store.groups().ok())
+                    .and_then(|groups| groups.into_iter().find(|g| g.group_id == id && !g.pending))
+                    .and_then(|stored| self.inner.store.load_log(&stored).ok());
+                let Some(log) = log.filter(|log| log.shared_state().is_member(&me)) else {
+                    tracing::info!("{from:?} moved to a group taken now, but is not run here");
+                    continue;
+                };
+                if let Err(e) = self.inner.node.add_group(GroupSetup::Member(log)).await {
+                    tracing::warn!("cannot run {from:?}, which moved to a group taken now: {e:#}");
+                    continue;
+                }
+                taken.push(from);
             }
-            to = from;
         }
     }
 
