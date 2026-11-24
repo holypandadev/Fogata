@@ -252,3 +252,58 @@ async fn a_line_of_moves_stops_back_to_its_first_log() {
     core.shutdown().await.unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A group stopped at a start beside an invitation to the log it moved to is run once the
+/// invitation is taken: the move is followed in that run, and the new log takes the
+/// group's name.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_log_taken_is_followed_in_the_same_run() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-taken-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    let (old_id, new_id) = {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let t = now_ms() - 10_000;
+        let mut old = GroupLog::create(&ana, "Campfire", t).unwrap();
+        old.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        old.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let new = old.new_log_for_move(&ana, t + 3).unwrap();
+        old.move_to(&ana, &new, t + 4).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        let offered = store.save_offered_group(&new, &ana.public_key()).unwrap();
+        assert!(matches!(offered, fogata_core::Offered::Pending(_)));
+        (old.group_id(), new.group_id())
+    };
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    assert!(core.groups().await.unwrap().is_empty());
+    core.accept_group_invitation(new_id).await.unwrap();
+    let hex_of = |id: &fogata_crypto::GroupId| hex::encode(id.as_bytes());
+    let mut named = None;
+    for _ in 0..600 {
+        let stored = core.store().groups().unwrap();
+        let new = stored
+            .iter()
+            .find(|g| g.group_id == hex_of(&new_id))
+            .unwrap();
+        if new.moved_from.is_some() {
+            named = Some(new.name.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(named.as_deref(), Some("Our fire"));
+    let stored = core.store().groups().unwrap();
+    let old = stored
+        .iter()
+        .find(|g| g.group_id == hex_of(&old_id))
+        .unwrap();
+    assert_eq!(
+        old.moved.as_ref().map(|m| m.to.clone()),
+        Some(hex_of(&new_id))
+    );
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

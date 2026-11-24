@@ -246,8 +246,35 @@ impl Core {
         let log = self.inner.store.load_log(&stored)?;
         self.inner.store.set_pending(&id, None)?;
         self.inner.node.add_group(GroupSetup::Member(log)).await?;
+        self.run_held_moves(group).await;
         let _ = self.inner.events.send(CoreEvent::GroupsChanged);
         Ok(())
+    }
+
+    /// Runs the groups stopped at the start because they moved to `taken` (or, down a line
+    /// of moves, to one of those), now that it runs: the node follows their moves, so the
+    /// new log takes the group's name and what it saw in this run, not at the next start.
+    async fn run_held_moves(&self, taken: GroupId) {
+        let me = self.inner.identity.public_key();
+        let mut to = taken;
+        loop {
+            let Some(from) = self.inner.lock().held_moves.remove(&to) else {
+                return;
+            };
+            let id = hex::encode(from.as_bytes());
+            let log = (self.inner.store.groups().ok())
+                .and_then(|groups| groups.into_iter().find(|g| g.group_id == id && !g.pending))
+                .and_then(|stored| self.inner.store.load_log(&stored).ok());
+            let Some(log) = log.filter(|log| log.shared_state().is_member(&me)) else {
+                tracing::info!("{from:?} moved to a group taken now, but is not run here");
+                return;
+            };
+            if let Err(e) = self.inner.node.add_group(GroupSetup::Member(log)).await {
+                tracing::warn!("cannot run {from:?}, which moved to a group taken now: {e:#}");
+                return;
+            }
+            to = from;
+        }
     }
 
     /// Declines a group a friend added this device to: its log is forgotten, and it is not

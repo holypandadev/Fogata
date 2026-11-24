@@ -192,6 +192,10 @@ impl Store {
         let at = (list.groups.iter())
             .position(|g| g.group_id == old_id)
             .context("no such group")?;
+        // An invitation itself: nothing of it runs here, so it never moves on.
+        if list.groups[at].pending {
+            bail!("the group that moved is an invitation, which waits for the person");
+        }
         // An invitation to it, or one declined, waits for the person: never followed into.
         if Self::waits_in(&list, new) {
             bail!("the log the group moved to is an invitation, which waits for the person");
@@ -224,6 +228,14 @@ impl Store {
             && known.moved_from.as_deref() == Some(old_id.as_str())
         {
             return Ok(known.name.clone());
+        }
+        // The new log of another group already: two groups never move to one log.
+        if (list.groups.iter())
+            .find(|g| g.group_id == new_id)
+            .and_then(|g| g.moved_from.as_deref())
+            .is_some_and(|from| from != old_id)
+        {
+            bail!("the log the group moved to is the new log of another group");
         }
         let name = list.groups[at].name.clone();
         let before = free_name(&list.groups, &format!("{name} (before moving)"));
@@ -262,7 +274,7 @@ impl Store {
         Ok(name)
     }
 
-    /// Whether group `id` (hex) is an invitation that waits for the person here, or one
+    /// Whether the group of `log` is an invitation that waits for the person here, or one
     /// they declined: a move to it is not followed until they say yes.
     pub fn waits_for_yes(&self, log: &GroupLog) -> bool {
         let held = self.lock();
@@ -295,6 +307,14 @@ impl Store {
             ms: now_ms,
         });
         self.write_groups(&held, &list)
+    }
+
+    /// Whether group `id` is listed here as an invitation that waits for the person.
+    pub fn is_pending(&self, id: &GroupId) -> bool {
+        let held = self.lock();
+        let id = hex::encode(id.as_bytes());
+        (self.read_groups(&held))
+            .is_ok_and(|list| list.groups.iter().any(|g| g.group_id == id && g.pending))
     }
 
     /// Whether group `id` is listed here, as an invitation or not.
@@ -976,6 +996,49 @@ mod tests {
             .unwrap();
         assert_eq!(is.name, "Our fire");
         assert_eq!(is.moved_from, Some(hex::encode(old.group_id().as_bytes())));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// An invitation that moved is not followed on, and a log that is the new log of one
+    /// group already is not taken for another's.
+    #[test]
+    fn a_move_from_an_invitation_or_into_a_taken_log_is_not_noted() {
+        let dir =
+            std::env::temp_dir().join(format!("fogata-store-not-noted-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let mut invited = GroupLog::create(&ana, "Campfire", 1).unwrap();
+        invited.add(&ana, me.public_key(), "Bea", 2).unwrap();
+        store
+            .save_offered_group(&invited, &ana.public_key())
+            .unwrap();
+        let onward = GroupLog::create(&me, "Campfire", 3).unwrap();
+        assert!(store.record_move(&invited.group_id(), &onward, 10).is_err());
+        let groups = store.groups().unwrap();
+        let is = |log: &GroupLog| hex::encode(log.group_id().as_bytes());
+        assert!(groups.iter().all(|g| g.group_id != is(&onward)));
+        assert!(
+            groups
+                .iter()
+                .any(|g| g.group_id == is(&invited) && g.pending && g.moved.is_none())
+        );
+        // Two groups, one new log.
+        let first = GroupLog::create(&me, "One", 4).unwrap();
+        let second = GroupLog::create(&me, "Two", 5).unwrap();
+        store.save_group_log(&first, "One").unwrap();
+        store.save_group_log(&second, "Two").unwrap();
+        let new = GroupLog::create(&me, "One", 6).unwrap();
+        assert_eq!(
+            store.record_move(&first.group_id(), &new, 10).unwrap(),
+            "One"
+        );
+        assert!(store.record_move(&second.group_id(), &new, 11).is_err());
+        let groups = store.groups().unwrap();
+        let was = groups.iter().find(|g| g.group_id == is(&second)).unwrap();
+        assert_eq!(was.name, "Two");
+        assert!(was.moved.is_none());
         fs::remove_dir_all(&dir).unwrap();
     }
 

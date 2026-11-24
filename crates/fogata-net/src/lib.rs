@@ -666,8 +666,12 @@ enum Command {
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     DropGroup(GroupId),
-    /// Stops running the new log `group` moved to, which waits for the person after all.
-    HoldMove(GroupId),
+    /// Stops running the new log `to` that `from` moved to, which waits for the person
+    /// after all (see [`NodeHandle::hold_move`]).
+    HoldMove {
+        from: GroupId,
+        to: GroupId,
+    },
     /// Moves a full group to a new log, as its first member (see [`NodeHandle::move_group`]).
     MoveGroup {
         group: GroupId,
@@ -902,7 +906,7 @@ impl fmt::Debug for Command {
             Command::AddDirect(_) => "AddDirect",
             Command::SendDirect { .. } => "SendDirect",
             Command::DropGroup(_) => "DropGroup",
-            Command::HoldMove(_) => "HoldMove",
+            Command::HoldMove { .. } => "HoldMove",
             Command::MoveGroup { .. } => "MoveGroup",
             Command::GiveEntries { .. } => "GiveEntries",
             Command::Typing { .. } => "Typing",
@@ -1176,12 +1180,14 @@ impl NodeHandle {
             .map_err(NetError::Refused)
     }
 
-    /// Stops running the new log `group` moved to, followed before core learned that it
-    /// waits for the person here (an invitation that came at the same time, see
-    /// [`WaitsForYes`]): the old group goes on, and the move is followed once the new log
-    /// runs another way (the invitation taken).
-    pub async fn hold_move(&self, group: GroupId) -> Result<(), NetError> {
-        self.tell(Command::HoldMove(group)).await
+    /// Stops running the new log `to` that group `from` moved to, followed before core
+    /// learned that it waits for the person here (an invitation that came at the same time,
+    /// or `from` one itself, see [`WaitsForYes`]): the old group goes on, and the move is
+    /// followed once the new log runs another way (the invitation taken). Nothing is held
+    /// when `from` runs and the new log no longer waits by the time this is done (the
+    /// invitation taken meanwhile).
+    pub async fn hold_move(&self, from: GroupId, to: GroupId) -> Result<(), NetError> {
+        self.tell(Command::HoldMove { from, to }).await
     }
 
     /// Stops running a group without leaving it, as when a call ends.
@@ -1564,14 +1570,14 @@ impl NodeHandle {
         }
     }
 
-    /// Levels kept from earlier sessions ([`NodeEvent::LevelSeen`]); a lower one never
-    /// replaces a higher one known.
     /// Tells the node which new logs wait for the person here (see [`WaitsForYes`]); none
     /// until this is called.
     pub fn set_waits_for_yes(&self, check: WaitsForYes) {
         *locked(&self.waits_for_yes) = Some(check);
     }
 
+    /// Levels kept from earlier sessions ([`NodeEvent::LevelSeen`]); a lower one never
+    /// replaces a higher one known.
     pub fn remember_levels(&self, levels: impl IntoIterator<Item = (DevicePublicKey, u32)>) {
         let mut known = locked(&self.levels);
         for (device, level) in levels {

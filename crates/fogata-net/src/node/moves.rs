@@ -262,14 +262,21 @@ impl Node {
     }
 
     /// See [`crate::NodeHandle::hold_move`].
-    pub(super) fn hold_move(&mut self, group: GroupId) {
-        let Some(to) = (self.groups.get(&group))
-            .and_then(|s| s.ctx.moved())
-            .map(|(_, m)| m.to)
-        else {
-            return;
+    pub(super) fn hold_move(&mut self, from: GroupId, to: GroupId) {
+        // Taken meanwhile (the person said yes before this came): followed, kept running.
+        // Either log may be the invitation: the new one, or the one it moved from.
+        let check = crate::locked(&self.waits_for_yes);
+        let waits = |group: &GroupId| {
+            (self.groups.get(group))
+                .is_some_and(|slot| check.as_ref().is_none_or(|w| w(slot.ctx.log())))
         };
-        if let Some(slot) = self.groups.get_mut(&group) {
+        let waits = !self.groups.contains_key(&to) || waits(&to) || waits(&from);
+        drop(check);
+        if self.groups.contains_key(&from) && !waits {
+            tracing::info!("{to:?} was taken before its hold came: it keeps running");
+            return;
+        }
+        if let Some(slot) = self.groups.get_mut(&from) {
             slot.following.followed = false;
             slot.following.waits = true;
             slot.following.asking = None;
@@ -1434,7 +1441,7 @@ mod tests {
         bea_takes(&bea_node, x, ana_peer, answer).await;
         assert!(runs(&bea_node, x, to).await);
         assert_eq!(moved_told(&mut bea_events), (Some(to), None));
-        bea_node.hold_move(x).await.unwrap();
+        bea_node.hold_move(x, to).await.unwrap();
         let (runs_now, asked) = inspect(&bea_node, move |n| {
             n.follow_moves();
             (
@@ -1456,6 +1463,50 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert_eq!(moved_told(&mut bea_events), (Some(to), None));
+        ana_node.shutdown().await.unwrap();
+        bea_node.shutdown().await.unwrap();
+    }
+
+    /// A hold that comes once the person took the new log (their yes before core's hold
+    /// reached the node) holds nothing; one for a group no longer run here drops the new
+    /// log all the same (the group it moved from waits for the person too).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_hold_after_the_yes_holds_nothing() {
+        let (ana, bea, log) = group();
+        let x = log.group_id();
+        let (ana_node, _) = node(&ana, &log);
+        let (bea_node, mut bea_events) = node(&bea, &log);
+        let (ana_peer, bea_peer) = (PeerId::random(), PeerId::random());
+        let bea_key = bea.public_key();
+        let (to, moved, answer) = inspect(&ana_node, move |n| {
+            member(n, x, bea_peer, bea_key);
+            let to = n.move_group(x, keep()).unwrap();
+            let answer = n.on_request(
+                bea_peer,
+                MemberRequest::MovedLog {
+                    group_id: x.as_bytes().to_vec(),
+                    from: 0,
+                },
+            );
+            (to, n.groups[&x].ctx.log().clone(), answer)
+        })
+        .await;
+        bea_gets_the_move(&bea_node, x, ana_peer, ana.public_key(), moved).await;
+        bea_takes(&bea_node, x, ana_peer, answer).await;
+        assert!(runs(&bea_node, x, to).await);
+        assert_eq!(moved_told(&mut bea_events), (Some(to), None));
+        // Taken: no longer waits.
+        bea_node.set_waits_for_yes(Box::new(|_| false));
+        bea_node.hold_move(x, to).await.unwrap();
+        let (runs_now, followed) = inspect(&bea_node, move |n| {
+            (n.groups.contains_key(&to), n.groups[&x].following.followed)
+        })
+        .await;
+        assert!(runs_now && followed);
+        // The old group no longer run: the new log goes too.
+        bea_node.drop_group(x).await.unwrap();
+        bea_node.hold_move(x, to).await.unwrap();
+        assert!(!inspect(&bea_node, move |n| n.groups.contains_key(&to)).await);
         ana_node.shutdown().await.unwrap();
         bea_node.shutdown().await.unwrap();
     }

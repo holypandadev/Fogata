@@ -690,12 +690,13 @@ async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
 /// the old one's local name, and the old one is no longer shown. The old one runs on,
 /// writing nothing, until a start after `MOVED_RUNS_MS`.
 async fn handle_group_moved(inner: &Arc<Inner>, from: GroupId, log: fogata_state::GroupLog) {
-    // Followed while an invitation to it came (an offer taken just before): it waits for
-    // the person after all. Done here, in the order events come, so nothing of the new log
-    // is saved meanwhile.
-    if inner.store.waits_for_yes(&log) {
-        tracing::info!("{from:?} moved to an invitation here: held until it is taken");
-        if let Err(e) = inner.node.hold_move(from).await {
+    // Followed while an invitation to it came (an offer taken just before), or followed on
+    // from an invitation (a line of moves followed while one held): it waits for the
+    // person after all. Done here, in the order events come, so nothing of the new log is
+    // saved meanwhile.
+    if inner.store.waits_for_yes(&log) || inner.store.is_pending(&from) {
+        tracing::info!("{from:?} moved to or from an invitation here: held until it is taken");
+        if let Err(e) = inner.node.hold_move(from, log.group_id()).await {
             tracing::warn!("cannot hold the move of {from:?}: {e:#}");
         }
         return;
@@ -1503,6 +1504,48 @@ mod tests {
         )
         .await;
         assert!(!inner.store.lists_group(&group));
+        core.shutdown().await.unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A move followed on from an invitation (a line of moves followed while the first was
+    /// held) is held too: the log after the invitation stops running.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_move_followed_on_from_an_invitation_is_held() {
+        let dir = std::env::temp_dir().join(format!("fogata-move-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (_, old, new) = moved_group(&dir);
+        let to = new.group_id();
+        let (core, _events) = Core::start(dir.clone(), quiet()).unwrap();
+        let inner = core.inner.clone();
+        // The old group, an invitation itself here; the new log, run as if followed.
+        inner
+            .store
+            .set_pending(&hex::encode(old.as_bytes()), Some("someone".into()))
+            .unwrap();
+        inner
+            .node
+            .add_group(GroupSetup::Member(new.clone()))
+            .await
+            .unwrap();
+        handle(
+            &inner,
+            NodeEvent::GroupMoved {
+                from: old,
+                log: new,
+            },
+        )
+        .await;
+        let mut runs = true;
+        for _ in 0..100 {
+            runs = matches!(inner.node.group(to).await, Ok(Some(_)));
+            if !runs {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert!(!runs);
+        assert!(!inner.store.lists_group(&to));
         core.shutdown().await.unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }

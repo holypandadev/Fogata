@@ -262,7 +262,7 @@ impl Node {
                 let _ = reply.send(self.send_direct(group, to, payloads));
             }
             Command::DropGroup(group) => self.drop_group(group),
-            Command::HoldMove(group) => self.hold_move(group),
+            Command::HoldMove { from, to } => self.hold_move(from, to),
             Command::MoveGroup { group, keep, reply } => {
                 let _ = reply.send(self.move_group(group, keep));
             }
