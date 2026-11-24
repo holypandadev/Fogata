@@ -169,6 +169,7 @@ pub(crate) fn start_with(
     let member_devices: crate::MemberDevices = Default::default();
     let advertised: Advertised = Default::default();
     let levels: Levels = Default::default();
+    let waits_for_yes: crate::WaitsCheck = Default::default();
     let wanted = Wanted::default();
     let shown: ShownPeers = Default::default();
     let lan_keys = LanKeys::default();
@@ -361,6 +362,7 @@ pub(crate) fn start_with(
         member_devices: member_devices.clone(),
         advertised: advertised.clone(),
         levels: levels.clone(),
+        waits_for_yes: waits_for_yes.clone(),
         wanted,
         shown,
         push_again: HashMap::new(),
@@ -483,6 +485,7 @@ pub(crate) fn start_with(
             member_devices,
             advertised,
             levels,
+            waits_for_yes,
         },
         events_rx,
     ))
@@ -1158,6 +1161,8 @@ struct Node {
     advertised: Advertised,
     /// The highest capability level each friend and member was seen at.
     levels: Levels,
+    /// New logs of groups that moved that wait for the person here (see moves.rs).
+    waits_for_yes: crate::WaitsCheck,
     /// Peers whose connections are kept open while idle; every other peer is a stranger.
     wanted: Wanted,
     /// Peers identify lists Fogata's protocols to besides the wanted ones (see behaviour.rs).

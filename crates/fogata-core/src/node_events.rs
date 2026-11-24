@@ -690,18 +690,6 @@ async fn handle_joined(inner: &Arc<Inner>, group: GroupId, name: String) {
 /// the old one's local name, and the old one is no longer shown. The old one runs on,
 /// writing nothing, until a start after `MOVED_RUNS_MS`.
 fn handle_group_moved(inner: &Arc<Inner>, from: GroupId, log: fogata_state::GroupLog) {
-    // An invitation to the new log, or one declined, waits for the person: the node stops
-    // running it, and keeps running the old group meanwhile. Accepted, it is followed at
-    // the next start.
-    let to = log.group_id();
-    if inner.store.waits_for_yes(&to) {
-        tracing::info!("{from:?} moved to {to:?}, an invitation here: not followed");
-        let node = inner.node.clone();
-        tokio::spawn(async move {
-            let _ = node.drop_group(to).await;
-        });
-        return;
-    }
     let store = inner.store.clone();
     // The list changes once the new log has the group's name. Only the sender is held, so
     // the core never ends on the writer's thread.

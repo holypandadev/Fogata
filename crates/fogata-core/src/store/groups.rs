@@ -193,7 +193,7 @@ impl Store {
             .position(|g| g.group_id == old_id)
             .context("no such group")?;
         // An invitation to it, or one declined, waits for the person: never followed into.
-        if Self::waits_in(&list, &new_id) {
+        if Self::waits_in(&list, new) {
             bail!("the log the group moved to is an invitation, which waits for the person");
         }
         // A new log saved here already may hold what this one lacks (a leave of this device
@@ -261,15 +261,37 @@ impl Store {
 
     /// Whether group `id` (hex) is an invitation that waits for the person here, or one
     /// they declined: a move to it is not followed until they say yes.
-    pub fn waits_for_yes(&self, id: &GroupId) -> bool {
+    pub fn waits_for_yes(&self, log: &GroupLog) -> bool {
         let held = self.lock();
-        let id = hex::encode(id.as_bytes());
-        (self.read_groups(&held)).is_ok_and(|list| Self::waits_in(&list, &id))
+        (self.read_groups(&held)).is_ok_and(|list| Self::waits_in(&list, log))
     }
 
-    fn waits_in(list: &GroupList, id: &str) -> bool {
+    fn waits_in(list: &GroupList, log: &GroupLog) -> bool {
+        let id = hex::encode(log.group_id().as_bytes());
+        let root = log.root().map(hex::encode);
         (list.groups.iter()).any(|g| g.group_id == id && g.pending)
-            || list.declined.iter().any(|d| d.declined_group == id)
+            || (list.declined.iter())
+                .any(|d| d.declined_group == id && (d.root.is_none() || d.root == root))
+    }
+
+    /// Notes that group `old` moved to `to`, which this device declined: it is no longer
+    /// shown, and stops being kept once a moved group stops running. Done again, or for a
+    /// move noted already, it changes nothing.
+    pub fn note_moved_away(&self, old: &GroupId, to: &GroupId, now_ms: u64) -> Result<()> {
+        let held = self.lock();
+        let mut list = self.read_groups(&held)?;
+        let id = hex::encode(old.as_bytes());
+        let Some(stored) = list.groups.iter_mut().find(|g| g.group_id == id) else {
+            bail!("no such group");
+        };
+        if stored.moved.is_some() {
+            return Ok(());
+        }
+        stored.moved = Some(MovedGroup {
+            to: hex::encode(to.as_bytes()),
+            ms: now_ms,
+        });
+        self.write_groups(&held, &list)
     }
 
     /// Ids (hex) of the groups whose invitation was declined here.
@@ -909,8 +931,8 @@ mod tests {
         store.save_group_log(&new, "Campfire").unwrap();
         let id = hex::encode(new.group_id().as_bytes());
         store.set_pending(&id, Some("someone".into())).unwrap();
-        assert!(store.waits_for_yes(&new.group_id()));
-        assert!(!store.waits_for_yes(&old.group_id()));
+        assert!(store.waits_for_yes(&new));
+        assert!(!store.waits_for_yes(&old));
         assert!(store.record_move(&old.group_id(), &new, 10).is_err());
         let groups = store.groups().unwrap();
         assert!(groups.iter().all(|g| g.moved.is_none()));

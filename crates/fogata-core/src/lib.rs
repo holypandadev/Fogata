@@ -907,9 +907,10 @@ impl Core {
                 .ok()
                 .and_then(|b| GroupId::from_bytes(&b).ok())
         };
-        let mut left: HashSet<GroupId> = (store.declined_groups().unwrap_or_default().iter())
+        let declined: HashSet<GroupId> = (store.declined_groups().unwrap_or_default().iter())
             .filter_map(|id| to_id(id))
             .collect();
+        let mut left = declined.clone();
         for stored in stored_groups {
             // Invitations wait for the person; nothing of them runs or is announced. A group
             // that moved to one stays stopped too, or following it would run the invitation.
@@ -984,10 +985,23 @@ impl Core {
         // A group that moved runs only beside the log it moved to: one this device does not
         // run leaves the old one stopped too, or it would be followed again (into a group
         // left, an invitation not answered, or over a file that could not be read).
-        let stopped: Vec<GroupId> = (moved_to.iter())
-            .filter(|(_, to)| left.contains(to))
-            .map(|(from, _)| *from)
-            .collect();
+        // Down a line of moves too: one stopped stops the group that moved to it.
+        let mut stopped: Vec<GroupId> = Vec::new();
+        while let Some((from, _)) =
+            (moved_to.iter()).find(|(from, to)| left.contains(to) && !stopped.contains(from))
+        {
+            stopped.push(*from);
+            left.insert(*from);
+        }
+        // One whose new log was declined here was left with it: noted as moved, it is no
+        // longer shown, and stops being kept after a while like any group that moved.
+        for (from, to) in &moved_to {
+            if declined.contains(to)
+                && let Err(e) = store.note_moved_away(from, to, now_ms())
+            {
+                tracing::warn!("cannot note a group whose new log was declined: {e:#}");
+            }
+        }
         groups.retain(|g| match g {
             GroupSetup::Member(log) => !stopped.contains(&log.group_id()),
             _ => true,
@@ -1162,6 +1176,10 @@ impl Core {
             direct: chats,
             updates: std::sync::OnceLock::new(),
         });
+        // A move into an invitation waits for the person's yes, or is never followed. Set
+        // before anything the node does is taken: a start a member sends takes longer.
+        let waits = inner.store.clone();
+        node.set_waits_for_yes(Box::new(move |log| waits.waits_for_yes(log)));
         let weak = Arc::downgrade(&inner);
         files::serve(node, inner.shared.clone(), move |group, id| {
             if let Some(inner) = weak.upgrade() {

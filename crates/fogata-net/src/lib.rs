@@ -554,6 +554,12 @@ pub struct RoomView {
 /// so no member is left following a log nobody has.
 pub type KeepNewLog = Box<dyn FnOnce(&GroupLog) -> Result<(), String> + Send>;
 
+/// Whether the new log of a group that moved waits for the person here (an invitation not
+/// answered, or declined): the node does not run it by following the move, only once it is
+/// run another way (the invitation accepted). See [`NodeHandle::set_waits_for_yes`].
+pub type WaitsForYes = Box<dyn Fn(&GroupLog) -> bool + Send>;
+pub(crate) type WaitsCheck = Arc<std::sync::Mutex<Option<WaitsForYes>>>;
+
 enum Command {
     AddGroup(GroupSetup),
     MergeGroup(GroupLog),
@@ -794,6 +800,7 @@ pub struct NodeHandle {
     member_devices: MemberDevices,
     advertised: Advertised,
     levels: Levels,
+    waits_for_yes: WaitsCheck,
 }
 
 /// How a handle reaches the node: a strong sender keeps it running.
@@ -1548,6 +1555,12 @@ impl NodeHandle {
 
     /// Levels kept from earlier sessions ([`NodeEvent::LevelSeen`]); a lower one never
     /// replaces a higher one known.
+    /// Tells the node which new logs wait for the person here (see [`WaitsForYes`]); none
+    /// until this is called.
+    pub fn set_waits_for_yes(&self, check: WaitsForYes) {
+        *locked(&self.waits_for_yes) = Some(check);
+    }
+
     pub fn remember_levels(&self, levels: impl IntoIterator<Item = (DevicePublicKey, u32)>) {
         let mut known = locked(&self.levels);
         for (device, level) in levels {

@@ -84,6 +84,9 @@ pub(super) struct Following {
     /// another way, was last judged here without being followed: judged again only once
     /// either changes, as the verdict would be the same.
     local_for: Option<(Vec<u8>, Vec<u8>)>,
+    /// The new log waits for the person here (an invitation, see [`crate::WaitsForYes`]):
+    /// not asked for again in this run, and followed only once it is run another way.
+    waits: bool,
 }
 
 struct Asking {
@@ -294,7 +297,7 @@ impl Node {
             return;
         };
         let following = &slot.following;
-        if following.followed || following.refused || following.judging {
+        if following.followed || following.refused || following.judging || following.waits {
             return;
         }
         if following
@@ -453,6 +456,10 @@ impl Node {
     pub(super) fn start_judged(&mut self, peer: PeerId, group: GroupId, verdict: StartVerdict) {
         // The copy run here, judged: no member to try another time.
         let local = peer == self.local_peer();
+        // A new log not run here that waits for the person is not run by following it.
+        let waits = matches!(&verdict, StartVerdict::Follows(new)
+            if !self.groups.contains_key(&new.group_id())
+                && crate::locked(&self.waits_for_yes).as_ref().is_some_and(|w| w(new)));
         let Some(slot) = self.groups.get_mut(&group) else {
             return;
         };
@@ -475,6 +482,11 @@ impl Node {
                 let to = new.group_id();
                 // Still the move here, and the new group not run yet.
                 if !slot.ctx.moved().is_some_and(|(_, m)| m.to == to) {
+                    return;
+                }
+                if waits {
+                    tracing::info!("{group:?} moved to {to:?}, an invitation here: waiting");
+                    slot.following.waits = true;
                     return;
                 }
                 slot.following.rounds = 0;
@@ -1310,6 +1322,64 @@ mod tests {
             (tried, in_vain, followed, again),
             (false, false, false, false)
         );
+        ana_node.shutdown().await.unwrap();
+        bea_node.shutdown().await.unwrap();
+    }
+
+    /// A new log that waits for the person here (an invitation not answered): a member's
+    /// start that is the group is not run and not asked for again; once the invitation is
+    /// taken (the new log run another way), the move is followed and told once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_new_log_that_waits_for_the_person_is_followed_once_taken() {
+        let (ana, bea, log) = group();
+        let x = log.group_id();
+        let (ana_node, _) = node(&ana, &log);
+        let (bea_node, mut bea_events) = node(&bea, &log);
+        let (ana_peer, bea_peer) = (PeerId::random(), PeerId::random());
+        let bea_key = bea.public_key();
+        let (to, moved, new, answer) = inspect(&ana_node, move |n| {
+            member(n, x, bea_peer, bea_key);
+            let to = n.move_group(x, keep()).unwrap();
+            let answer = n.on_request(
+                bea_peer,
+                MemberRequest::MovedLog {
+                    group_id: x.as_bytes().to_vec(),
+                    from: 0,
+                },
+            );
+            (
+                to,
+                n.groups[&x].ctx.log().clone(),
+                n.groups[&to].ctx.log().clone(),
+                answer,
+            )
+        })
+        .await;
+        bea_node.set_waits_for_yes(Box::new(move |log| log.group_id() == to));
+        bea_gets_the_move(&bea_node, x, ana_peer, ana.public_key(), moved).await;
+        bea_takes(&bea_node, x, ana_peer, answer).await;
+        assert!(!runs(&bea_node, x, to).await);
+        let (waits, asked) = inspect(&bea_node, move |n| {
+            n.follow_moves();
+            let f = &n.groups[&x].following;
+            (f.waits, f.asking.is_some())
+        })
+        .await;
+        assert!(waits && !asked);
+        assert_eq!(moved_told(&mut bea_events), (None, None));
+        // Taken: run another way, and followed.
+        inspect(&bea_node, move |n| {
+            n.add_group(GroupSetup::Member(new));
+            n.follow_moves();
+        })
+        .await;
+        for _ in 0..200 {
+            if inspect(&bea_node, move |n| n.groups[&x].following.followed).await {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(moved_told(&mut bea_events), (Some(to), None));
         ana_node.shutdown().await.unwrap();
         bea_node.shutdown().await.unwrap();
     }

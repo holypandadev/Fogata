@@ -146,7 +146,7 @@ async fn a_new_log_declined_leaves_the_old_group_stopped() {
     let dir = std::env::temp_dir().join(format!("fogata-moved-declined-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     Core::create_profile(&dir, "Bea", None).unwrap();
-    {
+    let (old, new) = {
         let store = Store::open(dir.clone()).unwrap();
         let (me, _) = store.identity().unwrap();
         let ana = DeviceIdentity::generate().unwrap();
@@ -162,9 +162,19 @@ async fn a_new_log_declined_leaves_the_old_group_stopped() {
         assert!(matches!(offered, fogata_core::Offered::Pending(_)));
         let id = hex::encode(new.group_id().as_bytes());
         store.decline_group(&id, &me, t + 5).unwrap();
-    }
+        (old.group_id(), new.group_id())
+    };
     let (core, _events) = Core::start(dir.clone(), options()).unwrap();
     assert!(core.groups().await.unwrap().is_empty());
+    // Left with the new log: noted as moved, so it stops being kept after a while.
+    let stored = core.store().groups().unwrap();
+    let was = (stored.iter())
+        .find(|g| g.group_id == hex::encode(old.as_bytes()))
+        .unwrap();
+    assert_eq!(
+        was.moved.as_ref().map(|m| m.to.clone()),
+        Some(hex::encode(new.as_bytes()))
+    );
     core.shutdown().await.unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -196,6 +206,46 @@ async fn a_new_log_that_cannot_be_read_leaves_the_old_group_stopped() {
             .join(format!("{}.log", hex::encode(new.group_id().as_bytes())));
         std::fs::remove_file(&path).unwrap();
         std::os::unix::fs::symlink(&path, &path).unwrap();
+    }
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    assert!(core.groups().await.unwrap().is_empty());
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A group that moved twice, whose last log is an invitation here: the one before it stays
+/// stopped, and so does the first, or following both moves would run the invitation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_line_of_moves_stops_back_to_its_first_log() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-line-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let t = now_ms() - 10_000;
+        let mut first = GroupLog::create(&ana, "Campfire", t).unwrap();
+        first.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        first.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let mut second = first.new_log_for_move(&ana, t + 3).unwrap();
+        first.move_to(&ana, &second, t + 4).unwrap();
+        if second.state().log_level < Level::Five {
+            second.raise_level(&ana, Level::Five, t + 5).unwrap();
+        }
+        let third = second.new_log_for_move(&ana, t + 6).unwrap();
+        second.move_to(&ana, &third, t + 7).unwrap();
+        store.save_group_log(&first, "Our fire").unwrap();
+        store
+            .record_move(&first.group_id(), &second, now_ms())
+            .unwrap();
+        store.save_group_log(&second, "Campfire").unwrap();
+        store.save_group_log(&third, "Campfire").unwrap();
+        let id = hex::encode(third.group_id().as_bytes());
+        store
+            .set_pending(&id, Some(hex::encode(ana.public_key().as_bytes())))
+            .unwrap();
     }
     let (core, _events) = Core::start(dir.clone(), options()).unwrap();
     assert!(core.groups().await.unwrap().is_empty());
