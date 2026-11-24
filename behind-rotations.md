@@ -15,3 +15,5 @@ After: members announce under the two older keys they look up as well, for the s
 - fogata-net `node/dht.rs`: `a_member_is_announced_where_members_two_rotations_behind_look` (announced under the oldest of three keys now, and not 15 days on, while the newest stays announced). Fails without the change.
 - Network lab, run locally: `group-behind` fails without the change (A finds B and C but never connects; B and C meet each other only) and passes with it (A connects to both, every message reaches the other two).
 - `cargo fmt --check` and `cargo clippy -D warnings` on fogata-net (all targets): clean. fogata-net: every test passes but `files::tests::what_an_earlier_run_left_and_cannot_go_is_left`, which needs a folder to be read-only and fails the same way on main on the test machine (root ignores it); it runs in CI.
+
+CI on this commit: CI (Linux, macOS, Windows and the Linux checks), call checks, the whole network lab (with `group-behind`, about 2 minutes on GitHub) and the Flatpak drop all pass.
