@@ -224,6 +224,23 @@ enum Command {
     #[cfg(feature = "lab")]
     #[command(hide = true)]
     LabDatagrams(lab::DatagramArgs),
+    /// Lab only: raise a group here to a judging level at once, with no check of who
+    /// judges at it.
+    #[cfg(feature = "lab")]
+    #[command(hide = true)]
+    LabLevel { group: String, level: u32 },
+    /// Lab only: write renames into a group here by this device and another in turn, each
+    /// signed on the other's last, as two members flooding its log.
+    #[cfg(feature = "lab")]
+    #[command(hide = true)]
+    LabFloodLog {
+        group: String,
+        /// The other device's data folder.
+        #[arg(long)]
+        with: PathBuf,
+        #[arg(long, default_value_t = 4000)]
+        entries: usize,
+    },
 }
 
 /// The bytes a hex argument writes.
@@ -368,6 +385,14 @@ async fn main() -> Result<()> {
         Command::LabSoak(args) => soak::run(store()?, args).await?,
         #[cfg(feature = "lab")]
         Command::LabDatagrams(args) => lab::datagrams(store()?, args).await?,
+        #[cfg(feature = "lab")]
+        Command::LabLevel { group, level } => lab::raise_level(store()?, &group, level)?,
+        #[cfg(feature = "lab")]
+        Command::LabFloodLog {
+            group,
+            with,
+            entries,
+        } => lab::flood(store()?, &group, &with, entries)?,
     }
     Ok(())
 }

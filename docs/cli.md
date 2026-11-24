@@ -34,6 +34,10 @@ how each is connected, `/invite` prints an invite with this device's current add
 entering the room (`/join` and `/leave` switch). Finding each other through the public DHT
 takes up to a minute.
 
+`/move` moves a group whose log is filling up to a new log, as its first member, once the
+group judges at level five; the others follow it as they connect. A chat open on a group
+that moved goes on in the new log, and in its room if you were in the old one's.
+
 Files: `/share <path>` offers a file to the room while you are in it, `/files` lists what is
 shared, `/get <n>` downloads one (into `--downloads <dir>`, the current folder by default)
 and checks it; after that you share it too. A file stays available while someone in the

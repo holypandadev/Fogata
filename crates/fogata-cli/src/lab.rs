@@ -215,3 +215,50 @@ pub async fn datagrams(store: Store, args: DatagramArgs) -> Result<()> {
     node.shutdown().await?;
     Ok(())
 }
+
+/// Raises group `name` here to judging `level` at once, written by this device with no
+/// check of who judges at it (`fogata group` and the app raise only once every member's
+/// copy does): lets the lab try a level this version does not raise to yet.
+pub fn raise_level(store: Store, name: &str, level: u32) -> Result<()> {
+    let level = fogata_state::Level::numbered(level).context("no such level")?;
+    let (identity, _) = store.identity()?;
+    let mut log = store.load_log(&store.group(name)?)?;
+    log.raise_level(&identity, level, crate::groups::now_ms())?;
+    store.save_log(name, &log)?;
+    println!("Raised \"{name}\" to level {}.", level.number());
+    Ok(())
+}
+
+/// Writes up to `entries` renames into group `name` here, by this device and the device of
+/// folder `with` in turn, each signed on the other's last: two members flooding a group's
+/// log. Stops at the first one the log refuses (a full log at level five). Prints how many
+/// it wrote and how full the log is then.
+pub fn flood(store: Store, name: &str, with: &Path, entries: usize) -> Result<()> {
+    let (me, _) = store.identity()?;
+    let (other, _) = Store::open(with.to_path_buf())?.identity()?;
+    let mut log = store.load_log(&store.group(name)?)?;
+    let group = log.group_id();
+    let mut parents = log.heads();
+    let start = crate::groups::now_ms();
+    let mut written = 0;
+    for k in 0..entries {
+        let who = if k % 2 == 0 { &me } else { &other };
+        let body = fogata_state::Body::Rename {
+            name: format!("flood {k}"),
+        };
+        let entry = fogata_state::Entry::sign(who, group, parents, start + k as u64, body);
+        let hash = entry.hash();
+        if log.insert(entry).is_err() {
+            break;
+        }
+        parents = vec![hash];
+        written += 1;
+    }
+    store.save_log(name, &log)?;
+    let fill = log.fill();
+    println!(
+        "Wrote {written} entries; the log holds {} counted entries, {} bytes.",
+        fill.entries, fill.bytes
+    );
+    Ok(())
+}

@@ -143,7 +143,7 @@ pub async fn run(store: Store, args: ChatArgs) -> Result<()> {
         say!("· looking for members on the DHT; this can take up to a minute");
     }
 
-    let session = Session {
+    let mut session = Session {
         core,
         group,
         nick,
@@ -169,7 +169,7 @@ pub async fn run(store: Store, args: ChatArgs) -> Result<()> {
             }
         }
     }
-    let core = session.core;
+    let (core, group) = (session.core, session.group);
     if core
         .room(group, fogata_core::FIRST_ROOM)
         .await?
@@ -194,13 +194,13 @@ struct Session {
 
 impl Session {
     /// Handles a typed line. Returns false to stop.
-    async fn command(&self, line: &str) -> Result<bool> {
+    async fn command(&mut self, line: &str) -> Result<bool> {
         let (core, group, me) = (&self.core, self.group, self.core.me());
         match line {
             "" => {}
             "/quit" => return Ok(false),
             "/help" => say!(
-                "· /room  /join  /leave  /share <file>  /files  /get <n>  /stop <n>  /members  /invite  /friends  /accept <who>  /decline <who>  /quit"
+                "· /room  /join  /leave  /share <file>  /files  /get <n>  /stop <n>  /members  /invite  /friends  /accept <who>  /decline <who>  /move  /quit"
             ),
             "/room" => match core.room(group, fogata_core::FIRST_ROOM).await? {
                 None => say!("· no room is open; /join starts one"),
@@ -313,6 +313,13 @@ impl Session {
                     Err(e) => say!("· {e}"),
                 }
             }
+            "/move" => match core.move_group(group).await {
+                Ok(to) => {
+                    say!("· moved the group to a new log; the members follow it as they connect");
+                    self.follow(to).await?;
+                }
+                Err(e) => say!("· {e:#}"),
+            },
             text => {
                 if let Err(e) = core.say(group, text).await {
                     say!("· {e:#}");
@@ -366,7 +373,7 @@ impl Session {
     }
 
     /// Prints an event. Returns false to stop.
-    async fn show(&self, event: CoreEvent) -> Result<bool> {
+    async fn show(&mut self, event: CoreEvent) -> Result<bool> {
         let (group, me) = (self.group, self.core.me());
         match event {
             CoreEvent::Room {
@@ -508,9 +515,30 @@ impl Session {
             ),
             CoreEvent::Info(text) => say!("· {text}"),
             CoreEvent::Notice(text) => say!("! {text}"),
+            CoreEvent::GroupsChanged => {
+                if let Some(to) = self.core.moved_to(group).await? {
+                    say!("· the group moved to a new log; following it");
+                    self.follow(to).await?;
+                }
+            }
             _ => {}
         }
         Ok(true)
+    }
+
+    /// Goes on in `to`, the group's new log, and in its room if this device was in the old
+    /// one's.
+    async fn follow(&mut self, to: GroupId) -> Result<()> {
+        let was_in = (self.core.room(self.group, fogata_core::FIRST_ROOM).await)
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.joined);
+        if was_in {
+            let _ = self.core.leave_room(self.group).await;
+            self.core.join_room_as(to, self.nick.clone()).await?;
+        }
+        self.group = to;
+        Ok(())
     }
 
     async fn friend_name(&self, device: &DevicePublicKey) -> String {

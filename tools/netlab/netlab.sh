@@ -46,7 +46,7 @@ BIN_A=${OLD_A:-$BIN}
 BIN_B=${OLD_B:-$BIN}
 SCENARIOS=(selftest cone-cone cone-cone-member cone-symmetric cone-symmetric-member
     symmetric-symmetric-member member-lost-direct home-two-routers home-two-routers-firewall
-    home-two-routers-closed group-join friends-link friends-code friends-later friends-later-code
+    home-two-routers-closed group-join group-move friends-link friends-code friends-later friends-later-code
     friends-remove friends-ex-mutual room-files network-check network-check-negative fake-observed inbound-flood
     silent-flood tcp-known tcp-slow mdns-flood mdns-stale dht-liars media-silent lan-first-contact lan-first-contact-quiet lan-sealed direct-apart transfer-cone-cone transfer-lan transfer-cone-symmetric
     transfer-two-routers transfer-two-routers-back update-chain update-refusals)
@@ -866,6 +866,77 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         fi
         echo "result: FAIL   logs: $WORK"
         exit 1 ;;
+    group-move)
+        # A group at level five whose log two of its members, F1 and F2, filled up to the
+        # ceiling; they stay offline from then on. Only B holds the full log. A, first on the
+        # ladder, removes them on the copy it has. Then A, B and C meet across their NATs: A
+        # gets the full log from B and moves the group to a new log, B and C follow it there
+        # from A, and the three go on talking in the new log, whose size is the group's and
+        # not the flood's.
+        nat_host A 203.0.113.21 cone
+        nat_host B 203.0.113.22 cone
+        nat_host C 203.0.113.23 cone
+        for device in A B C F1 F2; do
+            "$BIN" --data-dir "$WORK/data-$device" profile --name "$device" > /dev/null
+        done
+        "$BIN" --data-dir "$WORK/data-A" group create club > /dev/null
+        for device in B C F1 F2; do
+            key=$("$BIN" --data-dir "$WORK/data-$device" id | awk '/Device key/ {print $3}')
+            "$BIN" --data-dir "$WORK/data-A" group add club "$key" --nick "$device" > /dev/null
+        done
+        # Levels this version does not raise a group to yet are raised here by hand.
+        "$BIN" --data-dir "$WORK/data-A" lab-level club 5 > /dev/null
+        for device in B C F1; do
+            mkdir -p "$WORK/data-$device/logs"
+            cp "$WORK/data-A/groups.json" "$WORK/data-$device/"
+            cp "$WORK/data-A/logs/"*.log "$WORK/data-$device/logs/"
+        done
+        "$BIN" --data-dir "$WORK/data-F1" lab-flood-log club --with "$WORK/data-F2" \
+            > "$WORK/flood.out"
+        cp "$WORK/data-F1/logs/"*.log "$WORK/data-B/logs/"
+        for device in F1 F2; do
+            "$BIN" --data-dir "$WORK/data-A" group remove club "$(short_id "$device")" > /dev/null
+        done
+        old=$(basename "$(ls "$WORK/data-A/logs/"*.log)" .log)
+        (sleep 100; echo /move; sleep 70; echo "hello from A after the move"; sleep 50) |
+            ip netns exec A timeout 230 "$BIN" --data-dir "$WORK/data-A" chat club --nick A \
+            --no-mdns $BOOT > "$WORK/A.out" 2>&1 &
+        PIDS+=($!)
+        (sleep 190; echo "hello from B after the move"; sleep 30) |
+            ip netns exec B timeout 230 "$BIN" --data-dir "$WORK/data-B" chat club --nick B \
+            --no-mdns $BOOT > "$WORK/B.out" 2>&1 &
+        PIDS+=($!)
+        sleep 220 | ip netns exec C timeout 230 "$BIN" --data-dir "$WORK/data-C" chat club --nick C \
+            --no-mdns $BOOT > "$WORK/C.out" 2>&1 &
+        PIDS+=($!)
+        wait "${PIDS[-1]}" "${PIDS[-2]}" "${PIDS[-3]}" 2>/dev/null || true
+        echo "=== $SCENARIO"
+        cat "$WORK/flood.out"
+        pass=1
+        for device in A B C; do
+            new=$(python3 -I -c 'import json, sys
+groups = json.load(open(sys.argv[1]))
+print(" ".join(g["group_id"] for g in groups if g.get("moved_from") == sys.argv[2]))' \
+                "$WORK/data-$device/groups.json" "$old")
+            size=0
+            [[ -n $new && -f $WORK/data-$device/logs/$new.log ]] &&
+                size=$(stat -c %s "$WORK/data-$device/logs/$new.log")
+            echo "--- $device: new log ${new:-none}, $size bytes;" \
+                "old log $(stat -c %s "$WORK/data-$device/logs/$old.log") bytes"
+            grep -h -E 'moved|following|hello from' "$WORK/$device.out" || true
+            # The new log holds the group as it was, not the flood: a few kilobytes.
+            [[ -n $new && $size -gt 0 && $size -lt 65536 ]] || pass=0
+        done
+        grep -q 'moved the group to a new log' "$WORK/A.out" || pass=0
+        for device in B C; do
+            grep -q 'following it' "$WORK/$device.out" || pass=0
+            grep -q 'hello from A after the move' "$WORK/$device.out" || pass=0
+        done
+        grep -q 'hello from B after the move' "$WORK/A.out" || pass=0
+        grep -q 'hello from B after the move' "$WORK/C.out" || pass=0
+        echo "result: $([[ $pass == 1 ]] && echo PASS || echo FAIL)   logs: $WORK"
+        [[ $pass == 1 ]]
+        exit ;;
     friends-link|friends-code)
         # A and B, behind different NATs, become friends with a link (or a short code, which
         # carries no address and is found only through the DHT). Then both come back later

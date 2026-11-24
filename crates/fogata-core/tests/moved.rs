@@ -54,6 +54,9 @@ async fn a_new_log_kept_before_a_stop_is_listed_at_the_next_start() {
         .map(|g| (g.id, g.local_name.as_str()))
         .collect();
     assert_eq!(listed, [(new, "Our fire")]);
+    // What showed as the old group shows as the new one.
+    assert_eq!(core.moved_to(old).await.unwrap(), Some(new));
+    assert_eq!(core.moved_to(new).await.unwrap(), None);
     let stored = core.store().groups().unwrap();
     let was = (stored.iter())
         .find(|g| g.group_id == hex::encode(old.as_bytes()))
@@ -295,6 +298,7 @@ async fn a_new_log_taken_is_followed_in_the_same_run() {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
     assert_eq!(named.as_deref(), Some("Our fire"));
+    assert_eq!(core.moved_to(old_id).await.unwrap(), Some(new_id));
     let stored = core.store().groups().unwrap();
     let old = stored
         .iter()

@@ -306,6 +306,29 @@ impl Core {
         Ok(())
     }
 
+    /// The group that shows here in place of `group`, once it moved and this device
+    /// followed: the end of the line of moves that starts at `group`, as noted here. None
+    /// when `group` did not move, or its new log does not run here (yet).
+    pub async fn moved_to(&self, group: GroupId) -> Result<Option<GroupId>> {
+        let stored = self.inner.store.groups()?;
+        let running: HashSet<GroupId> = (self.inner.node.groups().await?.iter())
+            .map(|g| g.group_id)
+            .collect();
+        let next = |at: GroupId| {
+            let at = hex::encode(at.as_bytes());
+            (stored.iter().find(|g| g.group_id == at))
+                .and_then(|g| g.moved.as_ref())
+                .and_then(|moved| hex::decode(&moved.to).ok())
+                .and_then(|bytes| GroupId::from_bytes(&bytes).ok())
+                .filter(|to| running.contains(to))
+        };
+        let (mut at, mut seen) = (group, HashSet::from([group]));
+        while let Some(to) = next(at).filter(|to| seen.insert(*to)) {
+            at = to;
+        }
+        Ok((at != group).then_some(at))
+    }
+
     /// The group stored under `local_name` here.
     pub fn group_id(&self, local_name: &str) -> Result<GroupId> {
         let stored = self.inner.store.group(local_name)?;
