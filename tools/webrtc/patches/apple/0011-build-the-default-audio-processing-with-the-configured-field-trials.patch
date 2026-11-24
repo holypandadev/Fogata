@@ -1,0 +1,46 @@
+Build the default audio processing with the configured field trials
+
+RTCDefaultAudioProcessingModule built its audio processing with webrtc::CreateEnvironment(),
+so none of the field trials given to +[RTCPeerConnectionFactory configureFieldTrials:]
+reached it, the echo canceller's among them (Fogata's WebRTC-Aec3TransparentModeHmm). It now
+takes the same environment as the factory, made from them; they must be given before the
+module is made.
+
+--- a/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
++++ b/sdk/objc/api/peerconnection/RTCPeerConnectionFactory.mm
+@@ -83,6 +83,13 @@
+         std::make_unique<webrtc::FieldTrials>(gFieldTrials.stdString));
+   }
+   return webrtc::CreateEnvironment();
++}
++
++// Fogata: the same environment, with the field trials given to +configureFieldTrials:, for
++// the default audio processing module (RTCDefaultAudioProcessingModule.mm), which is made
++// apart from any factory and would otherwise read no field trial.
++webrtc::Environment RTCCreateEnvironmentWithConfiguredFieldTrials() {
++  return CreateDefaultEnvironment();
+ }
+ 
+ @implementation RTC_OBJC_TYPE (RTCPeerConnectionFactory) {
+--- a/sdk/objc/components/audio/RTCDefaultAudioProcessingModule.mm
++++ b/sdk/objc/components/audio/RTCDefaultAudioProcessingModule.mm
+@@ -22,6 +22,10 @@
+ #include "api/scoped_refptr.h"
+ #include "api/audio/builtin_audio_processing_builder.h"
+ #include "modules/audio_processing/include/audio_processing.h"
++
++// Fogata: defined in RTCPeerConnectionFactory.mm: an environment with the field trials
++// given to +configureFieldTrials: (none when none were given).
++webrtc::Environment RTCCreateEnvironmentWithConfiguredFieldTrials();
+ 
+ @implementation RTC_OBJC_TYPE (RTCDefaultAudioProcessingModule) {
+   webrtc::scoped_refptr<webrtc::AudioProcessing> _nativeAudioProcessingModule;
+@@ -61,7 +65,7 @@
+     builder.SetRenderPreProcessing(std::unique_ptr<webrtc::CustomProcessing>(
+         _renderPreProcessingAdapter.nativeAudioCustomProcessingModule));
+ 
+-    _nativeAudioProcessingModule = builder.Build(webrtc::CreateEnvironment());
++    _nativeAudioProcessingModule = builder.Build(RTCCreateEnvironmentWithConfiguredFieldTrials());
+   }
+   return self;
+ }

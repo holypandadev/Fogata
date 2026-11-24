@@ -339,6 +339,9 @@ static void FlutterWebRTCApplyFieldTrials(void) {
     _speakerOn = NO;
     _speakerOnButPreferBluetooth = NO;
     _eventChannel = eventChannel;
+    // Fogata: the field trials first: the audio processing the manager makes reads them
+    // as it is made (Apple patch 11).
+    FlutterWebRTCApplyFieldTrials();
     _audioManager = AudioManager.sharedInstance;
 
 #if TARGET_OS_IPHONE
