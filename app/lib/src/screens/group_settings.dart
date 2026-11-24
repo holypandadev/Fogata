@@ -273,7 +273,7 @@ class _Note extends StatelessWidget {
 /// member ([UiGroup.mayMove]) the button that moves the group to a fresh history. Full,
 /// only removing members, leaving and the move still work until it moves.
 @visibleForTesting
-class HistoryFill extends StatelessWidget {
+class HistoryFill extends StatefulWidget {
   const HistoryFill({super.key, required this.group});
   final UiGroup group;
 
@@ -281,9 +281,43 @@ class HistoryFill extends StatelessWidget {
   static const nearlyFull = 0.75;
 
   @override
+  State<HistoryFill> createState() => _HistoryFillState();
+}
+
+class _HistoryFillState extends State<HistoryFill> {
+  /// While the move is asked for: a second tap opens no second question.
+  bool _asking = false;
+
+  /// While the move is made, once confirmed: the button shows it and does nothing more.
+  bool _moving = false;
+
+  Future<void> _move() async {
+    if (_asking || _moving) return;
+    _asking = true;
+    final bool yes;
+    try {
+      yes = await confirmDialog(
+        context,
+        title: l10n.groupSettingsMoveTitle,
+        text: l10n.groupSettingsMoveText,
+        action: l10n.groupSettingsMoveConfirm,
+      );
+    } finally {
+      _asking = false;
+    }
+    if (!yes || !mounted) return;
+    setState(() => _moving = true);
+    try {
+      await AppScope.of(context).moveGroup(widget.group.id);
+    } finally {
+      if (mounted) setState(() => _moving = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final state = AppScope.of(context);
     final c = context.fg;
+    final group = widget.group;
     final full = (group.fill ?? 0) >= 1;
     return Container(
       key: const ValueKey('history-fill'),
@@ -316,16 +350,8 @@ class HistoryFill extends StatelessWidget {
               height: 30,
               fontSize: 13,
               padding: const EdgeInsets.symmetric(horizontal: 12),
-              onTap: () async {
-                final yes = await confirmDialog(
-                  context,
-                  title: l10n.groupSettingsMoveTitle,
-                  text: l10n.groupSettingsMoveText,
-                  action: l10n.groupSettingsMoveConfirm,
-                );
-                if (!yes) return;
-                await state.moveGroup(group.id);
-              },
+              busy: _moving,
+              onTap: _moving ? null : _move,
             ),
           ],
         ],
