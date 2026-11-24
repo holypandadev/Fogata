@@ -663,8 +663,9 @@ struct RecordSent {
     at: Instant,
     answered: bool,
     lost: u8,
-    /// Dropped before it left, past the outbox's bounds or with the peer's last connection:
-    /// a count of its own, which does not hold the record back as a failure does.
+    /// Dropped before it left, past the outbox's bounds or with the peer's last connection,
+    /// or its dial failed: a count of its own, which does not hold the record back as a
+    /// failure does.
     unsent: u8,
 }
 
@@ -679,9 +680,9 @@ const ON_ITS_WAY_AT_MOST: Duration = Duration::from_secs(60);
 /// may go to it again this long after, at a roster of the member that names another one,
 /// doubled at each failure in a row: 2, 4, 8 and 16 s. Past [`RECORD_LOST_TRIES`]
 /// failures, only after [`RECORD_AGAIN`], as one that got there; a member that has every
-/// request fail gets it a few more times, not at every roster. One dropped before it left
-/// goes again unasked once the peer's outbox has room: this long after, or as long as its
-/// failures before ask for (see `RecordSent::unsent_again`).
+/// request fail gets it a few more times, not at every roster. One dropped before it left,
+/// or whose dial failed, goes again unasked once the peer's outbox has room: this long
+/// after, or as long as its failures before ask for (see `RecordSent::unsent_again`).
 const RECORD_LOST_AGAIN: Duration = Duration::from_secs(2);
 const RECORD_LOST_TRIES: u8 = 4;
 /// How long what is kept of a record lost on its way still counts, sent or lost last that

@@ -438,8 +438,9 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
-    /// What a member's budget may refill while a test charges it: a few milliseconds.
-    const SLACK: usize = 1024;
+    /// What a member's budget may refill while a test charges it, at 256 bytes a millisecond:
+    /// half the least a record counts, so that one record is still told from two, or none.
+    const SLACK: usize = super::super::limits::SERVED_LEAST / 2;
 
     /// A group with a banner and a picture record, and member Bea, whose version keeps
     /// both, connected to it.
@@ -886,7 +887,7 @@ mod tests {
         })
         .await;
         // Each record of 500 bytes counts as the least an answer counts, less what the
-        // budget refills meanwhile (256 bytes a millisecond): far less than one record.
+        // budget refills meanwhile (see `SLACK`).
         let least = super::super::limits::SERVED_LEAST;
         let (same, (bea, cai), went) = found;
         assert!(same);
@@ -932,7 +933,14 @@ mod tests {
             slot.ctx.set_picture(png(6), crate::node::now_ms()).unwrap();
             let bea_before = left(n, bea);
             // Answered: no longer on their way.
-            n.pending.retain(|_, (p, _)| *p != bea);
+            let answered: Vec<_> = (n.pending.iter())
+                .filter(|(_, (p, _))| *p == bea)
+                .map(|(id, _)| *id)
+                .collect();
+            for id in answered {
+                n.pending.remove(&id);
+                n.request_done(bea);
+            }
             n.on_response(bea, Pending::Banner(group, banner), MemberResponse::Ack);
             n.on_response(bea, Pending::Picture(group, picture), MemberResponse::Ack);
             let charged = |before: f64, after: f64| (before - after).round() as usize;
