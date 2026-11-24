@@ -9,7 +9,8 @@ use fogata_state_before as before;
 
 use super::{hostile::Hostile, *};
 use crate::{
-    budget::RUN_ROOM,
+    budget::{CEILING, RUN_ROOM},
+    entry::Moved,
     state::{LEVEL_NOT_HIGHER, LEVEL_UNKNOWN},
 };
 
@@ -394,16 +395,56 @@ fn the_group_judges_at_its_level_and_stops_at_one_it_does_not_know() {
 /// kept or not, in the order they were written; and the room for a run its copies had.
 struct World {
     run: u32,
+    /// The ceiling of a log ordered at five, in entries: [`CEILING`]'s in the corpora made
+    /// before level five.
+    ceiling: u32,
+    /// Whether each entry is judged with others like it ([`World::with_variants`]): in the
+    /// corpora made before level five, always.
+    variants: bool,
     entries: Vec<Entry>,
     /// The devices of the world, which wrote most of them.
     devices: Vec<DeviceIdentity>,
 }
 
+/// The rooms a copy of a world judges in.
+#[derive(Clone, Copy)]
+struct Rooms {
+    run: u32,
+    ceiling: u32,
+}
+
+impl Rooms {
+    /// Those of every log.
+    fn usual() -> Self {
+        Rooms {
+            run: RUN_ROOM.entries,
+            ceiling: CEILING.entries,
+        }
+    }
+
+    fn set(self, log: &mut GroupLog) {
+        log.set_run_room(self.run, RUN_ROOM.bytes);
+        if self.ceiling != CEILING.entries {
+            log.set_ceiling(self.ceiling, CEILING.bytes);
+        }
+    }
+}
+
 impl World {
+    fn rooms(&self) -> Rooms {
+        Rooms {
+            run: self.run,
+            ceiling: self.ceiling,
+        }
+    }
+
     /// The entries of the world, each followed by others like it: the same body on the
     /// same parents signed by two other devices of the world, and by its own author an
     /// hour later. Signatures are the same each time, so these are too.
     fn with_variants(&self) -> Vec<Entry> {
+        if !self.variants {
+            return self.entries.clone();
+        }
         let n = self.devices.len();
         let mut out = Vec::new();
         for (i, entry) in self.entries.iter().enumerate() {
@@ -494,6 +535,8 @@ fn corpus_of(mut bytes: &[u8]) -> Vec<World> {
         }
         worlds.push(World {
             run,
+            ceiling: CEILING.entries,
+            variants: true,
             entries,
             devices,
         });
@@ -541,6 +584,8 @@ fn corpus_world(seed: u64) -> World {
     }
     World {
         run: h.world.logs[0].run_room.entries,
+        ceiling: CEILING.entries,
+        variants: true,
         entries: h.written,
         devices: (h.world.devices.iter())
             .map(|d| DeviceIdentity::from_secret_bytes(&d.id.secret_bytes()))
@@ -587,6 +632,8 @@ fn crafted_world() -> World {
     w(c.rotate(&bea.id, 51));
     World {
         run: RUN_ROOM.entries,
+        ceiling: CEILING.entries,
+        variants: true,
         entries: written,
         devices: [ana, bea, carlos, dani]
             .iter()
@@ -707,11 +754,10 @@ fn index_of(corpus: &[Entry]) -> HashMap<EntryHash, usize> {
         .collect()
 }
 
-/// A copy of this level given `order`, entries of `corpus`, one at a time, with room `run`
-/// for a run.
-fn given(corpus: &[Entry], order: &[&Entry], run: u32) -> GroupLog {
+/// A copy of this level given `order`, entries of `corpus`, one at a time, with `rooms`.
+fn given(corpus: &[Entry], order: &[&Entry], rooms: Rooms) -> GroupLog {
     let mut log = GroupLog::empty(corpus[0].group_id);
-    log.set_run_room(run, RUN_ROOM.bytes);
+    rooms.set(&mut log);
     for entry in order {
         let _ = log.insert((*entry).clone());
     }
@@ -812,9 +858,9 @@ fn a_level_ahead_of_this_copy_is_not_counted_against_its_author() {
 /// What a copy given `order`, entries of `corpus`, with room `run` for a run makes of
 /// them: which it keeps, which wait, their common order, which apply, and the group they
 /// make; entries named by their places in `corpus`.
-fn judged_in(corpus: &[Entry], order: &[&Entry], run: u32, names: &mut Names) -> String {
+fn judged_in(corpus: &[Entry], order: &[&Entry], rooms: Rooms, names: &mut Names) -> String {
     let index = index_of(corpus);
-    let log = given(corpus, order, run);
+    let log = given(corpus, order, rooms);
     let state = log.state();
     let order: Vec<usize> = log.ordered().iter().map(|h| index[h]).collect();
     let applied: Vec<usize> = state.applied.iter().map(|h| index[h]).collect();
@@ -858,7 +904,30 @@ fn judged_in(corpus: &[Entry], order: &[&Entry], run: u32, names: &mut Names) ->
             state.lacking_current_secret()
         ),
     ];
-    out.map(|line| names.of(&line)).join("\n")
+    let mut out: Vec<String> = out.map(|line| names.of(&line)).into();
+    // What only a log ordered at five holds: its fill, its move, and why each entry it
+    // keeps but applies not was refused (the ceiling, the move).
+    if state.log_level >= Level::Five {
+        let fill = log.fill();
+        out.push(format!("fill {} {}", fill.entries, fill.bytes));
+        out.push(match log.moved() {
+            Some((hash, moved)) => format!(
+                "moved {} to {:02x?} at {:02x?}",
+                index[&hash],
+                &moved.to.as_bytes()[..4],
+                &moved.setup[..4]
+            ),
+            None => "moved none".to_string(),
+        });
+        let mut why: BTreeMap<&str, Vec<EntryHash>> = BTreeMap::new();
+        for (hash, reason) in &state.rejected {
+            why.entry(reason).or_default().push(*hash);
+        }
+        for (reason, hashes) in why {
+            out.push(format!("refused {reason}: {}", places(&index, hashes)));
+        }
+    }
+    out.join("\n")
 }
 
 /// What the level before, the fogata-state of level one, makes of `corpus` given in that
@@ -867,7 +936,7 @@ fn judged_in(corpus: &[Entry], order: &[&Entry], run: u32, names: &mut Names) ->
 fn judged_apart_at_level_one(corpus: &[Entry]) -> [(&'static str, Vec<usize>); 4] {
     let index = index_of(corpus);
     let order: Vec<&Entry> = corpus.iter().collect();
-    let log = given(corpus, &order, RUN_ROOM.entries);
+    let log = given(corpus, &order, Rooms::usual());
     let mut old = before::GroupLog::empty(corpus[0].group_id);
     for entry in corpus {
         let _ = old.insert(before_level(entry));
@@ -960,12 +1029,12 @@ fn judged_with(worlds: &[World], apart_from_level_one: bool) -> String {
             names.of(&format!("{:?}", entry.author));
         }
         let as_written: Vec<&Entry> = corpus.iter().collect();
-        let judgment = judged_in(corpus, &as_written, world.run, &mut names);
+        let judgment = judged_in(corpus, &as_written, world.rooms(), &mut names);
         // A copy given them all at once keeps and applies the same.
         let mut at_once = GroupLog::empty(corpus[0].group_id);
-        at_once.set_run_room(world.run, RUN_ROOM.bytes);
+        world.rooms().set(&mut at_once);
         at_once.insert_all(corpus.iter().cloned());
-        let one_at_a_time = given(corpus, &as_written, world.run);
+        let one_at_a_time = given(corpus, &as_written, world.rooms());
         assert_eq!(at_once.ordered(), one_at_a_time.ordered(), "world {w}");
         assert_eq!(
             at_once.state().applied,
@@ -979,7 +1048,7 @@ fn judged_with(worlds: &[World], apart_from_level_one: bool) -> String {
         ));
         // The level before knows no other room for a run.
         if apart_from_level_one && world.run == RUN_ROOM.entries {
-            let log = given(corpus, &as_written, world.run);
+            let log = given(corpus, &as_written, world.rooms());
             for (what, at) in judged_apart_at_level_one(corpus) {
                 let mut line = what.to_string();
                 for i in at {
@@ -1187,6 +1256,8 @@ fn level_three_world(seed: u64) -> World {
     }
     World {
         run: h.world.logs[0].run_room.entries,
+        ceiling: CEILING.entries,
+        variants: true,
         entries: h.written,
         devices: (h.world.devices.iter())
             .map(|d| DeviceIdentity::from_secret_bytes(&d.id.secret_bytes()))
@@ -1265,7 +1336,7 @@ fn write_the_level_three_corpus() {
     for world in &worlds {
         let corpus = world.with_variants();
         let mut log = GroupLog::empty(corpus[0].group_id);
-        log.set_run_room(world.run, RUN_ROOM.bytes);
+        world.rooms().set(&mut log);
         log.insert_all(corpus.iter().cloned());
         let state = log.state();
         assert_eq!(state.level, Level::Three);
@@ -1288,6 +1359,251 @@ fn write_the_level_three_corpus() {
     std::fs::write(
         dir.join("level-three.txt"),
         as_level_three(|| judged_with(&worlds, false)),
+    )
+    .unwrap();
+}
+
+/// `f` run as a copy of the version that brought level five judges: one that knows no
+/// level after it.
+fn as_level_five<T>(f: impl FnOnce() -> T) -> T {
+    crate::state::HIGHEST.with(|h| h.set(Level::Five));
+    let out = f();
+    crate::state::HIGHEST.with(|h| h.set(Level::CURRENT));
+    out
+}
+
+/// The corpus the judgment of level five is pinned on, made by
+/// [`write_the_level_five_corpus`] with the version that brought level five, before any
+/// later level, and never made again: each world's ceiling and whether it is judged with
+/// variants, then the worlds as in the corpora before it. A later version judges it as level five did, as a copy of level five
+/// ([`as_level_five`]).
+const CORPUS_FIVE: &[u8] = include_bytes!("level-five.bin");
+
+/// What level five makes of [`CORPUS_FIVE`], as [`judged_with`] writes it.
+const JUDGED_FIVE: &str = include_str!("level-five.txt");
+
+fn corpus_five_bytes(worlds: &[World]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&(worlds.len() as u32).to_be_bytes());
+    for world in worlds {
+        out.extend_from_slice(&world.ceiling.to_be_bytes());
+        out.push(u8::from(world.variants));
+    }
+    out.extend(corpus_bytes(worlds));
+    out
+}
+
+fn corpus_five_of(bytes: &[u8]) -> Vec<World> {
+    let (n, mut rest) = bytes.split_at(4);
+    let n = u32::from_be_bytes(n.try_into().unwrap()) as usize;
+    let mut rooms = Vec::new();
+    for _ in 0..n {
+        let (c, after) = rest.split_at(5);
+        rooms.push((u32::from_be_bytes(c[..4].try_into().unwrap()), c[4] == 1));
+        rest = after;
+    }
+    let mut worlds = corpus_of(rest);
+    assert_eq!(worlds.len(), n);
+    for (world, (ceiling, variants)) in worlds.iter_mut().zip(rooms) {
+        world.ceiling = ceiling;
+        world.variants = variants;
+    }
+    worlds
+}
+
+/// A world of level five: a random history raised to three, four and five, with a ceiling
+/// a few dozen entries above copy 0's log at the raise, and a flood by two members past it
+/// (see `ceiling.rs`). Then the first member removes a flooder that is not itself and moves
+/// the group; another member writes on what it saw before the removal, apart from the move,
+/// and forges a move of its own; and every member writes a `Level` entry naming the level
+/// after five. Every entry written is noted, kept or not.
+fn level_five_corpus_world(seed: u64) -> World {
+    let mut h = super::ceiling::level_five_world(seed);
+    let ceiling = h.world.logs[0].ceiling.entries;
+    fn handed(h: &mut Hostile, entry: Entry, to: &[usize]) {
+        for &i in to {
+            let _ = h.world.logs[i].insert(entry.clone());
+        }
+        h.written.push(entry);
+    }
+    let all: Vec<usize> = (0..h.world.logs.len()).collect();
+    let stale = h.world.logs[1].heads();
+    // Copy 0 has everything written so far: the first member moves on the whole log.
+    let written = h.written.clone();
+    h.world.logs[0].insert_all(written);
+    let state = h.world.logs[0].state();
+    let member = |i: &usize| state.is_member(&h.world.devices[*i].key());
+    let members: Vec<usize> = (0..h.world.devices.len()).filter(member).collect();
+    let first = (state.ladder.first()).and_then(|k| {
+        members
+            .iter()
+            .copied()
+            .find(|&i| h.world.devices[i].key() == *k)
+    });
+    if let Some(first) = first {
+        let id = DeviceIdentity::from_secret_bytes(&h.world.devices[first].id.secret_bytes());
+        // The flood was written by the first two members (see `flooded`).
+        if let Some(&flooder) = members.iter().take(2).find(|&&i| i != first) {
+            h.world.time += 1;
+            let key = h.world.devices[flooder].key();
+            if let Ok(entry) = h.world.logs[0].remove(&id, key, h.world.time) {
+                handed(&mut h, entry, &all);
+            }
+        }
+        h.world.time += 1;
+        if let Ok(new) = h.world.logs[0].new_log_for_move(&id, h.world.time) {
+            h.world.time += 1;
+            if let Ok(entry) = h.world.logs[0].move_to(&id, &new, h.world.time) {
+                handed(&mut h, entry, &all);
+            }
+        }
+        if let Some(&other) = members.iter().find(|&&i| i != first) {
+            let other =
+                DeviceIdentity::from_secret_bytes(&h.world.devices[other].id.secret_bytes());
+            let group = h.world.logs[0].group_id();
+            h.world.time += 1;
+            let apart = Entry::sign(
+                &other,
+                group,
+                stale.clone(),
+                h.world.time,
+                Body::Rename {
+                    name: "apart".into(),
+                },
+            );
+            handed(&mut h, apart.clone(), &[0, 1]);
+            let forged = Moved {
+                to: GroupId::random().unwrap(),
+                setup: apart.hash(),
+            }
+            .body();
+            let heads = h.world.logs[0].heads();
+            let forged = Entry::sign(&other, group, heads, h.world.time, forged);
+            handed(&mut h, forged, &all);
+        }
+    }
+    let (group, heads) = (h.world.logs[0].group_id(), h.world.logs[0].heads());
+    for &i in &members {
+        let level = Body::Level {
+            level: Level::Five.number() + 1,
+        };
+        let entry = Entry::sign(
+            &h.world.devices[i].id,
+            group,
+            heads.clone(),
+            h.world.time,
+            level,
+        );
+        handed(&mut h, entry, &all);
+    }
+    World {
+        run: h.world.logs[0].run_room.entries,
+        ceiling,
+        variants: false,
+        entries: h.written,
+        devices: (h.world.devices.iter())
+            .map(|d| DeviceIdentity::from_secret_bytes(&d.id.secret_bytes()))
+            .collect(),
+    }
+}
+
+/// What level five keeps and applies of its corpus is what it kept and applied when the
+/// corpus was made (see [`JUDGED_FIVE`]), judged as a copy of level five: its ceiling, what
+/// a move leaves standing and what it refuses. A change to it comes as a new level, as for
+/// the levels before.
+#[test]
+fn the_judgment_of_level_five_never_changes() {
+    let worlds = corpus_five_of(CORPUS_FIVE);
+    assert!(!worlds.is_empty());
+    let now = as_level_five(|| judged_with(&worlds, false));
+    let then = JUDGED_FIVE.replace("\r\n", "\n");
+    if now != then {
+        let path = std::env::temp_dir().join("level-five-now.txt");
+        let _ = std::fs::write(&path, &now);
+        let line = now
+            .lines()
+            .zip(then.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or(now.lines().count().min(then.lines().count()));
+        panic!(
+            "level five judges its corpus otherwise than when it was made, from line {} of \
+             level-five.txt on (what it makes of it now is in {}). A change to what is kept \
+             or applied comes as a new level, never as a change to level five.",
+            line + 1,
+            path.display()
+        );
+    }
+}
+
+/// Makes the corpus of level five and what it judges of it, into the folder
+/// `FOGATA_LEVEL_FIVE_CORPUS` names: by the version that brought level five only, before
+/// any later level, and never while level five judges the corpus there otherwise than
+/// [`JUDGED_FIVE`] says. Its worlds hold what level five was made for: a log at its
+/// ceiling, entries past it, a removal that still applies, a move, what is written apart
+/// from it and a move forged by a member that is not first.
+#[test]
+#[ignore]
+fn write_the_level_five_corpus() {
+    let dir = std::env::var_os("FOGATA_LEVEL_FIVE_CORPUS").expect("FOGATA_LEVEL_FIVE_CORPUS");
+    assert_eq!(
+        Level::CURRENT,
+        Level::Five,
+        "made by the version of level five only"
+    );
+    if !CORPUS_FIVE.is_empty() {
+        let worlds = corpus_five_of(CORPUS_FIVE);
+        assert_eq!(as_level_five(|| judged_with(&worlds, false)), JUDGED_FIVE);
+    }
+    // The first three histories that reach five and move, judged as written: in some,
+    // nobody manages by the time of the raise, or the first member cannot move.
+    let judged = |world: &World| {
+        let corpus = world.with_variants();
+        let mut log = GroupLog::empty(corpus[0].group_id);
+        world.rooms().set(&mut log);
+        log.insert_all(corpus.iter().cloned());
+        log
+    };
+    let plain: Vec<World> = (1..64)
+        .map(level_five_corpus_world)
+        .filter(|world| {
+            let log = judged(world);
+            log.state().log_level == Level::Five && log.moved().is_some()
+        })
+        .take(3)
+        .collect();
+    assert_eq!(plain.len(), 3);
+    // Each also with its variants: entries like each, which push runs and the ceiling
+    // further, and may leave the raise or the move past them.
+    let mut worlds = Vec::new();
+    for world in plain {
+        let with = World {
+            variants: true,
+            entries: world.entries.clone(),
+            devices: (world.devices.iter())
+                .map(|d| DeviceIdentity::from_secret_bytes(&d.secret_bytes()))
+                .collect(),
+            ..world
+        };
+        worlds.extend([world, with]);
+    }
+    // In some world, a log at its ceiling with entries refused past it.
+    let mut refused: BTreeMap<&str, usize> = BTreeMap::new();
+    for world in &worlds {
+        for (_, why) in &judged(world).state().rejected {
+            *refused.entry(why).or_default() += 1;
+        }
+    }
+    assert!(
+        refused.contains_key(crate::budget::PAST_CEILING),
+        "{refused:?}"
+    );
+    let bytes = corpus_five_bytes(&worlds);
+    assert_eq!(corpus_five_of(&bytes).len(), worlds.len());
+    let dir = std::path::Path::new(&dir);
+    std::fs::write(dir.join("level-five.bin"), bytes).unwrap();
+    std::fs::write(
+        dir.join("level-five.txt"),
+        as_level_five(|| judged_with(&worlds, false)),
     )
     .unwrap();
 }
@@ -2007,8 +2323,8 @@ fn the_corpus_of_level_three_is_judged_alike_until_a_raise_to_four() {
     for (w, world) in corpus_of(CORPUS_THREE).iter().enumerate() {
         let corpus = world.with_variants();
         let order: Vec<&Entry> = corpus.iter().collect();
-        let then = as_level_three(|| given(&corpus, &order, world.run));
-        let now = given(&corpus, &order, world.run);
+        let then = as_level_three(|| given(&corpus, &order, world.rooms()));
+        let now = given(&corpus, &order, world.rooms());
         let fours: Vec<EntryHash> = corpus
             .iter()
             .filter(|e| matches!(e.body, Body::Level { level: 4 }))
@@ -2201,7 +2517,7 @@ fn a_raise_to_four_on_old_parents_holds_back_only_what_leaves_members_out() {
             if world.run != RUN_ROOM.entries {
                 continue;
             }
-            let log = given(&corpus, &order, world.run);
+            let log = given(&corpus, &order, world.rooms());
             if log.level() >= Level::Four {
                 continue;
             }

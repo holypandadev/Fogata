@@ -321,7 +321,7 @@ fn raised(h: &mut super::hostile::Hostile, level: Level) -> bool {
 
 /// Two members of copy 0 sign `n` renames, each on the one before, and hand them to every
 /// copy: a flood that no run holds back.
-fn flooded(h: &mut super::hostile::Hostile, n: usize) {
+pub(super) fn flooded(h: &mut super::hostile::Hostile, n: usize) {
     let state = h.world.logs[0].state();
     let two: Vec<usize> = (0..h.world.devices.len())
         .filter(|&i| state.is_member(&h.world.devices[i].key()))
@@ -348,7 +348,7 @@ fn flooded(h: &mut super::hostile::Hostile, n: usize) {
 /// A world of random histories raised to level three first, to four after a while and to
 /// five after that, with a ceiling a few dozen entries above copy 0's log at the raise to
 /// five, and a flood by two members at the end.
-fn level_five_world(seed: u64) -> super::hostile::Hostile {
+pub(super) fn level_five_world(seed: u64) -> super::hostile::Hostile {
     let mut h = super::hostile::Hostile::new(seed);
     raised(&mut h, Level::Three);
     for i in 0..120 {
