@@ -192,10 +192,17 @@ impl Store {
         let at = (list.groups.iter())
             .position(|g| g.group_id == old_id)
             .context("no such group")?;
-        // A new log saved here already is as new as this one or newer (a leave of this
-        // device in it, say): never written over.
+        // A new log saved here already may hold what this one lacks (a leave of this device
+        // in it, say), or lack what it holds (one kept as an invitation): never written
+        // over, the two are kept together.
         let known = list.groups.iter().any(|g| g.group_id == new_id);
-        if !known {
+        if known && let Ok(mut kept) = self.read_log(new.group_id()) {
+            let before = kept.len();
+            kept.insert_all(new.entries().cloned());
+            if kept.len() != before {
+                self.write_log(&kept)?;
+            }
+        } else {
             self.write_log(new)?;
         }
         if list.groups[at]
@@ -206,12 +213,6 @@ impl Store {
         {
             return Ok(known.name.clone());
         }
-        // Saved already as a group of its own (a change of it came first): it is registered
-        // again as the new log of `old`.
-        list.groups.retain(|g| g.group_id != new_id);
-        let at = (list.groups.iter())
-            .position(|g| g.group_id == old_id)
-            .context("no such group")?;
         let name = list.groups[at].name.clone();
         let before = free_name(&list.groups, &format!("{name} (before moving)"));
         let old_group = &mut list.groups[at];
@@ -220,14 +221,31 @@ impl Store {
             to: new_id.clone(),
             ms: now_ms,
         });
-        list.groups.push(StoredGroup {
-            name: name.clone(),
-            group_id: new_id,
-            pending: false,
-            invited_by: None,
-            moved: None,
-            moved_from: Some(old_id),
-        });
+        // Saved already as a group of its own (a change of it came first, an invitation to
+        // it): it is the new log of `old` now, and keeps what it knows of moves of its own.
+        let name = match list.groups.iter_mut().find(|g| g.group_id == new_id) {
+            Some(known) => {
+                // One that moved on itself keeps its name: the log after it has it.
+                if known.moved.is_none() {
+                    known.name = name;
+                }
+                known.moved_from.get_or_insert(old_id);
+                known.pending = false;
+                known.invited_by = None;
+                known.name.clone()
+            }
+            None => {
+                list.groups.push(StoredGroup {
+                    name: name.clone(),
+                    group_id: new_id,
+                    pending: false,
+                    invited_by: None,
+                    moved: None,
+                    moved_from: Some(old_id),
+                });
+                name
+            }
+        };
         self.merge_history(old, &new.group_id())?;
         self.write_groups(&held, &list)?;
         Ok(name)
@@ -736,7 +754,7 @@ mod tests {
     /// A group that moved: the new log takes the old one's local name and its banner and
     /// picture changes seen here (with those already noted of the new log, by time), the old
     /// one is marked; done again, or after the new group was saved on its own first, the list
-    /// is the same, and the new log saved here is never written over.
+    /// is the same, and the new log saved here is kept with the one that followed.
     #[test]
     fn a_group_that_moved_gives_its_name_to_the_new_log() {
         let dir = std::env::temp_dir().join(format!("fogata-store-moved-{}", std::process::id()));
@@ -772,10 +790,14 @@ mod tests {
             "Campfire"
         );
         write(&new.group_id(), &[seen(6, "b"), seen(5, "c")]);
+        // What follows holds what the copy saved here lacks, and lacks what it holds.
+        let mut incoming = new.clone();
+        let dan = DeviceIdentity::generate().unwrap().public_key();
+        incoming.add(&me, dan, "Dan", 4).unwrap();
         let ids = |g: &StoredGroup| g.group_id.clone();
         for _ in 0..2 {
             assert_eq!(
-                store.record_move(&old.group_id(), &new, 10).unwrap(),
+                store.record_move(&old.group_id(), &incoming, 10).unwrap(),
                 "Our fire"
             );
             let groups = store.groups().unwrap();
@@ -798,9 +820,10 @@ mod tests {
             .map(|r| r.signature)
             .collect();
         assert_eq!(signatures, ["a", "c", "b"]);
-        // The newer copy stays.
+        // The two copies are kept together.
         let kept = store.load_log_of(&new.group_id()).unwrap();
         assert_eq!(kept.shared_state().name, "Campfire 2");
+        assert!(kept.shared_state().is_member(&dan));
         new = kept;
         // Not a group here: nothing is noted.
         let other = GroupLog::create(&me, "Other", 3).unwrap();

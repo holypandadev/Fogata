@@ -900,6 +900,8 @@ impl Core {
         let listed: HashSet<String> = stored_groups.iter().map(|g| g.group_id.clone()).collect();
         // Groups that moved, run for a while, and the log each moved to.
         let mut moved_to = Vec::new();
+        // Groups read and not run: left, or removed from.
+        let mut left = HashSet::new();
         for stored in stored_groups {
             // Invitations wait for the person; nothing of them runs or is announced.
             if stored.pending {
@@ -934,9 +936,12 @@ impl Core {
                 .entries()
                 .any(|e| e.author == me && matches!(e.body, Body::Leave) && e.time_ms > since);
             // Moved by this device, which stopped before the new log was listed: it is on the
-            // disk (kept before the move was written), and listed now.
+            // disk (kept before the move was written), and listed now. Only the mover keeps a
+            // new log before it is listed; any other file of it (an invitation declined) is
+            // not taken for one.
             if stored.moved.is_none()
-                && let Some((_, moved)) = log.moved()
+                && let Some((hash, moved)) = log.moved()
+                && log.get(&hash).is_some_and(|e| e.author == me)
                 && !listed.contains(&hex::encode(moved.to.as_bytes()))
                 && let Ok(new) = store.load_log_of(&moved.to)
             {
@@ -962,18 +967,14 @@ impl Core {
             } else {
                 // Left or removed: its log stays, its banner and picture are not kept.
                 store.forget_group_pictures(&log.group_id());
+                left.insert(log.group_id());
             }
         }
         // A group that moved runs only beside the log it moved to: one this device left, or
         // was removed from, leaves the old one stopped too, or it would be followed again.
-        let runs = |id: &GroupId| {
-            groups.iter().any(|g| match g {
-                GroupSetup::Member(log) => log.group_id() == *id,
-                _ => false,
-            })
-        };
+        // One that could not be read this time leaves it running.
         let stopped: Vec<GroupId> = (moved_to.iter())
-            .filter(|(_, to)| !runs(to) && listed.contains(&hex::encode(to.as_bytes())))
+            .filter(|(_, to)| left.contains(to))
             .map(|(from, _)| *from)
             .collect();
         groups.retain(|g| match g {

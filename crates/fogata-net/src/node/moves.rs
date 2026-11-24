@@ -204,18 +204,35 @@ impl Node {
         let Some((_, moved)) = self.groups.get(&group).and_then(|s| s.ctx.moved()) else {
             return;
         };
-        if let Some(new) = self.groups.get(&moved.to) {
-            // Run another way (an invite to it, say), or at a start: core is told the group
-            // moved there all the same, once in a run.
-            let log = new.ctx.log().clone();
-            let following = &mut self.groups.get_mut(&group).expect("checked").following;
-            if !following.followed {
-                following.followed = true;
-                self.emit(NodeEvent::GroupMoved { from: group, log });
-            }
-            self.again_after_move(group, moved.to);
-        } else {
+        let Some(new) = self.groups.get(&moved.to) else {
             self.ask_for_moved_log(group, moved.to);
+            return;
+        };
+        let slot = &self.groups[&group];
+        if slot.following.followed {
+            self.again_after_move(group, moved.to);
+            return;
+        }
+        // Run another way (an invite to it, say), or at a start: judged as one a member sent
+        // would be, and core told the group moved there once in a run (see
+        // [`Self::start_judged`]). Not while it is only being joined.
+        let ready = new.ctx.joining().is_none() && new.ctx.i_am_member();
+        if !ready || slot.following.refused || slot.following.judging {
+            return;
+        }
+        let entries = (new.ctx.log().start_for_move(&moved.setup, &slot.me).iter())
+            .map(|e| e.encode())
+            .collect();
+        let job = Job::Moved {
+            old: slot.ctx.log().clone(),
+            to: moved.to,
+            entries,
+        };
+        let me = self.local_peer();
+        if self.judging.add(me, group, job)
+            && let Some(slot) = self.groups.get_mut(&group)
+        {
+            slot.following.judging = true;
         }
     }
 
@@ -283,7 +300,11 @@ impl Node {
         if let Some(asking) = slot.following.asking.take() {
             slot.following.tried.insert(asking.peer);
         }
-        let mut untried = able.iter().filter(|p| !slot.following.tried.contains(*p));
+        // During a wait, only a member that came since is asked.
+        let following = &slot.following;
+        let mut untried = (able.iter())
+            .filter(|p| !following.tried.contains(*p))
+            .filter(|p| !quiet || !following.quiet_for.contains(*p));
         let Some(peer) = untried.next().copied() else {
             // Every one that was asked gave nothing usable: each may answer in the next
             // round, after a while. One that is let in apart from the move and never added
@@ -426,12 +447,12 @@ impl Node {
                     return;
                 }
                 slot.following.rounds = 0;
-                // Run already: followed in [`Self::follow_move`].
-                if self.groups.contains_key(&to) {
+                slot.following.followed = true;
+                // Run already, another way: that is the new log core is told of.
+                if let Some(running) = self.groups.get(&to) {
+                    let log = running.ctx.log().clone();
+                    self.emit(NodeEvent::GroupMoved { from: group, log });
                     return;
-                }
-                if let Some(slot) = self.groups.get_mut(&group) {
-                    slot.following.followed = true;
                 }
                 tracing::info!("{group:?} moved to {to:?}: following it");
                 self.add_group(GroupSetup::Member((*new).clone()));
@@ -983,7 +1004,12 @@ mod tests {
             let cy = PeerId::random();
             member(n, x, cy, DeviceIdentity::generate().unwrap().public_key());
             n.follow_move(x);
-            assert!(n.groups[&x].following.asking.is_some());
+            let asked = n.groups[&x].following.asking.as_ref().map(|a| a.peer);
+            assert_eq!(
+                asked,
+                Some(cy),
+                "the member that came, not those asked in vain"
+            );
             waits
         })
         .await;
@@ -1023,6 +1049,7 @@ mod tests {
             n.follow_move(x);
             let other = n.groups[&x].following.judging && n.groups[&x].following.asking.is_none();
             n.on_judged(failed(true));
+            assert!(n.groups[&x].following.tried.contains(&ana_peer));
             n.follow_move(x);
             let asked = n.groups[&x].following.asking.as_ref().map(|a| a.peer);
             (other, asked == Some(cy))
@@ -1038,10 +1065,11 @@ mod tests {
     }
 
     /// A member that runs the new log another way (an invite to it accepted before its ask
-    /// was answered) tells core the group moved all the same, once; and once followed, the
-    /// new log is never asked for again, even when it stops running (left, say).
+    /// was answered) judges it as one a member sent, and tells core the group moved, once;
+    /// once followed, the new log is never asked for again, even when it stops running (left,
+    /// say). A log run another way that is not the group as it was is refused, as when sent.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_new_log_run_another_way_counts_as_followed() {
+    async fn a_new_log_run_another_way_is_judged_and_followed() {
         let (ana, bea, log) = group();
         let x = log.group_id();
         let (ana_node, _) = node(&ana, &log);
@@ -1057,18 +1085,29 @@ mod tests {
         })
         .await;
         bea_gets_the_move(&bea_node, x, ana_peer, ana.public_key(), moved).await;
-        let asked = inspect(&bea_node, move |n| {
+        inspect(&bea_node, move |n| {
+            let slot = n.groups.get_mut(&x).unwrap();
+            slot.following.asking = None;
             n.add_group(GroupSetup::Member(new));
             n.follow_moves();
+        })
+        .await;
+        let mut told = 0;
+        for _ in 0..200 {
+            let followed = inspect(&bea_node, move |n| n.groups[&x].following.followed).await;
+            if followed {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let asked = inspect(&bea_node, move |n| {
             n.follow_moves();
             n.drop_group(to);
-            n.groups.get_mut(&x).unwrap().following.asking = None;
             n.follow_moves();
             n.groups[&x].following.asking.is_some()
         })
         .await;
         assert!(!asked);
-        let mut told = 0;
         while let Ok(event) = bea_events.try_recv() {
             if let NodeEvent::GroupMoved { from, log } = event {
                 assert_eq!((from, log.group_id()), (x, to));
@@ -1077,6 +1116,50 @@ mod tests {
         }
         assert_eq!(told, 1);
         ana_node.shutdown().await.unwrap();
+        bea_node.shutdown().await.unwrap();
+    }
+
+    /// A first member that moves the group to a log that is not the group as it was, which a
+    /// member runs another way (an invite to it): refused all the same, and never told to
+    /// core as the group's new log.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_log_run_another_way_that_is_not_the_group_is_refused() {
+        let (ana, bea, mut log) = group();
+        let x = log.group_id();
+        let (bea_node, mut bea_events) = node(&bea, &log);
+        let mut other = GroupLog::create(&ana, "not friends", 10).unwrap();
+        other.raise_level(&ana, Level::CURRENT, 11).unwrap();
+        other.add(&ana, bea.public_key(), "Bea", 12).unwrap();
+        let [setup] = other.heads()[..] else {
+            unreachable!()
+        };
+        let body = Moved {
+            to: other.group_id(),
+            setup,
+        }
+        .body();
+        log.append(&ana, body, 13).unwrap();
+        bea_gets_the_move(&bea_node, x, PeerId::random(), ana.public_key(), log).await;
+        inspect(&bea_node, move |n| {
+            n.groups.get_mut(&x).unwrap().following.asking = None;
+            n.add_group(GroupSetup::Member(other));
+            n.follow_moves();
+        })
+        .await;
+        for _ in 0..200 {
+            let refused = inspect(&bea_node, move |n| n.groups[&x].following.refused).await;
+            if refused {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let (refused, followed) = inspect(&bea_node, move |n| {
+            let f = &n.groups[&x].following;
+            (f.refused, f.followed)
+        })
+        .await;
+        assert!(refused && !followed);
+        assert_eq!(moved_told(&mut bea_events), (None, Some(x)));
         bea_node.shutdown().await.unwrap();
     }
 }
