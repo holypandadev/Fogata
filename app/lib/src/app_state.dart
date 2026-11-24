@@ -1093,38 +1093,71 @@ class AppState extends ChangeNotifier {
 
   /// A group the window shows that is no longer listed because it moved to a fresh
   /// history (its first member moved it, and this device followed): what showed it shows
-  /// the group it moved to, its room too, without a word. One that did not move is left as
-  /// it was, to go as it always went.
+  /// the group it moved to, its room too, without a word. One that did not move (or whose
+  /// move cannot be read) is left as it was, to go as it always went.
   Future<void> _followMoves() async {
-    final open = {
-      nav.selectedGroup,
-      nav.membersGroup,
-      nav.groupSettings,
-      roomState.roomGroup,
-    }.whereType<String>().where((g) => contacts.group(g) == null);
+    final open =
+        {
+              nav.selectedGroup,
+              nav.membersGroup,
+              nav.groupSettings,
+              roomState.roomGroup,
+              call?.group,
+            }
+            .whereType<String>()
+            // A direct call's group is never listed among the groups.
+            .where(
+              (g) => contacts.group(g) == null && callState.callIn(g) == null,
+            )
+            .toList();
     for (final from in open) {
-      final to = await attempt(() => api.groupMovedTo(groupId: from));
-      if (to != null && contacts.group(to) != null) followGroup(from, to);
+      String? to;
+      try {
+        to = await api.groupMovedTo(groupId: from);
+      } catch (_) {
+        continue;
+      }
+      if (to == null) continue;
+      // Listed since the groups were read: read again.
+      if (contacts.group(to) == null) {
+        try {
+          contacts.groups = await api.groups();
+        } catch (_) {}
+      }
+      if (contacts.group(to) != null) followGroup(from, to);
     }
   }
 
   /// What the window shows of [from] shows [to] instead: the group moved to a fresh
-  /// history. In its room, this device goes into the new group's room.
+  /// history. A call in [from]'s room ends, as that room does, and this device goes into
+  /// [to]'s room with its microphone as it was; so does one that showed that room.
   @visibleForTesting
   void followGroup(String from, String to) {
     if (nav.selectedGroup == from) nav.selectedGroup = to;
     if (nav.membersGroup == from) nav.membersGroup = to;
     if (nav.groupSettings == from) nav.groupSettings = to;
-    if (roomState.roomGroup == from) {
-      final inRoom = nav.page == Screen.room;
-      roomState.roomGroup = null;
-      roomState.room = null;
-      roomState.dropPreviews();
+    final inCall = call?.group == from;
+    final mic = call?.mic;
+    if (inCall) _endCall();
+    if (roomState.roomGroup == from || inCall) {
+      final rejoin = inCall || nav.page == Screen.room;
+      if (roomState.roomGroup == from) {
+        roomState.roomGroup = null;
+        roomState.room = null;
+        roomState.dropPreviews();
+        _dropVideos();
+      }
       roomState.memories.remove(from);
-      if (inRoom) {
+      roomState.outgoing.remove(from);
+      contacts.paths.remove(from);
+      contacts.carriers.remove(from);
+      if (rejoin) {
+        if (mic != null) prefs.joinWithMic = mic;
         unawaited(openRoom(to));
       } else {
+        // The new group's voice rooms are its own: shown from its first one.
         roomState.roomGroup = to;
+        roomState.roomVoice = firstRoom;
       }
     }
     nav.changed();

@@ -136,6 +136,23 @@ void main() {
     expect(s.nav.page, Screen.members);
   });
 
+  test(
+    'a room shown, not entered, is shown from the new group\'s first one',
+    () {
+      final s = AppState('/nonexistent/fogata-history-fill-room')
+        ..contacts.groups = [_group(id: 'new')]
+        ..nav.page = Screen.members;
+      s.roomState
+        ..roomGroup = 'old'
+        ..roomVoice = 'ffffffffffffffff'
+        ..memories['old'] = RoomMemory(0);
+      s.followGroup('old', 'new');
+      expect(s.roomState.roomGroup, 'new');
+      expect(s.roomState.roomVoice, AppState.firstRoom);
+      expect(s.roomState.memories.containsKey('old'), isFalse);
+    },
+  );
+
   test('another group shown is left as it was', () {
     final s = AppState('/nonexistent/fogata-history-fill-other')
       ..contacts.groups = [_group(id: 'new'), _group(id: 'other')]
