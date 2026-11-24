@@ -704,13 +704,14 @@ impl GroupContext {
             .collect()
     }
 
-    /// The whole log in the log's encoding, in parts of at most
-    /// [`SYNC_BYTES`] (an entry longer than that goes alone): what a device let in is sent,
-    /// part after part.
+    /// The log a device new to it needs ([`GroupLog::hashes_to_offer`]: no spare entries
+    /// and none waiting for parents) in the log's encoding, in parts of at most
+    /// [`SYNC_BYTES`] (an entry longer than that goes alone): what a device let in or a
+    /// friend the group is offered to is sent, part after part.
     pub(crate) fn encoded_parts(&self) -> Vec<Vec<Vec<u8>>> {
         let mut parts: Vec<Vec<Vec<u8>>> = Vec::new();
         let mut size = 0;
-        for entry in self.encoded(self.hashes()) {
+        for entry in self.encoded(self.log.hashes_to_offer()) {
             match parts.last_mut() {
                 Some(part) if size + entry.len() <= SYNC_BYTES => {
                     size += entry.len();
@@ -1879,6 +1880,69 @@ mod tests {
         assert!(admin.log().spare().contains(&junk.hash()));
     }
 
+    /// A device new to the log, offered it or let in, is sent only what it needs: no
+    /// entries that change nothing and none waiting for parents. It gets the same group,
+    /// and every head new entries are signed on, its own join's too.
+    #[test]
+    fn a_device_new_to_the_log_gets_only_what_it_needs() {
+        let id = || Arc::new(DeviceIdentity::generate().unwrap());
+        let (ana, luis) = (id(), id());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, luis.public_key(), "luis", 2).unwrap();
+        // Luis writes a kind nobody knows: spare, it changes nothing.
+        let junk = Entry::sign(
+            &luis,
+            log.group_id(),
+            log.heads(),
+            3,
+            fogata_state::Body::Unknown {
+                kind: 200,
+                bytes: vec![7; 60_000],
+            },
+        );
+        log.insert(junk.clone()).unwrap();
+        // An entry signed on one that never came waits for it.
+        let unseen = Entry::sign(
+            &ana,
+            log.group_id(),
+            log.heads(),
+            4,
+            fogata_state::Body::Rename { name: "h".into() },
+        );
+        let waits = Entry::sign(
+            &ana,
+            log.group_id(),
+            vec![unseen.hash()],
+            5,
+            fogata_state::Body::Rename { name: "i".into() },
+        );
+        log.insert(waits.clone()).unwrap();
+        log.append(&luis, fogata_state::Body::Rename { name: "j".into() }, 6)
+            .unwrap();
+        assert!(log.spare().contains(&junk.hash()));
+        assert!(log.waiting().contains(&waits.hash()));
+
+        let parts = ctx(&ana, &log).encoded_parts();
+        let sent: Vec<Entry> = parts
+            .concat()
+            .iter()
+            .map(|bytes| Entry::decode(bytes).unwrap())
+            .collect();
+        let hashes: Vec<EntryHash> = sent.iter().map(Entry::hash).collect();
+        assert!(!hashes.contains(&junk.hash()));
+        assert!(!hashes.contains(&waits.hash()));
+        assert_eq!(hashes, log.hashes_to_offer());
+
+        let mut new = GroupLog::empty(log.group_id());
+        new.insert_all(sent);
+        assert!(new.waiting().is_empty());
+        assert_eq!(new.hashes_to_offer(), log.hashes_to_offer());
+        assert_eq!(new.needed_heads(), log.needed_heads());
+        assert_eq!(new.heads(), log.heads());
+        assert_eq!(new.state().name, "j");
+        assert!(new.state().is_member(&luis.public_key()));
+    }
+
     #[test]
     fn a_log_larger_than_a_message_syncs_in_parts() {
         let ana = Arc::new(DeviceIdentity::generate().unwrap());
@@ -1923,6 +1987,7 @@ mod tests {
                 .all(|p| p.iter().map(Vec::len).sum::<usize>() <= SYNC_BYTES)
         );
         assert_eq!(parts.concat(), at_ana.encoded(at_ana.hashes()));
+        assert_eq!(at_ana.hashes(), log.hashes_to_offer());
     }
 
     /// A manager removed or demoted keeps the log with the invites open then, and could

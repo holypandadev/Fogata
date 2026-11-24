@@ -256,7 +256,10 @@ after it came. So between trims a log holds at most what the members' budgets br
 seconds on top (3.6). A device checks, before letting them go, that the group comes out the
 same without them, and keeps them otherwise. Devices compare the heads of the entries that
 are not spare to tell whether they need to sync, and send each other only those (and
-waiting ones); spare entries reach the members when they are written. One that comes to be
+waiting ones); spare entries reach the members when they are written. A device new to the
+log, a friend it is offered to or a device let in, is sent only the entries that are not
+spare (`GroupLog::hashes_to_offer`): waiting ones would only wait there too, and come with
+the next sync once their parents do. One that comes to be
 needed (an entry of a later version signed on it, say, or one of a run that an entry of
 another member, placed before it, ended) is needed on the device that has it, which then
 sends it again, and it stays.
