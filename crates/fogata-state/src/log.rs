@@ -1198,17 +1198,31 @@ impl GroupLog {
 
     /// Hashes of the entries to send a device that has none of the log yet, a friend it is
     /// offered to or a device let in: those of the common order that are not spare
-    /// ([`Self::spare`]), in it. Spare entries change nothing there. Entries waiting for
-    /// parents would only wait there too, in its room for them, until the parents came,
-    /// and they come with the next sync ([`Self::hashes_to_send`]) along with their parents.
-    /// The device gets the same group and the same [`Self::needed_heads`] as this one.
+    /// ([`Self::spare`]), and the `Level` entries this copy judged among the spare ones, with
+    /// what they are signed on, in the order. A judged `Level` entry orders the whole log at
+    /// the level it names even past its author's run, so a device without it could order
+    /// the log otherwise; other spare entries change nothing there. Entries waiting for
+    /// parents would only wait there too, in its room for them, until the parents came, and
+    /// they come with the next sync ([`Self::hashes_to_send`]) along with their parents. The
+    /// device gets the same order, the same entries applied and the same
+    /// [`Self::needed_heads`] as this one; joins nobody let in yet, which are spare, reach it
+    /// with the welcome that lets their device in.
     pub fn hashes_to_offer(&self) -> Vec<EntryHash> {
         let needed = self.needed_cache();
-        self.full()
-            .order
-            .hashes
+        let order = &self.full().order.hashes;
+        let (mut keep, mut named) = (HashSet::new(), HashSet::new());
+        for hash in order.iter().rev() {
+            let entry = &self.entries[hash];
+            let orders =
+                matches!(entry.body, Body::Level { level } if Level::numbered(level).is_some());
+            if needed.hashes.contains(hash) || orders || named.contains(hash) {
+                keep.insert(*hash);
+                named.extend(entry.parents.iter().copied());
+            }
+        }
+        order
             .iter()
-            .filter(|h| needed.hashes.contains(*h))
+            .filter(|h| keep.contains(*h))
             .copied()
             .collect()
     }
@@ -3201,6 +3215,48 @@ mod tests {
         log.append(&ana.id, Body::SetManagers { first: Some(2) }, 4)
             .unwrap();
         (log, ana, bea, carlos)
+    }
+
+    /// A device new to the log is sent a raise past its author's run with the rest, though
+    /// it is spare: the log is ordered at the level it names, and the device orders it the
+    /// same and applies the same.
+    #[test]
+    fn a_raise_past_its_run_is_offered_with_the_log() {
+        let (base, ana, _, _) = two_managers();
+        let run = base.full().budget.run_of(&ana.key()).entries + 1;
+        let (group_id, heads) = (base.group_id(), base.heads());
+        let found = (0..64u64).find_map(|t| {
+            let mut log = base.clone();
+            log.set_run_room(run, RUN_ROOM.bytes);
+            let rename = Body::Rename {
+                name: "apart".into(),
+            };
+            let first = Entry::sign(&ana.id, group_id, heads.clone(), 20 + t, rename);
+            let raise = Entry::sign(
+                &ana.id,
+                group_id,
+                heads.clone(),
+                100 + t,
+                Body::Level { level: 3 },
+            );
+            log.insert_all([first, raise.clone()]);
+            let past_run = (raise.hash(), crate::budget::PAST_RUN);
+            log.state()
+                .rejected
+                .contains(&past_run)
+                .then_some((log, raise))
+        });
+        let (log, raise) = found.expect("the raise goes past Ana's run");
+        assert!(log.spare().contains(&raise.hash()));
+        let offered = log.hashes_to_offer();
+        assert!(offered.contains(&raise.hash()));
+        let mut new = GroupLog::empty(group_id);
+        new.set_run_room(run, RUN_ROOM.bytes);
+        new.insert_all(offered.iter().map(|h| log.entries[h].clone()));
+        assert!(new.waiting().is_empty());
+        assert_eq!(new.ordered(), log.ordered());
+        assert_eq!(new.state().applied, log.state().applied);
+        assert_eq!(new.needed_heads(), log.needed_heads());
     }
 
     #[test]
