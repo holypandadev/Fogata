@@ -828,6 +828,70 @@ fn moves_forged_before_the_raise_count_for_nothing() {
     }
 }
 
+/// The first member moves on a log that holds a change of its own, written before a flood
+/// it had not seen yet reached it: once the rest of the flood comes, the common order puts
+/// that change past the ceiling. The move still counts, on the first member's copy and on
+/// one that has everything, whatever came first: it is the one entry that gets the group
+/// out of a full log, so it may be signed on what the order put past the ceiling.
+#[test]
+fn a_move_on_a_change_the_flood_pushed_past_the_ceiling_counts() {
+    let (base, ana, laptop, bea) = group(Level::Five);
+    let (group_id, heads) = (base.group_id(), base.heads());
+    // Bea and Ana's laptop flood, each on the one before, from the heads Ana signs on too.
+    let mut flood = Vec::new();
+    let mut parents = heads.clone();
+    for n in 0..u64::from(SMALL) * 2 {
+        let who = if n % 2 == 0 { &bea } else { &laptop };
+        let body = Body::Rename {
+            name: format!("flood {n}"),
+        };
+        let entry = Entry::sign(&who.id, group_id, parents.clone(), 200 + n, body);
+        parents = vec![entry.hash()];
+        flood.push(entry);
+    }
+    // Ana renames on the heads before the flood; the order puts her rename past the ceiling
+    // once the whole flood is in (tried until it does).
+    let found = (0..64u64).find_map(|t| {
+        let rename = Entry::sign(
+            &ana.id,
+            group_id,
+            heads.clone(),
+            10 + t,
+            Body::Rename {
+                name: format!("ours {t}"),
+            },
+        );
+        let mut all = base.clone();
+        all.insert_all(flood.iter().cloned().chain([rename.clone()]));
+        all.full()
+            .budget
+            .over
+            .contains(&rename.hash())
+            .then_some(rename)
+    });
+    let rename = found.expect("the flood puts Ana's rename past the ceiling");
+    // Ana's copy: her rename, and the flood up to where she sees the log near full.
+    let mut anas = base.clone();
+    anas.insert(rename.clone()).unwrap();
+    let seen = (SMALL as usize) / 2;
+    anas.insert_all(flood[..seen].iter().cloned());
+    assert!(!anas.full().budget.over.contains(&rename.hash()));
+    let new = anas.new_log_for_move(&ana.id, 5_000).unwrap();
+    let moved = anas.move_to(&ana.id, &new, 5_001).unwrap();
+    assert_eq!(anas.moved().map(|(h, _)| h), Some(moved.hash()));
+    // Then the rest of the flood reaches her, and a copy gets everything at once.
+    anas.insert_all(flood[seen..].iter().cloned());
+    let mut all = base.clone();
+    let mut entries: Vec<Entry> = anas.entries().cloned().collect();
+    entries.sort_by_key(Entry::hash);
+    all.insert_all(entries);
+    for copy in [&anas, &all] {
+        assert!(copy.full().budget.over.contains(&rename.hash()));
+        assert_eq!(copy.moved().map(|(h, _)| h), Some(moved.hash()));
+        copy.follows(&new).unwrap();
+    }
+}
+
 /// A first member that left cannot move the group afterwards on what it saw before, even
 /// where the order puts that move before its leave: what the others wrote since stays.
 #[test]

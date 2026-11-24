@@ -496,7 +496,11 @@ ordered at five, whatever level its group is at: `GroupState::log_level`), and n
   ceiling, still applies. The first `Level` entry in the order to name a level, and the
   first move by a device that did not leave, go 64 entries and 64 KiB past that (`RESERVE`), for themselves alone (what
   they bring in only into the slack): whatever filled the slack, a full group can still be raised
-  and moved, and the removals it still needs are written in the new log. A later `Level`
+  and moved, and the removals it still needs are written in the new log. Like a removal,
+  the first move may be signed on an entry of its author's that the order puts past the
+  ceiling: a change the first member wrote before a flood it had not seen reached it comes
+  past the ceiling once the rest of the flood arrives, and the move made on it still counts
+  on every copy. A later `Level`
   entry naming no higher level is held like the rest, so that a manager cannot fill the log
   with them.
 - *`Moved`*: the first member on the ladder may write one, naming a new log, judged on the
@@ -569,8 +573,9 @@ the raise, a leave on entries part of no run, adds and their removals filling th
 moves forged on entries from before the raise, a removal or room rule written apart from the
 move, entries the order puts before a move after members followed, a move by a first member
 that left, a raise that does not apply, a raise past its author's run (and one before five,
-which orders as it always did), a removal on its author's entry past the ceiling, a full log
-with more heads than an entry is signed on).
+which orders as it always did), a removal on its author's entry past the ceiling, a move on
+its author's change that the rest of a flood puts past the ceiling, a full log with more heads
+than an entry is signed on).
 
 *What an older copy sees.* As for four: a copy of level four refuses the `Level` entry naming
 five, waits on everything signed after it, and is told to update; a release that brings level

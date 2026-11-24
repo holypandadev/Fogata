@@ -389,16 +389,19 @@ impl Budget {
         }
         let at_five = self.level >= Level::Five;
         let gets_out = at_five && self.gets_out(entry, kind);
+        let first_move = at_five && self.takes_reserve(log, entry);
         // One signed on an entry of its own author past its run is past it too; one signed
         // on one past the ceiling is past the ceiling, but for an entry that gets the group
-        // out, which brings that one in (see the module).
+        // out, or the move, which bring that one in (see the module): the first member's
+        // own change, written before a flood it had not seen, may come past the ceiling
+        // once the rest of the flood arrives, and its move signed on it counts all the same.
         for p in &entry.parents {
             if self.over.contains(p) && log.entries.get(p).is_some_and(|e| e.author == entry.author)
             {
                 if !self.past_ceiling.contains(p) {
                     return Err(PAST_RUN);
                 }
-                if !gets_out {
+                if !gets_out && !first_move {
                     return Err(PAST_CEILING);
                 }
             }
@@ -417,7 +420,6 @@ impl Budget {
                 entries: SLACK.entries + RESERVE.entries,
                 bytes: SLACK.bytes + RESERVE.bytes,
             };
-            let first_move = self.takes_reserve(log, entry);
             let held = if first_move || (gets_out && kind != Kind::Out) {
                 past(slack_and_reserve) || (!brings.is_empty() && past(SLACK))
             } else if gets_out {
