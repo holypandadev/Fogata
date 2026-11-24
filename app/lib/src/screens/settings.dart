@@ -1032,10 +1032,7 @@ class _Column extends StatelessWidget {
               spacing: 8,
               runSpacing: 4,
               crossAxisAlignment: WrapCrossAlignment.center,
-              children: [
-                Text('Fogata $appVersion', style: tx(c.fg3, size: 12)),
-                const _PreReleasePill(),
-              ],
+              children: const [_PreReleasePill()],
             ),
           ),
         ],
@@ -1044,24 +1041,34 @@ class _Column extends StatelessWidget {
   }
 }
 
-/// The red label beside the version: this copy is a pre-release.
+/// This version of Fogata, in the red label of a pre-release: the version names its beta,
+/// and the label says it is one (its tooltip and what a screen reader says, too). One line,
+/// so the settings' column keeps all its parts in view in the smallest window.
 class _PreReleasePill extends StatelessWidget {
   const _PreReleasePill();
 
   @override
   Widget build(BuildContext context) {
     final c = context.fg;
-    return Container(
-      key: const ValueKey('pre-release'),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
-      decoration: BoxDecoration(
-        color: c.redSoft,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: c.redLine),
-      ),
-      child: Text(
-        l10n.settingsPreRelease.toUpperCase(),
-        style: tx(c.red, size: 10.5, weight: w600, height: 1.45, spacing: .63),
+    final version = 'Fogata $appVersion';
+    return Tooltip(
+      message: l10n.settingsPreRelease,
+      child: Semantics(
+        label: '$version, ${l10n.settingsPreRelease}',
+        excludeSemantics: true,
+        child: Container(
+          key: const ValueKey('pre-release'),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+          decoration: BoxDecoration(
+            color: c.redSoft,
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(color: c.redLine),
+          ),
+          child: Text(
+            version,
+            style: tx(c.red, size: 11, weight: w600, height: 1.45),
+          ),
+        ),
       ),
     );
   }
