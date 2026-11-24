@@ -25,73 +25,81 @@ namespace flutter_webrtc_plugin {
 namespace {
 
 #ifdef __linux__
+// Fogata: a V4L2 string field of `size` bytes, which a driver may fill to the end.
+static std::string Field(const __u8* field, size_t size) {
+  const char* text = reinterpret_cast<const char*>(field);
+  return std::string(text, strnlen(text, size));
+}
+
+// Fogata: whether the node `cap` describes captures video and is the camera libwebrtc
+// listed as `name` with `unique_id` (its V4L2 bus_info, or empty where the driver gives
+// none: then the card name is the id, as libwebrtc takes it).
+static bool SameCamera(const v4l2_capability& cap, const std::string& unique_id,
+                       const std::string& name) {
+  const __u32 caps = (cap.capabilities & V4L2_CAP_DEVICE_CAPS) ? cap.device_caps
+                                                                : cap.capabilities;
+  if (!(caps & V4L2_CAP_VIDEO_CAPTURE)) return false;
+  return !unique_id.empty()
+             ? unique_id == Field(cap.bus_info, sizeof(cap.bus_info))
+             : name == Field(cap.card, sizeof(cap.card));
+}
+
 // Fogata: whether another process holds the camera libwebrtc listed as `name` with
-// `unique_id` (its V4L2 bus_info, or empty where the driver gives none: then the card
-// name is the id). A camera streamed by another process refuses a second opener's
+// `unique_id`. A camera streamed by another process refuses a second opener's
 // VIDIOC_S_FMT with EBUSY (or the open itself), which libwebrtc reports only as a
-// failure. Looks only; the format set is the one already there. `why` says what
-// answered, for the diagnostics log.
-static bool CameraBusy(const char* unique_id, const char* name,
+// failure. Every capture node of that camera is looked at (one USB camera can have
+// several, an infrared one beside it). Looks only, on this failure's path: the format
+// set is the one already there; opening a node may wake its device. `why` says what
+// answered, for the day's log.
+static bool CameraBusy(const std::string& unique_id, const std::string& name,
                        std::string* why) {
-  const std::string id = unique_id != nullptr ? unique_id : "";
-  const std::string card = name != nullptr ? name : "";
+  if (unique_id.empty() && name.empty()) return false;
   for (int n = 0; n < 64; n++) {
     const std::string path = "/dev/video" + std::to_string(n);
+    v4l2_capability cap;
+    memset(&cap, 0, sizeof(cap));
     const int fd = open(path.c_str(), O_RDWR | O_NONBLOCK, 0);
     if (fd < 0) {
-      // Not this one's to tell unless it is the camera: look at it read-only.
+      // Held so that it does not open: told only if it is that camera, read-only.
       if (errno != EBUSY) continue;
-      const int info = open(path.c_str(), O_RDONLY, 0);
+      const int info = open(path.c_str(), O_RDONLY | O_NONBLOCK, 0);
       if (info < 0) continue;
-      v4l2_capability cap;
-      memset(&cap, 0, sizeof(cap));
-      const bool ours =
-          ioctl(info, VIDIOC_QUERYCAP, &cap) == 0 &&
-          (cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) &&
-          (!id.empty()
-               ? id == reinterpret_cast<const char*>(cap.bus_info)
-               : card == reinterpret_cast<const char*>(cap.card));
+      const bool same = ioctl(info, VIDIOC_QUERYCAP, &cap) == 0 &&
+                        SameCamera(cap, unique_id, name);
       close(info);
-      if (ours) {
-        *why = path + ": open: " + strerror(EBUSY);
+      if (same) {
+        *why = path + ": open: Device or resource busy";
         return true;
       }
       continue;
     }
-    v4l2_capability cap;
-    memset(&cap, 0, sizeof(cap));
-    bool ours = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
-                (cap.device_caps & V4L2_CAP_VIDEO_CAPTURE);
-    if (ours) {
-      ours = !id.empty()
-                 ? id == reinterpret_cast<const char*>(cap.bus_info)
-                 : card == reinterpret_cast<const char*>(cap.card);
-    }
-    if (!ours) {
-      close(fd);
-      continue;
-    }
     bool busy = false;
-    v4l2_format format;
-    memset(&format, 0, sizeof(format));
-    format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-    if (ioctl(fd, VIDIOC_G_FMT, &format) == 0 &&
-        ioctl(fd, VIDIOC_S_FMT, &format) < 0 && errno == EBUSY) {
-      *why = path + ": VIDIOC_S_FMT: " + strerror(EBUSY);
-      busy = true;
+    if (ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 && SameCamera(cap, unique_id, name)) {
+      v4l2_format format;
+      memset(&format, 0, sizeof(format));
+      format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      if (ioctl(fd, VIDIOC_G_FMT, &format) == 0 &&
+          ioctl(fd, VIDIOC_S_FMT, &format) < 0 && errno == EBUSY) {
+        *why = path + ": VIDIOC_S_FMT: Device or resource busy";
+        busy = true;
+      }
     }
     close(fd);
-    return busy;
+    if (busy) return true;
   }
   return false;
 }
 
 // Fogata: the error for a camera that did not open or start: another application's
-// hold on it when it can be told (cameras reached directly only), else `plain`.
-static std::string CameraOpenError(bool direct, const char* unique_id,
-                                   const char* name, const char* plain) {
+// hold on it when it can be told (cameras reached directly only), the camera asked for
+// first, then the one tried last; else `plain`.
+static std::string CameraOpenError(bool direct, const std::string& asked_name,
+                                   const std::string& asked_guid,
+                                   const char* tried_guid, const char* tried_name,
+                                   const char* plain) {
   std::string why;
-  if (direct && CameraBusy(unique_id, name, &why)) {
+  if (direct && (CameraBusy(asked_guid, asked_name, &why) ||
+                 CameraBusy(tried_guid, tried_name, &why))) {
     return "NotReadableError: another application is using the camera "
            "(fogataCameraBusy): " +
            why;
@@ -514,6 +522,9 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
   }
 #endif
 
+#ifdef __linux__
+  std::string asked_name, asked_guid;
+#endif
   for (int i = 0; i < nb_video_devices; i++) {
     if (base_->video_device_->GetDeviceName(i, strNameUTF8, 256, strGuidUTF8,
                                             256) != 0) {
@@ -522,6 +533,11 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
     if (sourceId != "" &&
         sourceId ==
             SanitizeDeviceIdFromVideoBuffers(strNameUTF8, strGuidUTF8)) {
+#ifdef __linux__
+      // Fogata: the camera asked for, the one a failure is told of.
+      asked_name = strNameUTF8;
+      asked_guid = strGuidUTF8;
+#endif
       video_capturer =
           base_->video_device_->Create(strNameUTF8, i, width, height, fps);
       break;
@@ -560,9 +576,10 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
     // Fogata: busy, if another application holds it (cameras reached directly).
     if (nb_video_devices > 0) {
       *error = CameraOpenError(
-          base_->video_device_->GetCameraAccess() ==
-              RTCVideoDevice::kCameraAccessDirect,
-          strGuidUTF8, strNameUTF8, error->c_str());
+          !TestCamera::Wanted() &&
+              base_->video_device_->GetCameraAccess() ==
+                  RTCVideoDevice::kCameraAccessDirect,
+          asked_name, asked_guid, strGuidUTF8, strNameUTF8, error->c_str());
     }
 #endif
     return false;
@@ -578,9 +595,10 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
     if (nb_video_devices > 0) {
       video_capturer = scoped_refptr<RTCVideoCapturer>();
       *error = CameraOpenError(
-          base_->video_device_->GetCameraAccess() ==
-              RTCVideoDevice::kCameraAccessDirect,
-          strGuidUTF8, strNameUTF8, error->c_str());
+          !TestCamera::Wanted() &&
+              base_->video_device_->GetCameraAccess() ==
+                  RTCVideoDevice::kCameraAccessDirect,
+          asked_name, asked_guid, strGuidUTF8, strNameUTF8, error->c_str());
     }
 #endif
     return false;
