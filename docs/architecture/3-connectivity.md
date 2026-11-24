@@ -509,16 +509,27 @@ and they are nobody else's business. A friend or member at the same place but be
 router (two routers at home, one public address that does not lead back inside) still needs
 them, so they travel sealed inside a name, `/dns4/<hex>.fogata/udp/<port>/quic-v1`, that the
 public DHT keeps. There is one name for friends, sealed under a key from the device's friend
-rendezvous secret, and one per group (at most six names in all), under a key from the group's
-current rendezvous secret. An announcement always carries six: the ones not needed (and all
-six when the device has no local address) are random bytes as long as a real one, which
-open to nothing, so DHT nodes cannot count a device's groups. A device with a profile adds a
-seventh, longer name that proves to its friends the announcement is its own (5b); it does
-so with no friends as well, since the profile holds its friend secret from the start, so the
-seventh name does not tell who has friends. Each holds up to three local IPv4 addresses, encrypted and
-authenticated with an 8-byte nonce and an 8-byte tag (`seal_short`, HMAC-SHA256), so it fits
-in one DNS label. The names go only into DHT announcements, never into identify or to other
-peers. DHT nodes see random hex; a device that knows one of the
+rendezvous secret; up to five for its groups, under a key from each group's current
+rendezvous secret (a device in more groups seals for the first five); and up to five for
+the friend link and code shown here, the ones used here and an account move's code, each
+under a key from its own secret, which the device at its other end knows too (it is not a
+friend yet, and may be the one behind the other router; anyone who saw the link or code can
+open that name). A link used here opens only the names of the device that made it; a device
+that shows a link or code, or types a code, does not know who is at the other end, so it
+opens what anyone who saw it announces there, and dials those addresses only if they are on
+its own network, at a port of the devices' range. A group never loses its name to a link.
+An announcement always carries eleven: the ones not needed (and all eleven when the device
+has no local address) are random bytes as long as a real one, which open to nothing, so DHT
+nodes cannot count a device's groups. A device with a profile adds a twelfth, longer name
+that proves to its friends the announcement is its own (5b); it does so with no friends as
+well, since the profile holds its friend secret from the start, so the twelfth name does not
+tell who has friends. The DHT announces twenty addresses of a device at most, the oldest
+going first: the twelve names leave eight for its public ones (a warning in the log should
+there be more). Addresses opened with a key that went (a link that expired or was used) are
+not dialled again. Each name holds up to three local IPv4
+addresses, encrypted and authenticated with an 8-byte nonce and an 8-byte tag (`seal_short`,
+HMAC-SHA256), so it fits in one DNS label. The names go only into DHT announcements, never
+into identify or to other peers. DHT nodes see random hex; a device that knows one of the
 secrets opens the name when it dials that peer, and a name is never looked up in DNS. The
 port is not sealed, so a DHT node that keeps an announcement could change it to point dials
 at another service of a local address: a name opens only with a port of the devices' range
@@ -683,6 +694,7 @@ default program does not know any of them).
 | two routers at home, one public address without hairpin, no firewall on the devices | The device behind the inner router opens the other's sealed name and connects to its local address. |
 | the same, the outer device's firewall letting its port in | Connected the same way. |
 | the same, the outer device's firewall letting nothing in | No contact (known limit; the app shows the firewall command). |
+| the same two routers, no firewall: a friend link shown by either device and used by the other (`friends-link-two-routers`, the inner one shows it; `-back`, the outer one), and a code the same way (`friends-code-two-routers`, the outer one shows it; `-back`, the inner one) | The request arrives and both are friends, meeting at a local address: the inner device opens the outer one's name sealed under the link's or code's secret (or, for a link it uses, dials the local address the link holds). |
 | a public device told false addresses of its own: by three peers behind one public address (two agreeing), by two more at addresses of their own in one /16, agreeing, and by three on three networks that connect by themselves, agreeing (`fake-observed`) | It takes and announces only its real address, which the three DHT nodes it dialled report from three networks: strangers' reports count from three different networks (/16, /48), and only those of strangers it dialled. |
 | a public device flooded with 512 incoming connections from 16 addresses (64 peers, as one peer gets 8 in) that ask it something cheap every half minute, and a member behind a symmetric NAT (`inbound-flood`) | The member comes in, one of the stranger's connections closing for it, and its message arrives. |
 | a public device sent silent TCP connections from 8 addresses, and a device behind a router sent them from one local address, each as fast as they close, each device limited to 2048 open files (`silent-flood`) | Each holds at most a few dozen sockets more than usual (the local one used up all 2048, and could no longer write its files, when the local network had no limit), and its member's message arrives. |

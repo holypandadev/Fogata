@@ -162,6 +162,30 @@ pub(super) struct SoughtCode {
     request_secret: FriendSecret,
 }
 
+#[cfg(test)]
+impl ShownCode {
+    /// A code shown here that never expires, for tests elsewhere in the node.
+    pub(super) fn lasting(secrets: CodeSecrets) -> Self {
+        Self {
+            secrets,
+            expires_ms: u64::MAX,
+            failed: 0,
+        }
+    }
+}
+
+#[cfg(test)]
+impl SoughtCode {
+    /// A code typed here that never expires, for tests elsewhere in the node.
+    pub(super) fn lasting(secrets: CodeSecrets) -> Self {
+        Self {
+            secrets,
+            expires_ms: u64::MAX,
+            request_secret: FriendSecret::generate().unwrap(),
+        }
+    }
+}
+
 pub(super) struct FriendContext {
     pub(super) book: FriendBook,
     /// This device's animations of its picture and banner, set since it started.
@@ -319,17 +343,33 @@ impl FriendContext {
         self.book.friends.keys().any(|d| !self.is_online(d)) || !self.book.departing.is_empty()
     }
 
+    /// The rendezvous secrets of the friend link or code shown here and of the one used here:
+    /// the two devices at their ends both know them. With each, the one peer it is for when
+    /// that is known: the maker of a link used here.
+    pub(super) fn invite_secrets(&self) -> Vec<([u8; 32], Option<PeerId>)> {
+        let mut out = Vec::new();
+        out.extend(self.link.iter().map(|l| (l.rendezvous(), None)));
+        out.extend(self.code.iter().map(|c| (c.secrets.rendezvous(), None)));
+        out.extend(
+            self.sought_link
+                .iter()
+                .map(|l| (l.rendezvous(), PeerId::from_bytes(&l.peer).ok())),
+        );
+        out.extend(
+            self.sought_code
+                .iter()
+                .map(|c| (c.secrets.rendezvous(), None)),
+        );
+        out
+    }
+
     /// Secrets to announce under besides our own: the link or code shown here or used here;
     /// and the secrets shared with each friend that does not have our current friend secret
     /// yet (an acceptance or a new secret to deliver) and each device a request made here
     /// went to (its acceptance to receive), which they look up. Never a friend's own secret:
     /// its other friends know it, and would find this device there.
     pub(super) fn extra_announcements(&mut self, identity: &DeviceIdentity) -> Vec<[u8; 32]> {
-        let mut out = Vec::new();
-        out.extend(self.link.iter().map(FriendLink::rendezvous));
-        out.extend(self.code.iter().map(|c| c.secrets.rendezvous()));
-        out.extend(self.sought_link.iter().map(FriendLink::rendezvous));
-        out.extend(self.sought_code.iter().map(|c| c.secrets.rendezvous()));
+        let mut out: Vec<[u8; 32]> = self.invite_secrets().into_iter().map(|(s, _)| s).collect();
         let waiting: Vec<DevicePublicKey> = self
             .book
             .friends
@@ -2100,6 +2140,46 @@ mod tests {
                 "/ip4/192.168.2.123/udp/31000/quic-v1"
             ]
         );
+    }
+
+    /// A link shown on one device and used on another give both ends the same key for their
+    /// local addresses, the user's tied to the link's maker; a code shown on one and typed on
+    /// the other too, made a few seconds apart.
+    #[test]
+    fn a_link_or_code_gives_both_ends_the_same_local_address_key() {
+        let ana = DeviceIdentity::generate().unwrap();
+        let bea = DeviceIdentity::generate().unwrap();
+        let mut maker = FriendContext::new(FriendBook::new(&bea, "Bea", 1).unwrap());
+        let mut user = FriendContext::new(FriendBook::new(&ana, "Ana", 1).unwrap());
+        let peer = PeerId::random();
+        let link =
+            FriendLink::new(bea.public_key(), "Bea", peer.to_bytes(), Vec::new(), 1).unwrap();
+        maker.link = Some(link.clone());
+        user.sought_link = Some(FriendLink::decode(&link.encode()).unwrap());
+        assert_eq!(maker.invite_secrets(), vec![(link.rendezvous(), None)]);
+        assert_eq!(user.invite_secrets(), vec![(link.rendezvous(), Some(peer))]);
+
+        let at = 1_800_000_000;
+        let code = fogata_friends::FriendCode::generate(at).unwrap();
+        let typed = fogata_friends::FriendCode::parse(&code.to_string()).unwrap();
+        let (mut shower, mut typer) = (
+            FriendContext::new(FriendBook::new(&bea, "Bea", 1).unwrap()),
+            FriendContext::new(FriendBook::new(&ana, "Ana", 1).unwrap()),
+        );
+        shower.code = Some(ShownCode {
+            secrets: CodeSecrets::stretch(&code, at),
+            expires_ms: u64::MAX,
+            failed: 0,
+        });
+        typer.sought_code = Some(SoughtCode {
+            secrets: CodeSecrets::stretch(&typed, at + 5),
+            expires_ms: u64::MAX,
+            request_secret: FriendSecret::generate().unwrap(),
+        });
+        let shown = shower.invite_secrets();
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown, typer.invite_secrets());
+        assert_eq!(shown[0].1, None);
     }
 
     /// A friend that stays away is looked up less and less often, up to once an hour; one
