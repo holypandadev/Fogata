@@ -489,15 +489,20 @@ reported too counts as this device's own when a candidate behind it is taken for
 its old sessions (rested at once, not punched): strangers on two networks could otherwise
 make it give up on another member.
 
-The group secret here is that of a key epoch (5.4). A member announces under the two newest
-it holds, so members who missed one key change still find it, and looks up two more before
-those, each for two weeks after the key that replaced it began: a member that missed several
-key changes announces only under old ones, and is found there and sent the log. Nothing is
-announced under those older ones, so a removed device that knows them does not see the
-members' announcements; one that announces there during those two weeks learns the address
-of whoever dials it. A key whose successor says it began more than a day after this device's
-clock is not looked up at all: that time is its author's to choose, and one near the end of
-all time would keep it looked up for good.
+The group secret here is that of a key epoch (5.4). A member announces under and looks up
+the two newest it holds, so members who missed one key change still find it, and two more
+before those, each for two weeks after the key that replaced it began: a member that missed
+several key changes announces and looks only under old ones, and is found there and sent the
+log. Both ends must find each other there, since behind NATs that filter by address and port
+a dial from one end alone never gets through: a member only looked for under the old key,
+never announced there, was never reached (the lab's `group-behind`). So a device removed two
+or three key changes ago that kept those keys sees the members' announcements there during
+those two weeks, as the device removed by the latest change sees them under the previous key.
+It could already learn their addresses by announcing there itself, as members dial whoever
+they find there; it still cannot prove itself a member (below). A key whose successor says it
+began more than a day after this device's clock is neither announced under nor looked up:
+that time is its author's to choose, and one near the end of all time would keep it in use
+for good.
 
 Private LAN addresses are never published in the clear: public DHT nodes drop them anyway,
 and they are nobody else's business. A friend or member at the same place but behind another
