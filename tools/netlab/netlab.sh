@@ -47,7 +47,7 @@ BIN_A=${OLD_A:-$BIN}
 BIN_B=${OLD_B:-$BIN}
 SCENARIOS=(selftest cone-cone cone-cone-member cone-symmetric cone-symmetric-member
     symmetric-symmetric-member member-lost-direct home-two-routers home-two-routers-firewall
-    home-two-routers-closed group-join group-move friends-link friends-code friends-link-two-routers
+    home-two-routers-closed group-join group-behind group-move friends-link friends-code friends-link-two-routers
     friends-link-two-routers-back friends-code-two-routers friends-code-two-routers-back
     friends-later friends-later-code
     friends-remove friends-ex-mutual room-files network-check network-check-negative fake-observed inbound-flood
@@ -869,6 +869,56 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         fi
         echo "result: FAIL   logs: $WORK"
         exit 1 ;;
+    group-behind)
+        # A, B and C, each behind a cone NAT, are in a group with D and E. While B and C are
+        # away, A removes D and E, so the group changes its key twice, and B and C have only
+        # the key from before both. When the three come back, A must still reach them: the
+        # messages A and B send then reach the other two.
+        nat_host A 203.0.113.21 cone
+        nat_host B 203.0.113.22 cone
+        nat_host C 203.0.113.23 cone
+        for device in A B C D E; do
+            "$BIN" --data-dir "$WORK/data-$device" profile --name "$device" > /dev/null
+        done
+        "$BIN" --data-dir "$WORK/data-A" group create club > /dev/null
+        for device in B C D E; do
+            key=$("$BIN" --data-dir "$WORK/data-$device" id | awk '/Device key/ {print $3}')
+            "$BIN" --data-dir "$WORK/data-A" group add club "$key" --nick "$device" > /dev/null
+        done
+        for device in B C; do
+            mkdir -p "$WORK/data-$device/logs"
+            cp "$WORK/data-A/groups.json" "$WORK/data-$device/"
+            cp "$WORK/data-A/logs/"*.log "$WORK/data-$device/logs/"
+        done
+        for device in D E; do
+            "$BIN" --data-dir "$WORK/data-A" group remove club "$(short_id "$device")" > /dev/null
+        done
+        (sleep 90; echo "hello from A"; sleep 40) |
+            ip netns exec A timeout 140 "$BIN" --data-dir "$WORK/data-A" chat club --nick A \
+            --no-mdns $BOOT > "$WORK/A.out" 2>&1 &
+        PIDS+=($!)
+        (sleep 100; echo "hello from B"; sleep 30) |
+            ip netns exec B timeout 140 "$BIN" --data-dir "$WORK/data-B" chat club --nick B \
+            --no-mdns $BOOT > "$WORK/B.out" 2>&1 &
+        PIDS+=($!)
+        sleep 130 | ip netns exec C timeout 140 "$BIN" --data-dir "$WORK/data-C" chat club --nick C \
+            --no-mdns $BOOT > "$WORK/C.out" 2>&1 &
+        PIDS+=($!)
+        wait "${PIDS[-1]}" "${PIDS[-2]}" "${PIDS[-3]}" 2>/dev/null || true
+        echo "=== $SCENARIO"
+        pass=1
+        for device in A B C; do
+            echo "--- $device"
+            grep -h -E 'connected|hello from' "$WORK/$device.out" || true
+        done
+        for device in B C; do
+            grep -q 'hello from A' "$WORK/$device.out" || pass=0
+        done
+        grep -q 'hello from B' "$WORK/A.out" || pass=0
+        grep -q 'hello from B' "$WORK/C.out" || pass=0
+        echo "result: $([[ $pass == 1 ]] && echo PASS || echo FAIL)   logs: $WORK"
+        [[ $pass == 1 ]]
+        exit ;;
     group-move)
         # A group at level five whose log two of its members, F1 and F2, filled up to the
         # ceiling; they stay offline from then on. Only B holds the full log. A, first on the

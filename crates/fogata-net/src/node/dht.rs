@@ -242,8 +242,9 @@ impl Node {
         self.lan_names.crowded = crowded;
     }
 
-    /// Announces this device under the current rendezvous keys once it knows an address
-    /// others can use.
+    /// Announces this device under the rendezvous keys it looks up, older epochs' too, once
+    /// it knows an address others can use: a member that missed several rotations finds it
+    /// there, as it finds that member there.
     pub(super) fn refresh_announcement(&mut self, now_secs: u64) {
         if self.confirmed.is_empty() {
             return;
@@ -252,7 +253,7 @@ impl Node {
             .groups
             .values()
             .filter(|s| !s.direct)
-            .flat_map(|s| s.ctx.rendezvous_secrets(now_secs * 1000))
+            .flat_map(|s| s.ctx.lookup_secrets(now_secs * 1000))
             .collect();
         secrets.extend(self.friend_announce_secrets());
         secrets.extend(self.seek_announce_secrets());
@@ -447,6 +448,64 @@ mod tests {
         let tied: Vec<_> = opening.iter().filter(|(_, only)| only.is_some()).collect();
         assert_eq!(tied.len(), 1);
         assert_eq!(tied[0].1, Some(maker));
+    }
+
+    /// A member that missed two key changes announces only under the key before both; behind
+    /// NATs both ends must find each other, so a member that made those changes announces
+    /// under that key too, but only for two weeks after the key that replaced it began.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_is_announced_where_members_two_rotations_behind_look() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let now = now_ms();
+        let mut log = GroupLog::create(&ana, "g", now - 3).unwrap();
+        log.rotate(&ana, now - 2).unwrap();
+        log.rotate(&ana, now - 1).unwrap();
+        let group = log.group_id();
+        let (node, _events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: true,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+            spill_dir: None,
+        })
+        .unwrap();
+        let (soon, later) = inspect(&node, move |n| {
+            n.confirmed
+                .insert("/ip4/198.51.100.1/udp/4001/quic-v1".parse().unwrap());
+            let keys = n.groups[&group]
+                .ctx
+                .newest_epoch_keys(3)
+                .collect::<Vec<_>>();
+            assert_eq!(keys.len(), 3);
+            let (newest, first) = (*keys[0].rendezvous_secret(), *keys[2].rendezvous_secret());
+            // Whether `secret` is announced at `secs`, and the newest epoch too.
+            let mut announced_at = |secs: u64| {
+                n.provided.1 = None;
+                n.refresh_announcement(secs);
+                let under = |secret| {
+                    (rendezvous::announce_keys(&[secret], secs).iter())
+                        .all(|k| n.provided.0.contains(k))
+                };
+                (under(first), under(newest))
+            };
+            let secs = now / 1000;
+            (announced_at(secs), announced_at(secs + 15 * 24 * 3600))
+        })
+        .await;
+        node.shutdown().await.unwrap();
+        assert_eq!(
+            soon,
+            (true, true),
+            "not announced where the member behind looks"
+        );
+        assert_eq!(later, (false, true), "still announced there two weeks on");
     }
 
     #[test]
