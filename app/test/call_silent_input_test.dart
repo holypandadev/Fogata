@@ -361,6 +361,28 @@ void main() {
     },
   );
 
+  test('a mute, an unmute and a mute again while the silent input is chosen '
+      'end muted, on the silent input', () async {
+    engine.holdSelect = Completer();
+    final mic = _Mic();
+    final call = Call(group: 'g', me: 'me', mic: true)..sharing = true;
+    call.holdForTests(streams: [mic, null, _Screen()]);
+    await call.setShareSound(true);
+    unawaited(call.setMic(false));
+    await _until(() => engine.asked.contains('select silence'));
+    unawaited(call.setMic(true));
+    expect(mic.track.enabled, isTrue);
+    unawaited(call.setMic(false));
+    // Muted again at once, before anything held is let go of.
+    expect(mic.track.enabled, isFalse);
+    expect(call.mic, isFalse);
+    engine.holdSelect!.complete();
+    await call.voiceSettledForTests().timeout(const Duration(seconds: 5));
+    expect(mic.track.enabled, isFalse);
+    expect(engine.recording, 'silence');
+    await call.stop();
+  });
+
   test(
     'of the inputs chosen while one is being chosen, only the last is carried '
     'out',
