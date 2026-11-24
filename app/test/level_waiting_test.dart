@@ -57,6 +57,7 @@ AppState _settings({
       levelBehind: behind,
       needsUpdate: needsUpdate,
       raiseAnyway: raiseAnyway,
+      mayMove: false,
     ),
   ]
   ..contacts.members['g'] = [
@@ -184,6 +185,7 @@ void main() {
           voiceRooms: g.voiceRooms,
           openInvites: g.openInvites,
           needsUpdate: false,
+          mayMove: false,
           raiseAnyway: false,
         ),
     ];

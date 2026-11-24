@@ -6776,4 +6776,34 @@ class L10nPt extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'Ativar';
+
+  @override
+  String get groupSettingsHistoryNearlyFull =>
+      'O histórico deste grupo está quase cheio.';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'O histórico deste grupo está cheio: até passar para um novo, só funcionam remover membros, sair e a mudança.';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'Passe o grupo para um histórico novo: todos mantêm o grupo, o nome e o que ele guarda.';
+
+  @override
+  String get groupSettingsHistoryFirstMoves =>
+      'O primeiro membro pode passá-lo para um histórico novo.';
+
+  @override
+  String get groupSettingsMoveGroup => 'Passar para um histórico novo';
+
+  @override
+  String get groupSettingsMoveTitle =>
+      'Passar este grupo para um histórico novo?';
+
+  @override
+  String get groupSettingsMoveText =>
+      'Todos mantêm o grupo, o nome e o histórico. Os outros acompanham-no ao se ligarem; membros ausentes há mais de 30 dias podem ter de ser adicionados de novo.';
+
+  @override
+  String get groupSettingsMoveConfirm => 'Passar';
 }

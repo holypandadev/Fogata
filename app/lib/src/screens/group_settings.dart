@@ -269,6 +269,71 @@ class _Note extends StatelessWidget {
   );
 }
 
+/// How full the group's history is, once it nears its ceiling: a note, and for the first
+/// member ([UiGroup.mayMove]) the button that moves the group to a fresh history. Full,
+/// only removing members, leaving and the move still work until it moves.
+@visibleForTesting
+class HistoryFill extends StatelessWidget {
+  const HistoryFill({super.key, required this.group});
+  final UiGroup group;
+
+  /// From this share of the ceiling on, the note shows.
+  static const nearlyFull = 0.75;
+
+  @override
+  Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final c = context.fg;
+    final full = (group.fill ?? 0) >= 1;
+    return Container(
+      key: const ValueKey('history-fill'),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: full ? c.redSoft : c.amberSoft,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            full
+                ? l10n.groupSettingsHistoryFull
+                : l10n.groupSettingsHistoryNearlyFull,
+            style: tx(full ? c.red : c.amber, size: 13),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            group.mayMove
+                ? l10n.groupSettingsHistoryMoveHint
+                : l10n.groupSettingsHistoryFirstMoves,
+            style: tx(c.fg2, size: 13),
+          ),
+          if (group.mayMove) ...[
+            const SizedBox(height: 8),
+            FgButton(
+              key: const ValueKey('move-group'),
+              text: l10n.groupSettingsMoveGroup,
+              height: 30,
+              fontSize: 13,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              onTap: () async {
+                final yes = await confirmDialog(
+                  context,
+                  title: l10n.groupSettingsMoveTitle,
+                  text: l10n.groupSettingsMoveText,
+                  action: l10n.groupSettingsMoveConfirm,
+                );
+                if (!yes) return;
+                await state.moveGroup(group.id);
+              },
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// A rounded list of rows.
 class _Box extends StatelessWidget {
   const _Box({required this.children});
@@ -912,6 +977,10 @@ class _Members extends StatelessWidget {
       children: [
         if (group.needsUpdate) ...[
           GroupUpdateNote(updates: state.updates, say: state.say),
+          const SizedBox(height: 12),
+        ],
+        if ((group.fill ?? 0) >= HistoryFill.nearlyFull) ...[
+          HistoryFill(group: group),
           const SizedBox(height: 12),
         ],
         if (!group.manager) ...[

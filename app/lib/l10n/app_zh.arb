@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "仍然开启",
   "groupSettingsRaiseAnywayTitle": "现在开启更强的保护吗？",
   "groupSettingsRaiseAnywayText": "{names}需要先更新Fogata，才能再次参与这个群组：在那之前，他们看不到群组的变化。群组已经等了他们一周。",
-  "groupSettingsRaiseAnywayConfirm": "开启"
+  "groupSettingsRaiseAnywayConfirm": "开启",
+  "groupSettingsHistoryNearlyFull": "这个群组的历史快满了。",
+  "groupSettingsHistoryFull": "这个群组的历史已满：在移到新的历史之前，只能移除成员、退出和移动。",
+  "groupSettingsHistoryMoveHint": "把群组移到新的历史：所有人都会保留群组、它的名称和其中的内容。",
+  "groupSettingsHistoryFirstMoves": "它的第一位成员可以把它移到新的历史。",
+  "groupSettingsMoveGroup": "移到新的历史",
+  "groupSettingsMoveTitle": "把这个群组移到新的历史吗？",
+  "groupSettingsMoveText": "所有人都会保留群组、它的名称和它的历史。其他人在连接时跟着移过去；离开超过30天的成员可能需要重新添加。",
+  "groupSettingsMoveConfirm": "移动"
 }

@@ -112,6 +112,7 @@ AppState fakeRoom({
         room: summary,
         openInvites: 0,
         needsUpdate: false,
+        mayMove: false,
         raiseAnyway: false,
       ),
     ]

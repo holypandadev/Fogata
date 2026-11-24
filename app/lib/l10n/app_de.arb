@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "Trotzdem einschalten",
   "groupSettingsRaiseAnywayTitle": "Stärkeren Schutz jetzt einschalten?",
   "groupSettingsRaiseAnywayText": "{names} müssen Fogata aktualisieren, bevor sie wieder an dieser Gruppe teilnehmen können: Bis dahin sehen sie nicht, was sich in ihr ändert. Die Gruppe hat eine Woche auf sie gewartet.",
-  "groupSettingsRaiseAnywayConfirm": "Einschalten"
+  "groupSettingsRaiseAnywayConfirm": "Einschalten",
+  "groupSettingsHistoryNearlyFull": "Der Verlauf dieser Gruppe ist fast voll.",
+  "groupSettingsHistoryFull": "Der Verlauf dieser Gruppe ist voll: Bis sie in einen neuen umzieht, funktionieren nur noch das Entfernen von Mitgliedern, das Verlassen und der Umzug.",
+  "groupSettingsHistoryMoveHint": "Zieh die Gruppe in einen neuen Verlauf um: Alle behalten die Gruppe, ihren Namen und ihren Inhalt.",
+  "groupSettingsHistoryFirstMoves": "Ihr erstes Mitglied kann sie in einen neuen Verlauf umziehen.",
+  "groupSettingsMoveGroup": "In neuen Verlauf umziehen",
+  "groupSettingsMoveTitle": "Diese Gruppe in einen neuen Verlauf umziehen?",
+  "groupSettingsMoveText": "Alle behalten die Gruppe, ihren Namen und ihren Verlauf. Die anderen folgen, sobald sie sich verbinden; Mitglieder, die länger als 30 Tage weg sind, müssen eventuell neu hinzugefügt werden.",
+  "groupSettingsMoveConfirm": "Umziehen"
 }

@@ -42,6 +42,7 @@ UiGroup _group(String name) => UiGroup(
   ],
   openInvites: 0,
   needsUpdate: false,
+  mayMove: false,
   raiseAnyway: false,
 );
 

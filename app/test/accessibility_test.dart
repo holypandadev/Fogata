@@ -186,6 +186,7 @@ AppState _ringing({bool ringing = true}) {
         voiceRooms: const [],
         openInvites: g.openInvites,
         needsUpdate: false,
+        mayMove: false,
         raiseAnyway: false,
       ),
   ];

@@ -6892,4 +6892,33 @@ class L10nRu extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'Включить';
+
+  @override
+  String get groupSettingsHistoryNearlyFull =>
+      'История этой группы почти заполнена.';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'История этой группы заполнена: пока группа не перейдёт в новую, работают только удаление участников, выход и переход.';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'Переведите группу в новую историю: у всех останутся группа, её название и всё, что в ней есть.';
+
+  @override
+  String get groupSettingsHistoryFirstMoves =>
+      'Её первый участник может перевести её в новую историю.';
+
+  @override
+  String get groupSettingsMoveGroup => 'Перейти в новую историю';
+
+  @override
+  String get groupSettingsMoveTitle => 'Перевести эту группу в новую историю?';
+
+  @override
+  String get groupSettingsMoveText =>
+      'У всех останутся группа, её название и история. Остальные последуют за ней, когда подключатся; участников, которых не было больше 30 дней, возможно, придётся добавить снова.';
+
+  @override
+  String get groupSettingsMoveConfirm => 'Перевести';
 }

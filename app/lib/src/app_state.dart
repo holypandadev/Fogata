@@ -1091,6 +1091,55 @@ class AppState extends ChangeNotifier {
     nav.changed();
   }
 
+  /// A group the window shows that is no longer listed because it moved to a fresh
+  /// history (its first member moved it, and this device followed): what showed it shows
+  /// the group it moved to, its room too, without a word. One that did not move is left as
+  /// it was, to go as it always went.
+  Future<void> _followMoves() async {
+    final open = {
+      nav.selectedGroup,
+      nav.membersGroup,
+      nav.groupSettings,
+      roomState.roomGroup,
+    }.whereType<String>().where((g) => contacts.group(g) == null);
+    for (final from in open) {
+      final to = await attempt(() => api.groupMovedTo(groupId: from));
+      if (to != null && contacts.group(to) != null) followGroup(from, to);
+    }
+  }
+
+  /// What the window shows of [from] shows [to] instead: the group moved to a fresh
+  /// history. In its room, this device goes into the new group's room.
+  @visibleForTesting
+  void followGroup(String from, String to) {
+    if (nav.selectedGroup == from) nav.selectedGroup = to;
+    if (nav.membersGroup == from) nav.membersGroup = to;
+    if (nav.groupSettings == from) nav.groupSettings = to;
+    if (roomState.roomGroup == from) {
+      final inRoom = nav.page == Screen.room;
+      roomState.roomGroup = null;
+      roomState.room = null;
+      roomState.dropPreviews();
+      roomState.memories.remove(from);
+      if (inRoom) {
+        unawaited(openRoom(to));
+      } else {
+        roomState.roomGroup = to;
+      }
+    }
+    nav.changed();
+  }
+
+  /// Moves [group], whose history is nearly full, to a fresh one (its first member: see
+  /// [UiGroup.mayMove]); the window follows it at once, and the others as they connect.
+  Future<bool> moveGroup(String group) async {
+    final to = await attempt(() => api.moveGroup(groupId: group));
+    await refreshGroups();
+    if (to == null) return false;
+    if (contacts.group(to) != null) followGroup(group, to);
+    return true;
+  }
+
   /// After leaving a group or being removed from it: what the window held of it goes,
   /// and a page that showed it gives way to home.
   void forgetGroup(String group) {
@@ -1380,6 +1429,7 @@ class AppState extends ChangeNotifier {
       contacts.members.removeWhere((id, _) => contacts.group(id) == null);
       contacts.groupBanners.removeWhere((id, _) => contacts.group(id) == null);
       contacts.forgetGonePeople();
+      await _followMoves();
       roomState.rememberRooms(contacts.groups);
       if (shown != null) await leaveIfDeleted(shown);
       _followCall();

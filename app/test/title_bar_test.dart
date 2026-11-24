@@ -135,6 +135,7 @@ void main() {
         room: g.room,
         openInvites: 0,
         needsUpdate: false,
+        mayMove: false,
         raiseAnyway: false,
       ),
     ];
