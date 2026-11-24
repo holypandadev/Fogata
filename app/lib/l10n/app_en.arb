@@ -1476,6 +1476,10 @@
   "@devicesCameraUnavailable": {
     "description": "Note or error on Linux: the app reaches cameras through the system's camera portal (xdg-desktop-portal), which this system lacks. \"Camera portal\" may stay technical."
   },
+  "devicesCameraBusy": "Another application is using the camera. Close it, then try again.",
+  "@devicesCameraBusy": {
+    "description": "Note or error on Linux: another application is using the camera, so the app cannot open it. Says to close that application and try again."
+  },
   "devicesPreviewOnlyYou": "Only you see the preview.",
   "@devicesPreviewOnlyYou": {
     "description": "Settings › Voice & video › Test video: the camera preview is only shown on this computer."

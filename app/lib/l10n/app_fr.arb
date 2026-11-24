@@ -228,6 +228,7 @@
   "devicesCameraFailed": "{system, select, macos{Impossible d’utiliser la caméra. Autorise-la dans Réglages Système › Confidentialité et sécurité.} other{Impossible d’utiliser la caméra.}}",
   "devicesCameraDenied": "Le système ne laisse pas Fogata utiliser la caméra. Autorise-la dans les paramètres du système, puis réessaie.",
   "devicesCameraUnavailable": "Impossible d’accéder à la caméra : ce système n’a pas de portail de caméra.",
+  "devicesCameraBusy": "Une autre application utilise la caméra. Ferme-la, puis réessaie.",
   "devicesPreviewOnlyYou": "L’aperçu n’est visible que par toi.",
   "devicesStopVideo": "Arrêter la vidéo",
   "devicesTestVideo": "Tester la vidéo",

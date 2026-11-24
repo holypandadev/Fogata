@@ -45,6 +45,13 @@ class CameraDenied implements Exception {
   String toString() => 'camera denied';
 }
 
+/// Another application is using the camera, so it cannot be opened (Linux, the camera
+/// reached directly: the plugin found it held by another process).
+class CameraBusy implements Exception {
+  @override
+  String toString() => 'camera busy';
+}
+
 /// The cameras come through the Camera portal (Linux, in a Flatpak) and the system has
 /// none, or one without cameras (xdg-desktop-portal's Camera interface and PipeWire).
 class CameraUnavailable implements Exception {
@@ -96,6 +103,7 @@ String noCameraNote(CameraAccess access) => switch (access) {
 String cameraFailure(Object? error) => switch (error) {
   NoCamera() => l10n.devicesNoCamera,
   CameraDenied() => l10n.devicesCameraDenied,
+  CameraBusy() => l10n.devicesCameraBusy,
   CameraUnavailable() => l10n.devicesCameraUnavailable,
   _ => l10n.devicesCameraFailed(_system),
 };
@@ -104,7 +112,9 @@ String cameraFailure(Object? error) => switch (error) {
 /// preview opens it the same way. Throws [NoCamera] when the computer has none, and
 /// [CameraDenied] or [CameraUnavailable] when the system's Camera portal did not give
 /// the cameras (Linux, in a Flatpak: the plugin asks it first, which may show the
-/// system's question).
+/// system's question), and [CameraBusy] when another application holds the camera
+/// (Linux; the plugin's words, with the device and the system's answer, go to the
+/// diagnostics log).
 Future<MediaStream> openCameraStream(String? id) async {
   final MediaStream stream;
   try {
@@ -127,6 +137,11 @@ Future<MediaStream> openCameraStream(String? id) async {
     // Linux's plugin, the cameras coming through the Camera portal.
     if ('$e'.contains('fogataCameraDenied')) throw CameraDenied();
     if ('$e'.contains('fogataCameraUnavailable')) throw CameraUnavailable();
+    if ('$e'.contains('fogataCameraBusy')) {
+      // The mapped failure keeps no words: the cause goes to the day's log.
+      debugPrint('camera busy: $e');
+      throw CameraBusy();
+    }
     rethrow;
   }
   // Linux and Windows answer with a stream that has no picture.

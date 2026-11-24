@@ -1013,6 +1013,9 @@ class L10nZh extends L10n {
   String get devicesCameraUnavailable => '无法访问摄像头：此系统没有摄像头门户。';
 
   @override
+  String get devicesCameraBusy => '另一个应用正在使用摄像头。请关闭它后重试。';
+
+  @override
   String get devicesPreviewOnlyYou => '只有你能看到预览。';
 
   @override

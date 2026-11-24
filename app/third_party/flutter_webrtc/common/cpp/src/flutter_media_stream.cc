@@ -4,6 +4,14 @@
 #include "fogata_default_device.h"
 #include "fogata_track_owner.h"
 #ifdef __linux__
+#include <fcntl.h>
+#include <linux/videodev2.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
+
 #include "output_keeper.h"
 #include "test_camera.h"
 #endif
@@ -15,6 +23,82 @@
 namespace flutter_webrtc_plugin {
 
 namespace {
+
+#ifdef __linux__
+// Fogata: whether another process holds the camera libwebrtc listed as `name` with
+// `unique_id` (its V4L2 bus_info, or empty where the driver gives none: then the card
+// name is the id). A camera streamed by another process refuses a second opener's
+// VIDIOC_S_FMT with EBUSY (or the open itself), which libwebrtc reports only as a
+// failure. Looks only; the format set is the one already there. `why` says what
+// answered, for the diagnostics log.
+static bool CameraBusy(const char* unique_id, const char* name,
+                       std::string* why) {
+  const std::string id = unique_id != nullptr ? unique_id : "";
+  const std::string card = name != nullptr ? name : "";
+  for (int n = 0; n < 64; n++) {
+    const std::string path = "/dev/video" + std::to_string(n);
+    const int fd = open(path.c_str(), O_RDWR | O_NONBLOCK, 0);
+    if (fd < 0) {
+      // Not this one's to tell unless it is the camera: look at it read-only.
+      if (errno != EBUSY) continue;
+      const int info = open(path.c_str(), O_RDONLY, 0);
+      if (info < 0) continue;
+      v4l2_capability cap;
+      memset(&cap, 0, sizeof(cap));
+      const bool ours =
+          ioctl(info, VIDIOC_QUERYCAP, &cap) == 0 &&
+          (cap.device_caps & V4L2_CAP_VIDEO_CAPTURE) &&
+          (!id.empty()
+               ? id == reinterpret_cast<const char*>(cap.bus_info)
+               : card == reinterpret_cast<const char*>(cap.card));
+      close(info);
+      if (ours) {
+        *why = path + ": open: " + strerror(EBUSY);
+        return true;
+      }
+      continue;
+    }
+    v4l2_capability cap;
+    memset(&cap, 0, sizeof(cap));
+    bool ours = ioctl(fd, VIDIOC_QUERYCAP, &cap) == 0 &&
+                (cap.device_caps & V4L2_CAP_VIDEO_CAPTURE);
+    if (ours) {
+      ours = !id.empty()
+                 ? id == reinterpret_cast<const char*>(cap.bus_info)
+                 : card == reinterpret_cast<const char*>(cap.card);
+    }
+    if (!ours) {
+      close(fd);
+      continue;
+    }
+    bool busy = false;
+    v4l2_format format;
+    memset(&format, 0, sizeof(format));
+    format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    if (ioctl(fd, VIDIOC_G_FMT, &format) == 0 &&
+        ioctl(fd, VIDIOC_S_FMT, &format) < 0 && errno == EBUSY) {
+      *why = path + ": VIDIOC_S_FMT: " + strerror(EBUSY);
+      busy = true;
+    }
+    close(fd);
+    return busy;
+  }
+  return false;
+}
+
+// Fogata: the error for a camera that did not open or start: another application's
+// hold on it when it can be told (cameras reached directly only), else `plain`.
+static std::string CameraOpenError(bool direct, const char* unique_id,
+                                   const char* name, const char* plain) {
+  std::string why;
+  if (direct && CameraBusy(unique_id, name, &why)) {
+    return "NotReadableError: another application is using the camera "
+           "(fogataCameraBusy): " +
+           why;
+  }
+  return plain;
+}
+#endif
 
 std::string SanitizeDeviceIdFromAudioBuffers(const char* name, const char* guid) {
   const std::string raw = (guid != nullptr && strlen(guid) > 0)
@@ -472,12 +556,33 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
   if (!video_capturer.get()) {
     // Fogata: listed but not opened (busy, gone, or offering no format).
     *error = "NotReadableError: the camera could not be opened";
+#ifdef __linux__
+    // Fogata: busy, if another application holds it (cameras reached directly).
+    if (nb_video_devices > 0) {
+      *error = CameraOpenError(
+          base_->video_device_->GetCameraAccess() ==
+              RTCVideoDevice::kCameraAccessDirect,
+          strGuidUTF8, strNameUTF8, error->c_str());
+    }
+#endif
     return false;
   }
 
   // Fogata: a camera that does not start would show a black picture.
   if (!video_capturer->StartCapture()) {
     *error = "NotReadableError: the camera did not start";
+#ifdef __linux__
+    // Fogata: busy, if another application holds it (cameras reached directly).
+    // The capturer lets go of its own descriptor first, so it is not taken for
+    // the other application.
+    if (nb_video_devices > 0) {
+      video_capturer = scoped_refptr<RTCVideoCapturer>();
+      *error = CameraOpenError(
+          base_->video_device_->GetCameraAccess() ==
+              RTCVideoDevice::kCameraAccessDirect,
+          strGuidUTF8, strNameUTF8, error->c_str());
+    }
+#endif
     return false;
   }
 

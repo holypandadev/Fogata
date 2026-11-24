@@ -228,6 +228,7 @@
   "devicesCameraFailed": "{system, select, macos{无法使用摄像头。请在“系统设置 › 隐私与安全性”中允许。} other{无法使用摄像头。}}",
   "devicesCameraDenied": "系统不允许 Fogata 使用摄像头。请在系统设置中允许后重试。",
   "devicesCameraUnavailable": "无法访问摄像头：此系统没有摄像头门户。",
+  "devicesCameraBusy": "另一个应用正在使用摄像头。请关闭它后重试。",
   "devicesPreviewOnlyYou": "只有你能看到预览。",
   "devicesStopVideo": "停止视频",
   "devicesTestVideo": "测试视频",

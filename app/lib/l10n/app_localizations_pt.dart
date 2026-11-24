@@ -1134,6 +1134,10 @@ class L10nPt extends L10n {
       'Não foi possível acessar a câmera: este sistema não tem portal de câmera.';
 
   @override
+  String get devicesCameraBusy =>
+      'Outro aplicativo está usando a câmera. Feche-o e tente de novo.';
+
+  @override
   String get devicesPreviewOnlyYou => 'Só você vê a prévia.';
 
   @override

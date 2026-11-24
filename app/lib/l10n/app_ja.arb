@@ -228,6 +228,7 @@
   "devicesCameraFailed": "{system, select, macos{カメラを使用できませんでした。システム設定 › プライバシーとセキュリティで許可してください。} other{カメラを使用できませんでした。}}",
   "devicesCameraDenied": "システムが Fogata にカメラの使用を許可していません。システム設定で許可してから、もう一度お試しください。",
   "devicesCameraUnavailable": "カメラにアクセスできません。このシステムにはカメラのポータルがありません。",
+  "devicesCameraBusy": "別のアプリがカメラを使用しています。そのアプリを閉じてから、もう一度お試しください。",
   "devicesPreviewOnlyYou": "プレビューはあなたにだけ表示されます。",
   "devicesStopVideo": "ビデオを停止",
   "devicesTestVideo": "ビデオをテスト",
