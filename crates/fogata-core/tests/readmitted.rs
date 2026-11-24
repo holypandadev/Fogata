@@ -6,7 +6,6 @@
 
 use std::{
     fs,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -14,6 +13,10 @@ use std::{
 use fogata_core::{Core, NetOptions, Store};
 use fogata_crypto::{DeviceIdentity, GroupId};
 use fogata_state::GroupLog;
+
+#[path = "../../fogata-net/tests/support/unchangeable.rs"]
+mod unchangeable;
+use unchangeable::{Unchangeable, cannot_be_made_unchangeable, unchangeable};
 
 /// One test at a time: each starts a device on this computer's network.
 static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -39,11 +42,6 @@ fn base(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("fogata-readmitted-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     dir
-}
-
-fn writable(path: &Path, yes: bool) {
-    let mode = if yes { 0o700 } else { 0o500 };
-    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
 }
 
 /// Where the device stands with group `id` once it starts: whether the group runs, and
@@ -107,16 +105,26 @@ async fn a_device_added_again_is_asked_whatever_write_fails() {
         let log = dir
             .join("logs")
             .join(format!("{}.log", hex::encode(id.as_bytes())));
-        let unwritable_log = case == "log";
-        writable(&dir.join(unwritable), false);
-        if unwritable_log {
-            fs::set_permissions(&log, fs::Permissions::from_mode(0o400)).unwrap();
+        let mut locked: Vec<Unchangeable> = Vec::new();
+        let paths = if case == "log" {
+            vec![dir.join(unwritable), log]
+        } else {
+            vec![dir.join(unwritable)]
+        };
+        for path in &paths {
+            match unchangeable(path) {
+                Some(lock) => locked.push(lock),
+                None => {
+                    cannot_be_made_unchangeable(path);
+                    drop(locked);
+                    drop(store);
+                    let _ = fs::remove_dir_all(&dir);
+                    return;
+                }
+            }
         }
         let kept = store.save_offered_group(&offered, &ana.public_key());
-        writable(&dir.join(unwritable), true);
-        if unwritable_log {
-            fs::set_permissions(&log, fs::Permissions::from_mode(0o600)).unwrap();
-        }
+        drop(locked);
         assert!(kept.is_err(), "{case}: the write went through");
         drop(store);
         let (runs, _) = on_start(&dir, id).await;

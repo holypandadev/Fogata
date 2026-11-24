@@ -67,3 +67,8 @@ fogata-voice = { workspace = true, features = ["fuzzing"] }
 libp2p.workspace = true
 serde_bytes.workspace = true
 tracing-subscriber.workspace = true
+
+# The immutable attribute, through a safe call, for the tests of a folder or file that cannot
+# be changed when they run as root (fogata-net's tests/support/unchangeable.rs).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
