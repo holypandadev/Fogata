@@ -21,4 +21,4 @@ After: the command line moves a group (`/move` in `fogata chat`), and a chat ope
 
 ## Known limit, measured
 
-When the first member removes two members while offline, it writes two key changes. It then announces only under the two newest keys, which the other members do not know yet. They can still look it up, but behind cone NATs nobody answers back, so it never reaches them and nothing can move. With both flooders removed offline, the lab fails this way every time; with one removed, it passes. The scenario removes one, and this limit is not touched by this change.
+When the first member removes two members while offline, it writes two key changes, and the others, knowing only the key from before both, never reached it behind cone NATs. The scenario removes one. `lab/behind-rotations` fixes this on its own (members announce under the older keys they look up); once both are in, the scenario can remove both flooders again.
