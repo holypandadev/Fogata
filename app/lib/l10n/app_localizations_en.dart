@@ -1110,6 +1110,10 @@ class L10nEn extends L10n {
       'Could not reach the camera: this system has no camera portal.';
 
   @override
+  String get devicesCameraBusy =>
+      'Another application is using the camera. Close it, then try again.';
+
+  @override
   String get devicesPreviewOnlyYou => 'Only you see the preview.';
 
   @override

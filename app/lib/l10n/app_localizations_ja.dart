@@ -1033,6 +1033,9 @@ class L10nJa extends L10n {
       'カメラにアクセスできません。このシステムにはカメラのポータルがありません。';
 
   @override
+  String get devicesCameraBusy => '別のアプリがカメラを使用しています。そのアプリを閉じてから、もう一度お試しください。';
+
+  @override
   String get devicesPreviewOnlyYou => 'プレビューはあなたにだけ表示されます。';
 
   @override

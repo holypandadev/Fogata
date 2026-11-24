@@ -1175,6 +1175,10 @@ class L10nRu extends L10n {
       'Нет доступа к камере: в этой системе нет портала камеры.';
 
   @override
+  String get devicesCameraBusy =>
+      'Другое приложение использует камеру. Закройте его и попробуйте снова.';
+
+  @override
   String get devicesPreviewOnlyYou => 'Предпросмотр видите только вы.';
 
   @override
