@@ -1196,6 +1196,23 @@ impl GroupLog {
             .collect()
     }
 
+    /// Hashes of the entries to send a device that has none of the log yet, a friend it is
+    /// offered to or a device let in: those of the common order that are not spare
+    /// ([`Self::spare`]), in it. Spare entries change nothing there. Entries waiting for
+    /// parents would only wait there too, in its room for them, until the parents came,
+    /// and they come with the next sync ([`Self::hashes_to_send`]) along with their parents.
+    /// The device gets the same group and the same [`Self::needed_heads`] as this one.
+    pub fn hashes_to_offer(&self) -> Vec<EntryHash> {
+        let needed = self.needed_cache();
+        self.full()
+            .order
+            .hashes
+            .iter()
+            .filter(|h| needed.hashes.contains(*h))
+            .copied()
+            .collect()
+    }
+
     /// Makes the room a device writes in a run smaller, for tests of what happens past it.
     #[cfg(test)]
     pub(crate) fn set_run_room(&mut self, entries: u32, bytes: usize) {
