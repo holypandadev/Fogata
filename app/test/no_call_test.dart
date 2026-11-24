@@ -515,28 +515,88 @@ void main() {
       'a refusal seen before the system\'s devices does not outlive them',
       () {
         final watch = RecordingWatch();
-        final playing = {
-          'recordingAsked': false,
-          'recording': false,
+        final recording = {
+          'recordingAsked': true,
+          'recording': true,
           'inputUsable': true,
           'changing': false,
           'combinable': true,
         };
-        watch.take(playing, mic: true, sending: false, listened: false);
-        watch.take(
-          {...playing, 'combinable': false},
-          mic: true,
-          sending: false,
-          listened: false,
-        );
+        expect(watch.take(recording, mic: true, sending: true), isFalse);
+        // Refused while the choice is carried out, someone taking the voice: a loss after
+        // it would be taken at once.
+        final refused = {
+          ...recording,
+          'recording': false,
+          'combinable': false,
+          'changing': true,
+        };
+        expect(watch.take(refused, mic: true, sending: true), isFalse);
         // The system's devices chosen again, then a device chosen anew: a loss with it
         // needs two readings, as any.
         watch.reset();
-        final lost = {...playing, 'recordingAsked': true};
+        expect(
+          watch.take(
+            {...refused, 'combinable': true},
+            mic: true,
+            sending: true,
+          ),
+          isFalse,
+        );
+        final lost = {...recording, 'recording': false};
         expect(watch.take(lost, mic: true, sending: true), isFalse);
         expect(watch.take(lost, mic: true, sending: true), isTrue);
       },
     );
+
+    test(
+      'without the system\'s devices between, that refusal is taken at once',
+      () {
+        final watch = RecordingWatch();
+        final recording = {
+          'recordingAsked': true,
+          'recording': true,
+          'inputUsable': true,
+          'changing': false,
+          'combinable': true,
+        };
+        expect(watch.take(recording, mic: true, sending: true), isFalse);
+        final refused = {
+          ...recording,
+          'recording': false,
+          'combinable': false,
+          'changing': true,
+        };
+        expect(watch.take(refused, mic: true, sending: true), isFalse);
+        final lost = {...refused, 'changing': false};
+        expect(watch.take(lost, mic: true, sending: true), isTrue);
+      },
+    );
+
+    test('one who leaves and comes back costs one reading more, no more', () {
+      final watch = RecordingWatch();
+      final playing = {
+        'recordingAsked': false,
+        'recording': false,
+        'inputUsable': true,
+        'changing': false,
+        'combinable': true,
+      };
+      final refused = {...playing, 'combinable': false};
+      watch.take(playing, mic: true, sending: false, listened: true);
+      expect(
+        watch.take(refused, mic: true, sending: false, listened: false),
+        isFalse,
+      );
+      expect(
+        watch.take(refused, mic: true, sending: false, listened: true),
+        isFalse,
+      );
+      expect(
+        watch.take(refused, mic: true, sending: false, listened: true),
+        isTrue,
+      );
+    });
 
     test(
       'a refusal ends as something records, and is not taken while muted',

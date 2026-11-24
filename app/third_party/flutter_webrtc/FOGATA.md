@@ -1065,9 +1065,11 @@ it off. The input chosen while the output was another device met the same.
   microphone off or the call ends. Once for each loss, and again when the engine changed
   since (the pair now refused, R4). Seen 4 to 6 s after the loss (two readings in a row,
   the voice sent read from the reading before), or, once the pair is seen refused, at the
-  first reading with the microphone on, someone in the call up to take the voice and
-  nothing recorded, asked or not (2 s or so; that holds until something records or the
-  microphone is turned off, and alone in the call it waits for someone). Each participant's own
+  first reading with the microphone on, someone in the call up to take the voice since
+  the reading before, and nothing recorded, asked or not (2 s or so; that holds until
+  something records or the microphone is turned off; alone in the call it waits for
+  someone, and one who has just come is given a second reading, since WebRTC may not
+  record for them yet). The system's devices chosen again forget all of it. Each participant's own
   step is the only one that sets their encoding: while the restart runs it wants it off (a
   step of any origin meanwhile, a participant who arrives, does the same), and once no
   encoding of sound is on anywhere (3 s at most) every step runs again, turning them on

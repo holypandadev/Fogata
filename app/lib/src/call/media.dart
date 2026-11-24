@@ -477,7 +477,8 @@ class InputWatch {
 /// Seen twice in a row, it answers true once, for the call to stop and start its voice
 /// encodings so that WebRTC records again its own way ([Call._recoverVoice]); a recording
 /// seen again, or the pair chosen now refused by the engine (a new engine following the
-/// system's devices), lets it answer true again.
+/// system's devices), lets it answer true again, then after one reading only while
+/// someone takes the voice since the reading before.
 @visibleForTesting
 class RecordingWatch {
   int _seen = 0;
@@ -505,7 +506,8 @@ class RecordingWatch {
   }) {
     // The engine changed what it is since (the pair chosen now refused, R4: a new engine
     // following the system's devices): a restart of the recording may work now, and a
-    // loss seen now has that known cause, so one reading is enough. It holds until
+    // loss seen now has that known cause, so one reading is enough while someone took
+    // the voice at the reading before too. It holds until
     // something records or the microphone is off. While it holds, nothing recorded with
     // the microphone on, while someone takes the voice, is the loss, asked or not: a
     // start that failed drops the request, and the voice sent is read from the reading
