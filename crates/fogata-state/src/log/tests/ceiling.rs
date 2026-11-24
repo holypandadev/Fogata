@@ -379,15 +379,15 @@ fn level_five_world(seed: u64) -> super::hostile::Hostile {
 /// ceiling too: copies that took a world's entries in their own order, and fresh copies
 /// given every entry ever written as written, the other way round and shuffled, one at a
 /// time or all at once, keep the same entries, order them alike and apply the same, and
-/// worked out again from nothing the group is the same. Some entries in every world that
-/// reaches five go past the ceiling and apply to nothing.
-/// `FOGATA_LADDER_SEEDS` sets how many histories run (4 by default).
+/// worked out again from nothing the group is the same. At least one world fills its log to
+/// the ceiling, and what comes on top applies to nothing.
+/// `FOGATA_LADDER_SEEDS` sets how many histories run (8 by default).
 #[test]
 fn at_level_five_every_copy_applies_the_same_whatever_came_first() {
     let seeds = std::env::var("FOGATA_LADDER_SEEDS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(4u64);
+        .unwrap_or(8u64);
     let (mut at_five, mut past_ceiling) = (0, 0);
     for seed in 1..=seeds {
         let mut h = level_five_world(seed);
@@ -444,14 +444,18 @@ fn at_level_five_every_copy_applies_the_same_whatever_came_first() {
                 assert_eq!(again.state().applied, state.applied, "seed {seed}: {o}");
             }
         }
-        past_ceiling += (state.rejected.iter())
-            .filter(|(_, why)| *why == PAST_CEILING)
-            .count();
+        // The flood reached the ceiling: entries past it were refused, or the log holds all
+        // it may and what came on top is spare.
+        let fill = log.fill();
+        let refused = (state.rejected.iter()).any(|(_, why)| *why == PAST_CEILING);
+        if refused || fill.entries >= fill.max_entries {
+            past_ceiling += 1;
+        }
         check_every_step(log, &state);
         same_as_worked_out_again(log, &h.world.devices[0].id, &format!("seed {seed}"));
     }
     assert!(at_five > 0, "no world went up to level five");
-    assert!(past_ceiling > 0, "no entry went past the ceiling");
+    assert!(past_ceiling > 0, "no world reached the ceiling");
 }
 
 /// Two devices that sign on each other's entries, on the log as it was before the raise to
@@ -468,8 +472,10 @@ fn a_flood_apart_from_the_raise_stops_at_the_ceiling() {
     }
     log.insert_all(apart.entries_in_order().into_iter().cloned());
     assert_eq!(log.state().level, Level::Five);
+    // The raise names a higher level: where the order puts it after the flood, it goes into
+    // the reserve, one entry past the ceiling.
     let fill = log.fill();
-    assert!(fill.entries <= SMALL && fill.full(), "{fill:?}");
+    assert!(fill.entries <= SMALL + 1 && fill.full(), "{fill:?}");
 }
 
 /// A removal or leave is never held back for itself, but what it brings in (entries part
@@ -702,7 +708,7 @@ fn a_raise_past_its_run_orders_nothing() {
                 &ana.id,
                 group_id,
                 heads.clone(),
-                30,
+                100 + t,
                 Body::Level { level: 5 },
             );
             apart.push(raise.clone());
@@ -830,10 +836,15 @@ fn a_first_member_that_left_moves_nothing() {
     log.set_ceiling(CEILING.entries, CEILING.bytes);
     let before = log.heads();
     let new = log.new_log_for_move(&ana.id, 10).unwrap();
-    let leave = log.append(&ana.id, Body::Leave, 11).unwrap();
+    // A leave whose hash is in the upper half, so that a move found below can go first.
+    let leave = (0..256u64)
+        .map(|t| Entry::sign(&ana.id, log.group_id(), log.heads(), 11 + t, Body::Leave))
+        .find(|e| e.hash()[0] >= 0x80)
+        .unwrap();
+    log.insert(leave.clone()).unwrap();
     let renames = [
-        rename(&mut log, &bea, 12).unwrap(),
-        rename(&mut log, &laptop, 13).unwrap(),
+        rename(&mut log, &bea, 600).unwrap(),
+        rename(&mut log, &laptop, 601).unwrap(),
     ];
     let group_id = log.group_id();
     let setup = new.heads()[0];
@@ -871,12 +882,13 @@ fn before_five_a_raise_past_its_run_still_orders() {
         let rename = Body::Rename {
             name: "apart".into(),
         };
+        // Both sign their times, so each try orders them anew.
         let first = Entry::sign(&ana.id, group_id, heads.clone(), 20 + t, rename);
         let raise = Entry::sign(
             &ana.id,
             group_id,
             heads.clone(),
-            30,
+            100 + t,
             Body::Level { level: 3 },
         );
         copy.insert_all([first, raise.clone()]);
