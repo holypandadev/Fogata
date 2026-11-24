@@ -321,20 +321,25 @@ impl GroupContext {
 
     /// Writes again in this log, the one the group moved to from `old`, who entries
     /// written apart from the move took out or brought in there (see
-    /// [`GroupLog::again_after_move`]): the first member only. Returns the new hashes.
-    pub(crate) fn again_after_move(&mut self, old: &GroupLog, now_ms: u64) -> Vec<EntryHash> {
+    /// [`GroupLog::again_after_move`]): the first member only. Returns the new hashes, or
+    /// nothing when it could not be written.
+    pub(crate) fn again_after_move(
+        &mut self,
+        old: &GroupLog,
+        now_ms: u64,
+    ) -> Option<Vec<EntryHash>> {
         match self.log.again_after_move(&self.identity, old, now_ms) {
             Ok(written) if !written.is_empty() => {
                 self.refresh();
-                written.iter().map(Entry::hash).collect()
+                Some(written.iter().map(Entry::hash).collect())
             }
-            Ok(_) => Vec::new(),
+            Ok(_) => Some(Vec::new()),
             Err(e) => {
                 tracing::warn!(
                     "cannot write again in {:?} what was written apart from its move: {e}",
                     self.group_id()
                 );
-                Vec::new()
+                None
             }
         }
     }

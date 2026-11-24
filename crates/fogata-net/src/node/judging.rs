@@ -306,6 +306,10 @@ impl Node {
             }
             Verdict::Moved(verdict) => self.start_judged(peer, group, verdict),
             Verdict::Failed => {
+                // Whatever was judged, a new log being judged for the group is no more.
+                if let Some(slot) = self.groups.get_mut(&group) {
+                    slot.following_judged();
+                }
                 tracing::error!(
                     %peer,
                     "judging a log a peer sent failed with an internal error; the peer is \
