@@ -99,7 +99,8 @@ fn adds_events(request: &MemberRequest) -> bool {
         | MemberRequest::GroupPicture { .. }
         | MemberRequest::RoomEvents { .. }
         | MemberRequest::KeyProblem { .. }
-        | MemberRequest::FriendAsk { .. } => false,
+        | MemberRequest::FriendAsk { .. }
+        | MemberRequest::MovedLog { .. } => false,
     }
 }
 
@@ -204,7 +205,7 @@ impl Node {
 
     /// The device of member `peer`, when an ask of its for the log or a room's past is
     /// answered now (see `limits::SERVED_BYTES_BURST`).
-    fn may_serve(&mut self, peer: PeerId) -> Option<fogata_crypto::DevicePublicKey> {
+    pub(super) fn may_serve(&mut self, peer: PeerId) -> Option<fogata_crypto::DevicePublicKey> {
         let device = self.members.get(&peer)?.device;
         if self.limits.may_serve(device, Instant::now()) {
             Some(device)
@@ -231,7 +232,7 @@ impl Node {
     }
 
     /// Charges member `device` for an answer of about `bytes` made for it.
-    fn charge_served(&mut self, device: fogata_crypto::DevicePublicKey, bytes: usize) {
+    pub(super) fn charge_served(&mut self, device: fogata_crypto::DevicePublicKey, bytes: usize) {
         self.limits.charge_served(device, bytes, Instant::now());
     }
 
@@ -264,7 +265,8 @@ impl Node {
                 | MemberRequest::GroupPicture { .. }
                 | MemberRequest::RoomEvents { .. }
                 | MemberRequest::KeyProblem { .. }
-                | MemberRequest::FriendAsk { .. } => MemberResponse::Refused,
+                | MemberRequest::FriendAsk { .. }
+                | MemberRequest::MovedLog { .. } => MemberResponse::Refused,
             };
         }
         // The application is far behind (see events.rs): what would only add to its events
@@ -334,6 +336,9 @@ impl Node {
             }
             MemberRequest::OtherSession => self.on_other_session(peer),
             MemberRequest::FriendAsk { sealed } => self.on_member_friend_ask(peer, &sealed),
+            MemberRequest::MovedLog { group_id, from } => {
+                self.on_moved_log_request(peer, group_id, from)
+            }
             MemberRequest::KeyProblem { group_id, epoch } => {
                 self.on_key_problem_request(peer, group_id, epoch)
             }
@@ -1192,6 +1197,9 @@ impl Node {
             (Pending::Picture(group, digest), response) => {
                 self.on_picture_answer(peer, group, digest, response)
             }
+            (Pending::MovedLog(group, from), response) => {
+                self.on_moved_log_answer(peer, group, from, response)
+            }
             (Pending::FriendAsk(device, fresh), response) => {
                 self.member_ask_answered(device, fresh, matches!(response, MemberResponse::Ack))
             }
@@ -1479,6 +1487,7 @@ mod tests {
             MemberRequest::RoomEvents { .. } => "RoomEvents",
             MemberRequest::KeyProblem { .. } => "KeyProblem",
             MemberRequest::FriendAsk { .. } => "FriendAsk",
+            MemberRequest::MovedLog { .. } => "MovedLog",
         }
     }
 
@@ -1496,6 +1505,7 @@ mod tests {
             MemberResponse::JoinWaiting => "JoinWaiting",
             MemberResponse::JoinDeclined => "JoinDeclined",
             MemberResponse::RoomLog { .. } => "RoomLog",
+            MemberResponse::MovedLog { .. } => "MovedLog",
         }
     }
 
@@ -1597,6 +1607,10 @@ mod tests {
             MemberRequest::FriendAsk {
                 sealed: vec![1, 2, 3],
             },
+            MemberRequest::MovedLog {
+                group_id: group_id(),
+                from: 0,
+            },
         ]
     }
 
@@ -1657,6 +1671,8 @@ mod tests {
             ("RoomEvents", to_members("RoomLog")),
             ("KeyProblem", to_members("Ack")),
             ("FriendAsk", refused),
+            // The group did not move.
+            ("MovedLog", refused),
         ];
         assert_eq!(found, expected);
         node.shutdown().await.unwrap();

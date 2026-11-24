@@ -256,6 +256,19 @@ pub enum MemberRequest {
         #[serde(with = "serde_bytes")]
         sealed: Vec<u8>,
     },
+    /// Asks a member of a group that moved to a new log (a `Moved` entry, from level five)
+    /// for that new log, from the entry given: the asker checks that it is the group as it
+    /// was before following it. The answer is a [`MemberResponse::MovedLog`]. Only for
+    /// devices at capability level five or later; older ones cannot read it, which only
+    /// fails this request.
+    MovedLog {
+        /// The group that moved (not the one it moved to).
+        #[serde(with = "serde_bytes")]
+        group_id: Vec<u8>,
+        /// How many entries earlier parts of the answer gave; none at first.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        from: u32,
+    },
 }
 
 /// Protocol a device advertises (identify) when it takes [`MemberRequest::FriendAsk`].
@@ -304,6 +317,14 @@ pub enum MemberResponse {
     /// devices give all of them at once and leave it out.
     RoomLog {
         messages: Vec<WireMessage>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        more: Option<u32>,
+    },
+    /// The new log of a group that moved, in the log's order (canonical encoding), or a
+    /// part of it that fits one answer: then `more` says from which entry to ask for the
+    /// rest.
+    MovedLog {
+        entries: Vec<serde_bytes::ByteBuf>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         more: Option<u32>,
     },

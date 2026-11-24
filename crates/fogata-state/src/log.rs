@@ -2532,7 +2532,7 @@ fn invite_ticket(body: &Body) -> Option<Ticket> {
 mod moved;
 mod verdicts;
 
-pub use moved::{ApartFromMove, LogFill, NOT_THE_SAME_GROUP, same_group};
+pub use moved::{AddedApart, ApartFromMove, LogFill, NOT_THE_SAME_GROUP, same_group};
 pub use verdicts::Verdicts;
 
 #[cfg(test)]

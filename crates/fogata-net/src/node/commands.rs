@@ -262,6 +262,9 @@ impl Node {
                 let _ = reply.send(self.send_direct(group, to, payloads));
             }
             Command::DropGroup(group) => self.drop_group(group),
+            Command::MoveGroup { group, reply } => {
+                let _ = reply.send(self.move_group(group));
+            }
             Command::SetGroupBanner {
                 group,
                 picture,

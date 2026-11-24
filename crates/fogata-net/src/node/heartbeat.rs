@@ -66,34 +66,40 @@ impl Node {
             let one_above = self.manager_above_here(group);
             let levels = crate::locked(&self.levels).clone();
             let slot = self.groups.get_mut(&group).expect("listed above");
-            let mut new = slot.ctx.welcome_lacking(now_ms());
-            new.extend(slot.ctx.mend_key(now_ms(), one_above));
-            // An invite this manager wrote before it saw the group go up a level works only
-            // written again (see `GroupContext::name_unnamed_invites`).
-            new.extend(slot.ctx.name_unnamed_invites(now_ms()));
-            // Once every member's copy judges at this version's level, the group goes up.
-            new.extend(
-                slot.ctx
-                    .raise_level_when_all_judge(now_ms(), one_above, |d| {
-                        levels.get(d).copied().unwrap_or(crate::caps::FIRST_LEVEL)
-                    }),
-            );
-            // A week-old key is replaced (not a call's: it lasts as long as the call).
-            if !slot.call {
-                new.extend(slot.ctx.rotate_if_old(now_ms()));
+            // A group that moved takes nothing more (see moves.rs): it writes nothing, and
+            // only its rosters and syncs go on.
+            let moved = slot.ctx.moved().is_some();
+            let mut new = Vec::new();
+            if !moved {
+                new.extend(slot.ctx.welcome_lacking(now_ms()));
+                new.extend(slot.ctx.mend_key(now_ms(), one_above));
+                // An invite this manager wrote before it saw the group go up a level works only
+                // written again (see `GroupContext::name_unnamed_invites`).
+                new.extend(slot.ctx.name_unnamed_invites(now_ms()));
+                // Once every member's copy judges at this version's level, the group goes up.
+                new.extend(
+                    slot.ctx
+                        .raise_level_when_all_judge(now_ms(), one_above, |d| {
+                            levels.get(d).copied().unwrap_or(crate::caps::FIRST_LEVEL)
+                        }),
+                );
+                // A week-old key is replaced (not a call's: it lasts as long as the call).
+                if !slot.call {
+                    new.extend(slot.ctx.rotate_if_old(now_ms()));
+                }
+                // The member expected to rotate may be offline: after a couple of heartbeats,
+                // whoever sees the leak rotates.
+                slot.leak_heartbeats = if slot.ctx.secret_leaked() {
+                    slot.leak_heartbeats + 1
+                } else {
+                    0
+                };
+                new.extend(
+                    slot.ctx
+                        .rotate_if_leaked(now_ms(), slot.leak_heartbeats >= 2),
+                );
+                new.extend(slot.ctx.confirm_revokes(now_ms()));
             }
-            // The member expected to rotate may be offline: after a couple of heartbeats,
-            // whoever sees the leak rotates.
-            slot.leak_heartbeats = if slot.ctx.secret_leaked() {
-                slot.leak_heartbeats + 1
-            } else {
-                0
-            };
-            new.extend(
-                slot.ctx
-                    .rotate_if_leaked(now_ms(), slot.leak_heartbeats >= 2),
-            );
-            new.extend(slot.ctx.confirm_revokes(now_ms()));
             let joining = slot.ctx.joining().is_some();
             let ask = roster_ask(slot, group);
             for peer in members {
@@ -122,6 +128,7 @@ impl Node {
                 }
             }
         }
+        self.follow_moves();
     }
 
     /// Whether a member connected now in `group` manages it and is above this device: the

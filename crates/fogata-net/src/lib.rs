@@ -234,6 +234,21 @@ pub enum NodeEvent {
         group: GroupId,
         log: GroupLog,
     },
+    /// `from` moved to a new log (a `Moved` entry, see [`fogata_state::Moved`]): the node
+    /// runs the new group, `log` (save it), from now on. It keeps running `from`, writing
+    /// nothing, so its last entries still reach members that were away and they find the
+    /// new log through this device; stop it ([`NodeHandle::drop_group`]) once they had
+    /// time to. Told once, on the device that moved the group and on each that followed.
+    GroupMoved {
+        from: GroupId,
+        log: GroupLog,
+    },
+    /// `group` moved to a log that is not the group as it was where the move was made: the
+    /// device that moved it wrote another group there. This device stays in `group`, which
+    /// takes nothing more. Told once.
+    MoveRefused {
+        group: GroupId,
+    },
     /// A connected member's profile.
     MemberProfile {
         profile: Profile,
@@ -640,6 +655,11 @@ enum Command {
         reply: tokio::sync::oneshot::Sender<Result<(), String>>,
     },
     DropGroup(GroupId),
+    /// Moves a full group to a new log, as its first member (see [`NodeHandle::move_group`]).
+    MoveGroup {
+        group: GroupId,
+        reply: tokio::sync::oneshot::Sender<Result<GroupId, String>>,
+    },
     GiveEntries {
         to: Vec<DevicePublicKey>,
         entries: Vec<Vec<u8>>,
@@ -867,6 +887,7 @@ impl fmt::Debug for Command {
             Command::AddDirect(_) => "AddDirect",
             Command::SendDirect { .. } => "SendDirect",
             Command::DropGroup(_) => "DropGroup",
+            Command::MoveGroup { .. } => "MoveGroup",
             Command::GiveEntries { .. } => "GiveEntries",
             Command::Typing { .. } => "Typing",
             Command::SendCall { .. } => "SendCall",
@@ -1127,6 +1148,16 @@ impl NodeHandle {
             member,
         })
         .await
+    }
+
+    /// Moves `group` to a new log, as its first member, once its log is ordered at level
+    /// five: for a log near its ceiling (see [`fogata_state::LogFill`]). The node runs the
+    /// new group at once and tells [`NodeEvent::GroupMoved`]; the members follow it as they
+    /// get the move. Returns the new group's id.
+    pub async fn move_group(&self, group: GroupId) -> Result<GroupId, NetError> {
+        self.ask(|reply| Command::MoveGroup { group, reply })
+            .await?
+            .map_err(NetError::Refused)
     }
 
     /// Stops running a group without leaving it, as when a call ends.

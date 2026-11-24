@@ -137,6 +137,7 @@ fn member_request_kind(request: &MemberRequest) -> &'static str {
         MemberRequest::RoomEvents { .. } => "member-request-room-events",
         MemberRequest::KeyProblem { .. } => "member-request-key-problem",
         MemberRequest::FriendAsk { .. } => "member-request-friend-ask",
+        MemberRequest::MovedLog { .. } => "member-request-moved-log",
     }
 }
 
@@ -337,6 +338,20 @@ fn member_requests() -> Vec<(String, MemberRequest)> {
                 sealed: vec![30; 80],
             },
         ),
+        (
+            "-first",
+            MemberRequest::MovedLog {
+                group_id: group_id(),
+                from: 0,
+            },
+        ),
+        (
+            "",
+            MemberRequest::MovedLog {
+                group_id: group_id(),
+                from: 9,
+            },
+        ),
     ]
     .into_iter()
     .map(|(form, request)| (format!("{}{form}", member_request_kind(&request)), request))
@@ -357,6 +372,7 @@ fn member_response_kind(response: &MemberResponse) -> &'static str {
         MemberResponse::JoinWaiting => "member-response-join-waiting",
         MemberResponse::JoinDeclined => "member-response-join-declined",
         MemberResponse::RoomLog { .. } => "member-response-room-log",
+        MemberResponse::MovedLog { .. } => "member-response-moved-log",
     }
 }
 
@@ -412,6 +428,20 @@ fn member_responses() -> Vec<(String, MemberResponse)> {
             MemberResponse::RoomLog {
                 messages: vec![message(50)],
                 more: Some(12),
+            },
+        ),
+        (
+            "-last",
+            MemberResponse::MovedLog {
+                entries: vec![buf(51, 40)],
+                more: None,
+            },
+        ),
+        (
+            "",
+            MemberResponse::MovedLog {
+                entries: vec![buf(52, 40), buf(53, 40)],
+                more: Some(2),
             },
         ),
     ]

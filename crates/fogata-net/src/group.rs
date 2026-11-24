@@ -273,6 +273,72 @@ impl GroupContext {
         self.log.group_id()
     }
 
+    /// The move that applies in this group, and its entry: from it on the group lives in
+    /// the log it names, and nothing applies here (see [`fogata_state::Moved`]).
+    pub(crate) fn moved(&self) -> Option<(EntryHash, fogata_state::Moved)> {
+        self.log.moved()
+    }
+
+    /// Moves the group to a new log, as its first member (see
+    /// [`GroupLog::new_log_for_move`]): returns the new log and the `Moved` entry written
+    /// here, signed on every entry this device has.
+    pub(crate) fn move_group(&mut self, now_ms: u64) -> Result<(GroupLog, EntryHash), String> {
+        let new = (self.log)
+            .new_log_for_move(&self.identity, now_ms)
+            .map_err(|e| e.to_string())?;
+        let moved = (self.log)
+            .move_to(&self.identity, &new, now_ms)
+            .map_err(|e| e.to_string())?;
+        self.refresh();
+        Ok((new, moved.hash()))
+    }
+
+    /// What a member following a move to this log is sent of it, encoded (see
+    /// [`GroupLog::start_for_move`]): from entry `from` on, up to [`SYNC_BYTES`] (an entry
+    /// longer than that goes alone), and the entry to ask from next when more is left.
+    pub(crate) fn start_for_move(
+        &self,
+        setup: &EntryHash,
+        follower: &DevicePublicKey,
+        from: u32,
+    ) -> (Vec<Vec<u8>>, Option<u32>) {
+        let start = self.log.start_for_move(setup, follower);
+        let mut part = Vec::new();
+        let mut size = 0;
+        let mut next = from as usize;
+        for entry in start.iter().skip(from as usize) {
+            let bytes = entry.encode();
+            if !part.is_empty() && size + bytes.len() > SYNC_BYTES {
+                break;
+            }
+            size += bytes.len();
+            part.push(bytes);
+            next += 1;
+        }
+        let more = (next < start.len()).then_some(next as u32);
+        (part, more)
+    }
+
+    /// Writes again in this log, the one the group moved to from `old`, who entries
+    /// written apart from the move took out or brought in there (see
+    /// [`GroupLog::again_after_move`]): the first member only. Returns the new hashes.
+    pub(crate) fn again_after_move(&mut self, old: &GroupLog, now_ms: u64) -> Vec<EntryHash> {
+        match self.log.again_after_move(&self.identity, old, now_ms) {
+            Ok(written) if !written.is_empty() => {
+                self.refresh();
+                written.iter().map(Entry::hash).collect()
+            }
+            Ok(_) => Vec::new(),
+            Err(e) => {
+                tracing::warn!(
+                    "cannot write again in {:?} what was written apart from its move: {e}",
+                    self.group_id()
+                );
+                Vec::new()
+            }
+        }
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.state.name
     }

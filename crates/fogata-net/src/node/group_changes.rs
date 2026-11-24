@@ -160,7 +160,9 @@ impl Node {
         // Someone left or a rotation was discarded: the member admitted first rotates now.
         // A manager that was not given the current key makes a new one.
         let one_above = self.manager_above_here(group);
-        if let Some(slot) = self.groups.get_mut(&group) {
+        if let Some(slot) = self.groups.get_mut(&group)
+            && slot.ctx.moved().is_none()
+        {
             new.extend(slot.ctx.rotate_if_leaked(now_ms(), false));
             new.extend(slot.ctx.mend_key(now_ms(), one_above));
         }
@@ -223,6 +225,7 @@ impl Node {
         self.rooms_follow_log(group);
         self.forget_settled_joins(group);
         self.group_changed_for_friends(group);
+        self.follow_move(group);
         let slot = self.groups.get_mut(&group).expect("checked above");
         if slot.ctx.i_am_member() {
             // Back in (added again): no leave to deliver any more.

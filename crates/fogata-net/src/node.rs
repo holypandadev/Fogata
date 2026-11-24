@@ -28,6 +28,7 @@ mod mdns_dials;
 mod member_friends;
 mod member_reach;
 mod members;
+mod moves;
 mod network;
 mod outbox;
 mod own;
@@ -563,6 +564,8 @@ enum Pending {
     /// A friend request to a member's device (see member_friends.rs), and whether no
     /// request to it was waiting before this one.
     FriendAsk(DevicePublicKey, bool),
+    /// The start of the log a group moved to, from the entry given (see moves.rs).
+    MovedLog(GroupId, u32),
 }
 
 /// Member requests to one peer: how many are on their way, and those waiting their turn.
@@ -912,6 +915,8 @@ struct GroupSlot {
     /// left runs on until one has (see `members::leave_taken`), since a member that has not
     /// counted the device in yet refuses it, and one away gets nothing.
     leaving: Option<fogata_state::EntryHash>,
+    /// Following the group's move to a new log, once its log has one (see moves.rs).
+    following: moves::Following,
 }
 
 impl GroupSlot {
@@ -979,6 +984,7 @@ impl GroupSlot {
         let ctx = GroupContext::new(identity, setup);
         Self {
             leaving: ctx.my_leave().filter(|_| ctx.member_count() > 0),
+            following: moves::Following::default(),
             ctx,
             rooms: BTreeMap::new(),
             me,
@@ -1421,6 +1427,12 @@ impl Node {
                 tracing::info!("the group to join is at a level this version does not judge at")
             }
             NodeEvent::Removed { .. } => tracing::info!("this device left a group"),
+            NodeEvent::GroupMoved { from, log } => {
+                tracing::info!("{from:?} moved to {:?}", log.group_id())
+            }
+            NodeEvent::MoveRefused { group } => {
+                tracing::warn!("{group:?} moved to a log that is not the same group")
+            }
             NodeEvent::MemberProfile { profile } => {
                 tracing::debug!("profile of member {}", profile.device.fingerprint())
             }

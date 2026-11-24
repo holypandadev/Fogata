@@ -988,3 +988,103 @@ fn a_move_by_a_leaver_leaves_the_reserve() {
     assert_eq!(log.moved().map(|(h, _)| h), Some(theirs.hash()));
     assert_eq!(fresh(&log).moved(), log.moved());
 }
+
+/// What members wrote apart from a move about who is in the group, as the move went: the
+/// first member writes it again in the new log, once. A removal is written again; so is
+/// an add, or a join a manager let in, by a manager still in the new group; not one by a
+/// member those entries took out, nor a join nobody let in. What members decide in the new
+/// log later stands.
+#[test]
+fn what_was_written_apart_from_a_move_is_written_again_once() {
+    let (mut log, ana, laptop, bea) = group(Level::Five);
+    log.set_ceiling(CEILING.entries, CEILING.bytes);
+    let (dan, eve, eva) = (Device::new(), Device::new(), Device::new());
+    let mut laptops = log.clone();
+    let removal = laptops.remove(&laptop.id, bea.key(), 10).unwrap();
+    let add = laptops.add(&laptop.id, dan.key(), "Dan", 11).unwrap();
+    let (ticket, _) = laptops.invite(&laptop.id, u64::MAX, 12).unwrap();
+    let invite = laptops.get(&laptops.heads()[0]).unwrap().clone();
+    let body = Body::Join {
+        ticket,
+        name: "Eva".into(),
+    };
+    let join = Entry::sign(&eva.id, laptops.group_id(), laptops.heads(), 13, body);
+    laptops.insert(join.clone()).unwrap();
+    let welcome = laptops.let_in(&laptop.id, &join.hash(), 14).unwrap();
+    assert!(laptops.state().is_member(&eva.key()));
+    let mut beas = log.clone();
+    let beas_add = beas.add(&bea.id, eve.key(), "Eve", 10).unwrap();
+
+    let mut new = log.new_log_for_move(&ana.id, 20).unwrap();
+    log.move_to(&ana.id, &new, 21).unwrap();
+    // A join nobody let in brings nobody: any member can sign one with a ticket it saw.
+    let (ticket, _) = beas.invite(&bea.id, u64::MAX, 11).unwrap();
+    let beas_invite = beas.get(&beas.heads()[0]).unwrap().clone();
+    let body = Body::Join {
+        ticket,
+        name: "Ivy".into(),
+    };
+    let ivy = Device::new();
+    let lone_join = Entry::sign(&ivy.id, beas.group_id(), beas.heads(), 12, body);
+    for entry in [
+        removal,
+        add,
+        invite,
+        join,
+        welcome,
+        beas_add,
+        beas_invite,
+        lone_join,
+    ] {
+        log.insert(entry).unwrap();
+    }
+    let apart = log.apart_from_move();
+    assert_eq!(apart.removed, vec![bea.key()]);
+    let mut added: Vec<_> = apart.added.iter().map(|a| (a.member, a.by)).collect();
+    added.sort();
+    let mut expected = vec![
+        (dan.key(), laptop.key()),
+        (eve.key(), bea.key()),
+        (eva.key(), laptop.key()),
+    ];
+    expected.sort();
+    assert_eq!(added, expected);
+
+    // Only the first member writes them.
+    assert!(
+        new.again_after_move(&laptop.id, &log, 30)
+            .unwrap()
+            .is_empty()
+    );
+    let written = new.again_after_move(&ana.id, &log, 30).unwrap();
+    assert_eq!(written.len(), 3, "{written:?}");
+    let state = new.state();
+    assert!(!state.is_member(&bea.key()));
+    assert!(state.is_member(&dan.key()));
+    assert_eq!(state.members[&eva.key()].name, "Eva");
+    assert!(!state.is_member(&eve.key()), "Bea's add goes with her");
+    assert!(new.again_after_move(&ana.id, &log, 31).unwrap().is_empty());
+
+    // Bea added back and Dan removed in the new log: that stands.
+    new.add(&laptop.id, bea.key(), "Bea", 40).unwrap();
+    new.remove(&ana.id, dan.key(), 41).unwrap();
+    assert!(new.again_after_move(&ana.id, &log, 42).unwrap().is_empty());
+    assert!(new.state().is_member(&bea.key()));
+    assert!(!new.state().is_member(&dan.key()));
+
+    // A log the group did not move to gets nothing.
+    let (mut other, ..) = group(Level::Five);
+    let mut elsewhere = GroupLog::create(&ana.id, "elsewhere", 50).unwrap();
+    assert!(
+        elsewhere
+            .again_after_move(&ana.id, &log, 51)
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        other
+            .again_after_move(&ana.id, &log, 51)
+            .unwrap()
+            .is_empty()
+    );
+}

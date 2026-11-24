@@ -397,6 +397,14 @@ async fn handle(inner: &Arc<Inner>, event: NodeEvent) {
         NodeEvent::JoinExpired { group } => handle_join_expired(inner, group).await,
         NodeEvent::Joined { group, name } => handle_joined(inner, group, name).await,
         NodeEvent::Removed { group, log } => handle_removed(inner, group, log).await,
+        // The new group is saved as any; the old one runs on, writing nothing, until it is
+        // dropped.
+        NodeEvent::GroupMoved { log, .. } => {
+            handle_group_changed(inner, log.group_id()).await;
+        }
+        NodeEvent::MoveRefused { group } => {
+            tracing::warn!("{group:?} moved to a log that is not the same group; staying");
+        }
         NodeEvent::MemberProfile { profile } => handle_member_profile(inner, profile),
         NodeEvent::Animation { animation } => handle_animation(inner, animation),
         NodeEvent::Signal {

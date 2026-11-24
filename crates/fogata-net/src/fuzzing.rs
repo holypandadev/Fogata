@@ -169,6 +169,7 @@ fn member_request(request: &MemberRequest) {
         MemberRequest::RoomEvents { ids, .. } => {
             let _ = ids.as_chunks::<16>();
         }
+        MemberRequest::MovedLog { .. } => {}
     }
 }
 
@@ -198,7 +199,9 @@ fn member_response(response: &MemberResponse) {
         MemberResponse::JoinOffer { heads } => {
             let _ = heads.iter().filter(|h| h.len() == 32).count();
         }
-        MemberResponse::JoinAccepted { entries } => entries_of(entries),
+        MemberResponse::JoinAccepted { entries } | MemberResponse::MovedLog { entries, .. } => {
+            entries_of(entries)
+        }
         MemberResponse::RoomLog { messages, .. } => {
             messages.iter().take(1024).for_each(sealed_of);
             let all: Vec<&WireMessage> = messages.iter().collect();
@@ -1163,6 +1166,10 @@ pub fn member_wire_seeds() -> Vec<Vec<u8>> {
         MemberRequest::FriendAsk {
             sealed: vec![9; 160],
         },
+        MemberRequest::MovedLog {
+            group_id: vec![1; 16],
+            from: 3,
+        },
     ];
     let proof = fogata_crypto::MembershipProof::create(
         &keys,
@@ -1191,6 +1198,10 @@ pub fn member_wire_seeds() -> Vec<Vec<u8>> {
         },
         MemberResponse::JoinOffer {
             heads: vec![ByteBuf::from(vec![6; 32])],
+        },
+        MemberResponse::MovedLog {
+            entries: entries.clone(),
+            more: Some(4),
         },
         MemberResponse::JoinAccepted { entries },
         MemberResponse::JoinWaiting,

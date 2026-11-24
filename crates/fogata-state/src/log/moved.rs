@@ -54,7 +54,17 @@ impl LogFill {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ApartFromMove {
     pub removed: Vec<DevicePublicKey>,
-    pub added: Vec<DevicePublicKey>,
+    pub added: Vec<AddedApart>,
+}
+
+/// A device that entries written apart from a move bring in.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AddedApart {
+    pub member: DevicePublicKey,
+    /// The name it was added, or joined, with.
+    pub name: String,
+    /// Who let it in: the author of its `Add`, or of the `Welcome` that let in its `Join`.
+    pub by: DevicePublicKey,
 }
 
 /// Why a new log is not the group a move says it is.
@@ -266,6 +276,38 @@ impl GroupLog {
         )
     }
 
+    /// What member `follower` of the old group needs of this log to follow the move to it:
+    /// entry `setup`, which the move names, and every entry before it (see
+    /// [`Self::follows`]), by time then hash, so that parts of it asked for one after the
+    /// other stay in place whatever this log takes meanwhile. A follower the start does not
+    /// let in (added apart from the move, and added here again since, see
+    /// [`Self::again_after_move`]) gets the rest of this log after it, by time then hash, so
+    /// that it is a member of what it takes. Empty while this log lacks `setup` or has not
+    /// judged it.
+    pub fn start_for_move(&self, setup: &EntryHash, follower: &DevicePublicKey) -> Vec<&Entry> {
+        if !self.entries.contains_key(setup) || self.unjudged.contains(setup) {
+            return Vec::new();
+        }
+        let before = self.before_and(setup);
+        let mut start: Vec<&Entry> = (before.iter())
+            .filter_map(|h| self.entries.get(h))
+            .collect();
+        start.sort_by_key(|e| (e.time_ms, e.hash()));
+        // The start is written by the first member alone, which adds every other member.
+        let let_in = start.iter().any(|e| {
+            e.author == *follower
+                || matches!(&e.body, Body::Add { member, .. } if member == follower)
+        });
+        if !let_in && self.state().is_member(follower) {
+            let mut rest: Vec<&Entry> = (self.entries.values())
+                .filter(|e| !before.contains(&e.hash()))
+                .collect();
+            rest.sort_by_key(|e| (e.time_ms, e.hash()));
+            start.extend(rest);
+        }
+        start
+    }
+
     /// What entries written apart from the move, kept and part of a run (so judged on what
     /// their authors saw), change of who is in the group the move saw: the new group starts
     /// as that group, and the first member writes these again there (nothing where the
@@ -279,7 +321,8 @@ impl GroupLog {
         let saw = self.group_on(&self.entries[&hash].parents);
         let before = self.ancestors(&hash);
         let full = self.full();
-        let (mut removed, mut added) = (BTreeSet::new(), BTreeSet::new());
+        let mut removed = BTreeSet::new();
+        let mut added: BTreeMap<DevicePublicKey, (String, DevicePublicKey)> = BTreeMap::new();
         for h in &full.order.hashes {
             if *h == hash || before.contains(h) || full.budget.over.contains(h) {
                 continue;
@@ -292,16 +335,96 @@ impl GroupLog {
                 Body::Leave if saw.is_member(&entry.author) => {
                     removed.insert(entry.author);
                 }
-                Body::Add { member, .. } if !saw.is_member(member) => {
-                    added.insert(*member);
+                Body::Add { member, name, .. } if !saw.is_member(member) => {
+                    added
+                        .entry(*member)
+                        .or_insert_with(|| (name.clone(), entry.author));
+                }
+                // A join lets its device in only with a manager's `Welcome` signed on it: that
+                // manager let it in, with the name of the join.
+                Body::Welcome { member, .. } if !saw.is_member(member) => {
+                    let joined = entry
+                        .parents
+                        .iter()
+                        .find_map(|p| match self.entries.get(p) {
+                            Some(join) if join.author == *member => match &join.body {
+                                Body::Join { name, .. } => Some(name.clone()),
+                                _ => None,
+                            },
+                            _ => None,
+                        });
+                    if let Some(name) = joined {
+                        added.entry(*member).or_insert_with(|| (name, entry.author));
+                    }
                 }
                 _ => {}
             }
         }
-        added.retain(|m| !removed.contains(m));
+        added.retain(|m, _| !removed.contains(m));
         apart.removed = removed.into_iter().collect();
-        apart.added = added.into_iter().collect();
+        apart.added = (added.into_iter())
+            .map(|(member, (name, by))| AddedApart { member, name, by })
+            .collect();
         apart
+    }
+
+    /// Writes again in this log, the one a group moved to from `old`, what entries written
+    /// apart from the move changed of who is in it ([`Self::apart_from_move`]): removes the
+    /// members they took out, and adds those they brought in whose adder they did not take
+    /// out and is still a manager here. Only the first member writes them, once each: a member already removed or gone
+    /// from this log is not removed again, nor one added, removed or gone here added again,
+    /// so what members decide here later stands. Returns the entries written; none where
+    /// this device is not first here, or the group did not move to this log.
+    pub fn again_after_move(
+        &mut self,
+        identity: &DeviceIdentity,
+        old: &GroupLog,
+        now_ms: u64,
+    ) -> Result<Vec<Entry>, StateError> {
+        let me = identity.public_key();
+        let moved_here = old.moved().is_some_and(|(_, m)| m.to == self.group_id);
+        if !moved_here || self.state().first() != Some(me) {
+            return Ok(Vec::new());
+        }
+        let apart = old.apart_from_move();
+        // Who this log already took out, let go or let in, by any entry it keeps.
+        let (mut out, mut came) = (BTreeSet::new(), BTreeSet::new());
+        for entry in self.entries.values() {
+            match &entry.body {
+                Body::Remove { member, .. } => {
+                    out.insert(*member);
+                }
+                Body::Leave => {
+                    out.insert(entry.author);
+                }
+                Body::Add { member, .. } => {
+                    came.insert(*member);
+                }
+                Body::Join { .. } => {
+                    came.insert(entry.author);
+                }
+                _ => {}
+            }
+        }
+        let mut written = Vec::new();
+        for member in apart.removed.iter().copied() {
+            if member != me && !out.contains(&member) && self.state().is_member(&member) {
+                written.push(self.remove(identity, member, now_ms)?);
+            }
+        }
+        for AddedApart { member, name, by } in apart.added {
+            let state = self.state();
+            let again = !apart.removed.contains(&by)
+                && !out.contains(&member)
+                && !came.contains(&member)
+                && !state.is_member(&member)
+                && state.is_manager(&by)
+                && state.members.len() < usize::from(state.max_members);
+            if again {
+                written.push(self.add(identity, member, &name, now_ms)?);
+            }
+        }
+        Ok(written)
     }
 
     /// The group, room rules too, as the entries `parents` and every entry before them

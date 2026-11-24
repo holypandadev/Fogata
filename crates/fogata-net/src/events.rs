@@ -104,6 +104,7 @@ enum Latest {
     Animation(fogata_crypto::DevicePublicKey, fogata_friends::Animated),
     Level(fogata_crypto::DevicePublicKey),
     Removed(fogata_crypto::GroupId),
+    Moved(fogata_crypto::GroupId),
     Join(fogata_crypto::GroupId),
     JoinAsk(fogata_crypto::GroupId, fogata_crypto::DevicePublicKey),
     Offered(fogata_crypto::GroupId),
@@ -134,6 +135,9 @@ fn latest(event: &NodeEvent) -> Option<(Latest, Place)> {
         ),
         NodeEvent::LevelSeen { device, .. } => (Latest::Level(*device), Place::Last),
         NodeEvent::Removed { group, .. } => (Latest::Removed(*group), Place::Last),
+        NodeEvent::GroupMoved { from: group, .. } | NodeEvent::MoveRefused { group } => {
+            (Latest::Moved(*group), Place::Last)
+        }
         NodeEvent::JoinWaiting { group }
         | NodeEvent::Joined { group, .. }
         | NodeEvent::JoinDeclined { group }
@@ -194,6 +198,7 @@ fn weight(event: &NodeEvent) -> usize {
             ..
         } => line.text.len(),
         NodeEvent::Removed { log, .. }
+        | NodeEvent::GroupMoved { log, .. }
         | NodeEvent::GroupOffered { log, .. }
         | NodeEvent::DirectOffered { log, .. } => log.len() * LOG_ENTRY,
         NodeEvent::FriendRequest { profile }

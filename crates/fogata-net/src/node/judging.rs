@@ -65,6 +65,13 @@ pub(super) enum Job {
         trial: AdmittedTrial,
         entries: Vec<Vec<u8>>,
     },
+    /// The start of the log a group here moved to, sent by a member (see moves.rs), with
+    /// a copy of the old group's log to judge it on.
+    Moved {
+        old: GroupLog,
+        to: GroupId,
+        entries: Vec<Vec<u8>>,
+    },
 }
 
 impl Job {
@@ -74,6 +81,7 @@ impl Job {
             Job::Direct { .. } => 1,
             Job::Removal(_) => 2,
             Job::Admitted { .. } => 3,
+            Job::Moved { .. } => 4,
         }
     }
 
@@ -81,7 +89,8 @@ impl Job {
         match self {
             Job::Group { entries, .. }
             | Job::Direct { entries, .. }
-            | Job::Admitted { entries, .. } => entries.iter().map(Vec::len).sum(),
+            | Job::Admitted { entries, .. }
+            | Job::Moved { entries, .. } => entries.iter().map(Vec::len).sum(),
             Job::Removal(trial) => trial.bytes(),
         }
     }
@@ -111,6 +120,9 @@ impl Job {
                 log: trial.judge(),
                 entries,
             },
+            Job::Moved { old, to, entries } => {
+                Verdict::Moved(super::moves::judge_start(&old, to, &entries))
+            }
         }
     }
 }
@@ -144,6 +156,8 @@ pub(super) enum Verdict {
         log: Option<GroupLog>,
         entries: Vec<Vec<u8>>,
     },
+    /// What the start of the log a group moved to came to.
+    Moved(super::moves::StartVerdict),
     /// Judging it failed (a panic): the peer that sent it is let go.
     Failed,
 }
@@ -290,6 +304,7 @@ impl Node {
                 let taken = log.is_some();
                 self.admitted_judged(group, peer, entries, taken, log)
             }
+            Verdict::Moved(verdict) => self.start_judged(peer, group, verdict),
             Verdict::Failed => {
                 tracing::error!(
                     %peer,

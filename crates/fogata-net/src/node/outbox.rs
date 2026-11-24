@@ -61,7 +61,8 @@ pub(super) fn is_quick(request: &MemberRequest) -> bool {
         | MemberRequest::RoomSync { .. }
         | MemberRequest::Admitted { .. }
         | MemberRequest::RoomEvents { .. }
-        | MemberRequest::FriendAsk { .. } => false,
+        | MemberRequest::FriendAsk { .. }
+        | MemberRequest::MovedLog { .. } => false,
     };
     small_answer && request_bytes(request) <= QUICK_BYTES
 }
@@ -96,7 +97,8 @@ pub(super) fn request_bytes(request: &MemberRequest) -> usize {
         | MemberRequest::RoomSync { .. }
         | MemberRequest::Presence { .. }
         | MemberRequest::OtherSession
-        | MemberRequest::KeyProblem { .. } => 0,
+        | MemberRequest::KeyProblem { .. }
+        | MemberRequest::MovedLog { .. } => 0,
     }
 }
 
@@ -211,6 +213,8 @@ impl Node {
             // full queue it would push out the next oldest, and a peer that went is not
             // dialled. Only one that failed on its way goes again (see own.rs).
             Pending::Own(_, id, _) => self.own_answered(id),
+            // Another member is asked at the next heartbeat.
+            Pending::MovedLog(group, _) => self.moved_log_lost(group, peer),
             _ => {}
         }
     }

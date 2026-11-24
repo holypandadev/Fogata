@@ -33,7 +33,7 @@ pub use entry::{
 };
 pub use fogata_crypto::codec::DecodeError;
 pub use log::{
-    ApartFromMove, GroupLog, JOIN_ON_SPARE, KeyProblem, LogFill, NOT_THE_SAME_GROUP,
+    AddedApart, ApartFromMove, GroupLog, JOIN_ON_SPARE, KeyProblem, LogFill, NOT_THE_SAME_GROUP,
     RAISE_LEVEL_ONLY, StateError, TICKET_EXPIRED, Taken, Verdicts, same_group,
 };
 pub use picture::{
