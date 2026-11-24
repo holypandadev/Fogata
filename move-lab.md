@@ -19,6 +19,8 @@ After: the command line moves a group (`/move` in `fogata chat`), and a chat ope
 - `cargo fmt --check` and `cargo clippy -D warnings` on fogata-net, fogata-core, fogata-ffi and the CLI, with and without `lab`: clean. CLI tests pass; fogata-core `tests/moved.rs` 8 passed.
 - Network lab, run locally on 15245b2's script: `group-move` passes. B and C follow the move about 100 s in, all three hold the same new log of 1,465 bytes, and the messages after the move cross.
 
+CI on this commit: CI (Linux, macOS, Windows and the Linux checks), call checks, the network lab with `group-move` and the Flatpak drop all pass.
+
 ## Known limit, measured
 
 When the first member removes two members while offline, it writes two key changes, and the others, knowing only the key from before both, never reached it behind cone NATs. The scenario removes one. `lab/behind-rotations` fixes this on its own (members announce under the older keys they look up); once both are in, the scenario can remove both flooders again.
