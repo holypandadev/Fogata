@@ -1896,6 +1896,10 @@ fn numbered(dest: &Path, n: u32) -> PathBuf {
     dest.with_file_name(numbered)
 }
 
+#[cfg(all(test, unix))]
+#[path = "../tests/support/unchangeable.rs"]
+mod unchangeable;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2988,20 +2992,24 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn what_an_earlier_run_left_and_cannot_go_is_left() {
-        use std::os::unix::fs::PermissionsExt as _;
+        use super::unchangeable::{cannot_be_made_unchangeable, unchangeable};
         let dir = folder("copy-stuck");
         let kept = dir.join("kept");
         let stuck = kept.join("stuck");
         std::fs::create_dir_all(&stuck).unwrap();
         std::fs::write(stuck.join("a.copy"), b"old").unwrap();
-        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let Some(locked) = unchangeable(&stuck) else {
+            cannot_be_made_unchangeable(&stuck);
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        };
         let opened = Copies::open(kept.clone(), None);
         let from = dir.join("notes.txt");
         std::fs::write(&from, b"PUBLIC-V1").unwrap();
         let copied = opened
             .as_ref()
             .map(|copies| copies.copy(&from, u64::MAX).map(|(_, _, size)| size));
-        std::fs::set_permissions(&stuck, std::fs::Permissions::from_mode(0o700)).unwrap();
+        drop(locked);
         assert_eq!(copied.unwrap().unwrap(), 9);
         assert!(stuck.join("a.copy").exists());
         drop(opened);

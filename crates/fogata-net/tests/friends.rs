@@ -22,8 +22,9 @@ static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 /// The invitation must arrive well before the 20 s friend heartbeat would carry it.
 const PROMPT: Duration = Duration::from_secs(5);
 
-/// Entries of a group written to cost the most to judge, in a test: seconds in a
-/// debug build.
+/// Entries of a group written to cost the most to judge, in a test: seconds in a debug
+/// build, a fraction of one in a release build, where a test that needs it longer writes
+/// more (see `costly_group`).
 const COSTLY_ENTRIES: usize = 900;
 
 /// A node listening on `listen_port` (0 for any) that dials `peers`; nothing else of the
@@ -246,6 +247,32 @@ async fn a_long_group_reaches_a_friend_in_parts() {
     drop(node_b);
 }
 
+/// Group `first` with `n` entries more, written by `by` apart, each entry signed only on
+/// its author's last one: every entry is judged on the group worked out for its own
+/// parents. With the log judged from them, and how long judging took.
+fn costly_group(
+    first: &GroupLog,
+    by: [&DeviceIdentity; 2],
+    n: usize,
+) -> (Vec<Entry>, GroupLog, Duration) {
+    let group = first.group_id();
+    let mut entries: Vec<Entry> = first.entries_in_order().into_iter().cloned().collect();
+    let mut last = [first.heads(), first.heads()];
+    for i in 0..n {
+        let body = Body::Rename {
+            name: format!("n{i}"),
+        };
+        let entry = Entry::sign(by[i % 2], group, last[i % 2].clone(), 10 + i as u64, body);
+        last[i % 2] = vec![entry.hash()];
+        entries.push(entry);
+    }
+    let mut log = GroupLog::empty(group);
+    let started = Instant::now();
+    log.insert_all(entries.clone());
+    let judging = started.elapsed();
+    (entries, log, judging)
+}
+
 /// Longest a node may take to answer a command while a friend's offer is judged.
 const ANSWERS_WITHIN: Duration = Duration::from_millis(250);
 
@@ -265,24 +292,23 @@ async fn a_group_costly_to_judge_reaches_a_friend_that_goes_on_answering() {
     first.add(&ana, bea.public_key(), "bea", 2).unwrap();
     first.add(&ana, leo.public_key(), "leo", 3).unwrap();
     let group = first.group_id();
-    let mut entries: Vec<Entry> = first.entries_in_order().into_iter().cloned().collect();
-    let mut last = [first.heads(), first.heads()];
-    for i in 0..COSTLY_ENTRIES {
-        let by: &DeviceIdentity = [&ana, &leo][i % 2];
-        let body = Body::Rename {
-            name: format!("n{i}"),
-        };
-        let entry = Entry::sign(by, group, last[i % 2].clone(), 10 + i as u64, body);
-        last[i % 2] = vec![entry.hash()];
-        entries.push(entry);
-    }
-    let mut log = GroupLog::empty(group);
-    let started = Instant::now();
-    log.insert_all(entries.clone());
-    let judging = started.elapsed();
+    // Long enough to judge that a node judging it on its loop would not answer in time: as
+    // many entries as that takes on this computer, which a fixed number is not on a fast
+    // one (seconds on one, a fraction of one on another, or in a release build).
+    let mut written = COSTLY_ENTRIES;
+    let (entries, log, judging) = loop {
+        let (entries, log, judging) = costly_group(&first, [&ana, &leo], written);
+        if judging > 4 * ANSWERS_WITHIN || written >= 64 * COSTLY_ENTRIES {
+            break (entries, log, judging);
+        }
+        written *= 2;
+    };
     assert_eq!(log.len(), entries.len());
-    // Long enough that a node judging it on its loop would not answer in time.
-    assert!(judging > 4 * ANSWERS_WITHIN, "judged in {judging:?}");
+    assert!(
+        judging > 4 * ANSWERS_WITHIN,
+        "{} entries judged in {judging:?}",
+        entries.len()
+    );
     let port_a = free_port();
     let (node_a, mut events_a) = node(ana.clone(), book_a, port_a, Vec::new());
     let (node_b, mut events_b) = node(bea.clone(), book_b, 0, vec![loopback(port_a)]);

@@ -34,6 +34,11 @@ tracing-subscriber.workspace = true
 [target.'cfg(windows)'.dependencies]
 winapi-util = "0.1.11"
 
+# The immutable attribute, through a safe call, for the tests of a folder or file that cannot
+# be changed when they run as root (tests/support/unchangeable.rs).
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+rustix = { version = "1.1.6", features = ["fs"] }
+
 [features]
 # Entry points for fuzzing what peers send (see fogata-core's `fuzzing`).
 fuzzing = []

@@ -31,6 +31,10 @@ use fogata_net::{Multiaddr, RoomChange};
 use fogata_state::GroupLog;
 use tokio::{net::UdpSocket, time::timeout};
 
+#[cfg(unix)]
+#[path = "../../fogata-net/tests/support/unchangeable.rs"]
+mod unchangeable;
+
 /// One test at a time: each starts devices that talk over this computer's network, and
 /// several at once on a busy computer leave the protocol's timers too little room.
 static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -416,7 +420,7 @@ async fn a_plain_folder_is_sealed_at_its_first_start() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_folder_not_all_sealed_says_so_until_it_is() {
-    use std::os::unix::fs::PermissionsExt;
+    use unchangeable::{cannot_be_made_unchangeable, unchangeable};
     let _one = ONE_AT_A_TIME.lock().await;
     keychain();
     let base =
@@ -428,7 +432,11 @@ async fn a_folder_not_all_sealed_says_so_until_it_is() {
 
     std::fs::write(dir.join(BACKUP_DIR), b"not a folder").unwrap();
     let files = kept.parent().unwrap().to_path_buf();
-    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let Some(locked) = unchangeable(&files) else {
+        cannot_be_made_unchangeable(&files);
+        let _ = std::fs::remove_dir_all(&base);
+        return;
+    };
     let (core, _) = Core::start(dir.clone(), alone(free_port(), None)).unwrap();
     assert_eq!(core.me(), me.public_key());
     assert_ne!(core.at_rest(), AtRest::Sealed);
@@ -453,7 +461,7 @@ async fn a_folder_not_all_sealed_says_so_until_it_is() {
     core.shutdown().await.unwrap();
     drop(core);
 
-    std::fs::set_permissions(&files, std::fs::Permissions::from_mode(0o700)).unwrap();
+    drop(locked);
     let (core, _) = start_again(&dir, alone(free_port(), None)).await;
     timeout(Duration::from_secs(20), async {
         while sealed_form(&std::fs::read(&kept).unwrap()).is_none() {
