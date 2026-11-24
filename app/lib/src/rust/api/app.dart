@@ -350,6 +350,17 @@ Future<void> raiseGroupLevelAnyway({
   behind: behind,
 );
 
+/// Moves a group whose history is nearly full to a fresh one, as its first member
+/// (`UiGroup::may_move`): the new group takes its place here at once, and the others follow
+/// as they connect. Returns the new group's id.
+Future<String> moveGroup({required String groupId}) =>
+    RustLib.instance.api.crateApiAppMoveGroup(groupId: groupId);
+
+/// The group that shows here in place of `group_id` once it moved and this device followed
+/// (the end of a line of moves), or None.
+Future<String?> groupMovedTo({required String groupId}) =>
+    RustLib.instance.api.crateApiAppGroupMovedTo(groupId: groupId);
+
 /// Who manages a group: the first `first` on its list, or everyone (`None`).
 Future<void> setGroupManagers({required String groupId, int? first}) => RustLib
     .instance

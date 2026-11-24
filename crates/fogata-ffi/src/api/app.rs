@@ -1022,6 +1022,25 @@ pub async fn raise_group_level_anyway(group_id: String, behind: Vec<String>) -> 
     run(|core| async move { core.raise_group_level_anyway(id, behind).await }).await
 }
 
+/// Moves a group whose history is nearly full to a fresh one, as its first member
+/// (`UiGroup::may_move`): the new group takes its place here at once, and the others follow
+/// as they connect. Returns the new group's id.
+pub async fn move_group(group_id: String) -> Result<String> {
+    let id = self::group_id(&group_id)?;
+    run(|core| async move { core.move_group(id).await })
+        .await
+        .map(|moved| hex::encode(moved.as_bytes()))
+}
+
+/// The group that shows here in place of `group_id` once it moved and this device followed
+/// (the end of a line of moves), or None.
+pub async fn group_moved_to(group_id: String) -> Result<Option<String>> {
+    let id = self::group_id(&group_id)?;
+    run(|core| async move { core.moved_to(id).await })
+        .await
+        .map(|moved| moved.map(|g| hex::encode(g.as_bytes())))
+}
+
 /// Who manages a group: the first `first` on its list, or everyone (`None`).
 pub async fn set_group_managers(group_id: String, first: Option<u8>) -> Result<()> {
     let id = self::group_id(&group_id)?;
