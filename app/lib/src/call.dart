@@ -2260,7 +2260,9 @@ class Call extends ChangeNotifier {
   Future<void> _checkOutput() async {
     if (!onMacOS || _closed || _checkingOutput) return;
     if (output == null && input == null) {
-      // The system's devices chosen again: nothing in use beside a choice any more.
+      // The system's devices chosen again: nothing in use beside a choice any more, and
+      // nothing seen of the recording with the devices chosen before holds for the next.
+      _recordingWatch.reset();
       if (outputInUse != null || inputInUse != null) {
         outputInUse = null;
         inputInUse = null;

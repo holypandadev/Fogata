@@ -471,12 +471,72 @@ void main() {
           isFalse,
         );
       }
-      // Someone comes, and nothing records for them: started again at once.
+      // Someone comes: WebRTC may not record for them yet at this reading. Still nothing
+      // recorded at the next one: started again then.
+      expect(
+        watch.take(refused, mic: true, sending: false, listened: true),
+        isFalse,
+      );
       expect(
         watch.take(refused, mic: true, sending: false, listened: true),
         isTrue,
       );
     });
+
+    test('one who comes after a refusal and is recorded for costs no restart', () {
+      final watch = RecordingWatch();
+      final playing = {
+        'recordingAsked': false,
+        'recording': false,
+        'inputUsable': true,
+        'changing': false,
+        'combinable': true,
+      };
+      final refused = {...playing, 'combinable': false};
+      watch.take(playing, mic: true, sending: false, listened: false);
+      watch.take(refused, mic: true, sending: false, listened: false);
+      // The reading falls before WebRTC starts recording for the one who came.
+      expect(
+        watch.take(refused, mic: true, sending: false, listened: true),
+        isFalse,
+      );
+      final recording = {...refused, 'recordingAsked': true, 'recording': true};
+      expect(
+        watch.take(recording, mic: true, sending: true, listened: true),
+        isFalse,
+      );
+      expect(
+        watch.take(recording, mic: true, sending: true, listened: true),
+        isFalse,
+      );
+    });
+
+    test(
+      'a refusal seen before the system\'s devices does not outlive them',
+      () {
+        final watch = RecordingWatch();
+        final playing = {
+          'recordingAsked': false,
+          'recording': false,
+          'inputUsable': true,
+          'changing': false,
+          'combinable': true,
+        };
+        watch.take(playing, mic: true, sending: false, listened: false);
+        watch.take(
+          {...playing, 'combinable': false},
+          mic: true,
+          sending: false,
+          listened: false,
+        );
+        // The system's devices chosen again, then a device chosen anew: a loss with it
+        // needs two readings, as any.
+        watch.reset();
+        final lost = {...playing, 'recordingAsked': true};
+        expect(watch.take(lost, mic: true, sending: true), isFalse);
+        expect(watch.take(lost, mic: true, sending: true), isTrue);
+      },
+    );
 
     test(
       'a refusal ends as something records, and is not taken while muted',

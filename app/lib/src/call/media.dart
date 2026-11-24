@@ -484,6 +484,17 @@ class RecordingWatch {
   bool _recovered = false;
   bool _refused = false;
   Object? _combinable;
+  bool _listened = false;
+
+  /// The system's devices chosen again (nothing read meanwhile): what was seen of the
+  /// devices chosen before is not this choice's.
+  void reset() {
+    _seen = 0;
+    _recovered = false;
+    _refused = false;
+    _combinable = null;
+    _listened = false;
+  }
 
   /// [listened]: someone in the call takes this device's voice now (a connection up).
   bool take(
@@ -499,7 +510,11 @@ class RecordingWatch {
     // the microphone on, while someone takes the voice, is the loss, asked or not: a
     // start that failed drops the request, and the voice sent is read from the reading
     // before, with the microphone maybe still off then. Alone in the call nothing is to
-    // record, and the refusal waits for someone.
+    // record, and the refusal waits for someone; one who has just come may not be
+    // recorded for yet (WebRTC starts the recording as the voice to them starts), so
+    // only a second reading with them takes it for the loss.
+    final listenedBefore = _listened;
+    _listened = listened;
     if (facts is Map) {
       final combinable = facts['combinable'];
       if (_combinable == true && combinable == false) {
@@ -519,7 +534,8 @@ class RecordingWatch {
         facts['inputUsable'] == true &&
         (facts['recordingAsked'] == true || sending || _refused && listened);
     _seen = lost ? _seen + 1 : 0;
-    if ((_seen < 2 && !(lost && _refused)) || _recovered) return false;
+    final atOnce = lost && _refused && listenedBefore;
+    if ((_seen < 2 && !atOnce) || _recovered) return false;
     _refused = false;
     _recovered = true;
     return true;
