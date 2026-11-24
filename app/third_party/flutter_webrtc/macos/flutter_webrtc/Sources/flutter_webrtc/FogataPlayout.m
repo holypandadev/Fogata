@@ -287,7 +287,9 @@ static BOOL Combinable(AudioObjectID output, AudioObjectID input,
 // a sound from is taken as refused, once. 0 otherwise, as always outside that test.
 static int gTestRefuse = 0;
 
-// The unique ids of the system's devices other than this process's own aggregates.
+// The system's devices other than this process's own aggregates, each by its unique id
+// and its object: a device unplugged and plugged in again between two notifications keeps
+// its unique id and comes back as another object, which is a change too.
 static NSSet<NSString*>* OtherDevices(void) {
   NSMutableSet<NSString*>* uids = [NSMutableSet set];
   AudioObjectPropertyAddress address = {kAudioHardwarePropertyDevices,
@@ -307,7 +309,9 @@ static NSSet<NSString*>* OtherDevices(void) {
   const AudioObjectID* devices = data.bytes;
   for (UInt32 i = 0; i < size / sizeof(AudioObjectID); i++) {
     NSString* uid = UIDOf(devices[i]);
-    if (uid != nil && ![uid hasPrefix:kOwnPrefix]) [uids addObject:uid];
+    if (uid != nil && ![uid hasPrefix:kOwnPrefix]) {
+      [uids addObject:[NSString stringWithFormat:@"%@#%u", uid, (unsigned)devices[i]]];
+    }
   }
   return uids;
 }
