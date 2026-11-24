@@ -1240,6 +1240,13 @@ class Call extends ChangeNotifier {
     if (!on) {
       _silenceSenders();
       _micToPeers();
+    } else if (_micStream != null) {
+      // Still open (a mute's change not done, waiting for the silent input, say): on at
+      // once, as a mute is, whatever that change is waiting for; the change of this
+      // unmute still comes in its turn.
+      _enableMic();
+      _micToPeers();
+      _micToldOn = asked;
     }
     final turn = _micTurn.then((_) => _micDevice(asked));
     _micTurn = turn.catchError((Object e) => _trace('microphone: $e'));
@@ -1278,6 +1285,17 @@ class Call extends ChangeNotifier {
     }
   }
 
+  /// Enables the microphone's track, disabled by a mute ([_silenceSenders]).
+  void _enableMic() {
+    for (final track in _micStream?.getAudioTracks() ?? <MediaStreamTrack>[]) {
+      try {
+        if (!track.enabled) track.enabled = true;
+      } catch (e) {
+        _trace('microphone track: $e');
+      }
+    }
+  }
+
   /// Takes [peer]'s voice for a moment as late voice does, for tests ([_pauseVoiceIn]).
   @visibleForTesting
   Future<void> pauseVoiceInForTests(CallPeer peer) => _pauseVoiceIn(peer);
@@ -1285,11 +1303,11 @@ class Call extends ChangeNotifier {
   /// When the microphone was last asked to change ([setMic]).
   DateTime _micAskedAt = DateTime(0);
 
-  /// Tells everyone the microphone's state and has every participant's channels brought
+  /// Tells everyone the microphone's state (unless [tell] says it was told already) and
   /// to it.
-  void _micToPeers() {
+  void _micToPeers({bool tell = true}) {
     if (_closed) return;
-    _sendState();
+    if (tell) _sendState();
     notifyListeners();
     for (final peer in peers.values.toList()) {
       _queueVoice(peer);
@@ -1299,6 +1317,9 @@ class Call extends ChangeNotifier {
   /// The changes of the microphone asked so far, and the last one's turn to open or close
   /// it ([setMic]).
   int _micAsked = 0;
+
+  /// The unmute last told to everyone at once, before its turn ([setMic]).
+  int _micToldOn = 0;
   Future<void> _micTurn = Future.value();
 
   /// Opens or closes the microphone for change [asked], unless a later change was asked
@@ -1319,14 +1340,10 @@ class Call extends ChangeNotifier {
     if (mic) {
       if (_micStream == null) await step('opening', _openMic);
       // Disabled by a mute left to this change before it closed the microphone.
-      await step('enabling', () async {
-        for (final track
-            in _micStream?.getAudioTracks() ?? <MediaStreamTrack>[]) {
-          if (!track.enabled) track.enabled = true;
-        }
-      });
+      await step('enabling', () async => _enableMic());
       await step('input', _loudInput);
-      _micToPeers();
+      // Told at once already ([setMic]): the voice channels only, back on the microphone.
+      _micToPeers(tell: _micToldOn != asked);
     } else {
       // To the silent input first, if the screen's sound keeps going out, so the
       // microphone is not held open by it.
@@ -1748,16 +1765,26 @@ class Call extends ChangeNotifier {
   /// Changes the microphone in the middle of the call; null is the system's default.
   /// Chosen in the input turn ([_inputTurn]), so never in the middle of choosing the
   /// silent input.
+  /// A choice made while an earlier change of input is still going on (the sound server
+  /// slow to answer, say) waits for it; of the choices made meanwhile only the last is
+  /// carried out, with what is chosen when it runs.
   Future<void> useInput(String? id) async {
     input = id;
+    final asked = ++_inputAsked;
     // Another input is judged from the start.
     _micCheck.reset();
     await _inputTurn(() async {
-      // Taken when the silent input is left.
-      if (_silent) return;
-      await _select(id ?? await _first('audioinput'), Helper.selectAudioInput);
+      // Taken when the silent input is left; or left to a later choice.
+      if (_silent || asked != _inputAsked) return;
+      await _select(
+        input ?? await _first('audioinput'),
+        Helper.selectAudioInput,
+      );
     });
   }
+
+  /// The choices of input made so far ([useInput]).
+  int _inputAsked = 0;
 
   /// Changes the speakers or headphones; null is the system's default.
   Future<void> useOutput(String? id) async {

@@ -46,6 +46,34 @@ class _Screen implements MediaStream {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// The microphone's track, which a mute disables.
+class _MicTrack extends _Track {
+  _MicTrack() : super('audio');
+
+  @override
+  bool enabled = true;
+}
+
+/// The microphone's stream.
+class _Mic implements MediaStream {
+  final track = _MicTrack();
+
+  @override
+  List<MediaStreamTrack> getTracks() => [track];
+
+  @override
+  List<MediaStreamTrack> getAudioTracks() => [track];
+
+  @override
+  List<MediaStreamTrack> getVideoTracks() => const [];
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
 const _channel = MethodChannel('FlutterWebRTC.Method');
 final _silenceId = 'silence-$pid';
 
@@ -57,6 +85,9 @@ class _Engine {
   /// Held until completed: making the silent input, choosing an input.
   Completer<void>? holdSilence;
   Completer<void>? holdSelect;
+
+  /// Held until completed: choosing an input other than the silent one.
+  Completer<void>? holdMic;
 
   /// Held until completed: the list of devices.
   Completer<void>? holdSources;
@@ -98,7 +129,11 @@ class _Engine {
       case 'selectAudioInput':
         final id = args!['deviceId'] as String;
         asked.add('select ${id == _silenceId ? 'silence' : id}');
-        if (id == _silenceId) await holdSelect?.future;
+        if (id == _silenceId) {
+          await holdSelect?.future;
+        } else {
+          await holdMic?.future;
+        }
         return null;
       case 'selectAudioOutput':
         asked.add('output ${args!['deviceId']}');
@@ -301,4 +336,49 @@ void main() {
     await share;
     expect(engine.asked.last, 'screen sound off');
   });
+
+  test(
+    'an unmute while a mute waits for the silent input goes out at once',
+    () async {
+      engine.holdSelect = Completer();
+      final mic = _Mic();
+      final call = Call(group: 'g', me: 'me', mic: true)..sharing = true;
+      call.holdForTests(streams: [mic, null, _Screen()]);
+      await call.setShareSound(true);
+      unawaited(call.setMic(false));
+      await _until(() => engine.asked.contains('select silence'));
+      expect(mic.track.enabled, isFalse);
+      // The sound server does not answer the choice of the silent input: the unmute
+      // does not wait for it.
+      final on = call.setMic(true);
+      expect(mic.track.enabled, isTrue);
+      expect(call.mic, isTrue);
+      engine.holdSelect!.complete();
+      await on.timeout(const Duration(seconds: 5));
+      expect(mic.track.enabled, isTrue);
+      expect(engine.recording, 'mic-1');
+      await call.stop();
+    },
+  );
+
+  test(
+    'of the inputs chosen while one is being chosen, only the last is carried '
+    'out',
+    () async {
+      engine.holdMic = Completer();
+      final call = Call(group: 'g', me: 'me', mic: true);
+      final first = call.useInput('mic-2');
+      await _until(() => engine.asked.contains('select mic-2'));
+      final second = call.useInput('mic-3');
+      final third = call.useInput('mic-4');
+      engine.holdMic!.complete();
+      await Future.wait([first, second, third])
+          .timeout(const Duration(seconds: 5));
+      expect(engine.asked.where((a) => a.startsWith('select ')), [
+        'select mic-2',
+        'select mic-4',
+      ]);
+      expect(call.input, 'mic-4');
+    },
+  );
 }
