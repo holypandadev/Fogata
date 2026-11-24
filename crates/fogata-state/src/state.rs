@@ -957,7 +957,11 @@ impl GroupState {
     /// Whether `author` may write `moved` on this group: it is at level five (as its log is
     /// ordered), has not moved yet, and `author` is its first member; the new log is
     /// another group.
-    pub(crate) fn could_move(&self, author: DevicePublicKey, moved: &Moved) -> Result<(), &'static str> {
+    pub(crate) fn could_move(
+        &self,
+        author: DevicePublicKey,
+        moved: &Moved,
+    ) -> Result<(), &'static str> {
         if self.log_level < Level::Five {
             return Err("a group moves from level five");
         }

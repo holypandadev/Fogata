@@ -647,7 +647,9 @@ fn adds_and_their_removals_stop_at_the_slack() {
     let mut removals = Vec::new();
     for n in 0..u64::from(room) {
         let mut one = base.clone();
-        let add = one.add(&laptop.id, Device::new().key(), "nobody", 10 + n).unwrap();
+        let add = one
+            .add(&laptop.id, Device::new().key(), "nobody", 10 + n)
+            .unwrap();
         let Body::Add { member, .. } = add.body else {
             unreachable!()
         };
@@ -667,7 +669,10 @@ fn adds_and_their_removals_stop_at_the_slack() {
     log.move_to(&ana.id, &new, 50_001).unwrap();
     log.follows(&new).unwrap();
     let fill = log.fill();
-    assert!(fill.entries <= room + slack.entries + reserve.entries, "{fill:?}");
+    assert!(
+        fill.entries <= room + slack.entries + reserve.entries,
+        "{fill:?}"
+    );
 }
 
 /// A raise to five past its author's run is spare: a copy may never have it, so it orders
@@ -693,7 +698,13 @@ fn a_raise_past_its_run_orders_nothing() {
                     Entry::sign(&ana.id, group_id, heads.clone(), 20 + n + t, body)
                 })
                 .collect();
-            let raise = Entry::sign(&ana.id, group_id, heads.clone(), 30, Body::Level { level: 5 });
+            let raise = Entry::sign(
+                &ana.id,
+                group_id,
+                heads.clone(),
+                30,
+                Body::Level { level: 5 },
+            );
             apart.push(raise.clone());
             let mut first = base.clone();
             first.insert_all(apart.clone());
@@ -765,9 +776,19 @@ fn moves_forged_before_the_raise_count_for_nothing() {
     for forger_first in [false, true] {
         let (mut log, ana, laptop, bea) = group(Level::Four);
         // The forger came in after the raiser, or before it.
-        let (raiser, forger) = if forger_first { (&bea, &laptop) } else { (&ana, &bea) };
+        let (raiser, forger) = if forger_first {
+            (&bea, &laptop)
+        } else {
+            (&ana, &bea)
+        };
         let (group_id, heads) = (log.group_id(), log.heads());
-        let raise = Entry::sign(&raiser.id, group_id, heads.clone(), 10, Body::Level { level: 5 });
+        let raise = Entry::sign(
+            &raiser.id,
+            group_id,
+            heads.clone(),
+            10,
+            Body::Level { level: 5 },
+        );
         let forged: Vec<Entry> = (0..u64::from(SMALL + slack.entries + reserve.entries) + 20)
             .map(|n| {
                 let body = Moved {
@@ -851,7 +872,13 @@ fn before_five_a_raise_past_its_run_still_orders() {
             name: "apart".into(),
         };
         let first = Entry::sign(&ana.id, group_id, heads.clone(), 20 + t, rename);
-        let raise = Entry::sign(&ana.id, group_id, heads.clone(), 30, Body::Level { level: 3 });
+        let raise = Entry::sign(
+            &ana.id,
+            group_id,
+            heads.clone(),
+            30,
+            Body::Level { level: 3 },
+        );
         copy.insert_all([first, raise.clone()]);
         let past_run = (raise.hash(), crate::budget::PAST_RUN);
         copy.state().rejected.contains(&past_run).then_some(copy)

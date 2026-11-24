@@ -259,7 +259,11 @@ impl GroupLog {
         if start.entries.values().any(|e| e.author != mover) {
             return Err(NOT_THE_SAME_GROUP);
         }
-        same_group(&self.group_on(&self.entries[&hash].parents), &start.state(), at)
+        same_group(
+            &self.group_on(&self.entries[&hash].parents),
+            &start.state(),
+            at,
+        )
     }
 
     /// What entries written apart from the move, kept and part of a run (so judged on what

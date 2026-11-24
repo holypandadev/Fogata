@@ -1620,9 +1620,13 @@ impl GroupLog {
     /// entry, where it is judged, and kept with what was judged of the log (as what a
     /// rotation's author saw, [`Seen::needed`]).
     pub(crate) fn moves(&self, hash: &EntryHash) -> bool {
-        let noted = (self.cache.judged.lock().unwrap_or_else(PoisonError::into_inner))
-            .get(hash)
-            .map(|seen| seen.needed);
+        let noted = (self
+            .cache
+            .judged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner))
+        .get(hash)
+        .map(|seen| seen.needed);
         if let Some(moves) = noted {
             return moves;
         }
@@ -1630,20 +1634,27 @@ impl GroupLog {
         let Some(moved) = Moved::of(&entry.body) else {
             return false;
         };
-        let moves = self.state_before(hash).could_move(entry.author, &moved).is_ok();
+        let moves = self
+            .state_before(hash)
+            .could_move(entry.author, &moved)
+            .is_ok();
         self.note_move(entry, moves);
         moves
     }
 
     /// Notes whether `entry`, a `Moved`, is a move (see [`Self::moves`]).
     fn note_move(&self, entry: &Entry, moves: bool) {
-        (self.cache.judged.lock().unwrap_or_else(PoisonError::into_inner))
-            .entry(entry.hash())
-            .or_insert(Seen {
-                needed: moves,
-                for_all: false,
-                bound: false,
-            });
+        (self
+            .cache
+            .judged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner))
+        .entry(entry.hash())
+        .or_insert(Seen {
+            needed: moves,
+            for_all: false,
+            bound: false,
+        });
     }
 
     /// The group as entry `hash` saw it: the state of the log made of everything before it

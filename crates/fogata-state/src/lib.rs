@@ -33,8 +33,8 @@ pub use entry::{
 };
 pub use fogata_crypto::codec::DecodeError;
 pub use log::{
-    ApartFromMove, GroupLog, JOIN_ON_SPARE, KeyProblem, LogFill, NOT_THE_SAME_GROUP, RAISE_LEVEL_ONLY, StateError,
-    TICKET_EXPIRED, Taken, Verdicts, same_group,
+    ApartFromMove, GroupLog, JOIN_ON_SPARE, KeyProblem, LogFill, NOT_THE_SAME_GROUP,
+    RAISE_LEVEL_ONLY, StateError, TICKET_EXPIRED, Taken, Verdicts, same_group,
 };
 pub use picture::{
     GroupPicture, MAX_RECORD_PICTURE_BYTES, PictureKind, is_group_picture, is_record_picture,
@@ -48,7 +48,7 @@ pub use room::{
 pub use state::{
     Barrier, Caps, Epoch, GroupState, KeptOut, LEVEL_NOT_HIGHER, LEVEL_UNKNOWN, Level,
     MAX_GROUP_NAME_CHARS, MAX_IN_ROOM, MAX_MEMBER_NAME_CHARS, MAX_MEMBERS, MAX_PICTURE_BYTES,
-    MAX_ROOM_NAME_CHARS, MAX_ROOMS, MLS_NOT_YET, MOVED_AWAY, MOVED_NOT_FIRST, NOT_A_MOVE,
-    Managers, Member, ROTATE_NOT_NEEDED, RoomRules, VoiceRoom, WELCOME_NOT_MANAGER, fair_name,
+    MAX_ROOM_NAME_CHARS, MAX_ROOMS, MLS_NOT_YET, MOVED_AWAY, MOVED_NOT_FIRST, Managers, Member,
+    NOT_A_MOVE, ROTATE_NOT_NEEDED, RoomRules, VoiceRoom, WELCOME_NOT_MANAGER, fair_name,
     hiding_mark,
 };
