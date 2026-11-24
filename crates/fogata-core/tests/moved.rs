@@ -136,3 +136,69 @@ async fn a_new_log_offered_again_leaves_the_old_group_stopped() {
     core.shutdown().await.unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A member that got the move and was offered the new log before following it, and
+/// declined it: the old group stays stopped, or following the move would run the group
+/// declined.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_log_declined_leaves_the_old_group_stopped() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-declined-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let t = now_ms() - 10_000;
+        let mut old = GroupLog::create(&ana, "Campfire", t).unwrap();
+        old.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        old.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let new = old.new_log_for_move(&ana, t + 3).unwrap();
+        old.move_to(&ana, &new, t + 4).unwrap();
+        // The move is in the old log here, not followed yet.
+        store.save_group_log(&old, "Our fire").unwrap();
+        let offered = store.save_offered_group(&new, &ana.public_key()).unwrap();
+        assert!(matches!(offered, fogata_core::Offered::Pending(_)));
+        let id = hex::encode(new.group_id().as_bytes());
+        store.decline_group(&id, &me, t + 5).unwrap();
+    }
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    assert!(core.groups().await.unwrap().is_empty());
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A new log listed here whose file cannot be read at a start leaves the old group stopped
+/// too: following the move would run the new log and write it over the file.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_new_log_that_cannot_be_read_leaves_the_old_group_stopped() {
+    let _one = ONE_AT_A_TIME.lock().await;
+    let dir = std::env::temp_dir().join(format!("fogata-moved-unread-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    Core::create_profile(&dir, "Bea", None).unwrap();
+    {
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let ana = DeviceIdentity::generate().unwrap();
+        let t = now_ms() - 10_000;
+        let mut old = GroupLog::create(&ana, "Campfire", t).unwrap();
+        old.add(&ana, me.public_key(), "Bea", t + 1).unwrap();
+        old.raise_level(&ana, Level::Five, t + 2).unwrap();
+        let new = old.new_log_for_move(&ana, t + 3).unwrap();
+        old.move_to(&ana, &new, t + 4).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        store.record_move(&old.group_id(), &new, now_ms()).unwrap();
+        // Out of reach this time: a link to itself where the file was.
+        let path = dir
+            .join("logs")
+            .join(format!("{}.log", hex::encode(new.group_id().as_bytes())));
+        std::fs::remove_file(&path).unwrap();
+        std::os::unix::fs::symlink(&path, &path).unwrap();
+    }
+    let (core, _events) = Core::start(dir.clone(), options()).unwrap();
+    assert!(core.groups().await.unwrap().is_empty());
+    core.shutdown().await.unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+}

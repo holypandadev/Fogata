@@ -192,9 +192,13 @@ impl Store {
         let at = (list.groups.iter())
             .position(|g| g.group_id == old_id)
             .context("no such group")?;
+        // An invitation to it, or one declined, waits for the person: never followed into.
+        if Self::waits_in(&list, &new_id) {
+            bail!("the log the group moved to is an invitation, which waits for the person");
+        }
         // A new log saved here already may hold what this one lacks (a leave of this device
-        // in it, say), or lack what it holds (one kept as an invitation): never written
-        // over, the two are kept together.
+        // in it, say), or lack what it holds (one accepted after an invitation): never
+        // written over, the two are kept together.
         // One that cannot be read this time is not written over either: the move is noted
         // at a later try. One listed with no file at all (stopped before it was written) is.
         if list.groups.iter().any(|g| g.group_id == new_id)
@@ -227,7 +231,8 @@ impl Store {
             ms: now_ms,
         });
         // Saved already as a group of its own (a change of it came first, an invitation to
-        // it): it is the new log of `old` now, and keeps what it knows of moves of its own.
+        // it accepted): it is the new log of `old` now, and keeps what it knows of moves of
+        // its own.
         let name = match list.groups.iter_mut().find(|g| g.group_id == new_id) {
             Some(known) => {
                 // One that moved on itself keeps its name: the log after it has it.
@@ -235,8 +240,6 @@ impl Store {
                     known.name = name;
                 }
                 known.moved_from.get_or_insert(old_id);
-                known.pending = false;
-                known.invited_by = None;
                 known.name.clone()
             }
             None => {
@@ -254,6 +257,30 @@ impl Store {
         self.merge_history(old, &new.group_id())?;
         self.write_groups(&held, &list)?;
         Ok(name)
+    }
+
+    /// Whether group `id` (hex) is an invitation that waits for the person here, or one
+    /// they declined: a move to it is not followed until they say yes.
+    pub fn waits_for_yes(&self, id: &GroupId) -> bool {
+        let held = self.lock();
+        let id = hex::encode(id.as_bytes());
+        (self.read_groups(&held)).is_ok_and(|list| Self::waits_in(&list, &id))
+    }
+
+    fn waits_in(list: &GroupList, id: &str) -> bool {
+        (list.groups.iter()).any(|g| g.group_id == id && g.pending)
+            || list.declined.iter().any(|d| d.declined_group == id)
+    }
+
+    /// Ids (hex) of the groups whose invitation was declined here.
+    pub fn declined_groups(&self) -> Result<Vec<String>> {
+        let held = self.lock();
+        let list = self.read_groups(&held)?;
+        Ok(list
+            .declined
+            .into_iter()
+            .map(|d| d.declined_group)
+            .collect())
     }
 
     /// Keeps the log a group is moving to on the disk, not listed yet: before the move that
@@ -866,6 +893,28 @@ mod tests {
         store.record_move(&old.group_id(), &incoming, 10).unwrap();
         let log = store.load_log_of(&new.group_id()).unwrap();
         assert!(!log.shared_state().is_member(&me.public_key()));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A move to a group that is an invitation here is not noted: it waits for the person.
+    #[test]
+    fn a_move_to_an_invitation_is_not_noted() {
+        let dir = std::env::temp_dir().join(format!("fogata-store-invited-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let store = Store::open(dir.clone()).unwrap();
+        let (me, _) = store.identity().unwrap();
+        let old = GroupLog::create(&me, "Campfire", 1).unwrap();
+        store.save_group_log(&old, "Our fire").unwrap();
+        let new = GroupLog::create(&me, "Campfire", 2).unwrap();
+        store.save_group_log(&new, "Campfire").unwrap();
+        let id = hex::encode(new.group_id().as_bytes());
+        store.set_pending(&id, Some("someone".into())).unwrap();
+        assert!(store.waits_for_yes(&new.group_id()));
+        assert!(!store.waits_for_yes(&old.group_id()));
+        assert!(store.record_move(&old.group_id(), &new, 10).is_err());
+        let groups = store.groups().unwrap();
+        assert!(groups.iter().all(|g| g.moved.is_none()));
+        assert!(groups.iter().any(|g| g.group_id == id && g.pending));
         fs::remove_dir_all(&dir).unwrap();
     }
 

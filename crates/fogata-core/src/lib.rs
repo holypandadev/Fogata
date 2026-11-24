@@ -900,18 +900,21 @@ impl Core {
         let listed: HashSet<String> = stored_groups.iter().map(|g| g.group_id.clone()).collect();
         // Groups that moved, run for a while, and the log each moved to.
         let mut moved_to = Vec::new();
-        // Groups read and not run: left, removed from, or offered again and waiting.
-        let mut left = HashSet::new();
+        // Groups not run: left, removed from, offered again and waiting, declined, or that
+        // could not be read this time.
+        let to_id = |hex_id: &str| {
+            hex::decode(hex_id)
+                .ok()
+                .and_then(|b| GroupId::from_bytes(&b).ok())
+        };
+        let mut left: HashSet<GroupId> = (store.declined_groups().unwrap_or_default().iter())
+            .filter_map(|id| to_id(id))
+            .collect();
         for stored in stored_groups {
             // Invitations wait for the person; nothing of them runs or is announced. A group
             // that moved to one stays stopped too, or following it would run the invitation.
             if stored.pending {
-                if let Some(id) = hex::decode(&stored.group_id)
-                    .ok()
-                    .and_then(|b| GroupId::from_bytes(&b).ok())
-                {
-                    left.insert(id);
-                }
+                left.extend(to_id(&stored.group_id));
                 continue;
             }
             if stored
@@ -933,6 +936,7 @@ impl Core {
                     let id = stored.group_id.get(..12).unwrap_or(&stored.group_id);
                     tracing::warn!("group {id} not loaded: {e:#}");
                     all_read = false;
+                    left.extend(to_id(&stored.group_id));
                     continue;
                 }
             };
@@ -962,10 +966,10 @@ impl Core {
                     Err(e) => tracing::warn!("cannot list the log a group moved to: {e:#}"),
                 }
             }
-            if let Some(moved) = &stored.moved
-                && let Some(to) = hex::decode(&moved.to)
-                    .ok()
-                    .and_then(|b| GroupId::from_bytes(&b).ok())
+            // Moved, whether or not it was noted here (a move not followed yet).
+            if let Some(to) = (stored.moved.as_ref())
+                .and_then(|m| to_id(&m.to))
+                .or_else(|| log.moved().map(|(_, m)| m.to))
             {
                 moved_to.push((log.group_id(), to));
             }
@@ -977,10 +981,9 @@ impl Core {
                 left.insert(log.group_id());
             }
         }
-        // A group that moved runs only beside the log it moved to: one this device left, was
-        // removed from, or was offered again, leaves the old one stopped too, or it would be
-        // followed again.
-        // One that could not be read this time leaves it running.
+        // A group that moved runs only beside the log it moved to: one this device does not
+        // run leaves the old one stopped too, or it would be followed again (into a group
+        // left, an invitation not answered, or over a file that could not be read).
         let stopped: Vec<GroupId> = (moved_to.iter())
             .filter(|(_, to)| left.contains(to))
             .map(|(from, _)| *from)
