@@ -4625,7 +4625,9 @@ mod tests {
     /// is read, sealed or not; what was judged of it counts only sealed with the folder's key.
     #[test]
     fn a_chat_group_costly_to_judge_is_judged_once() {
-        use crate::store::judged_tests::{assert_same, costly_log, judged_from_nothing, timed};
+        use crate::store::judged_tests::{
+            assert_same, cheaper, costly_log, counted, judging_from_nothing,
+        };
         let friend = DeviceIdentity::generate().unwrap();
         let (log, _) = costly_log(&friend, 600);
         for (what, key) in [
@@ -4635,17 +4637,29 @@ mod tests {
             let dir = folder(&format!("costly-group-{what}"));
             let store = DirectStore::open_sealed(&dir, key.clone());
             store.save_group(&friend.public_key(), &log).unwrap();
-            let (_, judging) = judged_from_nothing(&store.group_path(&friend.public_key()));
-            // The best of a few reads: what a read costs, without the waits of a computer
-            // busy with the other tests (one slow read on CI took 2.4 times less than judging).
-            let (loaded, mut took) = timed(|| store.load(&friend.public_key()).unwrap());
-            for _ in 0..2 {
-                took = took.min(timed(|| store.load(&friend.public_key()).unwrap()).1);
-            }
-            assert_same(&loaded.group.unwrap(), &log);
+            let judging = judging_from_nothing(&store.group_path(&friend.public_key()));
+            // The work a read does, counted rather than timed: reading the file and checking
+            // its signatures cost the same on any computer, judging its entries again does
+            // not, and a fast one or one busy with other tests turns times into a coin toss.
+            let read = || {
+                counted(|| {
+                    let loaded = store.load(&friend.public_key()).unwrap();
+                    let group = loaded.group.unwrap();
+                    drop(group.state());
+                    group
+                })
+            };
+            let (loaded, took) = read();
+            assert_same(&loaded, &log);
             assert!(
-                took * 5 < judging,
-                "{what}: read in {took:?}, judged in {judging:?}"
+                cheaper(took, judging),
+                "{what}: read with {took:?}, judged with {judging:?}"
+            );
+            // And again: what was judged is kept, not judged anew at each read.
+            let (_, again) = read();
+            assert!(
+                cheaper(again, judging),
+                "{what}: read again with {again:?}, judged with {judging:?}"
             );
             if let Some(key) = &key {
                 // Left plain in a sealed folder, they count for nothing.

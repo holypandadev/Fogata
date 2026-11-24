@@ -2873,6 +2873,10 @@ fn read_one(
 
 use std::io::Read as _;
 
+#[cfg(all(test, unix))]
+#[path = "../../../fogata-net/tests/support/unchangeable.rs"]
+mod unchangeable;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3602,13 +3606,18 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_move_that_cannot_be_committed_stays_staged() {
-        use std::os::unix::fs::PermissionsExt;
+        use super::unchangeable::{cannot_be_made_unchangeable, unchangeable};
         let (dir, mut record) = committed("uncommitted", 2, 2);
         record.state = StageState::Staged;
         write_stage(&dir, &record).unwrap();
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500)).unwrap();
-        assert!(activate(&dir, &Keychain::Off, record).await.is_err());
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).unwrap();
+        let Some(locked) = unchangeable(&dir) else {
+            cannot_be_made_unchangeable(&dir);
+            fs::remove_dir_all(&dir).unwrap();
+            return;
+        };
+        let activated = activate(&dir, &Keychain::Off, record).await;
+        drop(locked);
+        assert!(activated.is_err());
         assert_eq!(stage_of(&dir).unwrap().state, StageState::Staged);
         assert_eq!(fs::read(dir.join("identity.key")).unwrap(), b"own identity");
         fs::remove_dir_all(&dir).unwrap();
