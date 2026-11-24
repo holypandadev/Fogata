@@ -9,8 +9,8 @@ use std::{
 use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId, GroupKeys};
 use fogata_state::{Barrier, Entry, EntryHash, GroupLog, GroupState, StateError, Taken, Ticket};
 
-/// How long after a key epoch began the two before the ones announced are still looked up
-/// (see `GroupContext::lookup_secrets`).
+/// How long after a key epoch began the two before the newest two are still announced under
+/// and looked up (see `GroupContext::lookup_secrets`).
 const OLDER_EPOCHS_FOR_MS: u64 = 14 * 24 * 3600 * 1000;
 
 /// Most entries this device lacks that a removal shown by a device it does not verify may
@@ -498,10 +498,11 @@ impl GroupContext {
         out
     }
 
-    /// Rendezvous secrets to announce and look up: the current epoch and the previous one,
-    /// so members who missed a rotation still find the group; for managers, also the tokens of
+    /// Rendezvous secrets of the newest epochs: the current one and the previous one, so
+    /// members who missed a rotation still find the group; for managers, also the tokens of
     /// the invites open at `now_ms`, where the invited devices look for them; or the
-    /// invite's while joining.
+    /// invite's while joining. Announced under and looked up with older epochs for a while
+    /// ([`Self::lookup_secrets`]).
     pub(crate) fn rendezvous_secrets(&self, now_ms: u64) -> Vec<[u8; 32]> {
         if let Some((_, secret, _)) = &self.joining {
             return vec![*secret];
@@ -525,13 +526,16 @@ impl GroupContext {
         out
     }
 
-    /// Rendezvous secrets to look up, and to open sealed local addresses with: those
-    /// announced under ([`Self::rendezvous_secrets`]) and two epochs before them, where a
-    /// member that missed several rotations still announces itself; it can only find the
-    /// others once one of them finds it and sends it the log. Nothing is announced there, so
-    /// a removed device that knows those epochs does not see this one's announcements; one
-    /// that announces there learns the address of whoever dials it, so an epoch is looked
-    /// up only for two weeks after the one that replaced it began.
+    /// Rendezvous secrets to announce under, look up, and open sealed local addresses with:
+    /// those of [`Self::rendezvous_secrets`] and two epochs before them, where a member that
+    /// missed several rotations still announces itself and looks. Both ends must find each
+    /// other there: behind NATs that filter by address and port, a dial from one end alone
+    /// never gets through, so a member only looked for there is never reached. A removed
+    /// device that kept those epochs' keys sees this one's announcements there (as the one
+    /// removed by the latest change does under the previous epoch); it could already learn
+    /// this device's address by announcing there itself, as this device dials whoever it
+    /// finds there. So an epoch is used only for two weeks after the one that replaced it
+    /// began.
     pub(crate) fn lookup_secrets(&self, now_ms: u64) -> Vec<[u8; 32]> {
         let mut out = self.rendezvous_secrets(now_ms);
         if self.joining.is_some() || !self.i_am_member() {
@@ -2439,13 +2443,10 @@ mod tests {
             log.rotate(&ana, 10 + i).unwrap();
         }
         let at_ana = ctx(&ana, &log);
-        let announced = at_ana.rendezvous_secrets(20);
         let sought = at_ana.lookup_secrets(20);
-        assert_eq!(announced.len(), 2);
+        assert_eq!(at_ana.rendezvous_secrets(20).len(), 2);
         assert_eq!(sought.len(), 4);
-        // Three rotations behind, Luis announces under a key Ana looks up but no longer
-        // announces under.
-        assert!(his.iter().all(|s| !announced.contains(s)));
+        // Three rotations behind, Luis announces under a key Ana looks up too.
         assert!(his.iter().any(|s| sought.contains(s)));
         // Not for ever after: two weeks after the next key began.
         let later = 20 + OLDER_EPOCHS_FOR_MS;
