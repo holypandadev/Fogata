@@ -1037,12 +1037,16 @@ mod tests {
         let second = GroupLog::create(&me, "Two", 5).unwrap();
         store.save_group_log(&first, "One").unwrap();
         store.save_group_log(&second, "Two").unwrap();
-        let new = GroupLog::create(&me, "One", 6).unwrap();
+        let mut new = GroupLog::create(&me, "One", 6).unwrap();
         assert_eq!(
             store.record_move(&first.group_id(), &new, 10).unwrap(),
             "One"
         );
+        assert!(store.is_taken(&new.group_id()) && !store.is_taken(&invited.group_id()));
+        // Refused before anything of it is written.
+        new.append(&me, Body::SetIcon { icon: 3 }, 7).unwrap();
         assert!(store.record_move(&second.group_id(), &new, 11).is_err());
+        assert_eq!(store.read_log(new.group_id()).unwrap().len(), new.len() - 1);
         let groups = store.groups().unwrap();
         let was = groups.iter().find(|g| g.group_id == is(&second)).unwrap();
         assert_eq!(was.name, "Two");

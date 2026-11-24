@@ -264,14 +264,15 @@ impl Node {
     /// See [`crate::NodeHandle::hold_move`].
     pub(super) fn hold_move(&mut self, from: GroupId, to: GroupId) {
         // Taken meanwhile (the person said yes before this came): kept running, and the move
-        // told again if it was followed, so that it is noted.
-        let taken = self.groups.contains_key(&to)
-            && (crate::locked(&self.waits_for_yes).taken)
-                .as_ref()
-                .is_some_and(|t| t(&to));
+        // told again if it was followed from a group taken too, so that it is noted. One
+        // from a group that waits for the person is not told again: it would be held again.
+        let checks = crate::locked(&self.waits_for_yes);
+        let taken = |group: &GroupId| checks.taken.as_ref().is_some_and(|t| t(group));
+        let (taken, from_taken) = (self.groups.contains_key(&to) && taken(&to), taken(&from));
+        drop(checks);
         if taken {
             tracing::info!("{to:?} was taken before its hold came: it keeps running");
-            if (self.groups.get(&from)).is_some_and(|s| s.following.followed) {
+            if from_taken && (self.groups.get(&from)).is_some_and(|s| s.following.followed) {
                 let log = self.groups[&to].ctx.log().clone();
                 self.emit(NodeEvent::GroupMoved { from, log });
             }
@@ -1496,11 +1497,16 @@ mod tests {
         bea_takes(&bea_node, x, ana_peer, answer).await;
         assert!(runs(&bea_node, x, to).await);
         assert_eq!(moved_told(&mut bea_events), (Some(to), None));
-        // Taken meanwhile: kept, and the move told again so that it is noted.
-        let taken = Arc::new(std::sync::atomic::AtomicBool::new(true));
-        let is_taken = taken.clone();
+        // Taken meanwhile, the old group waiting for the person (added again, say): kept,
+        // and not told again, or it would be held again, and so on.
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+        let (taken, old_taken) = (
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (is_taken, is_old_taken) = (taken.clone(), old_taken.clone());
         bea_node.set_taken(Box::new(move |id| {
-            *id == to && is_taken.load(std::sync::atomic::Ordering::SeqCst)
+            (*id == to && is_taken.load(SeqCst)) || (*id == x && is_old_taken.load(SeqCst))
         }));
         bea_node.hold_move(x, to).await.unwrap();
         let (runs_now, followed) = inspect(&bea_node, move |n| {
@@ -1508,9 +1514,14 @@ mod tests {
         })
         .await;
         assert!(runs_now && followed);
+        assert_eq!(moved_told(&mut bea_events), (None, None));
+        // The old group taken too: told again, so that the move is noted.
+        old_taken.store(true, SeqCst);
+        bea_node.hold_move(x, to).await.unwrap();
+        assert!(inspect(&bea_node, move |n| n.groups.contains_key(&to)).await);
         assert_eq!(moved_told(&mut bea_events), (Some(to), None));
         // Not taken, and the old group no longer run: the new log goes.
-        taken.store(false, std::sync::atomic::Ordering::SeqCst);
+        taken.store(false, SeqCst);
         bea_node.drop_group(x).await.unwrap();
         bea_node.hold_move(x, to).await.unwrap();
         assert!(!inspect(&bea_node, move |n| n.groups.contains_key(&to)).await);

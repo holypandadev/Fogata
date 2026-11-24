@@ -80,7 +80,7 @@ pub fn now_ms() -> u64 {
 
 /// How long a group this device left still runs at start, so that its leave reaches the
 /// members who were away; as long as members look up the keys of older epochs.
-const LEAVE_DELIVERY_MS: u64 = 14 * 24 * 3600 * 1000;
+pub(crate) const LEAVE_DELIVERY_MS: u64 = 14 * 24 * 3600 * 1000;
 /// How long a group that moved to another log still runs at start, writing nothing: its
 /// last entries reach the members who were away, and they find the new log through this
 /// device. Its log stays after, for the new group's past.
@@ -1012,7 +1012,10 @@ impl Core {
         });
         let mut held_moves: HashMap<GroupId, Vec<GroupId>> = HashMap::new();
         for (from, to) in moved_to.iter().filter(|(from, _)| stopped.contains(from)) {
-            held_moves.entry(*to).or_default().push(*from);
+            let held = held_moves.entry(*to).or_default();
+            if !held.contains(from) {
+                held.push(*from);
+            }
         }
         // Joins with an invite that were still waiting for a manager go on.
         let mut joining = HashMap::new();

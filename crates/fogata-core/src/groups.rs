@@ -264,7 +264,15 @@ impl Core {
                 let log = (self.inner.store.groups().ok())
                     .and_then(|groups| groups.into_iter().find(|g| g.group_id == id && !g.pending))
                     .and_then(|stored| self.inner.store.load_log(&stored).ok());
-                let Some(log) = log.filter(|log| log.shared_state().is_member(&me)) else {
+                // Run as at a start: as a member, or while a leave of it may still be on its way.
+                let since = now_ms().saturating_sub(crate::LEAVE_DELIVERY_MS);
+                let leaving = |log: &GroupLog| {
+                    log.entries().any(|e| {
+                        e.author == me && matches!(e.body, Body::Leave) && e.time_ms > since
+                    })
+                };
+                let Some(log) = log.filter(|log| log.shared_state().is_member(&me) || leaving(log))
+                else {
                     tracing::info!("{from:?} moved to a group taken now, but is not run here");
                     continue;
                 };
