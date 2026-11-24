@@ -1122,6 +1122,10 @@ class L10nDe extends L10n {
       'Kein Zugriff auf die Kamera: Dieses System hat kein Kamera-Portal.';
 
   @override
+  String get devicesCameraBusy =>
+      'Eine andere Anwendung verwendet die Kamera. Schließe sie und versuche es erneut.';
+
+  @override
   String get devicesPreviewOnlyYou => 'Nur du siehst die Vorschau.';
 
   @override

@@ -1,6 +1,7 @@
 // A computer without a camera: opening one says so instead of giving a stream that never
 // shows a picture.
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fogata/src/call.dart';
@@ -92,10 +93,32 @@ void main() {
     );
   });
 
+  test('a camera another application holds is told apart', () async {
+    answer(
+      (_) async => throw PlatformException(
+        code: 'NotReadableError',
+        message:
+            'NotReadableError: another application is using the camera '
+            '(fogataCameraBusy): /dev/video2: VIDIOC_S_FMT: Device or resource busy',
+      ),
+    );
+    final printed = <String>[];
+    final print = debugPrint;
+    debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
+    addTearDown(() => debugPrint = print);
+    await expectLater(openCameraStream(null), throwsA(isA<CameraBusy>()));
+    // The cause, for the day's log: the device and the system's answer.
+    expect(
+      printed,
+      contains(contains('/dev/video2: VIDIOC_S_FMT: Device or resource busy')),
+    );
+  });
+
   test('each failure has its own words', () {
     expect(cameraFailure(NoCamera()), l10n.devicesNoCamera);
     expect(cameraFailure(CameraDenied()), l10n.devicesCameraDenied);
     expect(cameraFailure(CameraUnavailable()), l10n.devicesCameraUnavailable);
+    expect(cameraFailure(CameraBusy()), l10n.devicesCameraBusy);
     expect(
       cameraFailure(Exception('x')),
       isNot(
@@ -103,6 +126,7 @@ void main() {
           l10n.devicesNoCamera,
           l10n.devicesCameraDenied,
           l10n.devicesCameraUnavailable,
+          l10n.devicesCameraBusy,
         ),
       ),
     );

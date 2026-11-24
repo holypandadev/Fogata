@@ -1116,6 +1116,10 @@ class L10nIt extends L10n {
       'Impossibile raggiungere la videocamera: questo sistema non ha un portale della videocamera.';
 
   @override
+  String get devicesCameraBusy =>
+      'Un’altra applicazione sta usando la videocamera. Chiudila, poi riprova.';
+
+  @override
   String get devicesPreviewOnlyYou => 'Solo tu vedi l’anteprima.';
 
   @override

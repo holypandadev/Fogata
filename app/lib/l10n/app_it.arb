@@ -228,6 +228,7 @@
   "devicesCameraFailed": "{system, select, macos{Impossibile usare la videocamera. Consenti l’accesso in Impostazioni di Sistema › Privacy e sicurezza.} other{Impossibile usare la videocamera.}}",
   "devicesCameraDenied": "Il sistema non consente a Fogata di usare la videocamera. Consentilo nelle impostazioni di sistema, poi riprova.",
   "devicesCameraUnavailable": "Impossibile raggiungere la videocamera: questo sistema non ha un portale della videocamera.",
+  "devicesCameraBusy": "Un’altra applicazione sta usando la videocamera. Chiudila, poi riprova.",
   "devicesPreviewOnlyYou": "Solo tu vedi l’anteprima.",
   "devicesStopVideo": "Ferma il video",
   "devicesTestVideo": "Prova il video",

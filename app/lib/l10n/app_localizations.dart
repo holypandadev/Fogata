@@ -1479,6 +1479,12 @@ abstract class L10n {
   /// **'Could not reach the camera: this system has no camera portal.'**
   String get devicesCameraUnavailable;
 
+  /// Note or error on Linux: another application is using the camera, so the app cannot open it. Says to close that application and try again.
+  ///
+  /// In en, this message translates to:
+  /// **'Another application is using the camera. Close it, then try again.'**
+  String get devicesCameraBusy;
+
   /// Settings › Voice & video › Test video: the camera preview is only shown on this computer.
   ///
   /// In en, this message translates to:
