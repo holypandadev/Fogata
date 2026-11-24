@@ -51,7 +51,11 @@ use fogata_net::Multiaddr;
 use fogata_core::{Store, store};
 
 #[derive(Parser)]
-#[command(name = "fogata", version, about = "Peer-to-peer group chat")]
+#[command(
+    name = "fogata",
+    version = fogata_update::THIS_VERSION,
+    about = "Peer-to-peer group chat"
+)]
 struct Cli {
     /// Where the identity and groups are stored.
     #[arg(long, global = true, env = "FOGATA_DATA_DIR")]

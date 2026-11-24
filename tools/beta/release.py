@@ -1172,8 +1172,9 @@ def main():
     commit = checked_out()
     build, version = this_build()
     if (build, version) != (args.build, args.version):
-        fail(f"the source says build {build} ({version}); set THIS_BUILD, THIS_VERSION and "
-             "BUILD_MARKER first and build every system from that commit")
+        fail(f"the source says build {build} ({version}); set THIS_BUILD, THIS_VERSION, "
+             "BUILD_MARKER, app/pubspec.yaml and app/lib/src/version.dart first and build "
+             "every system from that commit")
     check_commit_tested(commit, not args.no_ci_check, not args.no_previous_check,
                         records_folder())
     if not release_keys_named() and not args.allow_no_keys:
