@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "それでもオンにする",
   "groupSettingsRaiseAnywayTitle": "より強い保護を今すぐオンにしますか？",
   "groupSettingsRaiseAnywayText": "{names}は、Fogataをアップデートするまでこのグループに参加できなくなり、それまでグループの変更も表示されません。グループは1週間待ちました。",
-  "groupSettingsRaiseAnywayConfirm": "オンにする"
+  "groupSettingsRaiseAnywayConfirm": "オンにする",
+  "groupSettingsHistoryNearlyFull": "このグループの履歴はまもなくいっぱいになります。",
+  "groupSettingsHistoryFull": "このグループの履歴がいっぱいです：新しい履歴に移るまで、メンバーの削除、退出、移動だけが使えます。",
+  "groupSettingsHistoryMoveHint": "グループを新しい履歴に移しましょう：全員がグループ、その名前、その内容をそのまま保持します。",
+  "groupSettingsHistoryFirstMoves": "最初のメンバーが新しい履歴に移せます。",
+  "groupSettingsMoveGroup": "新しい履歴に移す",
+  "groupSettingsMoveTitle": "このグループを新しい履歴に移しますか？",
+  "groupSettingsMoveText": "全員がグループ、その名前、その履歴をそのまま保持します。ほかのメンバーは接続したときに移ります。30日以上いないメンバーは、もう一度追加が必要になる場合があります。",
+  "groupSettingsMoveConfirm": "移す"
 }

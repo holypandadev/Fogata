@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "Всё равно включить",
   "groupSettingsRaiseAnywayTitle": "Включить более сильную защиту сейчас?",
   "groupSettingsRaiseAnywayText": "{names} смогут снова участвовать в этой группе только после обновления Fogata: до тех пор они не увидят, что в ней меняется. Группа ждала их неделю.",
-  "groupSettingsRaiseAnywayConfirm": "Включить"
+  "groupSettingsRaiseAnywayConfirm": "Включить",
+  "groupSettingsHistoryNearlyFull": "История этой группы почти заполнена.",
+  "groupSettingsHistoryFull": "История этой группы заполнена: пока группа не перейдёт в новую, работают только удаление участников, выход и переход.",
+  "groupSettingsHistoryMoveHint": "Переведите группу в новую историю: у всех останутся группа, её название и всё, что в ней есть.",
+  "groupSettingsHistoryFirstMoves": "Её первый участник может перевести её в новую историю.",
+  "groupSettingsMoveGroup": "Перейти в новую историю",
+  "groupSettingsMoveTitle": "Перевести эту группу в новую историю?",
+  "groupSettingsMoveText": "У всех останутся группа, её название и история. Остальные последуют за ней, когда подключатся; участников, которых не было больше 30 дней, возможно, придётся добавить снова.",
+  "groupSettingsMoveConfirm": "Перевести"
 }

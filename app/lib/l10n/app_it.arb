@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "Attivala comunque",
   "groupSettingsRaiseAnywayTitle": "Attivare ora la protezione più forte?",
   "groupSettingsRaiseAnywayText": "{names} dovranno aggiornare Fogata prima di poter partecipare di nuovo a questo gruppo: fino ad allora non vedranno cosa cambia nel gruppo. Il gruppo li ha aspettati una settimana.",
-  "groupSettingsRaiseAnywayConfirm": "Attivala"
+  "groupSettingsRaiseAnywayConfirm": "Attivala",
+  "groupSettingsHistoryNearlyFull": "La cronologia di questo gruppo è quasi piena.",
+  "groupSettingsHistoryFull": "La cronologia di questo gruppo è piena: finché non passa a una nuova, funzionano solo la rimozione di membri, l’uscita e lo spostamento.",
+  "groupSettingsHistoryMoveHint": "Sposta il gruppo in una nuova cronologia: tutti mantengono il gruppo, il suo nome e ciò che contiene.",
+  "groupSettingsHistoryFirstMoves": "Il suo primo membro può spostarlo in una nuova cronologia.",
+  "groupSettingsMoveGroup": "Sposta in una nuova cronologia",
+  "groupSettingsMoveTitle": "Spostare questo gruppo in una nuova cronologia?",
+  "groupSettingsMoveText": "Tutti mantengono il gruppo, il suo nome e la sua cronologia. Gli altri lo seguono quando si collegano; i membri assenti da più di 30 giorni potrebbero dover essere aggiunti di nuovo.",
+  "groupSettingsMoveConfirm": "Spostalo"
 }

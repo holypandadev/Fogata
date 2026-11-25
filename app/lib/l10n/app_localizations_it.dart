@@ -6718,4 +6718,34 @@ class L10nIt extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'Attivala';
+
+  @override
+  String get groupSettingsHistoryNearlyFull =>
+      'La cronologia di questo gruppo è quasi piena.';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'La cronologia di questo gruppo è piena: finché non passa a una nuova, funzionano solo la rimozione di membri, l’uscita e lo spostamento.';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'Sposta il gruppo in una nuova cronologia: tutti mantengono il gruppo, il suo nome e ciò che contiene.';
+
+  @override
+  String get groupSettingsHistoryFirstMoves =>
+      'Il suo primo membro può spostarlo in una nuova cronologia.';
+
+  @override
+  String get groupSettingsMoveGroup => 'Sposta in una nuova cronologia';
+
+  @override
+  String get groupSettingsMoveTitle =>
+      'Spostare questo gruppo in una nuova cronologia?';
+
+  @override
+  String get groupSettingsMoveText =>
+      'Tutti mantengono il gruppo, il suo nome e la sua cronologia. Gli altri lo seguono quando si collegano; i membri assenti da più di 30 giorni potrebbero dover essere aggiunti di nuovo.';
+
+  @override
+  String get groupSettingsMoveConfirm => 'Spostalo';
 }

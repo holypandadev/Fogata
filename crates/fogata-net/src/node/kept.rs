@@ -252,6 +252,15 @@ impl KeptLines {
         }
     }
 
+    /// The members of `group` that are not `connected` are no longer connected in it, their
+    /// devices not known here any more: as for [`Self::member_gone`], for each of them.
+    fn members_gone_but(&mut self, group: GroupId, connected: &BTreeSet<DevicePublicKey>) {
+        (self.reads).retain(|(g, device), _| *g != group || connected.contains(device));
+        for line in self.lines.iter_mut().filter(|l| l.group == group) {
+            line.sent.retain(|device, _| connected.contains(device));
+        }
+    }
+
     /// Line `id` went to `device` at `now`.
     fn sent(&mut self, id: &[u8; 16], device: DevicePublicKey, now: Instant) {
         if let Some(line) = self.lines.iter_mut().find(|l| l.id == *id) {
@@ -592,6 +601,20 @@ impl Node {
         self.kept_lines.member_gone(group, device);
     }
 
+    /// A member of `group` is no longer connected in it, and its device is not known here
+    /// any more (see `drop_member`): what is known of those of its devices not connected in
+    /// it goes.
+    pub(super) fn kept_unknown_member_gone(&mut self, group: GroupId) {
+        let Some(slot) = self.groups.get(&group) else {
+            return;
+        };
+        let connected = (slot.members.iter())
+            .filter_map(|p| self.members.get(p))
+            .map(|m| m.device)
+            .collect();
+        self.kept_lines.members_gone_but(group, &connected);
+    }
+
     /// A request carrying this device's room event `id` to `peer` did not get there.
     pub(super) fn kept_unsent(&mut self, peer: PeerId, id: [u8; 16]) {
         if let Some(device) = self.members.get(&peer).map(|m| m.device) {
@@ -909,6 +932,95 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
+    /// A member no longer connected in a group is no longer known to read that group's
+    /// keys: a line of the group does not go to it, and its `Ack` lets it go of nothing,
+    /// until it proves itself again; then the line goes at once, whatever went to it before.
+    /// What is known of it in another group, and what went to it there, stays.
+    #[test]
+    fn a_member_gone_is_known_to_read_again_only_once_it_proves_itself() {
+        let (ana, log, keys) = group();
+        let other = GroupLog::create(&ana, "h", 1).unwrap();
+        let other_keys = other.current_keys(&ana).unwrap();
+        let (group, elsewhere) = (log.group_id(), other.group_id());
+        let bea = someone();
+        let file = TempFile::new("gone");
+        let key = DataKey::generate().unwrap();
+        let mut kept = KeptLines::open(file.0.clone(), key, true, now_ms());
+        let (id, wire) = line(&keys, &ana, "here", now_ms());
+        let (other_id, other_wire) = line(&other_keys, &ana, "there", now_ms());
+        let to_bea = BTreeSet::from([bea]);
+        kept.read(group, bea, vec![keys.epoch()]);
+        kept.read(elsewhere, bea, vec![other_keys.epoch()]);
+        // Both went to her just now.
+        kept.keep(group, id, &wire, to_bea.clone(), &to_bea);
+        kept.keep(elsewhere, other_id, &other_wire, to_bea.clone(), &to_bea);
+        let now = Instant::now();
+        assert!(kept.due_to(group, &bea, now).is_empty());
+        kept.member_gone(group, &bea);
+        // What went to her counts no more there, and still does in her other group.
+        let went = |kept: &KeptLines, g: GroupId| {
+            (kept.lines.iter()).any(|l| l.group == g && l.sent.contains_key(&bea))
+        };
+        assert!(!went(&kept, group));
+        assert!(went(&kept, elsewhere));
+        assert!(!kept.knows(group, &bea, keys.epoch()));
+        assert!(kept.due_to(group, &bea, now).is_empty());
+        kept.answered(&id, &bea, true);
+        assert_eq!(owed(&kept, group, &bea), 1);
+        // Her other group is as it was: known, and not due again before its time.
+        assert!(kept.knows(elsewhere, &bea, other_keys.epoch()));
+        assert!(kept.due_to(elsewhere, &bea, now).is_empty());
+        assert_eq!(owed(&kept, elsewhere, &bea), 1);
+        // She proves herself again: the line is due at once, not a minute after it went.
+        kept.read(group, bea, vec![keys.epoch()]);
+        let due: Vec<[u8; 16]> = (kept.due_to(group, &bea, Instant::now()).into_iter())
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(due, vec![id]);
+        kept.answered(&id, &bea, true);
+        assert_eq!(owed(&kept, group, &bea), 0);
+    }
+
+    /// A line whose request to a member did not get there goes to it again at the next
+    /// heartbeat, not a minute after it went, and only once; a request to another member,
+    /// or of a peer that is no member, changes nothing.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_that_did_not_get_there_goes_again_at_the_next_heartbeat() {
+        let (ana, mut log, _) = group();
+        let (bea, cai) = (someone(), someone());
+        log.add(&ana, bea, "bea", 2).unwrap();
+        log.add(&ana, cai, "cai", 3).unwrap();
+        let group = log.group_id();
+        let keys = log.current_keys(&ana).unwrap();
+        let epoch = keys.epoch();
+        let (node, _events) = node(&ana, log);
+        let file = TempFile::new("unsent");
+        let (path, key) = (file.0.clone(), DataKey::generate().unwrap());
+        let (id, wire) = line(&keys, &ana, "lost on the way", now_ms());
+        let found = inspect(&node, move |n| {
+            n.keep_own_lines(path, key, true);
+            let to_bea = connect(n, group, bea);
+            let to_cai = connect(n, group, cai);
+            n.kept_proved(group, to_bea, epoch);
+            n.kept_proved(group, to_cai, epoch);
+            // Said while both are connected: it goes to them now.
+            n.keep_line(group, FIRST_ROOM, id, &wire);
+            n.kept_heartbeat();
+            let before = [sent(n, to_bea, id), sent(n, to_cai, id)];
+            n.kept_unsent(to_bea, id);
+            n.kept_unsent(to_cai, [9; 16]);
+            n.kept_unsent(PeerId::random(), id);
+            n.kept_heartbeat();
+            let after = [sent(n, to_bea, id), sent(n, to_cai, id)];
+            n.kept_heartbeat();
+            let once = [sent(n, to_bea, id), sent(n, to_cai, id)];
+            (before, after, once)
+        })
+        .await;
+        assert_eq!(found, ([0, 0], [1, 0], [1, 0]));
+        node.shutdown().await.unwrap();
+    }
+
     /// A line is owed to the members in its room: one listed there, or let go of it without
     /// a leave (cut off, as a closed lid is), but not one that never entered it nor one that
     /// left it saying so; and one that comes back and leaves saying so is let go of it.
@@ -1107,5 +1219,63 @@ mod tests {
         kept.follow(true);
         assert!(path.exists());
         assert!(KeptLines::open(path, key, true, now_ms()).lines.is_empty());
+    }
+
+    /// A member dropped from a group after its device was no longer known here lets go of
+    /// what is known of what it reads there, and of what went to it, as one whose device is
+    /// known does; what is known of a member still connected stays, also of a device still
+    /// connected through another of its sessions, and of a member of another group.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_dropped_without_its_device_known_is_not_known_to_read() {
+        let (ana, mut log, _) = group();
+        let (bea, cai, dan, eve) = (someone(), someone(), someone(), someone());
+        let ana_too = ana.clone();
+        log.add(&ana, bea, "bea", 2).unwrap();
+        log.add(&ana, cai, "cai", 3).unwrap();
+        log.add(&ana, dan, "dan", 4).unwrap();
+        let group = log.group_id();
+        let keys = log.current_keys(&ana).unwrap();
+        let epoch = keys.epoch();
+        let (node, _events) = node(&ana, log);
+        let file = TempFile::new("unknown");
+        let (path, key) = (file.0.clone(), DataKey::generate().unwrap());
+        let (id, wire) = line(&keys, &ana, "to all", now_ms());
+        let found = inspect(&node, move |n| {
+            n.keep_own_lines(path, key, true);
+            let to_bea = connect(n, group, bea);
+            let to_cai = connect(n, group, cai);
+            let to_dan = connect(n, group, dan);
+            let to_dan_too = connect(n, group, dan);
+            for peer in [to_bea, to_cai, to_dan, to_dan_too] {
+                n.kept_proved(group, peer, epoch);
+            }
+            // Said while all are connected: it goes to each now.
+            n.keep_line(group, FIRST_ROOM, id, &wire);
+            let known = |n: &Node| [bea, cai, dan].map(|d| n.kept_lines.knows(group, &d, epoch));
+            let went = |n: &Node| {
+                let line = n.kept_lines.lines.iter().find(|l| l.id == id).unwrap();
+                [bea, cai, dan].map(|d| line.sent.contains_key(&d))
+            };
+            // Eve is a member of another group of Ana's only, connected there.
+            let mut other = GroupLog::create(&ana_too, "h", 1).unwrap();
+            other.add(&ana_too, eve, "eve", 2).unwrap();
+            let elsewhere = other.group_id();
+            let other_epoch = other.current_keys(&ana_too).unwrap().epoch();
+            n.add_group(GroupSetup::Member(other));
+            let to_eve = connect(n, elsewhere, eve);
+            n.kept_proved(elsewhere, to_eve, other_epoch);
+            let before = (known(n), went(n));
+            for peer in [to_bea, to_dan] {
+                n.members.remove(&peer);
+                n.drop_member(group, peer);
+            }
+            let eve_known = n.kept_lines.knows(elsewhere, &eve, other_epoch);
+            let after = (known(n), went(n), eve_known);
+            (before, after, n.kept_lines.reads.len())
+        })
+        .await;
+        let (all, bea_gone) = ([true; 3], [false, true, true]);
+        assert_eq!(found, ((all, all), (bea_gone, bea_gone, true), 3));
+        node.shutdown().await.unwrap();
     }
 }

@@ -97,6 +97,14 @@ pub struct UiGroup {
     /// is updated, this device stays with the group as it was then and sees none of its
     /// changes since. Said again after a restart, until Fogata is updated.
     pub needs_update: bool,
+    /// How much of its history's ceiling the group holds, from 0 to 1, from protection level
+    /// five; None below it. From three quarters on its first member is told to move it to a
+    /// fresh history ([`super::app::move_group`]); from 1 only removals, leaves and the move
+    /// still apply.
+    pub fill: Option<f64>,
+    /// This device may move the group to a fresh history: it is first on the group's list,
+    /// the group is at level five or higher, and it has not moved.
+    pub may_move: bool,
 }
 
 /// A voice room of a group: its own people, chat and files.
@@ -1035,6 +1043,8 @@ pub(crate) fn group(g: GroupView) -> UiGroup {
             .then(|| g.level_behind.iter().map(person).collect()),
         raise_anyway: g.raise_anyway,
         needs_update: g.level_ahead.is_some(),
+        fill: g.fill,
+        may_move: g.may_move,
     }
 }
 

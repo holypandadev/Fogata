@@ -69,6 +69,9 @@ struct NamesFrom {
 pub(super) struct LanNames {
     inputs: Option<NamesFrom>,
     names: Vec<Multiaddr>,
+    /// Whether the names and the public addresses were more than the DHT announces, when
+    /// last looked (said once in the log each time it becomes so).
+    crowded: bool,
 }
 
 impl Node {
@@ -119,27 +122,58 @@ impl Node {
     /// sealed again only when what it holds or who it is for changes.
     pub(super) fn refresh_lan_names(&mut self) {
         let (own_friends, friends) = self.friend_lan_secrets();
-        let mut opening: Vec<[u8; 32]> = friends.iter().map(lan::key_of).collect();
-        let mut sealing: Vec<[u8; 32]> = own_friends.iter().map(lan::key_of).collect();
+        let mut opening: Vec<lan::OpeningKey> =
+            friends.iter().map(|s| (lan::key_of(s), None)).collect();
         let mut groups: Vec<(&GroupId, &GroupSlot)> =
             self.groups.iter().filter(|(_, s)| !s.direct).collect();
         groups.sort_by_key(|(id, _)| id.as_bytes());
+        let mut group_keys: Vec<[u8; 32]> = Vec::new();
         for (_, slot) in groups {
-            opening.extend(slot.ctx.lookup_secrets(now_ms()).iter().map(lan::key_of));
+            opening.extend(
+                slot.ctx
+                    .lookup_secrets(now_ms())
+                    .iter()
+                    .map(|s| (lan::key_of(s), None)),
+            );
             if let Some(secret) = slot.ctx.lan_secret()
                 && !slot.call
             {
-                sealing.push(lan::key_of(&secret));
+                group_keys.push(lan::key_of(&secret));
             }
         }
+        group_keys.truncate(lan::GROUP_NAMES);
         // The other computer of a move seals its local addresses under the key both made
-        // from the code, as this one does.
+        // from the code, as this one does; and the device at the other end of a friend link
+        // or code shown or used here may be at the same place behind another router,
+        // reachable only at its local address: it knows the link or code too. Names of their
+        // own, so that no group loses its name to them.
+        let mut invite_keys: Vec<[u8; 32]> = Vec::new();
         if let Some(key) = self.seek_lan_key() {
-            opening.push(key);
-            sealing.insert(0, key);
+            opening.push((key, None));
+            invite_keys.push(key);
         }
+        if let Some(f) = &self.friends {
+            for (secret, only) in f.invite_secrets() {
+                let key = lan::key_of(&secret);
+                opening.push((key, only));
+                if !invite_keys.contains(&key) {
+                    invite_keys.push(key);
+                }
+            }
+        }
+        if invite_keys.len() > lan::INVITE_NAMES {
+            tracing::debug!(
+                keys = invite_keys.len(),
+                "more links, codes and moves at once than names for them: the last left out"
+            );
+            invite_keys.truncate(lan::INVITE_NAMES);
+        }
+        let mut sealing: Vec<[u8; 32]> = own_friends.iter().map(lan::key_of).collect();
+        sealing.extend(group_keys);
+        sealing.extend(invite_keys);
+        let mut sealed = std::collections::HashSet::new();
+        sealing.retain(|key| sealed.insert(*key));
         self.lan_keys.set(opening);
-        sealing.truncate(lan::MAX_NAMES);
         // Friends dial what they find under this device's friend secret only with its
         // proof, made again for each rendezvous window.
         let proof = own_friends.map(|secret| (secret, fogata_crypto::window_at(now_ms() / 1000)));
@@ -160,6 +194,7 @@ impl Node {
             }),
         };
         if inputs == self.lan_names.inputs {
+            self.check_announced_room();
             return;
         }
         let local = self.local_peer();
@@ -185,12 +220,31 @@ impl Node {
             }));
         }
         tracing::debug!(names = names.len(), "local addresses sealed for the DHT");
-        self.lan_names = LanNames { inputs, names };
+        self.lan_names.inputs = inputs;
+        self.lan_names.names = names;
+        self.check_announced_room();
         self.provided.1 = None;
     }
 
-    /// Announces this device under the current rendezvous keys once it knows an address
-    /// others can use.
+    /// The DHT announces a few addresses at most, the oldest going first: the names must leave
+    /// room for this device's public addresses, which may come later than the names. Looked
+    /// at whenever the names are, at every slot.
+    fn check_announced_room(&mut self) {
+        let (names, public) = (self.lan_names.names.len(), self.confirmed.len());
+        let crowded = names + public > lan::ANNOUNCED_ADDRESSES;
+        if crowded && !self.lan_names.crowded {
+            tracing::warn!(
+                names,
+                public,
+                "more addresses to announce than the DHT keeps: the oldest go"
+            );
+        }
+        self.lan_names.crowded = crowded;
+    }
+
+    /// Announces this device under the rendezvous keys it looks up, older epochs' too, once
+    /// it knows an address others can use: a member that missed several rotations finds it
+    /// there, as it finds that member there.
     pub(super) fn refresh_announcement(&mut self, now_secs: u64) {
         if self.confirmed.is_empty() {
             return;
@@ -199,7 +253,7 @@ impl Node {
             .groups
             .values()
             .filter(|s| !s.direct)
-            .flat_map(|s| s.ctx.rendezvous_secrets(now_secs * 1000))
+            .flat_map(|s| s.ctx.lookup_secrets(now_secs * 1000))
             .collect();
         secrets.extend(self.friend_announce_secrets());
         secrets.extend(self.seek_announce_secrets());
@@ -310,7 +364,149 @@ impl Node {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use fogata_crypto::DeviceIdentity;
+    use fogata_friends::{CodeSecrets, FriendBook, FriendCode, FriendLink};
+    use fogata_state::GroupLog;
+    use libp2p::PeerId;
+
     use super::*;
+    use crate::{
+        NodeConfig,
+        group::GroupSetup,
+        node::{
+            friends::{ShownCode, SoughtCode},
+            start,
+            tests::inspect,
+        },
+    };
+
+    /// Seven groups, and a friend link and a code shown here and one of each used here: the
+    /// friends' name, the first five groups' (in the order of their ids) and the four
+    /// invites' are all sealed, whatever invites come and go; the link used here opens only
+    /// its maker's names.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn invites_never_push_a_group_out_of_the_names() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let logs: Vec<GroupLog> = (0..7)
+            .map(|i| GroupLog::create(&ana, &format!("g{i}"), 1).unwrap())
+            .collect();
+        let (node, _events) = start(NodeConfig {
+            identity: ana.clone(),
+            groups: logs.into_iter().map(GroupSetup::Member).collect(),
+            friends: Some(FriendBook::new(&ana, "Ana", 1).unwrap()),
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: false,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+            spill_dir: None,
+        })
+        .unwrap();
+        let bea = DeviceIdentity::generate().unwrap();
+        let maker = PeerId::random();
+        let (sealed, opening, groups) = inspect(&node, move |n| {
+            n.listen_addrs = vec!["/ip4/192.168.1.2/udp/4001/quic-v1".parse().unwrap()];
+            let mut ids: Vec<GroupId> = n.groups.keys().copied().collect();
+            ids.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
+            let groups: Vec<[u8; 32]> = ids
+                .iter()
+                .map(|id| lan::key_of(&n.groups[id].ctx.lan_secret().unwrap()))
+                .collect();
+            let link = |peer: PeerId| {
+                FriendLink::new(bea.public_key(), "Bea", peer.to_bytes(), Vec::new(), 1).unwrap()
+            };
+            let at = 1_800_000_000;
+            let code = || CodeSecrets::stretch(&FriendCode::generate(at).unwrap(), at);
+            let f = n.friends.as_mut().unwrap();
+            f.link = Some(link(PeerId::random()));
+            f.code = Some(ShownCode::lasting(code()));
+            f.sought_link = Some(link(maker));
+            f.sought_code = Some(SoughtCode::lasting(code()));
+            n.refresh_lan_names();
+            let all = n.lan_names.inputs.as_ref().unwrap().keys.clone();
+            // The link shown here goes: the groups' names stay as they were.
+            n.friends.as_mut().unwrap().link = None;
+            n.refresh_lan_names();
+            let fewer = n.lan_names.inputs.as_ref().unwrap().keys.clone();
+            let opening = n.lan_keys.held();
+            (vec![all, fewer], opening, groups)
+        })
+        .await;
+        let (all, fewer) = (&sealed[0], &sealed[1]);
+        assert_eq!(all.len(), lan::MAX_NAMES - 1);
+        assert_eq!(&all[1..6], &groups[..5]);
+        assert!(!all.contains(&groups[5]) && !all.contains(&groups[6]));
+        assert_eq!(fewer.len(), all.len() - 1);
+        assert_eq!(&fewer[..6], &all[..6]);
+        // Every group opens names, sealed for or not; the link used here only its maker's.
+        assert!(groups.iter().all(|g| opening.contains(&(*g, None))));
+        let tied: Vec<_> = opening.iter().filter(|(_, only)| only.is_some()).collect();
+        assert_eq!(tied.len(), 1);
+        assert_eq!(tied[0].1, Some(maker));
+    }
+
+    /// A member that missed two key changes announces only under the key before both; behind
+    /// NATs both ends must find each other, so a member that made those changes announces
+    /// under that key too, but only for two weeks after the key that replaced it began.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_is_announced_where_members_two_rotations_behind_look() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let now = now_ms();
+        let mut log = GroupLog::create(&ana, "g", now - 3).unwrap();
+        log.rotate(&ana, now - 2).unwrap();
+        log.rotate(&ana, now - 1).unwrap();
+        let group = log.group_id();
+        let (node, _events) = start(NodeConfig {
+            identity: ana,
+            groups: vec![GroupSetup::Member(log)],
+            friends: None,
+            listen_port: 0,
+            bootstrap: Vec::new(),
+            use_dht: true,
+            use_mdns: false,
+            bridge: false,
+            peers: Vec::new(),
+            remembered: Vec::new(),
+            hidden: false,
+            spill_dir: None,
+        })
+        .unwrap();
+        let (soon, later) = inspect(&node, move |n| {
+            n.confirmed
+                .insert("/ip4/198.51.100.1/udp/4001/quic-v1".parse().unwrap());
+            let keys = n.groups[&group]
+                .ctx
+                .newest_epoch_keys(3)
+                .collect::<Vec<_>>();
+            assert_eq!(keys.len(), 3);
+            let (newest, first) = (*keys[0].rendezvous_secret(), *keys[2].rendezvous_secret());
+            // Whether `secret` is announced at `secs`, and the newest epoch too.
+            let mut announced_at = |secs: u64| {
+                n.provided.1 = None;
+                n.refresh_announcement(secs);
+                let under = |secret| {
+                    (rendezvous::announce_keys(&[secret], secs).iter())
+                        .all(|k| n.provided.0.contains(k))
+                };
+                (under(first), under(newest))
+            };
+            let secs = now / 1000;
+            (announced_at(secs), announced_at(secs + 15 * 24 * 3600))
+        })
+        .await;
+        node.shutdown().await.unwrap();
+        assert_eq!(
+            soon,
+            (true, true),
+            "not announced where the member behind looks"
+        );
+        assert_eq!(later, (false, true), "still announced there two weeks on");
+    }
 
     #[test]
     fn a_healthy_routing_table_is_refreshed_seldom() {

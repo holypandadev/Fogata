@@ -6354,4 +6354,31 @@ class L10nJa extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'オンにする';
+
+  @override
+  String get groupSettingsHistoryNearlyFull => 'このグループの履歴はまもなくいっぱいになります。';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'このグループの履歴がいっぱいです：新しい履歴に移るまで、メンバーの削除、退出、移動だけが使えます。';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'グループを新しい履歴に移しましょう：全員がグループ、その名前、その内容をそのまま保持します。';
+
+  @override
+  String get groupSettingsHistoryFirstMoves => '最初のメンバーが新しい履歴に移せます。';
+
+  @override
+  String get groupSettingsMoveGroup => '新しい履歴に移す';
+
+  @override
+  String get groupSettingsMoveTitle => 'このグループを新しい履歴に移しますか？';
+
+  @override
+  String get groupSettingsMoveText =>
+      '全員がグループ、その名前、その履歴をそのまま保持します。ほかのメンバーは接続したときに移ります。30日以上いないメンバーは、もう一度追加が必要になる場合があります。';
+
+  @override
+  String get groupSettingsMoveConfirm => '移す';
 }

@@ -9,8 +9,8 @@ use std::{
 use fogata_crypto::{DeviceIdentity, DevicePublicKey, GroupId, GroupKeys};
 use fogata_state::{Barrier, Entry, EntryHash, GroupLog, GroupState, StateError, Taken, Ticket};
 
-/// How long after a key epoch began the two before the ones announced are still looked up
-/// (see `GroupContext::lookup_secrets`).
+/// How long after a key epoch began the two before the newest two are still announced under
+/// and looked up (see `GroupContext::lookup_secrets`).
 const OLDER_EPOCHS_FOR_MS: u64 = 14 * 24 * 3600 * 1000;
 
 /// Most entries this device lacks that a removal shown by a device it does not verify may
@@ -498,10 +498,11 @@ impl GroupContext {
         out
     }
 
-    /// Rendezvous secrets to announce and look up: the current epoch and the previous one,
-    /// so members who missed a rotation still find the group; for managers, also the tokens of
+    /// Rendezvous secrets of the newest epochs: the current one and the previous one, so
+    /// members who missed a rotation still find the group; for managers, also the tokens of
     /// the invites open at `now_ms`, where the invited devices look for them; or the
-    /// invite's while joining.
+    /// invite's while joining. Announced under and looked up with older epochs for a while
+    /// ([`Self::lookup_secrets`]).
     pub(crate) fn rendezvous_secrets(&self, now_ms: u64) -> Vec<[u8; 32]> {
         if let Some((_, secret, _)) = &self.joining {
             return vec![*secret];
@@ -525,13 +526,16 @@ impl GroupContext {
         out
     }
 
-    /// Rendezvous secrets to look up, and to open sealed local addresses with: those
-    /// announced under ([`Self::rendezvous_secrets`]) and two epochs before them, where a
-    /// member that missed several rotations still announces itself; it can only find the
-    /// others once one of them finds it and sends it the log. Nothing is announced there, so
-    /// a removed device that knows those epochs does not see this one's announcements; one
-    /// that announces there learns the address of whoever dials it, so an epoch is looked
-    /// up only for two weeks after the one that replaced it began.
+    /// Rendezvous secrets to announce under, look up, and open sealed local addresses with:
+    /// those of [`Self::rendezvous_secrets`] and two epochs before them, where a member that
+    /// missed several rotations still announces itself and looks. Both ends must find each
+    /// other there: behind NATs that filter by address and port, a dial from one end alone
+    /// never gets through, so a member only looked for there is never reached. A removed
+    /// device that kept those epochs' keys sees this one's announcements there (as the one
+    /// removed by the latest change does under the previous epoch); it could already learn
+    /// this device's address by announcing there itself, as this device dials whoever it
+    /// finds there. So an epoch is used only for two weeks after the one that replaced it
+    /// began.
     pub(crate) fn lookup_secrets(&self, now_ms: u64) -> Vec<[u8; 32]> {
         let mut out = self.rendezvous_secrets(now_ms);
         if self.joining.is_some() || !self.i_am_member() {
@@ -704,13 +708,14 @@ impl GroupContext {
             .collect()
     }
 
-    /// The whole log in the log's encoding, in parts of at most
-    /// [`SYNC_BYTES`] (an entry longer than that goes alone): what a device let in is sent,
-    /// part after part.
+    /// The log a device new to it needs ([`GroupLog::hashes_to_offer`]: no spare entries
+    /// and none waiting for parents) in the log's encoding, in parts of at most
+    /// [`SYNC_BYTES`] (an entry longer than that goes alone): what a device let in or a
+    /// friend the group is offered to is sent, part after part.
     pub(crate) fn encoded_parts(&self) -> Vec<Vec<Vec<u8>>> {
         let mut parts: Vec<Vec<Vec<u8>>> = Vec::new();
         let mut size = 0;
-        for entry in self.encoded(self.hashes()) {
+        for entry in self.encoded(self.log.hashes_to_offer()) {
             match parts.last_mut() {
                 Some(part) if size + entry.len() <= SYNC_BYTES => {
                     size += entry.len();
@@ -1594,12 +1599,16 @@ impl AdmittedTrial {
 }
 
 #[cfg(test)]
+#[path = "measures/group.rs"]
+mod measures;
+
+#[cfg(test)]
 mod tests {
     use fogata_state::{Entry, Ticket};
 
     use super::*;
 
-    fn ctx(identity: &Arc<DeviceIdentity>, log: &GroupLog) -> GroupContext {
+    pub(super) fn ctx(identity: &Arc<DeviceIdentity>, log: &GroupLog) -> GroupContext {
         GroupContext::new(identity.clone(), GroupSetup::Member(log.clone()))
     }
 
@@ -1879,6 +1888,69 @@ mod tests {
         assert!(admin.log().spare().contains(&junk.hash()));
     }
 
+    /// A device new to the log, offered it or let in, is sent only what it needs: no
+    /// entries that change nothing and none waiting for parents. It gets the same group,
+    /// and every head new entries are signed on, its own join's too.
+    #[test]
+    fn a_device_new_to_the_log_gets_only_what_it_needs() {
+        let id = || Arc::new(DeviceIdentity::generate().unwrap());
+        let (ana, luis) = (id(), id());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, luis.public_key(), "luis", 2).unwrap();
+        // Luis writes a kind nobody knows: spare, it changes nothing.
+        let junk = Entry::sign(
+            &luis,
+            log.group_id(),
+            log.heads(),
+            3,
+            fogata_state::Body::Unknown {
+                kind: 200,
+                bytes: vec![7; 60_000],
+            },
+        );
+        log.insert(junk.clone()).unwrap();
+        // An entry signed on one that never came waits for it.
+        let unseen = Entry::sign(
+            &ana,
+            log.group_id(),
+            log.heads(),
+            4,
+            fogata_state::Body::Rename { name: "h".into() },
+        );
+        let waits = Entry::sign(
+            &ana,
+            log.group_id(),
+            vec![unseen.hash()],
+            5,
+            fogata_state::Body::Rename { name: "i".into() },
+        );
+        log.insert(waits.clone()).unwrap();
+        log.append(&luis, fogata_state::Body::Rename { name: "j".into() }, 6)
+            .unwrap();
+        assert!(log.spare().contains(&junk.hash()));
+        assert!(log.waiting().contains(&waits.hash()));
+
+        let parts = ctx(&ana, &log).encoded_parts();
+        let sent: Vec<Entry> = parts
+            .concat()
+            .iter()
+            .map(|bytes| Entry::decode(bytes).unwrap())
+            .collect();
+        let hashes: Vec<EntryHash> = sent.iter().map(Entry::hash).collect();
+        assert!(!hashes.contains(&junk.hash()));
+        assert!(!hashes.contains(&waits.hash()));
+        assert_eq!(hashes, log.hashes_to_offer());
+
+        let mut new = GroupLog::empty(log.group_id());
+        new.insert_all(sent);
+        assert!(new.waiting().is_empty());
+        assert_eq!(new.hashes_to_offer(), log.hashes_to_offer());
+        assert_eq!(new.needed_heads(), log.needed_heads());
+        assert_eq!(new.heads(), log.heads());
+        assert_eq!(new.state().name, "j");
+        assert!(new.state().is_member(&luis.public_key()));
+    }
+
     #[test]
     fn a_log_larger_than_a_message_syncs_in_parts() {
         let ana = Arc::new(DeviceIdentity::generate().unwrap());
@@ -1923,6 +1995,7 @@ mod tests {
                 .all(|p| p.iter().map(Vec::len).sum::<usize>() <= SYNC_BYTES)
         );
         assert_eq!(parts.concat(), at_ana.encoded(at_ana.hashes()));
+        assert_eq!(at_ana.hashes(), log.hashes_to_offer());
     }
 
     /// A manager removed or demoted keeps the log with the invites open then, and could
@@ -2374,13 +2447,10 @@ mod tests {
             log.rotate(&ana, 10 + i).unwrap();
         }
         let at_ana = ctx(&ana, &log);
-        let announced = at_ana.rendezvous_secrets(20);
         let sought = at_ana.lookup_secrets(20);
-        assert_eq!(announced.len(), 2);
+        assert_eq!(at_ana.rendezvous_secrets(20).len(), 2);
         assert_eq!(sought.len(), 4);
-        // Three rotations behind, Luis announces under a key Ana looks up but no longer
-        // announces under.
-        assert!(his.iter().all(|s| !announced.contains(s)));
+        // Three rotations behind, Luis announces under a key Ana looks up too.
         assert!(his.iter().any(|s| sought.contains(s)));
         // Not for ever after: two weeks after the next key began.
         let later = 20 + OLDER_EPOCHS_FOR_MS;
@@ -2491,62 +2561,6 @@ mod tests {
         // So does a log of another group.
         let other = GroupLog::create(&ana, "g", 1).unwrap();
         assert_eq!(ctx(&bea, &log).take_judged(other), None);
-    }
-
-    /// What a removal shown with as many entries as it may bring costs the node's loop, in a
-    /// group of 4096 entries written apart to cost the most: the checks and the copy of the
-    /// log before it is judged elsewhere, and taking the judged log after; and what judging
-    /// it costs. For a release build: `cargo test --release -p fogata-net --lib --
-    /// --ignored measure_removal_on_the_loop --nocapture`.
-    #[test]
-    #[ignore]
-    fn measure_removal_on_the_loop() {
-        let ana = Arc::new(DeviceIdentity::generate().unwrap());
-        let leo = Arc::new(DeviceIdentity::generate().unwrap());
-        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
-        log.add(&ana, leo.public_key(), "leo", 2).unwrap();
-        let group = log.group_id();
-        let write_apart = |log: &mut GroupLog, n: usize, from: u64| {
-            let mut last = [log.heads(), log.heads()];
-            let mut written = Vec::new();
-            for i in 0..n {
-                let by: &DeviceIdentity = [&ana, &leo][i % 2];
-                let body = fogata_state::Body::Rename {
-                    name: format!("n{i}"),
-                };
-                let entry = Entry::sign(by, group, last[i % 2].clone(), from + i as u64, body);
-                last[i % 2] = vec![entry.hash()];
-                written.push(entry);
-            }
-            log.insert_all(written);
-        };
-        write_apart(&mut log, 4096 - 2 - MAX_REMOVAL_ENTRIES, 10);
-        let at_leo = ctx(&leo, &log);
-        write_apart(&mut log, MAX_REMOVAL_ENTRIES - 1, 10_000);
-        log.remove(&ana, leo.public_key(), 20_000).unwrap();
-        let shown: Vec<Vec<u8>> = log
-            .entries_in_order()
-            .into_iter()
-            .filter(|e| at_leo.log().get(&e.hash()).is_none())
-            .map(Entry::encode)
-            .collect();
-        let started = std::time::Instant::now();
-        let trial = at_leo.removal_trial(&shown).unwrap();
-        let checked = started.elapsed();
-        let started = std::time::Instant::now();
-        let (_, judged) = trial.judge().unwrap();
-        let judging = started.elapsed();
-        let mut at_leo = at_leo;
-        let started = std::time::Instant::now();
-        let new = at_leo.take_judged(judged).unwrap();
-        let taken = started.elapsed();
-        assert!(!at_leo.i_am_member());
-        println!(
-            "{} entries shown in a log of {}: checked and copied on the loop in {checked:?}, \
-             judged elsewhere in {judging:?}, taken on the loop in {taken:?}",
-            new.len(),
-            at_leo.log().len() - new.len(),
-        );
     }
 
     #[test]
@@ -2737,7 +2751,7 @@ mod tests {
     /// A member that sends in every voice room of a group a chat full of lines and as many
     /// shares as a participant may have, each one as heavy as the room takes it (`padded`:
     /// each padded to the largest group message, which the room refuses).
-    fn fill_rooms(
+    pub(super) fn fill_rooms(
         rooms: u8,
         padded: bool,
     ) -> Vec<fogata_state::RoomTracker<fogata_proto::WireMessage>> {
@@ -3140,22 +3154,5 @@ mod tests {
                 "Leo, the first room's shares first: {first_room_first}"
             );
         }
-    }
-
-    /// How much memory a member sending the heaviest events a room takes makes a device keep
-    /// in the ten rooms of a group, measured (Linux).
-    #[test]
-    #[ignore]
-    fn measure_room_memory() {
-        let rss = || {
-            let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
-            let pages: u64 = statm.split_whitespace().nth(1).unwrap().parse().unwrap();
-            pages * 4096
-        };
-        let before = rss();
-        let trackers = fill_rooms(10, false);
-        let after = rss();
-        let records: usize = trackers.iter().map(|t| t.snapshot().len()).sum();
-        println!("{records} records kept; {} MiB", (after - before) >> 20);
     }
 }

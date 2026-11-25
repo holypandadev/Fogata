@@ -6778,4 +6778,34 @@ class L10nFr extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'L’activer';
+
+  @override
+  String get groupSettingsHistoryNearlyFull =>
+      'L’historique de ce groupe est presque plein.';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'L’historique de ce groupe est plein : tant qu’il n’est pas déplacé vers un nouveau, seuls retirer des membres, quitter et le déplacement fonctionnent encore.';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'Déplacez le groupe vers un nouvel historique : tout le monde garde le groupe, son nom et ce qu’il contient.';
+
+  @override
+  String get groupSettingsHistoryFirstMoves =>
+      'Son premier membre peut le déplacer vers un nouvel historique.';
+
+  @override
+  String get groupSettingsMoveGroup => 'Déplacer vers un nouvel historique';
+
+  @override
+  String get groupSettingsMoveTitle =>
+      'Déplacer ce groupe vers un nouvel historique ?';
+
+  @override
+  String get groupSettingsMoveText =>
+      'Tout le monde garde le groupe, son nom et son historique. Les autres le suivent en se connectant ; les membres absents depuis plus de 30 jours devront peut-être être ajoutés à nouveau.';
+
+  @override
+  String get groupSettingsMoveConfirm => 'Le déplacer';
 }

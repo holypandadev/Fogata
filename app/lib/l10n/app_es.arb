@@ -1534,5 +1534,13 @@
   "groupSettingsRaiseAnyway": "Activarla de todos modos",
   "groupSettingsRaiseAnywayTitle": "¿Activar ahora la protección más fuerte?",
   "groupSettingsRaiseAnywayText": "{names} tendrán que actualizar Fogata antes de volver a participar en este grupo: hasta entonces, no verán lo que cambie en él. El grupo ya los esperó una semana.",
-  "groupSettingsRaiseAnywayConfirm": "Activarla"
+  "groupSettingsRaiseAnywayConfirm": "Activarla",
+  "groupSettingsHistoryNearlyFull": "El historial de este grupo está casi lleno.",
+  "groupSettingsHistoryFull": "El historial de este grupo está lleno: hasta que pase a uno nuevo, solo funcionan quitar miembros, salir y el traslado.",
+  "groupSettingsHistoryMoveHint": "Pasa el grupo a un historial nuevo: todos conservan el grupo, su nombre y lo que guarda.",
+  "groupSettingsHistoryFirstMoves": "Su primer miembro puede pasarlo a un historial nuevo.",
+  "groupSettingsMoveGroup": "Pasar a un historial nuevo",
+  "groupSettingsMoveTitle": "¿Pasar este grupo a un historial nuevo?",
+  "groupSettingsMoveText": "Todos conservan el grupo, su nombre y su historial. Los demás lo siguen al conectarse; puede que haya que volver a añadir a los miembros ausentes más de 30 días.",
+  "groupSettingsMoveConfirm": "Pasarlo"
 }

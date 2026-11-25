@@ -48,6 +48,7 @@ void main() {
             ],
             openInvites: 0,
             needsUpdate: false,
+            mayMove: false,
             raiseAnyway: false,
           ),
         ]
@@ -134,6 +135,7 @@ void main() {
             ],
             openInvites: 0,
             needsUpdate: false,
+            mayMove: false,
             raiseAnyway: false,
           ),
         ]

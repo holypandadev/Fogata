@@ -6259,4 +6259,29 @@ class L10nZh extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => '开启';
+
+  @override
+  String get groupSettingsHistoryNearlyFull => '这个群组的历史快满了。';
+
+  @override
+  String get groupSettingsHistoryFull => '这个群组的历史已满：在移到新的历史之前，只能移除成员、退出和移动。';
+
+  @override
+  String get groupSettingsHistoryMoveHint => '把群组移到新的历史：所有人都会保留群组、它的名称和其中的内容。';
+
+  @override
+  String get groupSettingsHistoryFirstMoves => '它的第一位成员可以把它移到新的历史。';
+
+  @override
+  String get groupSettingsMoveGroup => '移到新的历史';
+
+  @override
+  String get groupSettingsMoveTitle => '把这个群组移到新的历史吗？';
+
+  @override
+  String get groupSettingsMoveText =>
+      '所有人都会保留群组、它的名称和它的历史。其他人在连接时跟着移过去；离开超过30天的成员可能需要重新添加。';
+
+  @override
+  String get groupSettingsMoveConfirm => '移动';
 }

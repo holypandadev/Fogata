@@ -130,7 +130,7 @@ entries, 3 MB): one change adds its entry in about 8 ms where the file written w
 ms; what is left is mostly flushing to the disk, as is writing what was judged of the log
 (about 10 ms either way). A burst of 200 changes, written in turn by the writer below, cost
 the writer 109 to 122 ms in 5 to 7 whole writes before, and 36 to 78 ms in 3 or 4 saves that
-add 34 KB in all after (`measure_a_burst_of_changes_to_a_large_log` in `store/judged.rs`). It is added to only when the store knows
+add 34 KB in all after (`measure_a_burst_of_changes_to_a_large_log` in fogata-core's `measures/store_judged.rs`). It is added to only when the store knows
 what the file holds (it read it whole or wrote it, and finds it as it left it: its length,
 when it changed and, on Unix, which file it is) and the log still holds every entry in it;
 otherwise (a file changed by something else, entries the log let go of: spare ones trimmed,
@@ -256,7 +256,11 @@ after it came. So between trims a log holds at most what the members' budgets br
 seconds on top (3.6). A device checks, before letting them go, that the group comes out the
 same without them, and keeps them otherwise. Devices compare the heads of the entries that
 are not spare to tell whether they need to sync, and send each other only those (and
-waiting ones); spare entries reach the members when they are written. One that comes to be
+waiting ones); spare entries reach the members when they are written. A device new to the
+log, a friend it is offered to or a device let in, is sent only the entries that are not
+spare (`GroupLog::hashes_to_offer`), with the spare `Level` entries it judged and what they
+are signed on, since one orders the whole log at its level even past its author's run.
+Waiting ones would only wait there too, and come with the next sync once their parents do. One that comes to be
 needed (an entry of a later version signed on it, say, or one of a run that an entry of
 another member, placed before it, ended) is needed on the device that has it, which then
 sends it again, and it stays.

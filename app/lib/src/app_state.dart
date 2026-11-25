@@ -1091,6 +1091,94 @@ class AppState extends ChangeNotifier {
     nav.changed();
   }
 
+  /// A group the window shows that is no longer listed because it moved to a fresh
+  /// history (its first member moved it, and this device followed): what showed it shows
+  /// the group it moved to, its room too, without a word. One that did not move (or whose
+  /// move cannot be read) is left as it was, to go as it always went.
+  Future<void> _followMoves() async {
+    final open =
+        {
+              nav.selectedGroup,
+              nav.membersGroup,
+              nav.groupSettings,
+              roomState.roomGroup,
+              call?.group,
+            }
+            .whereType<String>()
+            // A direct call's group is never listed among the groups.
+            .where(
+              (g) => contacts.group(g) == null && callState.callIn(g) == null,
+            )
+            .toList();
+    var unlisted = false;
+    for (final from in open) {
+      String? to;
+      try {
+        to = await api.groupMovedTo(groupId: from);
+      } catch (_) {
+        continue;
+      }
+      if (to == null) continue;
+      if (contacts.group(to) != null) {
+        // Not waited for: the rest of the refresh goes on while the new room is entered
+        // (the old call ends first, inside it).
+        unawaited(followGroup(from, to).catchError((Object _) {}));
+      } else {
+        unlisted = true;
+      }
+    }
+    // A group it moved to that runs but was not listed when the groups were read: read
+    // them again, once, as any change of the groups does.
+    if (unlisted && !_followingAgain) {
+      _followingAgain = true;
+      unawaited(refreshGroups().whenComplete(() => _followingAgain = false));
+    }
+  }
+
+  bool _followingAgain = false;
+
+  /// What the window shows of [from] shows [to] instead: the group moved to a fresh
+  /// history. A call in [from]'s room ends, as that room does, and this device goes into
+  /// [to]'s room with its microphone as the person left it; so does one that showed that
+  /// room. What was kept of [from] goes, as when leaving it.
+  @visibleForTesting
+  Future<void> followGroup(String from, String to) async {
+    if (nav.selectedGroup == from) nav.selectedGroup = to;
+    if (nav.membersGroup == from) nav.membersGroup = to;
+    if (nav.groupSettings == from) nav.groupSettings = to;
+    final inCall = call?.group == from;
+    final shown = roomState.roomGroup == from;
+    final rejoin = inCall || (shown && nav.page == Screen.room);
+    if (shown) {
+      roomState.roomGroup = null;
+      roomState.room = null;
+      roomState.dropPreviews();
+    }
+    if (shown || inCall) _dropVideos();
+    roomState.memories.remove(from);
+    roomState.outgoing.remove(from);
+    contacts.paths.remove(from);
+    contacts.carriers.remove(from);
+    if (shown && !rejoin) {
+      // The new group's voice rooms are its own: shown from its first one.
+      roomState.roomGroup = to;
+      roomState.roomVoice = firstRoom;
+    }
+    nav.changed();
+    if (inCall) await _endCall();
+    if (rejoin) await openRoom(to);
+  }
+
+  /// Moves [group], whose history is nearly full, to a fresh one (its first member: see
+  /// [UiGroup.mayMove]); the window follows it at once, and the others as they connect.
+  Future<bool> moveGroup(String group) async {
+    final to = await attempt(() => api.moveGroup(groupId: group));
+    await refreshGroups();
+    if (to == null) return false;
+    if (contacts.group(to) != null) await followGroup(group, to);
+    return true;
+  }
+
   /// After leaving a group or being removed from it: what the window held of it goes,
   /// and a page that showed it gives way to home.
   void forgetGroup(String group) {
@@ -1380,6 +1468,7 @@ class AppState extends ChangeNotifier {
       contacts.members.removeWhere((id, _) => contacts.group(id) == null);
       contacts.groupBanners.removeWhere((id, _) => contacts.group(id) == null);
       contacts.forgetGonePeople();
+      await _followMoves();
       roomState.rememberRooms(contacts.groups);
       if (shown != null) await leaveIfDeleted(shown);
       _followCall();

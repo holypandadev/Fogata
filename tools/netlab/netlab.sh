@@ -32,7 +32,8 @@
 # Mixed versions: OLD_A or OLD_B, the path of an older `fogata`, runs device A or B of the
 # friends-link, friends-code, friends-later(-code) and (A only) friends-ex-mutual scenarios
 # with it. An older device
-# that is given a code of the newer format must refuse it as not a code.
+# that is given a code of the newer format must refuse it as not a code. Not the
+# -two-routers ones: an older device does not seal its local addresses for a link or code.
 # Needs: unshare, ip, nft. Does not need root.
 set -euo pipefail
 
@@ -46,7 +47,9 @@ BIN_A=${OLD_A:-$BIN}
 BIN_B=${OLD_B:-$BIN}
 SCENARIOS=(selftest cone-cone cone-cone-member cone-symmetric cone-symmetric-member
     symmetric-symmetric-member member-lost-direct home-two-routers home-two-routers-firewall
-    home-two-routers-closed group-join group-move friends-link friends-code friends-later friends-later-code
+    home-two-routers-closed group-join group-behind group-move friends-link friends-code friends-link-two-routers
+    friends-link-two-routers-back friends-code-two-routers friends-code-two-routers-back
+    friends-later friends-later-code
     friends-remove friends-ex-mutual room-files network-check network-check-negative fake-observed inbound-flood
     silent-flood tcp-known tcp-slow mdns-flood mdns-stale dht-liars media-silent lan-first-contact lan-first-contact-quiet lan-sealed direct-apart transfer-cone-cone transfer-lan transfer-cone-symmetric
     transfer-two-routers transfer-two-routers-back update-chain update-refusals)
@@ -866,6 +869,56 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         fi
         echo "result: FAIL   logs: $WORK"
         exit 1 ;;
+    group-behind)
+        # A, B and C, each behind a cone NAT, are in a group with D and E. While B and C are
+        # away, A removes D and E, so the group changes its key twice, and B and C have only
+        # the key from before both. When the three come back, A must still reach them: the
+        # messages A and B send then reach the other two.
+        nat_host A 203.0.113.21 cone
+        nat_host B 203.0.113.22 cone
+        nat_host C 203.0.113.23 cone
+        for device in A B C D E; do
+            "$BIN" --data-dir "$WORK/data-$device" profile --name "$device" > /dev/null
+        done
+        "$BIN" --data-dir "$WORK/data-A" group create club > /dev/null
+        for device in B C D E; do
+            key=$("$BIN" --data-dir "$WORK/data-$device" id | awk '/Device key/ {print $3}')
+            "$BIN" --data-dir "$WORK/data-A" group add club "$key" --nick "$device" > /dev/null
+        done
+        for device in B C; do
+            mkdir -p "$WORK/data-$device/logs"
+            cp "$WORK/data-A/groups.json" "$WORK/data-$device/"
+            cp "$WORK/data-A/logs/"*.log "$WORK/data-$device/logs/"
+        done
+        for device in D E; do
+            "$BIN" --data-dir "$WORK/data-A" group remove club "$(short_id "$device")" > /dev/null
+        done
+        (sleep 90; echo "hello from A"; sleep 40) |
+            ip netns exec A timeout 140 "$BIN" --data-dir "$WORK/data-A" chat club --nick A \
+            --no-mdns $BOOT > "$WORK/A.out" 2>&1 &
+        PIDS+=($!)
+        (sleep 100; echo "hello from B"; sleep 30) |
+            ip netns exec B timeout 140 "$BIN" --data-dir "$WORK/data-B" chat club --nick B \
+            --no-mdns $BOOT > "$WORK/B.out" 2>&1 &
+        PIDS+=($!)
+        sleep 130 | ip netns exec C timeout 140 "$BIN" --data-dir "$WORK/data-C" chat club --nick C \
+            --no-mdns $BOOT > "$WORK/C.out" 2>&1 &
+        PIDS+=($!)
+        wait "${PIDS[-1]}" "${PIDS[-2]}" "${PIDS[-3]}" 2>/dev/null || true
+        echo "=== $SCENARIO"
+        pass=1
+        for device in A B C; do
+            echo "--- $device"
+            grep -h -E 'connected|hello from' "$WORK/$device.out" || true
+        done
+        for device in B C; do
+            grep -q 'hello from A' "$WORK/$device.out" || pass=0
+        done
+        grep -q 'hello from B' "$WORK/A.out" || pass=0
+        grep -q 'hello from B' "$WORK/C.out" || pass=0
+        echo "result: $([[ $pass == 1 ]] && echo PASS || echo FAIL)   logs: $WORK"
+        [[ $pass == 1 ]]
+        exit ;;
     group-move)
         # A group at level five whose log two of its members, F1 and F2, filled up to the
         # ceiling; they stay offline from then on. Only B holds the full log. A, first on the
@@ -936,29 +989,46 @@ print(" ".join(g["group_id"] for g in groups if g.get("moved_from") == sys.argv[
         echo "result: $([[ $pass == 1 ]] && echo PASS || echo FAIL)   logs: $WORK"
         [[ $pass == 1 ]]
         exit ;;
-    friends-link|friends-code)
+    friends-link|friends-code|friends-link-two-routers*|friends-code-two-routers*)
         # A and B, behind different NATs, become friends with a link (or a short code, which
         # carries no address and is found only through the DHT). Then both come back later
-        # and find each other as friends.
-        nat_host A 203.0.113.21 cone
-        nat_host B 203.0.113.22 cone
+        # and find each other as friends. -two-routers: both at one home, A on the main
+        # router and B behind a second one (see home_two_routers): A cannot reach B at all
+        # and B reaches A only at its local address, sealed for it under the link's or
+        # code's secret, and they must meet at it. With a link B shows it and A uses it, with
+        # a code A shows it and B types it; -back, the other way round.
+        inviter=A adder=B
+        case $SCENARIO in
+            *-two-routers*)
+                home_two_routers 203.0.113.30 A B
+                case $SCENARIO in
+                    friends-link-two-routers | friends-code-two-routers-back) inviter=B adder=A ;;
+                esac ;;
+            *)
+                nat_host A 203.0.113.21 cone
+                nat_host B 203.0.113.22 cone ;;
+        esac
         "$BIN_A" --data-dir "$WORK/data-A" profile --name Ana > /dev/null
         "$BIN_B" --data-dir "$WORK/data-B" profile --name Bea > /dev/null
         flag=() pattern='fogata:friend:[A-Za-z0-9_-]*'
-        if [[ $SCENARIO == friends-code ]]; then
+        if [[ $SCENARIO == friends-code* ]]; then
             flag=(--code) pattern='FGT-[0-9A-Z]{4,5}-[0-9A-Z]{4,5}'
         fi
-        ip netns exec A timeout 200 "$BIN_A" --data-dir "$WORK/data-A" friends invite "${flag[@]}" \
-            --accept-first --no-mdns $BOOT > "$WORK/A-invite.out" 2>&1 &
+        bin=$BIN_A
+        [[ $inviter == B ]] && bin=$BIN_B
+        ip netns exec "$inviter" timeout 200 "$bin" --data-dir "$WORK/data-$inviter" friends invite "${flag[@]}" \
+            --accept-first --no-mdns $BOOT > "$WORK/$inviter-invite.out" 2>&1 &
         PIDS+=($!)
         for _ in $(seq 300); do
-            grep -q -E "$pattern" "$WORK/A-invite.out" && break
+            grep -q -E "$pattern" "$WORK/$inviter-invite.out" && break
             sleep 0.1
         done
-        what=$(grep -o -m1 -E "$pattern" "$WORK/A-invite.out")
+        what=$(grep -o -m1 -E "$pattern" "$WORK/$inviter-invite.out")
         echo "$what" > "$WORK/shown"
-        in_ns B timeout 200 "$BIN_B" --data-dir "$WORK/data-B" friends add "$what" --no-mdns $BOOT \
-            > "$WORK/B-add.out" 2>&1 || true
+        bin=$BIN_B
+        [[ $adder == A ]] && bin=$BIN_A
+        in_ns "$adder" timeout 200 "$bin" --data-dir "$WORK/data-$adder" friends add "$what" --no-mdns $BOOT \
+            > "$WORK/$adder-add.out" 2>&1 || true
         if refused_newer_code; then
             kill "${PIDS[-1]}" 2>/dev/null || true
             exit 0
@@ -973,11 +1043,20 @@ print(" ".join(g["group_id"] for g in groups if g.get("moved_from") == sys.argv[
         done
         wait "${PIDS[-1]}" "${PIDS[-2]}" 2>/dev/null || true
         echo "=== $SCENARIO"
-        for file in A-invite B-add A-online B-online; do
+        for file in $inviter-invite $adder-add A-online B-online; do
             echo "--- $file"
             grep -E '^[0-9:]{8} [-+?·]' "$WORK/$file.out" | grep -v 'waiting for a friend' || true
         done
-        if grep -q 'friends now' "$WORK/B-add.out" && grep -q 'Bea .* is online' "$WORK/A-online.out" \
+        # Met at a local address: said when the new friend came online, or (should its path
+        # not be known yet then) when both came back later.
+        local_ok=1
+        if [[ $SCENARIO == *-two-routers* ]] && ! grep -q 'is online (local network)' "$WORK/$adder-add.out" \
+            && ! { grep -q -E 'is online$' "$WORK/$adder-add.out" \
+                && grep -q 'is online (local network)' "$WORK/$adder-online.out"; }; then
+            echo "--- the two did not meet at a local address"
+            local_ok=0
+        fi
+        if [[ $local_ok == 1 ]] && grep -q 'friends now' "$WORK/$adder-add.out" && grep -q 'Bea .* is online' "$WORK/A-online.out" \
             && grep -q 'Ana .* is online' "$WORK/B-online.out"; then
             echo "result: PASS   logs: $WORK"
             exit 0

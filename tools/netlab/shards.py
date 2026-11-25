@@ -26,8 +26,11 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 MINUTES = {
     "friends-remove": 9.2, "friends-ex-mutual": 4.0, "friends-later": 4.0,
     "friends-later-code": 4.0, "member-lost-direct": 3.6, "direct-apart": 3.5, "dht-liars": 3.1,
-    "silent-flood": 2.9, "room-files": 2.5, "group-join": 2.4, "mdns-flood": 2.1,
-    "group-move": 4.4, "friends-code": 2.0, "friends-link": 2.0, "update-chain": 1.9, "cone-cone-member": 1.8,
+    "silent-flood": 2.9, "room-files": 2.5, "group-join": 2.4, "group-behind": 2.4,
+    "mdns-flood": 2.1,
+    "group-move": 4.4, "friends-code": 2.0, "friends-link": 2.0, "friends-code-two-routers": 2.0,
+    "friends-code-two-routers-back": 2.0, "friends-link-two-routers": 2.0,
+    "friends-link-two-routers-back": 2.0, "update-chain": 1.9, "cone-cone-member": 1.8,
     "lan-sealed": 1.8, "tcp-known": 1.8, "lan-first-contact": 1.7, "lan-first-contact-quiet": 1.7,
     "transfer-cone-cone": 1.7, "transfer-two-routers": 1.7, "cone-cone": 1.6,
     "cone-symmetric": 1.6, "cone-symmetric-member": 1.6, "home-two-routers": 1.6,

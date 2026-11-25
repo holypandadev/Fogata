@@ -9372,6 +9372,54 @@ abstract class L10n {
   /// In en, this message translates to:
   /// **'Turn it on'**
   String get groupSettingsRaiseAnywayConfirm;
+
+  /// Group settings › Members, a note shown to every member when the group's history (the record every member keeps of who is in it and what changed) holds three quarters or more of what it can hold.
+  ///
+  /// In en, this message translates to:
+  /// **'This group’s history is nearly full.'**
+  String get groupSettingsHistoryNearlyFull;
+
+  /// Group settings › Members, a note shown instead of groupSettingsHistoryNearlyFull once the group's history is full: until the group is moved to a fresh history, only removing members, leaving the group and moving it still work.
+  ///
+  /// In en, this message translates to:
+  /// **'This group’s history is full: until it moves to a fresh one, only removing members, leaving and the move still work.'**
+  String get groupSettingsHistoryFull;
+
+  /// Group settings › Members, under groupSettingsHistoryNearlyFull or groupSettingsHistoryFull, shown to the group's first member, the only one who can move it: moving it starts a fresh history that everyone follows.
+  ///
+  /// In en, this message translates to:
+  /// **'Move the group to a fresh history: everyone keeps the group, its name and what it holds.'**
+  String get groupSettingsHistoryMoveHint;
+
+  /// Group settings › Members, under groupSettingsHistoryNearlyFull or groupSettingsHistoryFull, shown to members who are not first in the group: only the first member can move the group to a fresh history.
+  ///
+  /// In en, this message translates to:
+  /// **'Its first member can move it to a fresh history.'**
+  String get groupSettingsHistoryFirstMoves;
+
+  /// Group settings › Members, the button under groupSettingsHistoryMoveHint that moves the group to a fresh history (its first member only).
+  ///
+  /// In en, this message translates to:
+  /// **'Move to a fresh history'**
+  String get groupSettingsMoveGroup;
+
+  /// Title of the confirmation asked after groupSettingsMoveGroup.
+  ///
+  /// In en, this message translates to:
+  /// **'Move this group to a fresh history?'**
+  String get groupSettingsMoveTitle;
+
+  /// Text of the confirmation asked after groupSettingsMoveGroup: what moving the group to a fresh history means for everyone in it.
+  ///
+  /// In en, this message translates to:
+  /// **'Everyone keeps the group, its name and its history. The others follow it as they connect; members away for more than 30 days may have to be added again.'**
+  String get groupSettingsMoveText;
+
+  /// The confirming button of the confirmation asked after groupSettingsMoveGroup.
+  ///
+  /// In en, this message translates to:
+  /// **'Move it'**
+  String get groupSettingsMoveConfirm;
 }
 
 class _L10nDelegate extends LocalizationsDelegate<L10n> {

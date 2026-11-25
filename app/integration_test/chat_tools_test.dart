@@ -104,6 +104,7 @@ AppState _state(Screen page) {
               ],
               openInvites: 0,
               needsUpdate: false,
+              mayMove: false,
               raiseAnyway: false,
             ),
           ]

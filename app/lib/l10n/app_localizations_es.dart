@@ -6777,4 +6777,34 @@ class L10nEs extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'Activarla';
+
+  @override
+  String get groupSettingsHistoryNearlyFull =>
+      'El historial de este grupo está casi lleno.';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'El historial de este grupo está lleno: hasta que pase a uno nuevo, solo funcionan quitar miembros, salir y el traslado.';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'Pasa el grupo a un historial nuevo: todos conservan el grupo, su nombre y lo que guarda.';
+
+  @override
+  String get groupSettingsHistoryFirstMoves =>
+      'Su primer miembro puede pasarlo a un historial nuevo.';
+
+  @override
+  String get groupSettingsMoveGroup => 'Pasar a un historial nuevo';
+
+  @override
+  String get groupSettingsMoveTitle =>
+      '¿Pasar este grupo a un historial nuevo?';
+
+  @override
+  String get groupSettingsMoveText =>
+      'Todos conservan el grupo, su nombre y su historial. Los demás lo siguen al conectarse; puede que haya que volver a añadir a los miembros ausentes más de 30 días.';
+
+  @override
+  String get groupSettingsMoveConfirm => 'Pasarlo';
 }

@@ -6727,4 +6727,34 @@ class L10nDe extends L10n {
 
   @override
   String get groupSettingsRaiseAnywayConfirm => 'Einschalten';
+
+  @override
+  String get groupSettingsHistoryNearlyFull =>
+      'Der Verlauf dieser Gruppe ist fast voll.';
+
+  @override
+  String get groupSettingsHistoryFull =>
+      'Der Verlauf dieser Gruppe ist voll: Bis sie in einen neuen umzieht, funktionieren nur noch das Entfernen von Mitgliedern, das Verlassen und der Umzug.';
+
+  @override
+  String get groupSettingsHistoryMoveHint =>
+      'Zieh die Gruppe in einen neuen Verlauf um: Alle behalten die Gruppe, ihren Namen und ihren Inhalt.';
+
+  @override
+  String get groupSettingsHistoryFirstMoves =>
+      'Ihr erstes Mitglied kann sie in einen neuen Verlauf umziehen.';
+
+  @override
+  String get groupSettingsMoveGroup => 'In neuen Verlauf umziehen';
+
+  @override
+  String get groupSettingsMoveTitle =>
+      'Diese Gruppe in einen neuen Verlauf umziehen?';
+
+  @override
+  String get groupSettingsMoveText =>
+      'Alle behalten die Gruppe, ihren Namen und ihren Verlauf. Die anderen folgen, sobald sie sich verbinden; Mitglieder, die länger als 30 Tage weg sind, müssen eventuell neu hinzugefügt werden.';
+
+  @override
+  String get groupSettingsMoveConfirm => 'Umziehen';
 }
