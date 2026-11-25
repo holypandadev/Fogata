@@ -2165,14 +2165,17 @@ mod tests {
                 }
                 tokio::task::yield_now().await;
             }
-            assert_eq!(
-                seen,
-                [
-                    UpdateState::Checking,
-                    UpdateState::Downloading { done: 0, total: 0 },
-                    UpdateState::Ready
-                ],
-                "{name} {:?}",
+            // Checking first and Ready last, and only Downloading between: a download of a
+            // small package can start and end between two looks, so it is not always seen.
+            let between = &seen[1..seen.len().saturating_sub(1)];
+            assert!(
+                seen.first() == Some(&UpdateState::Checking)
+                    && seen.last() == Some(&UpdateState::Ready)
+                    && seen.len() >= 2
+                    && between
+                        .iter()
+                        .all(|s| *s == UpdateState::Downloading { done: 0, total: 0 }),
+                "{name} {seen:?} {:?}",
                 updater.notes()
             );
             node.shutdown().await.unwrap();
