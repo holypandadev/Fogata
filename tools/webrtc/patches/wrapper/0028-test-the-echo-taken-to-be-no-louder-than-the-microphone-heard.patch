@@ -1,0 +1,203 @@
+Test the echo taken to be no louder than the microphone heard after aligning anew
+
+WebRTC patch 0018 caps the echo path gain of AEC3's non-linear echo model after the
+echo controller is aligned anew, at what the microphone heard against the render, until
+the linear filter takes over. In test/echo_aligned_anew.test.cc AEC3 hears a room's echo
+of the other side's voice, 20 dB under it, and the output changes four times
+(RestartForOtherDevices), to an echo 120 ms later and back or to the same delay; a word
+of the person's own, 0.5 to 1.1 s after each change, comes out at least 0.3 dB less held
+down than with the cap left out (Fogata-Aec3EchoPathGainCapAfterAligningAnew/0/, stock
+AEC3), and the echo without the word no louder than 1 dB over stock's at its loudest 100
+ms in the 3.3 s after each change. With an echo 6 dB under the other side's voice, the
+echo is no louder than stock's and the word no more than 0.5 dB more held down. Built in
+again: the library shows only its own API.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 5b362a9..84ec9a5 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -380,6 +380,7 @@ if (rtc_include_tests) {
+        "test/echo_restart.test.cc",
+        "test/echo_room.test.cc",
+        "test/echo_call.test.cc",
++       "test/echo_aligned_anew.test.cc",
+        "test/closed_connection.test.cc",
+        "src/rtc_audio_device_impl.cc",
+        "src/rtc_audio_device_impl.h",
+diff --git a/test/echo_aligned_anew.test.cc b/test/echo_aligned_anew.test.cc
+new file mode 100644
+index 0000000..0598e41
+--- /dev/null
++++ b/test/echo_aligned_anew.test.cc
+@@ -0,0 +1,171 @@
++// WebRTC's AEC3 with Fogata's patch 0018 (tools/webrtc/patches/webrtc): after
++// the render buffer is aligned anew, until the linear filter is usable again,
++// the echo model takes the echo to be no louder than the microphone heard.
++// Built in again: the library shows only its own API.
++
++#include <algorithm>
++#include <cmath>
++#include <memory>
++#include <optional>
++#include <random>
++#include <vector>
++
++#include "absl/strings/string_view.h"
++#include "api/audio/echo_canceller3_config.h"
++#include "modules/audio_processing/aec3/echo_canceller3.h"
++#include "modules/audio_processing/audio_buffer.h"
++#include "test/create_test_environment.h"
++#include "test/gtest.h"
++
++namespace {
++
++constexpr int kRate = 16000;
++constexpr int kFrame = kRate / 100;
++constexpr int kWarmFrames = 1000;   // 10 s before the first change.
++constexpr int kPeriodFrames = 600;  // 6 s between changes.
++constexpr int kChanges = 4;
++constexpr int kWordFrom = 50;  // The word: 0.5 to 1.1 s after each change.
++constexpr int kWordTo = 110;
++
++// The other side's voice, at speech's pace: noise whose level moves with
++// syllables of an eighth to a quarter of a second, with some pauses.
++std::vector<float> OtherSide(int samples) {
++  std::mt19937 random(11);
++  std::normal_distribution<float> noise(0.f, 1.f);
++  std::uniform_real_distribution<float> uniform(0.f, 1.f);
++  std::vector<float> x(samples);
++  float level = 0.f, target = 0.f, low = 0.f;
++  int left = 0;
++  for (int n = 0; n < samples; ++n) {
++    if (left-- <= 0) {
++      left = kRate / 8 + static_cast<int>(uniform(random) * kRate / 8);
++      target = uniform(random) < 0.15f ? 0.f : 0.4f + uniform(random);
++    }
++    level += (target - level) * 0.002f;
++    low = 0.9f * low + noise(random);
++    x[n] = 1500.f * level * low;
++  }
++  return x;
++}
++
++struct Result {
++  double word_db = 0.0;  // The word out against the word in, in dB.
++  double echo_db = 0.0;  // The loudest 100 ms of echo out after a change.
++};
++
++// The output changes kChanges times to one whose echo comes `delay_ms` later
++// or back (RestartForOtherDevices), with an echo `echo_db` below the other
++// side's voice. Run once with a word of the person's own after each change and
++// once without it.
++Result Run(absl::string_view field_trials, int delay_ms, float echo_db) {
++  const int frames = kWarmFrames + kChanges * kPeriodFrames;
++  const std::vector<float> far = OtherSide(frames * kFrame);
++  std::mt19937 random(5);
++  std::normal_distribution<float> noise(0.f, 1.f);
++  std::vector<float> room(800);
++  double room_energy = 0.0;
++  for (size_t k = 0; k < room.size(); ++k) {
++    room[k] = noise(random) * std::exp(-static_cast<float>(k) / (0.02f * kRate));
++    room_energy += room[k] * room[k];
++  }
++  for (float& r : room) {
++    r *= std::pow(10.f, echo_db / 20.f) / std::sqrt(room_energy);
++  }
++  std::vector<float> word(frames * kFrame), floor(frames * kFrame);
++  for (int n = 0; n < frames * kFrame; ++n) {
++    word[n] = 1000.f * noise(random);
++    floor[n] = 5.f * noise(random);
++  }
++  Result result;
++  for (bool with_word : {true, false}) {
++    webrtc::EchoCanceller3Config config;
++    config.delay.delay_headroom_samples = 512;  // As wrapper patch 0019 sets it.
++    auto aec = std::make_unique<webrtc::EchoCanceller3>(
++        webrtc::CreateTestEnvironment({.field_trials = field_trials}), config,
++        std::nullopt, nullptr, kRate, 1, 1);
++    webrtc::AudioBuffer render(kRate, 1, kRate, 1, kRate, 1);
++    webrtc::AudioBuffer capture(kRate, 1, kRate, 1, kRate, 1);
++    double word_in = 0.0, word_out = 0.0, loudest = 0.0, window = 0.0;
++    for (int f = 0; f < frames; ++f) {
++      const int since = (f - kWarmFrames) % kPeriodFrames;
++      const int change = (f - kWarmFrames) / kPeriodFrames;
++      if (f >= kWarmFrames && since == 0) {
++        aec->RestartForOtherDevices();
++      }
++      const int delay =
++          (60 + (f >= kWarmFrames && change % 2 == 0 ? delay_ms : 0)) * kRate /
++          1000;
++      const bool in_word = f >= kWarmFrames && since >= kWordFrom &&
++                           since < kWordTo;
++      double frame_in = 0.0;
++      for (int i = 0; i < kFrame; ++i) {
++        const int n = f * kFrame + i;
++        render.channels()[0][i] = far[n];
++        double echo = 0.0;
++        for (int k = 0; k < static_cast<int>(room.size()) && n - delay - k >= 0;
++             ++k) {
++          echo += room[k] * far[n - delay - k];
++        }
++        const float own = with_word && in_word ? word[n] : 0.f;
++        frame_in += own * own;
++        capture.channels()[0][i] = static_cast<float>(echo) + floor[n] + own;
++      }
++      aec->AnalyzeRender(&render);
++      aec->AnalyzeCapture(&capture);
++      aec->ProcessCapture(&capture, false);
++      double frame_out = 0.0;
++      for (int i = 0; i < kFrame; ++i) {
++        frame_out += capture.channels()[0][i] * capture.channels()[0][i];
++      }
++      if (with_word && in_word) {
++        word_in += frame_in;
++        word_out += frame_out;
++      }
++      if (!with_word && f >= kWarmFrames && since < 330) {
++        window += frame_out;
++        if (since % 10 == 9) {
++          loudest = std::max(loudest, window / (10 * kFrame));
++          window = 0.0;
++        }
++      }
++    }
++    if (with_word) {
++      result.word_db = 10.0 * std::log10((word_out + 1e-9) / (word_in + 1e-9));
++    } else {
++      result.echo_db = 10.0 * std::log10(loudest + 1e-9);
++    }
++  }
++  return result;
++}
++
++constexpr char kStock[] = "Fogata-Aec3EchoPathGainCapAfterAligningAnew/0/";
++
++}  // namespace
++
++// The other side speaks while the person does in the second after a change of
++// output: AEC3 holds the person's word down less than stock AEC3, which took
++// the echo to be as loud as the other side's voice until its linear filter
++// was usable, and lets no more echo through.
++TEST(EchoAlignedAnew, AWordAfterAChangeOfOutputIsHeldDownLess) {
++  for (int delay_ms : {0, 120}) {
++    const Result capped = Run("", delay_ms, -20.f);
++    const Result stock = Run(kStock, delay_ms, -20.f);
++    EXPECT_GT(capped.word_db, stock.word_db + 0.3)
++        << "delay " << delay_ms << " ms: " << capped.word_db << " dB, stock "
++        << stock.word_db << " dB";
++    EXPECT_LT(capped.echo_db, stock.echo_db + 1.0)
++        << "delay " << delay_ms << " ms: " << capped.echo_db << " dB, stock "
++        << stock.echo_db << " dB";
++  }
++}
++
++// A louder echo: the cap follows what the microphone heard and lets no more
++// echo through than stock AEC3.
++TEST(EchoAlignedAnew, ALoudEchoAfterAChangeOfOutputIsNotLetThrough) {
++  const Result capped = Run("", 120, -6.f);
++  const Result stock = Run(kStock, 120, -6.f);
++  EXPECT_LT(capped.echo_db, stock.echo_db + 1.0)
++      << capped.echo_db << " dB, stock " << stock.echo_db << " dB";
++  EXPECT_GT(capped.word_db, stock.word_db - 0.5)
++      << capped.word_db << " dB, stock " << stock.word_db << " dB";
++}

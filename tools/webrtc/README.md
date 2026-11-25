@@ -318,6 +318,18 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    mode through that restart, and let the other side back for 0.1 s at -59 dBFS at the
    loudest (0.35 s at -18 dBFS without these patches).
 
+18. `0018-take-the-echo-to-be-no-louder-than-the-microphone-heard-after-aligning-anew`:
+   after the echo controller is aligned anew (0010, 0014, 0016) and until its linear
+   filter takes over, AEC3 models the residual echo from the render alone with an echo
+   path gain of 1, the echo as loud as the other side's voice, and holds the person's own
+   words down in the first second after a change of output. While that initial state
+   runs, the gain is capped at 6 dB over what the microphone heard against the render
+   since the alignment, once 0.4 s of active render has been measured
+   (`Fogata-Aec3EchoPathGainCapAfterAligningAnew/<x>/`, 0 leaves it out). In AEC3 alone
+   at 16 kHz a word 0.5 s after the change came out 0.4 to 1.2 dB less held down, with
+   the word at 3.5 s and the echo let through within 0.2 dB of before; the patch's header
+   gives the figures.
+
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
 `patches/wrapper` (to webrtc-sdk/libwebrtc):
@@ -442,6 +454,9 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     the change is not taken again at the next unmute; a change and a restart marked while
     recording is stopped, with a block recorded before the unmute's start returns, still
     give the restart for other devices.
+28. the tests of WebRTC's patch 0018 (`test/echo_aligned_anew.test.cc`): after changes of
+    output in double talk, AEC3 holds a word of the person's own down less than with the
+    cap left out and lets no more echo through, also with a louder echo.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

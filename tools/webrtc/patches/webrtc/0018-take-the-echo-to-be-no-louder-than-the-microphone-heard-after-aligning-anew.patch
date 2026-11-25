@@ -1,0 +1,289 @@
+Take the echo to be no louder than the microphone heard after the echo controller is aligned anew
+
+After patch 0010's restart for recording, 0014's realign and 0016's restart for other
+devices, AEC3 starts its linear filters and its delay over, and until the filter is
+usable again (0.2 s after the delay is found, itself 0.4 to 0.6 s after the restart,
+and a second start over when it is found) the residual echo is modelled from the render
+alone with the echo path's default gain, 1: the echo taken to be as loud as the other
+side's voice. With the other side talking that model sits 20 dB or more above the real
+echo of a room, and the suppressor holds the person's own words down for the first
+second after a change of output.
+
+While the initial state after an alignment anew runs (AecState::AligningAnew, until 2.5
+s of render active since the last delay found), the residual echo estimator now caps
+the echo path gain of its non-linear model, and of the reverb it feeds, at four times
+(6 dB over) the energy the microphone heard against the render's since the alignment,
+once 0.4 s of render as loud as active render on average has been measured. What the
+microphone heard holds the echo and whatever else the room and the person added, so the
+cap is never under the echo heard so far; the person speaking only raises it. A cap
+once set only falls until the initial state ends, and then goes. An echo controller made
+anew, and every other change of the echo path, keep stock AEC3.
+
+Fogata-Aec3EchoPathGainCapAfterAligningAnew/<x>/ sets the margin, from 0 (no cap, stock
+AEC3) to 100; a value beyond that keeps the default, 4.
+
+AEC3 alone at 16 kHz (the other side's speech-like sound, a room's echo 20 dB under it
+at 60 ms, an output change every 8 s alternating with one at 180 ms, 300 ms or the same
+delay, a word of the person's own 0.5 s and 3.5 s after each change, 8 runs): the word
+at 0.5 s 3.9 to 4.0 dB down before, 3.2 after; with a second output 10 dB louder 5.9
+before, 5.1 after; with the echo 10 dB under the other side 9.5 before, 9.1 after; with
+the echo 30 dB under 3.7 before, 2.5 after. The word at 3.5 s and the echo let through
+(the loudest 100 ms in the first 0.5 s, 0.4 to 1.3 s and 1.3 to 3.3 s after each change,
+without the word) within 0.2 dB of before in every case. Starting the ERLE over sooner
+after the alignment as well held the word at 3.5 s down by 0.8 dB more with the louder
+echo, and is kept out.
+
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+index cf50821..6a65df4 100644
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -161,6 +161,9 @@ void AecState::HandleEchoPathChange(
+   // TODO(peah): Refine the reset scheme according to the type of gain and
+   // delay adjustment.
+ 
++  if (echo_path_variability.aligned_anew) {
++    aligning_anew_ = true;
++  }
+   if (echo_path_variability.delay_change !=
+       EchoPathVariability::DelayAdjustment::kNone) {
+     full_reset();
+@@ -245,6 +248,7 @@ void AecState::Update(
+   // Update the ERL and ERLE measures.
+   if (initial_state_.TransitionTriggered()) {
+     erle_estimator_.Reset(false);
++    aligning_anew_ = false;
+   }
+ 
+   erle_estimator_.Update(render_buffer, adaptive_filter_frequency_responses,
+diff --git a/modules/audio_processing/aec3/aec_state.h b/modules/audio_processing/aec3/aec_state.h
+index 17649bf..d606ab4 100644
+--- a/modules/audio_processing/aec3/aec_state.h
++++ b/modules/audio_processing/aec3/aec_state.h
+@@ -56,6 +56,10 @@ class AecState {
+            config_.filter.use_linear_filter;
+   }
+ 
++  // Fogata: whether the initial state after the render buffer was aligned anew,
++  // when recording starts again, still runs.
++  bool AligningAnew() const { return aligning_anew_; }
++
+   // Returns whether the echo subtractor output should be used as output.
+   bool UseLinearFilterOutput() const {
+     return filter_quality_state_.LinearFilterUsable() &&
+@@ -167,6 +171,7 @@ class AecState {
+   const EchoCanceller3Config config_;
+   const size_t num_capture_channels_;
+   const bool subtractor_analyzer_reset_at_echo_path_change_;
++  bool aligning_anew_ = false;
+ 
+   // Class for controlling the transition from the intial state, which in turn
+   // controls when the filter parameters for the initial state should be used.
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index 0d42ab2..34a72f1 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -158,6 +158,7 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+     // After a change of devices (patch 0016) the transparent mode goes too: a
+     // headset's "no echo" is not the speakers'.
+     echo_path_variability.recording_restarted = !other_devices_;
++    echo_path_variability.aligned_anew = true;
+     RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
+                      << capture_call_counter_
+                      << ", render buffer aligned anew"
+diff --git a/modules/audio_processing/aec3/echo_path_variability.h b/modules/audio_processing/aec3/echo_path_variability.h
+index a9d46c6..c87dc12 100644
+--- a/modules/audio_processing/aec3/echo_path_variability.h
++++ b/modules/audio_processing/aec3/echo_path_variability.h
+@@ -29,6 +29,10 @@ struct EchoPathVariability {
+   // Fogata: the change is recording starting again
+   // (BlockProcessor::RestartForRecording).
+   bool recording_restarted = false;
++  // Fogata: the change is the render buffer aligned anew when recording starts
++  // again, after a change of devices too (BlockProcessor::RestartForRecording
++  // and RestartForOtherDevices).
++  bool aligned_anew = false;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+index 9919b6f..62e4965 100644
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -400,6 +400,9 @@ void EchoRemoverImpl::ProcessCapture(
+ 
+     subtractor_.HandleEchoPathChange(echo_path_variability);
+     aec_state_.HandleEchoPathChange(echo_path_variability);
++    if (echo_path_variability.aligned_anew) {
++      residual_echo_estimator_.HandleAlignedAnew();
++    }
+ 
+     if (echo_path_variability.delay_change !=
+         EchoPathVariability::DelayAdjustment::kNone) {
+diff --git a/modules/audio_processing/aec3/residual_echo_estimator.cc b/modules/audio_processing/aec3/residual_echo_estimator.cc
+index fd821cc..88511b5 100644
+--- a/modules/audio_processing/aec3/residual_echo_estimator.cc
++++ b/modules/audio_processing/aec3/residual_echo_estimator.cc
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
++#include <limits>
+ #include <optional>
+ #include <span>
+ #include <vector>
+@@ -29,6 +30,7 @@
+ #include "modules/audio_processing/aec3/reverb_model.h"
+ #include "modules/audio_processing/aec3/spectrum_buffer.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/experiments/field_trial_parser.h"
+ 
+ namespace webrtc {
+ namespace {
+@@ -164,6 +166,25 @@ void EchoGeneratingPower(size_t num_render_channels,
+   }
+ }
+ 
++// Fogata: how much louder than the microphone heard, against the render, the
++// echo model may still take the echo to be after the render buffer is aligned
++// anew (energy ratio, 4: 6 dB). Fogata-Aec3EchoPathGainCapAfterAligningAnew/<x>/
++// sets it, from 0 (no cap, stock AEC3) to 100; a value beyond that keeps the
++// default.
++float EchoPathGainCapMargin(const FieldTrialsView& field_trials) {
++  constexpr double kDefault = 4.0;
++  FieldTrialParameter<double> margin(/*key=*/"", kDefault);
++  ParseFieldTrial({&margin}, field_trials.Lookup(
++                                 "Fogata-Aec3EchoPathGainCapAfterAligningAnew"));
++  const double value = margin.Get();
++  return static_cast<float>(value >= 0.0 && value <= 100.0 ? value : kDefault);
++}
++
++// Fogata: how long the capture and render are measured after an alignment
++// anew before the cap holds (0.4 s), and how much render they need: at least
++// as much as active render on average.
++constexpr size_t kEchoPathGainCapBlocks = 2 * kNumBlocksPerSecond / 5;
++
+ }  // namespace
+ 
+ ResidualEchoEstimator::ResidualEchoEstimator(
+@@ -184,10 +205,59 @@ ResidualEchoEstimator::ResidualEchoEstimator(
+       erle_onset_compensation_in_dominant_nearend_(
+           UseErleOnsetCompensationInDominantNearend(env.field_trials(),
+                                                     config_.ep_strength)),
+-      neural_residual_echo_estimator_(neural_residual_echo_estimator) {
++      neural_residual_echo_estimator_(neural_residual_echo_estimator),
++      echo_path_gain_cap_margin_(EchoPathGainCapMargin(env.field_trials())),
++      echo_path_gain_cap_(std::numeric_limits<float>::max()) {
+   Reset();
+ }
+ 
++void ResidualEchoEstimator::HandleAlignedAnew() {
++  blocks_since_aligned_anew_ = 0;
++  capture_energy_since_aligned_anew_ = 0.0;
++  render_energy_since_aligned_anew_ = 0.0;
++  echo_path_gain_cap_ = std::numeric_limits<float>::max();
++}
++
++void ResidualEchoEstimator::UpdateEchoPathGainCap(
++    const AecState& aec_state,
++    const RenderBuffer& render_buffer,
++    std::span<const std::array<float, kFftLengthBy2>> capture) {
++  if (echo_path_gain_cap_margin_ <= 0.f || !aec_state.AligningAnew()) {
++    echo_path_gain_cap_ = std::numeric_limits<float>::max();
++    return;
++  }
++  const Block& render = render_buffer.GetBlock(0);
++  double render_energy = 0.0;
++  for (int ch = 0; ch < render.NumChannels(); ++ch) {
++    for (float x : render.View(/*band=*/0, ch)) {
++      render_energy += x * x;
++    }
++  }
++  double capture_energy = 0.0;
++  for (const auto& y : capture) {
++    double energy = 0.0;
++    for (float v : y) {
++      energy += v * v;
++    }
++    capture_energy = std::max(capture_energy, energy);
++  }
++  ++blocks_since_aligned_anew_;
++  render_energy_since_aligned_anew_ += render_energy;
++  capture_energy_since_aligned_anew_ += capture_energy;
++  const double active_render_energy =
++      static_cast<double>(config_.render_levels.active_render_limit) *
++      config_.render_levels.active_render_limit * kBlockSize *
++      blocks_since_aligned_anew_;
++  if (blocks_since_aligned_anew_ >= kEchoPathGainCapBlocks &&
++      render_energy_since_aligned_anew_ >= active_render_energy) {
++    const double cap = echo_path_gain_cap_margin_ *
++                       capture_energy_since_aligned_anew_ /
++                       render_energy_since_aligned_anew_;
++    echo_path_gain_cap_ =
++        std::min(echo_path_gain_cap_, static_cast<float>(cap));
++  }
++}
++
+ ResidualEchoEstimator::~ResidualEchoEstimator() = default;
+ 
+ void ResidualEchoEstimator::Estimate(
+@@ -210,6 +280,7 @@ void ResidualEchoEstimator::Estimate(
+                       aec_state.UsableLinearEstimate();
+   // Estimate the power of the stationary noise in the render signal.
+   UpdateRenderNoisePower(render_buffer);
++  UpdateEchoPathGainCap(aec_state, render_buffer, capture);
+ 
+   // The neural residual echo estimation always runs, even if the estimated
+   // spectra |R2| and |R2_unbounded| are overwritten later. This ensures the
+@@ -426,7 +497,7 @@ float ResidualEchoEstimator::GetEchoPathGain(
+                          ? early_reflections_general_gain_
+                          : late_reflections_general_gain_;
+   }
+-  return gain_amplitude * gain_amplitude;
++  return std::min(gain_amplitude * gain_amplitude, echo_path_gain_cap_);
+ }
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/residual_echo_estimator.h b/modules/audio_processing/aec3/residual_echo_estimator.h
+index 0a53e0d..198f191 100644
+--- a/modules/audio_processing/aec3/residual_echo_estimator.h
++++ b/modules/audio_processing/aec3/residual_echo_estimator.h
+@@ -52,12 +52,23 @@ class ResidualEchoEstimator {
+   // Returns true if ML-REE is active.
+   bool IsMlReeActive() const { return is_ml_ree_active_; }
+ 
++  // Fogata: the render buffer was aligned anew (BlockProcessor's
++  // RestartForRecording and RestartForOtherDevices).
++  void HandleAlignedAnew();
++
+  private:
+   enum class ReverbType { kLinear, kNonLinear };
+ 
+   // Resets the state.
+   void Reset();
+ 
++  // Fogata: updates the cap on the echo path gain that holds while the
++  // initial state after an alignment anew runs.
++  void UpdateEchoPathGainCap(
++      const AecState& aec_state,
++      const RenderBuffer& render_buffer,
++      std::span<const std::array<float, kFftLengthBy2>> capture);
++
+   // Updates estimate for the power of the stationary noise component in the
+   // render signal.
+   void UpdateRenderNoisePower(const RenderBuffer& render_buffer);
+@@ -87,6 +98,15 @@ class ResidualEchoEstimator {
+   std::array<int, kFftLengthBy2Plus1> X2_noise_floor_counter_;
+   ReverbModel echo_reverb_;
+   NeuralResidualEchoEstimator* neural_residual_echo_estimator_;
++  // Fogata: after the render buffer is aligned anew, the echo path gain that
++  // the echo model assumes is capped at `echo_path_gain_cap_margin_` times the
++  // capture's energy against the render's since the alignment: the echo is no
++  // louder than what the microphone heard. 0 leaves the cap out.
++  const float echo_path_gain_cap_margin_;
++  size_t blocks_since_aligned_anew_ = 0;
++  double capture_energy_since_aligned_anew_ = 0.0;
++  double render_energy_since_aligned_anew_ = 0.0;
++  float echo_path_gain_cap_;
+   bool is_ml_ree_active_ = false;
+ };
+ 
