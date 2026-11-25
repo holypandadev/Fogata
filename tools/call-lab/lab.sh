@@ -677,8 +677,7 @@ lab_unmute_sound() {
   if [ "$room" = 1 ] && [ -n "${UNMUTE_ROOM_AFTER:-}" ]; then
     (
       until [ -e "$M/mark-a-mute-$UNMUTE_ROOM_AFTER" ]; do sleep 0.05; done
-      pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
-        source_dont_move=true sink_dont_move=true > /dev/null
+      lab_unmute_room_loop
       echo "the room's echo from $(lab_ms)" >> "$RUN/lab.log"
     ) &
     echo $! > "$RUN/room-after.pid"
@@ -687,14 +686,12 @@ lab_unmute_sound() {
       until [ -s "$M/mark-a-connected" ]; do sleep 0.05; done
       at=$(cat "$M/mark-a-connected")
       python3 -I -c "import time; time.sleep(max(0, ($at + $UNMUTE_ROOM_AT) / 1000 - time.time()))"
-      pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
-        source_dont_move=true sink_dont_move=true > /dev/null
+      lab_unmute_room_loop
       lab_ms > "$M/lab-room-on"
     ) &
     echo $! > "$RUN/room-after.pid"
   elif [ "$room" = 1 ]; then
-    pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
-      source_dont_move=true sink_dont_move=true > /dev/null
+    lab_unmute_room_loop
   fi
   if [ -n "${UNMUTE_UNPLUG:-}" ]; then
     # Moving a's playback by hand would not do: the application keeps its sounds on the
@@ -742,15 +739,45 @@ lab_unmute_sound() {
   fi
 }
 
+# The unmute case's room echo: what a plays goes back into its microphone 30 ms later, as
+# from speakers (a module-loopback, a clean copy). UNMUTE_ROOM_PATH=rough sends it through
+# ffmpeg instead: the direct sound with three reflections (40, 75 and 120 ms later, 6, 9
+# and 13 dB down) and a loudspeaker's soft clipping (tanh, 6 dB of drive), a path an echo
+# canceller's linear filters fit less closely; it stays well inside the delay AEC3 looks
+# for. UNMUTE_ROOM_PATH=mild: the same with reflections 12, 15 and 18 dB down and 3 dB of
+# drive, nearer a laptop's speakers. Its three processes go with the case (lab_unmute_stop).
+lab_unmute_room_loop() {
+  local drive=6 decays=0.5\|0.35\|0.22
+  [ "${UNMUTE_ROOM_PATH:-}" = mild ] && drive=3 decays=0.25\|0.18\|0.12
+  if [ "${UNMUTE_ROOM_PATH:-}" = rough ] || [ "${UNMUTE_ROOM_PATH:-}" = mild ]; then
+    mkfifo "$RUN/rough-in.fifo" "$RUN/rough-out.fifo"
+    pacat --device=laba_test --raw --format=s16le --rate=48000 --channels=1 \
+      --latency-msec=20 < "$RUN/rough-out.fifo" > /dev/null 2>&1 &
+    echo $! > "$RUN/rough-pacat.pid"
+    ffmpeg -hide_banner -loglevel error -fflags nobuffer -flags low_delay \
+      -f s16le -ar 48000 -ac 1 -i "$RUN/rough-in.fifo" \
+      -af "aecho=1:1:40|75|120:${decays//\\/},volume=${drive}dB,asoftclip=type=tanh,volume=-$((drive + 3))dB" \
+      -flush_packets 1 -f s16le -ar 48000 -ac 1 - > "$RUN/rough-out.fifo" 2>> "$RUN/lab.log" &
+    echo $! > "$RUN/rough-ffmpeg.pid"
+    parec --device=laba_quiet.monitor --raw --format=s16le --rate=48000 --channels=1 \
+      --latency-msec=10 > "$RUN/rough-in.fifo" 2>> "$RUN/lab.log" &
+    echo $! > "$RUN/rough-parec.pid"
+  else
+    pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec=30 \
+      source_dont_move=true sink_dont_move=true > /dev/null
+  fi
+}
+
 lab_unmute_stop() {
   local f
   for f in words words-b room-after room-move; do
     [ -e "$RUN/$f.pid" ] && lab_kill "$(cat "$RUN/$f.pid")" bash
   done
-  for f in room-ffmpeg:ffmpeg room-pacat:pacat rec-played-b:parec rec-mic-a:parec rec-mic-b:parec; do
+  for f in room-ffmpeg:ffmpeg room-pacat:pacat rec-played-b:parec rec-mic-a:parec rec-mic-b:parec \
+    rough-parec:parec rough-ffmpeg:ffmpeg rough-pacat:pacat; do
     [ -e "$RUN/${f%%:*}.pid" ] && lab_kill "$(cat "$RUN/${f%%:*}.pid")" "${f#*:}"
   done
-  rm -f "$RUN/room.fifo"
+  rm -f "$RUN/room.fifo" "$RUN/rough-in.fifo" "$RUN/rough-out.fifo"
 }
 
 lab_stop() {

@@ -122,6 +122,8 @@
 #            and 660 Hz), its microphone on; UNMUTE_FAR_FILE=<a WAV file>: b's voice is that
 #            recording instead, at the words' loudness, played again and again; UNMUTE_ROOM=1: what a plays goes back into a's
 #            microphone 30 ms later, as from speakers (without it, as with a headset);
+#            UNMUTE_ROOM_PATH=rough or mild sends that echo through reflections and a
+#            loudspeaker's soft clipping instead of a clean copy (lab.sh, lab_unmute_room_loop);
 #            UNMUTE_ECHO=1 is both, with words. UNMUTE_ROOM_AFTER=<n> starts that echo
 #            only as a mutes for the n-th time, as a headset taken off while muted;
 #            UNMUTE_ROOM_AT=<ms> that long after a saw b connected, its microphone on;
@@ -402,7 +404,7 @@ for check in "${checks[@]}"; do
   [ "${LAB_FIXED_QUANTUM:-1}" = 0 ] && echo "LAB_FIXED_QUANTUM=0" >> "$RUN/settings.txt"
   [ "$name" = term ] && echo "TERM_AFTER=${TERM_AFTER:-0} SIGNAL=${SIGNAL:-TERM}" >> "$RUN/settings.txt"
   [ "$name" = restart ] && echo "RESTART_HOW=${RESTART_HOW:-pulse} RESTART_LATE=${RESTART_LATE-b:8}" >> "$RUN/settings.txt"
-  [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_FAR_FILE=${UNMUTE_FAR_FILE:+given} UNMUTE_ROOM=${UNMUTE_ROOM:-} UNMUTE_ROOM_AFTER=${UNMUTE_ROOM_AFTER:-} UNMUTE_ROOM_AT=${UNMUTE_ROOM_AT:-} UNMUTE_UNPLUG=${UNMUTE_UNPLUG:-} UNMUTE_COPIES=${UNMUTE_COPIES:-} UNMUTE_REJOIN=${UNMUTE_REJOIN:-} UNMUTE_WORDS_START=${UNMUTE_WORDS_START:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
+  [ "$name" = unmute ] && echo "UNMUTE_JUDGE=${UNMUTE_JUDGE:-} UNMUTE_OFFS=${UNMUTE_OFFS:-2 10 60} UNMUTE_ON=${UNMUTE_ON:-10} UNMUTE_SETTLE=${UNMUTE_SETTLE:-10} UNMUTE_NOISE_DB=${UNMUTE_NOISE_DB:--52} UNMUTE_WORDS_DB=${UNMUTE_WORDS_DB:--28} UNMUTE_MIC_VOLUME=${UNMUTE_MIC_VOLUME:-} UNMUTE_TRIALS=${UNMUTE_TRIALS:-} UNMUTE_NS=${UNMUTE_NS:-} UNMUTE_WORDS_AT=${UNMUTE_WORDS_AT:-500 3500 6500} UNMUTE_ECHO=${UNMUTE_ECHO:-} UNMUTE_FAR=${UNMUTE_FAR:-} UNMUTE_FAR_FILE=${UNMUTE_FAR_FILE:+given} UNMUTE_ROOM=${UNMUTE_ROOM:-} UNMUTE_ROOM_AFTER=${UNMUTE_ROOM_AFTER:-} UNMUTE_ROOM_PATH=${UNMUTE_ROOM_PATH:-} UNMUTE_ROOM_AT=${UNMUTE_ROOM_AT:-} UNMUTE_UNPLUG=${UNMUTE_UNPLUG:-} UNMUTE_COPIES=${UNMUTE_COPIES:-} UNMUTE_REJOIN=${UNMUTE_REJOIN:-} UNMUTE_WORDS_START=${UNMUTE_WORDS_START:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   [ "$name" = unmute ] && echo "${UNMUTE_OFFS:-2 10 60}" > "$RUN/offs.txt"
   [ "$name" = quiet-switch ] && echo "QUIET_ROUNDS=${QUIET_ROUNDS:-5} QUIET_MUTED=${QUIET_MUTED:-10} QUIET_ALLOW=${QUIET_ALLOW:-4} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
   [ "$name" = echo ] && echo "ECHO_FROM=${ECHO_FROM-pw-cat (unset)} CALL_LAB_LOOPBACK=${CALL_LAB_LOOPBACK:-} ECHO_PROOF=${ECHO_PROOF:-} ECHO_MONO=${ECHO_MONO:-} ECHO_PAUSES=${ECHO_PAUSES:-1 10} ECHO_ROOM=${ECHO_ROOM:-1} WEBRTC_LOG=${WEBRTC_LOG:-info} ECHO_TIMING=${ECHO_TIMING:-1} ECHO_STALL=${ECHO_STALL:-} BUNDLE=$BUNDLE" >> "$RUN/settings.txt"
