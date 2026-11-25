@@ -139,8 +139,18 @@ elif check == "switch":
         # as its recording was just before it ended. A recording not linked for an
         # instant, as the one made for the other microphone is, has not ended.
         back_at = tone + 2
+        # Ended: no recording from some moment on, until then. Choosing another input closes
+        # the copy's recording and opens a new one a moment later; that gap is not an end.
+        a_recs = recordings("a", unlinked=True)
         ended = next(
-            (t for t, s in recordings("a", unlinked=True) if tone < t <= back_at and not s), None
+            (
+                t
+                for i, (t, s) in enumerate(a_recs)
+                if tone < t <= back_at
+                and not s
+                and not any(s2 for t2, s2 in a_recs[i + 1 :] if t2 <= back_at)
+            ),
+            None,
         )
         if ended is not None:
             back_at = ended - 0.05
