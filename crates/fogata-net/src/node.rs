@@ -778,7 +778,7 @@ impl RecordSent {
     /// whether the peer's outbox has none waiting: after this one was dropped before it
     /// left, once there is room, [`Self::unsent_again`] later, without pushing out another
     /// request; after it failed on its way, a newer one at once, and this one a couple of
-    /// times soon (see [`RECORD_LOST_UNASKED`]).
+    /// times soon, once there is room (see [`RECORD_LOST_UNASKED`]).
     fn due_again(&self, digest: &[u8; 32], room: bool) -> bool {
         if !self.answered {
             return false;
@@ -790,9 +790,9 @@ impl RecordSent {
             return false;
         }
         // A newer one at once; this one, after a failure on its way, a couple of times
-        // soon, unasked (see [`RECORD_LOST_UNASKED`]).
+        // soon, unasked, once there is room (see [`RECORD_LOST_UNASKED`]).
         self.digest != *digest
-            || (self.lost <= RECORD_LOST_UNASKED && self.at.elapsed() >= self.lost_again())
+            || (room && self.lost <= RECORD_LOST_UNASKED && self.at.elapsed() >= self.lost_again())
     }
 
     /// Whether a record with `digest` may go to a member that was sent `sent`, `refused`

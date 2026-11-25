@@ -759,11 +759,11 @@ mod tests {
     }
 
     /// A record that failed on its way may have got there, only its answer lost: it is
-    /// sent again unasked only a couple of times (see [`super::super::RECORD_LOST_UNASKED`]),
-    /// however often the copy it would send fails too, and then goes again only to a member whose roster names another record, never to one whose roster names
-    /// it.
+    /// sent again unasked only a couple of times (`RECORD_LOST_UNASKED`), however often
+    /// the copy it would send fails too, and after that goes again only to a member whose
+    /// roster names another record, never to one whose roster names it.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_record_that_may_have_got_there_goes_again_only_to_a_member_without_it() {
+    async fn a_record_that_may_have_got_there_goes_again_unasked_only_twice() {
         let (node, group) = lone_member();
         let found = inspect(&node, move |n| {
             let (bea, cai) = (with_records(n, group), with_records(n, group));
