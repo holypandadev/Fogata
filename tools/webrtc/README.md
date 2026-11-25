@@ -318,6 +318,17 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    mode through that restart, and let the other side back for 0.1 s at -59 dBFS at the
    loudest (0.35 s at -18 dBFS without these patches).
 
+18. `0018-keep-the-echo-model-at-a-call-s-start-while-the-linear-filter-takes-no-echo-away`:
+   at a call's start with music through speakers, AEC3 marks its linear filter usable
+   before it cancels anything, takes the residual echo from it and lets the music back.
+   Until the filter first takes echo away (full-band ERLE of 3 dB), while the other side
+   plays without pauses, the echo model is kept too, at an echo path gain no higher than
+   6 dB over what the microphone heard over its noise against the render
+   (`Fogata-Aec3KeepEchoModelWhileErleIsLow/margin:<x>,pauses:<y>/`, margin 0 leaves it
+   out). In AEC3 alone at 16 kHz the music came out 0.4 to 0.7 dB quieter (1.2 to 2.3 dB
+   with pauses:0.1), with a voice, double talk and changes of output as before; the
+   patch's header gives the figures and what it costs a headset.
+
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
 `patches/wrapper` (to webrtc-sdk/libwebrtc):
@@ -442,6 +453,10 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     the change is not taken again at the next unmute; a change and a restart marked while
     recording is stopped, with a block recorded before the unmute's start returns, still
     give the restart for other devices.
+28. the tests of WebRTC's patch 0018 (`test/echo_music_start.test.cc`): music through
+    speakers at a call's start comes out quieter than with the echo model left out, a
+    voice no louder, a headset's noise and words as before, and the person's words over
+    the other side held down no more.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

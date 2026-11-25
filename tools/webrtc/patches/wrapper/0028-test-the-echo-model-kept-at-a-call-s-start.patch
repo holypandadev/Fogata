@@ -1,0 +1,270 @@
+Test the echo model kept at a call's start
+
+WebRTC patch 0018 keeps AEC3's echo model at a call's start, until the linear filter first
+takes echo away, while the other side plays without pauses, at an echo path gain no higher
+than the microphone heard. In test/echo_music_start.test.cc AEC3 hears 8 s from a call's
+start: music through speakers, 10 and 20 dB under the other side, comes out at least 0.3
+dB quieter than with the patch left out (Fogata-Aec3KeepEchoModelWhileErleIsLow/margin:0/,
+stock AEC3), and 0.6 dB quieter with pauses:0.1; a voice through speakers no louder than
+0.5 dB over stock; with a headset and music, the room's noise and the person's words go
+out within 0.2 dB of stock; and the person's words over music, and over a voice with the
+default setting, are held down no more than 0.5 dB beyond stock. Built in again: the
+library shows only its own API.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 5b362a9..b37162f 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -380,6 +380,7 @@ if (rtc_include_tests) {
+        "test/echo_restart.test.cc",
+        "test/echo_room.test.cc",
+        "test/echo_call.test.cc",
++       "test/echo_music_start.test.cc",
+        "test/closed_connection.test.cc",
+        "src/rtc_audio_device_impl.cc",
+        "src/rtc_audio_device_impl.h",
+diff --git a/test/echo_music_start.test.cc b/test/echo_music_start.test.cc
+new file mode 100644
+index 0000000..5c6e9c6
+--- /dev/null
++++ b/test/echo_music_start.test.cc
+@@ -0,0 +1,239 @@
++// WebRTC's AEC3 with Fogata's patch 0018 (tools/webrtc/patches/webrtc): at a
++// call's start, until the linear filter first takes echo away, the echo model
++// is kept while the far end plays without pauses, at an echo path gain no
++// higher than the microphone heard. Built in again: the library shows only its
++// own API.
++
++#include <algorithm>
++#include <cmath>
++#include <memory>
++#include <optional>
++#include <random>
++#include <vector>
++
++#include "absl/strings/string_view.h"
++#include "api/audio/echo_canceller3_config.h"
++#include "modules/audio_processing/aec3/echo_canceller3.h"
++#include "modules/audio_processing/audio_buffer.h"
++#include "test/create_test_environment.h"
++#include "test/gtest.h"
++
++namespace {
++
++constexpr int kRate = 16000;
++constexpr int kFrame = kRate / 100;
++constexpr int kFrames = 800;  // 8 s from the call's start.
++
++// Music: sustained, overlapping harmonic notes, a new one every 0.1 to 0.4 s.
++std::vector<float> Music(int samples) {
++  std::mt19937 random(3);
++  std::uniform_real_distribution<float> uniform(0.f, 1.f);
++  std::vector<float> x(samples, 0.f);
++  for (int start = 0; start < samples;
++       start += static_cast<int>((0.1f + 0.3f * uniform(random)) * kRate)) {
++    const float hz =
++        440.f *
++        std::pow(2.f, (std::floor(48 + 36 * uniform(random)) - 69) / 12);
++    const int length =
++        static_cast<int>((0.25f + 0.6f * uniform(random)) * kRate);
++    const float level = 1200.f * (0.5f + uniform(random));
++    for (int i = 0; i < length && start + i < samples; ++i) {
++      const float envelope = std::min(1.f, i / (0.01f * kRate)) *
++                             std::exp(-i / (0.8f * kRate)) *
++                             std::min(1.f, (length - i) / (0.05f * kRate));
++      float note = 0.f;
++      for (int h = 1; h <= 8; ++h) {
++        note += std::sin(2.f * 3.14159265f * hz * h * i / kRate) /
++                (0.5f * h * h + 0.5f);
++      }
++      x[start + i] += level * envelope * note;
++    }
++  }
++  return x;
++}
++
++// A voice, at speech's pace: noise whose level moves with syllables of an
++// eighth to a quarter of a second, with some pauses.
++std::vector<float> Voice(int samples, unsigned seed, float scale) {
++  std::mt19937 random(seed);
++  std::normal_distribution<float> noise(0.f, 1.f);
++  std::uniform_real_distribution<float> uniform(0.f, 1.f);
++  std::vector<float> x(samples);
++  float level = 0.f, target = 0.f, low = 0.f;
++  int left = 0;
++  for (int n = 0; n < samples; ++n) {
++    if (left-- <= 0) {
++      left = kRate / 8 + static_cast<int>(uniform(random) * kRate / 8);
++      target = uniform(random) < 0.15f ? 0.f : 0.4f + uniform(random);
++    }
++    level += (target - level) * 0.002f;
++    low = 0.9f * low + noise(random);
++    x[n] = scale * level * low;
++  }
++  return x;
++}
++
++struct Result {
++  double echo_db = 0.0;  // The echo out against the echo in, 1 to 6 s.
++  double near_db = 0.0;  // The person out against in, 0 to 6 s.
++};
++
++// A call's start: the other side's `far` reaches the microphone through a room
++// `echo_db` under it at 60 ms (no echo for a headset), over the room's noise
++// and, if given, the person's own `near`.
++Result Run(absl::string_view field_trials,
++           const std::vector<float>& far,
++           std::optional<float> echo_db,
++           const std::vector<float>& near) {
++  const int samples = kFrames * kFrame;
++  std::mt19937 random(5);
++  std::normal_distribution<float> noise(0.f, 1.f);
++  std::vector<float> echo(samples, 0.f), floor(samples);
++  if (echo_db) {
++    std::vector<float> room(1600);
++    double room_energy = 0.0;
++    for (size_t k = 0; k < room.size(); ++k) {
++      room[k] =
++          noise(random) * std::exp(-static_cast<float>(k) / (0.04f * kRate));
++      room_energy += room[k] * room[k];
++    }
++    for (float& r : room) {
++      r *= std::pow(10.f, *echo_db / 20.f) / std::sqrt(room_energy);
++    }
++    const int delay = 60 * kRate / 1000;
++    for (int n = delay; n < samples; ++n) {
++      double e = 0.0;
++      for (int k = 0; k < static_cast<int>(room.size()) && n - delay - k >= 0;
++           ++k) {
++        e += room[k] * far[n - delay - k];
++      }
++      echo[n] = static_cast<float>(e);
++    }
++  }
++  for (float& f : floor) {
++    f = 5.f * noise(random);
++  }
++  auto energy = [](const std::vector<float>& x, int from_s, int to_s) {
++    double e = 0.0;
++    for (int n = from_s * kRate; n < to_s * kRate; ++n) {
++      e += static_cast<double>(x[n]) * x[n];
++    }
++    return e;
++  };
++  std::vector<float> out[2];
++  for (int with_near : {0, 1}) {
++    if (with_near && near.empty()) {
++      break;
++    }
++    webrtc::EchoCanceller3Config config;
++    // As wrapper patch 0019 sets it.
++    config.delay.delay_headroom_samples = 512;
++    auto aec = std::make_unique<webrtc::EchoCanceller3>(
++        webrtc::CreateTestEnvironment({.field_trials = field_trials}), config,
++        std::nullopt, nullptr, kRate, 1, 1);
++    webrtc::AudioBuffer render(kRate, 1, kRate, 1, kRate, 1);
++    webrtc::AudioBuffer capture(kRate, 1, kRate, 1, kRate, 1);
++    out[with_near].resize(samples);
++    for (int f = 0; f < kFrames; ++f) {
++      for (int i = 0; i < kFrame; ++i) {
++        const int n = f * kFrame + i;
++        render.channels()[0][i] = far[n];
++        capture.channels()[0][i] =
++            echo[n] + floor[n] + (with_near ? near[n] : 0.f);
++      }
++      aec->AnalyzeRender(&render);
++      aec->AnalyzeCapture(&capture);
++      aec->ProcessCapture(&capture, false);
++      for (int i = 0; i < kFrame; ++i) {
++        out[with_near][f * kFrame + i] = capture.channels()[0][i];
++      }
++    }
++  }
++  Result result;
++  const std::vector<float>& in = echo_db ? echo : floor;
++  result.echo_db =
++      10.0 *
++      std::log10((energy(out[0], 1, 6) + 1.0) / (energy(in, 1, 6) + 1.0));
++  if (!near.empty()) {
++    // What the person's words added to the output, against the words.
++    result.near_db = 10.0 * std::log10(
++        std::max(1.0, energy(out[1], 0, 6) - energy(out[0], 0, 6)) /
++        energy(near, 0, 6));
++  }
++  return result;
++}
++
++constexpr char kStock[] = "Fogata-Aec3KeepEchoModelWhileErleIsLow/margin:0/";
++// The far end counted as playing without pauses down to 10 dB under its
++// average: more of music's echo held down, a voice's too.
++constexpr char kFewerPauses[] =
++    "Fogata-Aec3KeepEchoModelWhileErleIsLow/pauses:0.1/";
++
++}  // namespace
++
++// Music through speakers at a call's start: AEC3 took its linear filter's
++// estimate while the filter did not yet cancel music, and let it back; the echo
++// model kept lets less of it through.
++TEST(EchoMusicStart, MusicThroughSpeakersIsLetThroughLess) {
++  const std::vector<float> far = Music(kFrames * kFrame);
++  for (float echo_db : {-10.f, -20.f}) {
++    const Result stock = Run(kStock, far, echo_db, {});
++    const Result kept = Run("", far, echo_db, {});
++    EXPECT_LT(kept.echo_db, stock.echo_db - 0.3)
++        << "echo " << echo_db << " dB: " << kept.echo_db << " dB, stock "
++        << stock.echo_db << " dB";
++    const Result fewer = Run(kFewerPauses, far, echo_db, {});
++    EXPECT_LT(fewer.echo_db, stock.echo_db - 0.6)
++        << "echo " << echo_db << " dB, pauses:0.1: " << fewer.echo_db
++        << " dB, stock " << stock.echo_db << " dB";
++  }
++}
++
++// A voice through speakers: no more echo than stock AEC3.
++TEST(EchoMusicStart, AVoiceThroughSpeakersIsLetThroughNoMore) {
++  const std::vector<float> far = Voice(kFrames * kFrame, 11, 1500.f);
++  const Result stock = Run(kStock, far, -10.f, {});
++  for (const char* trials : {"", kFewerPauses}) {
++    const Result kept = Run(trials, far, -10.f, {});
++    EXPECT_LT(kept.echo_db, stock.echo_db + 0.5)
++        << "\"" << trials << "\": " << kept.echo_db << " dB, stock "
++        << stock.echo_db << " dB";
++  }
++}
++
++// A headset (no echo) at a call's start, with the other side's music: the
++// room's noise and the person's words go out as with stock AEC3.
++TEST(EchoMusicStart, WithAHeadsetNothingIsHeldDownMore) {
++  const std::vector<float> far = Music(kFrames * kFrame);
++  const std::vector<float> words = Voice(kFrames * kFrame, 23, 700.f);
++  const Result stock = Run(kStock, far, std::nullopt, words);
++  for (const char* trials : {"", kFewerPauses}) {
++    const Result kept = Run(trials, far, std::nullopt, words);
++    EXPECT_GT(kept.echo_db, stock.echo_db - 0.2)
++        << "\"" << trials << "\": " << kept.echo_db << " dB, stock "
++        << stock.echo_db << " dB";
++    EXPECT_GT(kept.near_db, stock.near_db - 0.2)
++        << "\"" << trials << "\": " << kept.near_db << " dB, stock "
++        << stock.near_db << " dB";
++  }
++}
++
++// The person talks over the other side through speakers from the call's
++// start: over music their words are held down no more than with stock AEC3,
++// nor over a voice with the default setting.
++TEST(EchoMusicStart, WordsOverTheOtherSideAreHeldDownNoMore) {
++  const std::vector<float> words = Voice(kFrames * kFrame, 23, 1500.f);
++  const std::vector<float> music = Music(kFrames * kFrame);
++  const Result music_stock = Run(kStock, music, -10.f, words);
++  for (const char* trials : {"", kFewerPauses}) {
++    const Result kept = Run(trials, music, -10.f, words);
++    EXPECT_GT(kept.near_db, music_stock.near_db - 0.5)
++        << "\"" << trials << "\": " << kept.near_db << " dB, stock "
++        << music_stock.near_db << " dB";
++  }
++  const std::vector<float> voice = Voice(kFrames * kFrame, 11, 3000.f);
++  const Result talk = Run("", voice, -10.f, words);
++  const Result talk_stock = Run(kStock, voice, -10.f, words);
++  EXPECT_GT(talk.near_db, talk_stock.near_db - 0.5)
++      << talk.near_db << " dB, stock " << talk_stock.near_db << " dB";
++}

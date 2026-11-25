@@ -1,0 +1,391 @@
+Keep the echo model at a call's start while the linear filter takes no echo away
+
+At a call's start with music through speakers, AEC3 marks its linear filter usable well
+before it cancels anything: the filter converges on a voice but not on sustained,
+overlapping notes, and its full-band ERLE stays near 0 for seconds. The residual echo is
+then taken from the linear filter's output, which still holds the whole echo, against an
+estimate S2 the filter makes far too low, and the suppressor lets the music back.
+
+Until the linear filter first takes echo away (its full-band ERLE log2 reaching 1, 3 dB;
+once reached, for the echo controller's life, so realigns and restarts after it keep
+stock AEC3), the residual echo estimator now also keeps the estimate of its non-linear
+echo model, the render times the echo path gain, and takes the larger of the two. The
+gain is bounded by what the microphone heard: every 12 blocks, over 1.15 s, margin times
+the quietest 48 ms of the capture, after taking off four times its stationary noise,
+against the render read at least 0.6 s earlier; the lowest such bound is kept. It applies
+only once that render is as loud as active render, and only while the other side plays
+without pauses (no 96 ms of the render under `pauses` times its average in the window),
+so a voice, with its pauses, keeps stock AEC3. A change of delay or gain starts the
+measurement over and keeps the bound and the noise.
+
+Fogata-Aec3KeepEchoModelWhileErleIsLow/margin:<x>,pauses:<y>/: margin from 0 (left out,
+stock AEC3) to 100, default 4 (6 dB); pauses from 0 to 1, default 0.5 (3 dB). A value
+out of range keeps the default.
+
+AEC3 alone at 16 kHz, 8 s from a call's start (the other side's music or speech-like
+sound, through a room 10 dB under it at 60 ms or 20 dB under at 200 ms, over the room's
+noise): the music let through from 1 to 6 s -17.9 dB before, -18.4 after (-19.9 with
+pauses:0.1), at its loudest 5 s -1.1 before, -1.8 after (-3.4); with the echo 20 dB
+under, -17.4 before, -17.8 after (-18.6). A voice, double talk from the call's start
+through speakers, changes of output and a headset with the room's noise alone as before.
+A headset with music and the person talking from the start: held down 2.27 s before,
+2.54 s after (0.5 s more with pauses:0.1); double talk over a voice at the call's start
+0.9 dB more held down with pauses:0.1. Keeping the echo model with no bound let 10 to 15
+dB less music through on a real call and 3.5 dB less in this simulation, which so
+understates what the model kept gives.
+
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+index 9919b6f..0255701 100644
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -400,6 +400,7 @@ void EchoRemoverImpl::ProcessCapture(
+ 
+     subtractor_.HandleEchoPathChange(echo_path_variability);
+     aec_state_.HandleEchoPathChange(echo_path_variability);
++    residual_echo_estimator_.HandleEchoPathChange(echo_path_variability);
+ 
+     if (echo_path_variability.delay_change !=
+         EchoPathVariability::DelayAdjustment::kNone) {
+diff --git a/modules/audio_processing/aec3/residual_echo_estimator.cc b/modules/audio_processing/aec3/residual_echo_estimator.cc
+index fd821cc..1c48d35 100644
+--- a/modules/audio_processing/aec3/residual_echo_estimator.cc
++++ b/modules/audio_processing/aec3/residual_echo_estimator.cc
+@@ -13,8 +13,10 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
++#include <limits>
+ #include <optional>
+ #include <span>
++#include <tuple>
+ #include <vector>
+ 
+ #include "api/audio/echo_canceller3_config.h"
+@@ -29,6 +31,7 @@
+ #include "modules/audio_processing/aec3/reverb_model.h"
+ #include "modules/audio_processing/aec3/spectrum_buffer.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/experiments/field_trial_parser.h"
+ 
+ namespace webrtc {
+ namespace {
+@@ -164,6 +167,64 @@ void EchoGeneratingPower(size_t num_render_channels,
+   }
+ }
+ 
++// Fogata: the echo model kept at a call's start while the linear filter takes
++// no echo away (Fogata-Aec3KeepEchoModelWhileErleIsLow/margin:<x>,pauses:<y>/):
++// margin, how much louder than the microphone heard over its stationary noise,
++// against the render, it may take the echo to be (energy ratio, from 0, left
++// out and stock AEC3, to 100; default 4: 6 dB); pauses, how far under its
++// average 96 ms of the render may fall and the far end still count as playing
++// without pauses (energy ratio, 0 to 1; default 0.5: 3 dB). A value out of
++// range keeps the default.
++struct KeepEchoModelSettings {
++  float margin = 4.f;
++  float pauses = 0.5f;
++};
++
++KeepEchoModelSettings GetKeepEchoModelSettings(
++    const FieldTrialsView& field_trials) {
++  KeepEchoModelSettings settings;
++  FieldTrialParameter<double> margin("margin", settings.margin);
++  FieldTrialParameter<double> pauses("pauses", settings.pauses);
++  ParseFieldTrial(
++      {&margin, &pauses},
++      field_trials.Lookup("Fogata-Aec3KeepEchoModelWhileErleIsLow"));
++  if (margin.Get() >= 0.0 && margin.Get() <= 100.0) {
++    settings.margin = static_cast<float>(margin.Get());
++  }
++  if (pauses.Get() >= 0.0 && pauses.Get() <= 1.0) {
++    settings.pauses = static_cast<float>(pauses.Get());
++  }
++  return settings;
++}
++
++// Fogata: the linear filter takes echo away once its full-band ERLE reaches
++// 3 dB (log2 1); from then on the echo model is not kept, after realigns too.
++constexpr float kKeepEchoModelErleLog2 = 1.f;
++
++// Fogata: the echo path gain is bounded over a window of the last 1.15 s, in 24
++// parts of 48 ms: the quietest part of the microphone, as if it held all the
++// window, against the render read in the window at least 0.6 s ago, whose echo
++// has reached the microphone within it, once that render is as loud as active
++// render on average over a quarter of its blocks. The quietest part leaves out
++// the person's own words, which pause where an echo of music does not.
++constexpr int kBoundPartBlocks = 12;
++constexpr int kBoundParts = 24;
++constexpr int kBoundWindowBlocks = kBoundParts * kBoundPartBlocks;
++constexpr int kBoundLagBlocks = 3 * kNumBlocksPerSecond / 5;
++
++// Fogata: the echo model is kept only while the far end plays without pauses,
++// as music does: no 96 ms of the render in the window under `pauses` times its
++// average.
++constexpr int kPauseParts = 2;
++
++// Fogata: the microphone's stationary noise: the lowest of its energy smoothed
++// over about 40 ms, held for 1 s, then rising by 5 dB a second. Four times that
++// is taken off each block's energy, so that noise alone leaves nothing.
++constexpr float kCaptureNoiseSmoothing = 0.1f;
++constexpr int kCaptureNoiseHoldBlocks = kNumBlocksPerSecond;
++constexpr float kCaptureNoiseRise = 1.005f;
++constexpr float kCaptureNoiseFactor = 4.f;
++
+ }  // namespace
+ 
+ ResidualEchoEstimator::ResidualEchoEstimator(
+@@ -184,8 +245,164 @@ ResidualEchoEstimator::ResidualEchoEstimator(
+       erle_onset_compensation_in_dominant_nearend_(
+           UseErleOnsetCompensationInDominantNearend(env.field_trials(),
+                                                     config_.ep_strength)),
+-      neural_residual_echo_estimator_(neural_residual_echo_estimator) {
++      neural_residual_echo_estimator_(neural_residual_echo_estimator),
++      keep_echo_model_margin_(
++          GetKeepEchoModelSettings(env.field_trials()).margin),
++      keep_echo_model_pauses_(
++          GetKeepEchoModelSettings(env.field_trials()).pauses) {
++  static_assert(std::tuple_size_v<decltype(bound_capture_energy_)> ==
++                kBoundWindowBlocks);
+   Reset();
++  bound_capture_energy_.fill(0.f);
++  bound_render_energy_.fill(0.f);
++}
++
++void ResidualEchoEstimator::HandleEchoPathChange(
++    const EchoPathVariability& echo_path_variability) {
++  if (!echo_path_variability.gain_change &&
++      echo_path_variability.delay_change ==
++          EchoPathVariability::DelayAdjustment::kNone) {
++    return;
++  }
++  // The render buffer may read elsewhere now: measure the window again. The
++  // bound measured so far stays, as the room did not change.
++  bound_capture_energy_.fill(0.f);
++  bound_render_energy_.fill(0.f);
++  bound_blocks_ = 0;
++  bound_render_sum_ = 0.0;
++  render_without_pauses_ = false;
++}
++
++void ResidualEchoEstimator::UpdateEchoPathGainBound(
++    const RenderBuffer& render_buffer,
++    std::span<const std::array<float, kFftLengthBy2>> capture) {
++  if (keep_echo_model_margin_ <= 0.f || linear_filter_took_echo_away_) {
++    return;
++  }
++  const Block& render = render_buffer.GetBlock(0);
++  float render_energy = 0.f;
++  for (int ch = 0; ch < render.NumChannels(); ++ch) {
++    for (float x : render.View(/*band=*/0, ch)) {
++      render_energy += x * x;
++    }
++  }
++  float capture_energy = 0.f;
++  for (const auto& y : capture) {
++    float energy = 0.f;
++    for (float v : y) {
++      energy += v * v;
++    }
++    capture_energy = std::max(capture_energy, energy);
++  }
++
++  // The microphone's stationary noise, taken off.
++  capture_smoothed_energy_ =
++      capture_noise_energy_ < 0.f
++          ? capture_energy
++          : capture_smoothed_energy_ +
++                kCaptureNoiseSmoothing *
++                    (capture_energy - capture_smoothed_energy_);
++  if (capture_noise_energy_ < 0.f ||
++      capture_smoothed_energy_ < capture_noise_energy_) {
++    capture_noise_energy_ = capture_smoothed_energy_;
++    capture_noise_hold_blocks_ = 0;
++  } else if (++capture_noise_hold_blocks_ > kCaptureNoiseHoldBlocks) {
++    capture_noise_energy_ *= kCaptureNoiseRise;
++  }
++  capture_energy = std::max(
++      0.f, capture_energy - kCaptureNoiseFactor * capture_noise_energy_);
++
++  // The window: the capture of its blocks, the render of those read at least
++  // kBoundLagBlocks ago.
++  const int slot = bound_blocks_ % kBoundWindowBlocks;
++  if (bound_blocks_ >= kBoundWindowBlocks) {
++    // The block leaving the window was read kBoundWindowBlocks ago.
++    bound_render_sum_ -= bound_render_energy_[slot];
++  }
++  if (bound_blocks_ >= kBoundLagBlocks) {
++    bound_render_sum_ +=
++        bound_render_energy_[(bound_blocks_ - kBoundLagBlocks) %
++                             kBoundWindowBlocks];
++  }
++  bound_capture_energy_[slot] = capture_energy;
++  bound_render_energy_[slot] = render_energy;
++  ++bound_blocks_;
++  // At the end of each part, with a full window; its oldest block is next to
++  // be written over.
++  if (bound_blocks_ < kBoundWindowBlocks ||
++      bound_blocks_ % kBoundPartBlocks != 0) {
++    return;
++  }
++  const int oldest = bound_blocks_ % kBoundWindowBlocks;
++  double quietest_capture = std::numeric_limits<double>::max();
++  for (int part = 0; part < kBoundParts; ++part) {
++    double energy = 0.0;
++    for (int b = 0; b < kBoundPartBlocks; ++b) {
++      energy += bound_capture_energy_[(oldest + part * kBoundPartBlocks + b) %
++                                      kBoundWindowBlocks];
++    }
++    quietest_capture = std::min(quietest_capture, energy);
++  }
++  double render_window = 0.0;
++  double quietest_render = std::numeric_limits<double>::max();
++  for (int part = 0; part < kBoundParts; part += kPauseParts) {
++    double energy = 0.0;
++    for (int b = 0; b < kPauseParts * kBoundPartBlocks; ++b) {
++      energy += bound_render_energy_[(oldest + part * kBoundPartBlocks + b) %
++                                     kBoundWindowBlocks];
++    }
++    render_window += energy;
++    quietest_render = std::min(quietest_render, energy);
++  }
++  render_without_pauses_ =
++      quietest_render >=
++      keep_echo_model_pauses_ * render_window * kPauseParts / kBoundParts;
++
++  const double active_render_energy =
++      static_cast<double>(config_.render_levels.active_render_limit) *
++      config_.render_levels.active_render_limit * kBlockSize *
++      (kBoundWindowBlocks - kBoundLagBlocks) / 4;
++  if (bound_render_sum_ <= active_render_energy) {
++    return;
++  }
++  const float bound = static_cast<float>(keep_echo_model_margin_ *
++                                         quietest_capture * kBoundParts /
++                                         bound_render_sum_);
++  echo_path_gain_bound_ = echo_path_gain_bound_ > 0.f
++                              ? std::min(echo_path_gain_bound_, bound)
++                              : std::max(bound, 1e-10f);
++}
++
++void ResidualEchoEstimator::KeepEchoModelWhileErleIsLow(
++    const AecState& aec_state,
++    const RenderBuffer& render_buffer,
++    std::span<std::array<float, kFftLengthBy2Plus1>> R2,
++    std::span<std::array<float, kFftLengthBy2Plus1>> R2_unbounded) {
++  if (keep_echo_model_margin_ <= 0.f || linear_filter_took_echo_away_ ||
++      echo_path_gain_bound_ <= 0.f || !render_without_pauses_) {
++    return;
++  }
++  const float gain =
++      std::min(GetEchoPathGain(aec_state, /*gain_for_early_reflections=*/true),
++               echo_path_gain_bound_);
++  // As the non-linear branch models the echo.
++  std::array<float, kFftLengthBy2Plus1> X2;
++  EchoGeneratingPower(num_render_channels_, render_buffer.GetSpectrumBuffer(),
++                      config_.echo_model, aec_state.MinDirectPathFilterDelay(),
++                      X2);
++  if (!aec_state.UseStationarityProperties()) {
++    ApplyNoiseGate(config_.echo_model, X2);
++  }
++  for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++    X2[k] -= config_.echo_model.stationary_gate_slope * X2_noise_floor_[k];
++    X2[k] = std::max(0.f, X2[k]) * gain;
++  }
++  for (size_t ch = 0; ch < R2.size(); ++ch) {
++    for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++      R2[ch][k] = std::max(R2[ch][k], X2[k]);
++      R2_unbounded[ch][k] = std::max(R2_unbounded[ch][k], X2[k]);
++    }
++  }
+ }
+ 
+ ResidualEchoEstimator::~ResidualEchoEstimator() = default;
+@@ -210,6 +427,10 @@ void ResidualEchoEstimator::Estimate(
+                       aec_state.UsableLinearEstimate();
+   // Estimate the power of the stationary noise in the render signal.
+   UpdateRenderNoisePower(render_buffer);
++  if (aec_state.FullBandErleLog2() >= kKeepEchoModelErleLog2) {
++    linear_filter_took_echo_away_ = true;
++  }
++  UpdateEchoPathGainBound(render_buffer, capture);
+ 
+   // The neural residual echo estimation always runs, even if the estimated
+   // spectra |R2| and |R2_unbounded| are overwritten later. This ensures the
+@@ -252,6 +473,8 @@ void ResidualEchoEstimator::Estimate(
+             erle_onset_compensation_in_dominant_nearend_ || !dominant_nearend;
+         LinearEstimate(S2_linear, aec_state.Erle(onset_compensated), R2);
+         LinearEstimate(S2_linear, aec_state.ErleUnbounded(), R2_unbounded);
++        KeepEchoModelWhileErleIsLow(aec_state, render_buffer, R2,
++                                    R2_unbounded);
+       }
+ 
+       UpdateReverb(ReverbType::kLinear, aec_state, render_buffer,
+diff --git a/modules/audio_processing/aec3/residual_echo_estimator.h b/modules/audio_processing/aec3/residual_echo_estimator.h
+index 0a53e0d..7d03f6b 100644
+--- a/modules/audio_processing/aec3/residual_echo_estimator.h
++++ b/modules/audio_processing/aec3/residual_echo_estimator.h
+@@ -20,6 +20,7 @@
+ #include "api/environment/environment.h"
+ #include "modules/audio_processing/aec3/aec3_common.h"
+ #include "modules/audio_processing/aec3/aec_state.h"
++#include "modules/audio_processing/aec3/echo_path_variability.h"
+ #include "modules/audio_processing/aec3/render_buffer.h"
+ #include "modules/audio_processing/aec3/reverb_model.h"
+ 
+@@ -52,12 +53,31 @@ class ResidualEchoEstimator {
+   // Returns true if ML-REE is active.
+   bool IsMlReeActive() const { return is_ml_ree_active_; }
+ 
++  // Fogata: the echo path changed (a delay or gain change, a realign): the
++  // render taken against the microphone is measured again from here.
++  void HandleEchoPathChange(const EchoPathVariability& echo_path_variability);
++
+  private:
+   enum class ReverbType { kLinear, kNonLinear };
+ 
+   // Resets the state.
+   void Reset();
+ 
++  // Fogata: updates the most the echo path gain can be, measured from the
++  // energy the microphone heard over its stationary noise against the render.
++  void UpdateEchoPathGainBound(
++      const RenderBuffer& render_buffer,
++      std::span<const std::array<float, kFftLengthBy2>> capture);
++
++  // Fogata: until the linear filter first takes echo away, keeps the echo
++  // model's estimate, at the bounded echo path gain, where it is larger than
++  // the linear one.
++  void KeepEchoModelWhileErleIsLow(
++      const AecState& aec_state,
++      const RenderBuffer& render_buffer,
++      std::span<std::array<float, kFftLengthBy2Plus1>> R2,
++      std::span<std::array<float, kFftLengthBy2Plus1>> R2_unbounded);
++
+   // Updates estimate for the power of the stationary noise component in the
+   // render signal.
+   void UpdateRenderNoisePower(const RenderBuffer& render_buffer);
+@@ -88,6 +108,24 @@ class ResidualEchoEstimator {
+   ReverbModel echo_reverb_;
+   NeuralResidualEchoEstimator* neural_residual_echo_estimator_;
+   bool is_ml_ree_active_ = false;
++  // Fogata: the echo model kept while the linear filter takes no echo away,
++  // at an echo path gain of at most `keep_echo_model_margin_` times the energy
++  // the microphone heard over its stationary noise against the render's, the
++  // lowest measured so far. 0 leaves it out. Only until the linear filter has
++  // first taken echo away: a call's start, not the realigns after it.
++  const float keep_echo_model_margin_;
++  const float keep_echo_model_pauses_;
++  bool linear_filter_took_echo_away_ = false;
++  float capture_smoothed_energy_ = 0.f;
++  float capture_noise_energy_ = -1.f;
++  int capture_noise_hold_blocks_ = 0;
++  // The last 1.15 s of blocks (kBoundWindowBlocks in the .cc file).
++  std::array<float, 288> bound_capture_energy_;
++  std::array<float, 288> bound_render_energy_;
++  int bound_blocks_ = 0;
++  double bound_render_sum_ = 0.0;
++  bool render_without_pauses_ = false;
++  float echo_path_gain_bound_ = 0.f;
+ };
+ 
+ }  // namespace webrtc
