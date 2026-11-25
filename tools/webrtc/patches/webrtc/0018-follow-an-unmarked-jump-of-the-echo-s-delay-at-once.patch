@@ -1,0 +1,333 @@
+Follow a jump of the echo's delay that nothing marked at once, once the estimate is settled
+
+When the delay between what is played and what comes back in the microphone jumps with
+nothing marked (no change of devices, no restart or move of a stream: a device's glitch,
+the sound server's own buffering; tools/call-lab/device-echo.sh jump:<ms>), AEC3's delay
+estimator kept the old delay until estimates at the new one outnumbered it in its
+histogram of the last 250 (MatchedFilterLagAggregator: 126 estimates at the new delay,
+half a second at the least and longer with speech, which gives none in its pauses).
+Meanwhile its filters stayed aligned to the old delay and the other side's voice came
+back to them.
+
+Once the estimate is settled (a refined delay, and 5 s since the estimator was last reset
+hard), 32 lag estimates in a row more than two blocks (8 ms) from the current delay and
+within a block of each other, with none near the current delay between them, now move
+it there at once: the aggregator's histograms start over from those estimates, at the
+lag most of them gave, which is a refined estimate, and the render delay buffer aligns
+to it as to any new delay (EchoPathVariability kNewDetectedDelay, as before).
+
+Around a marked change of devices nothing changes. The realign of patches 0010, 0014 and
+0016 (and a call's start, and a render buffer overrun) resets the estimator hard, which
+starts the 5 s hold-off: the delays a new device settles through are followed exactly as
+before. An echo still seen at the old delay among the new estimates (an echo coming both
+ways) keeps the old delay, and a drift of a lag or two (clock drift) never reaches the
+two blocks.
+
+Tested in matched_filter_lag_aggregator_unittest.cc: a settled estimate follows a jump
+after the 32nd estimate at the new delay; within the hold-off after a hard reset it
+follows only after the 126 as before; estimates at the old delay among the new keep it.
+Not measured in a call. To measure: device-echo-cases.sh jump (60 to 180 ms and back) for
+the time the other side comes back after each jump and its level, and last night's echo
+and headset series with output changes (marked) for no more echo than 8127.4 there;
+interleaved with the library without it. The log says "echo delay jumped ... estimate
+moved at once" at each jump followed this way.
+
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+index 51e5db84..8cba3bb9 100644
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstddef>
++#include <cstdlib>
+ #include <iterator>
+ #include <memory>
+ #include <optional>
+@@ -22,6 +23,7 @@
+ #include "modules/audio_processing/aec3/matched_filter.h"
+ #include "modules/audio_processing/logging/apm_data_dumper.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
+ #include "rtc_base/numerics/safe_minmax.h"
+ 
+ namespace webrtc {
+@@ -49,7 +51,11 @@ MatchedFilterLagAggregator::MatchedFilterLagAggregator(
+       thresholds_(delay_config.delay_selection_thresholds),
+       headroom_(static_cast<int>(delay_config.delay_headroom_samples /
+                                  delay_config.down_sampling_factor)),
+-      highest_peak_aggregator_(max_filter_lag) {
++      highest_peak_aggregator_(max_filter_lag),
++      block_lags_(std::max(
++          1,
++          static_cast<int>(kBlockSize / delay_config.down_sampling_factor))) {
++  jump_lags_.reserve(kFastJumpEstimates);
+   if (delay_config.detect_pre_echo) {
+     pre_echo_lag_aggregator_ = std::make_unique<PreEchoLagAggregator>(
+         max_filter_lag, delay_config.down_sampling_factor);
+@@ -67,20 +73,100 @@ void MatchedFilterLagAggregator::Reset(bool hard_reset) {
+   }
+   if (hard_reset) {
+     significant_candidate_found_ = false;
++    blocks_since_hard_reset_ = 0;
+   }
++  jump_lags_.clear();
++}
++
++// Fogata: an echo whose delay jumps with nothing marked (a device's glitch, a
++// sound server's own buffering) took 126 lag estimates at the new delay to win
++// the 250 of the old one in the histogram (half a second at the least, longer
++// with speech, which gives no estimate in its pauses), the other side's voice
++// coming back meanwhile through filters aligned to the old delay. Once
++// the estimate is settled (a refined candidate, and kFastJumpHoldOffBlocks
++// since the last hard reset), kFastJumpEstimates estimates in a row more than
++// two blocks from the candidate and within a block of each other, with none
++// near the candidate between them, move it there at once: the histograms start
++// over from those estimates, at the lag most of them gave, enough for a refined
++// estimate (the render delay buffer then aligns to it as to any new delay).
++// Around a marked change of devices nothing changes: the realign there resets
++// the estimator hard, and the delays a new device settles through are followed
++// as before for the hold-off.
++bool MatchedFilterLagAggregator::JumpedToNewDelay(const HeadroomLags& lags) {
++  const int candidate = highest_peak_aggregator_.candidate();
++  if (!significant_candidate_found_ || candidate < 0 ||
++      blocks_since_hard_reset_ < kFastJumpHoldOffBlocks ||
++      std::abs(lags.lag - candidate) <= 2 * block_lags_) {
++    jump_lags_.clear();
++    return false;
++  }
++  if (!jump_lags_.empty() &&
++      std::abs(lags.lag - jump_lags_.front().lag) > block_lags_) {
++    jump_lags_.clear();
++  }
++  jump_lags_.push_back(lags);
++  if (jump_lags_.size() < kFastJumpEstimates) {
++    return false;
++  }
++  // The matched filters' peak moves by a lag or two from one estimate to the
++  // next: the histogram starts over at the lag most of them gave, so that the
++  // new delay is refined at once rather than spread over a few lags.
++  int most_given_lag = jump_lags_.front().lag;
++  int most_given_count = 0;
++  for (const HeadroomLags& jump : jump_lags_) {
++    const int count = static_cast<int>(std::count_if(
++        jump_lags_.begin(), jump_lags_.end(),
++        [&](const HeadroomLags& other) { return other.lag == jump.lag; }));
++    if (count > most_given_count) {
++      most_given_lag = jump.lag;
++      most_given_count = count;
++    }
++  }
++  highest_peak_aggregator_.Reset();
++  if (pre_echo_lag_aggregator_ != nullptr) {
++    pre_echo_lag_aggregator_->Reset();
++  }
++  for (const HeadroomLags& jump : jump_lags_) {
++    if (pre_echo_lag_aggregator_ != nullptr) {
++      pre_echo_lag_aggregator_->Aggregate(jump.pre_echo_lag);
++    }
++    highest_peak_aggregator_.Aggregate(most_given_lag);
++  }
++  RTC_LOG(LS_INFO) << "AEC3: echo delay jumped from lag " << candidate << " to "
++                   << highest_peak_aggregator_.candidate()
++                   << " with nothing marked, estimate moved at once";
++  jump_lags_.clear();
++  return true;
+ }
+ 
+ std::optional<DelayEstimate> MatchedFilterLagAggregator::Aggregate(
+     const std::optional<const MatchedFilter::LagEstimate>& lag_estimate) {
++  if (blocks_since_hard_reset_ < kFastJumpHoldOffBlocks) {
++    ++blocks_since_hard_reset_;
++  }
++  // Fogata: the jump to a new delay (JumpedToNewDelay) takes this estimate
++  // with the ones before it.
++  bool jumped = false;
++  if (lag_estimate) {
++    jumped = JumpedToNewDelay(HeadroomLags{
++        .lag = std::max(0, static_cast<int>(lag_estimate->lag) - headroom_),
++        .pre_echo_lag = std::max(
++            0, static_cast<int>(lag_estimate->pre_echo_lag) - headroom_)});
++  }
++
+   if (lag_estimate && pre_echo_lag_aggregator_) {
+     pre_echo_lag_aggregator_->Dump(data_dumper_);
+-    pre_echo_lag_aggregator_->Aggregate(
+-        std::max(0, static_cast<int>(lag_estimate->pre_echo_lag) - headroom_));
++    if (!jumped) {
++      pre_echo_lag_aggregator_->Aggregate(std::max(
++          0, static_cast<int>(lag_estimate->pre_echo_lag) - headroom_));
++    }
+   }
+ 
+   if (lag_estimate) {
+-    highest_peak_aggregator_.Aggregate(
+-        std::max(0, static_cast<int>(lag_estimate->lag) - headroom_));
++    if (!jumped) {
++      highest_peak_aggregator_.Aggregate(
++          std::max(0, static_cast<int>(lag_estimate->lag) - headroom_));
++    }
+     std::span<const int> histogram = highest_peak_aggregator_.histogram();
+     int candidate = highest_peak_aggregator_.candidate();
+     significant_candidate_found_ = significant_candidate_found_ ||
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.h b/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
+index d53464fb..91cc9798 100644
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
+@@ -19,6 +19,7 @@
+ #include <vector>
+ 
+ #include "api/audio/echo_canceller3_config.h"
++#include "modules/audio_processing/aec3/aec3_common.h"
+ #include "modules/audio_processing/aec3/delay_estimate.h"
+ #include "modules/audio_processing/aec3/matched_filter.h"
+ 
+@@ -57,7 +58,24 @@ class MatchedFilterLagAggregator {
+     return highest_peak_aggregator_.candidate();
+   }
+ 
++  // Fogata: the number of consistent lag estimates at another delay that move a
++  // settled estimate to it at once, and how long after a hard reset (a realign
++  // for a change of devices, a call's start) the estimate counts as settled.
++  static constexpr size_t kFastJumpEstimates = 32;
++  static constexpr int kFastJumpHoldOffBlocks = 5 * kNumBlocksPerSecond;
++
+  private:
++  // Fogata: one lag estimate, less the headroom, as the aggregators take it.
++  struct HeadroomLags {
++    int lag;
++    int pre_echo_lag;
++  };
++
++  // Fogata: follows lag estimates far from the settled candidate; once
++  // kFastJumpEstimates of them agree, starts both aggregators over from them
++  // and returns true.
++  bool JumpedToNewDelay(const HeadroomLags& lags);
++
+   class PreEchoLagAggregator {
+    public:
+     PreEchoLagAggregator(size_t max_filter_lag, size_t down_sampling_factor);
+@@ -96,6 +114,10 @@ class MatchedFilterLagAggregator {
+   const int headroom_;
+   HighestPeakAggregator highest_peak_aggregator_;
+   std::unique_ptr<PreEchoLagAggregator> pre_echo_lag_aggregator_;
++  // Fogata: the lags (down-sampled samples) in one block.
++  const int block_lags_;
++  int blocks_since_hard_reset_ = 0;
++  std::vector<HeadroomLags> jump_lags_;
+ };
+ }  // namespace webrtc
+ 
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator_unittest.cc b/modules/audio_processing/aec3/matched_filter_lag_aggregator_unittest.cc
+index 12b525ea..bee2e199 100644
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator_unittest.cc
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator_unittest.cc
+@@ -102,6 +102,108 @@ TEST(MatchedFilterLagAggregator, DISABLED_PersistentAggregatedLag) {
+   }
+ }
+ 
++namespace {
++
++// Fogata: lags (before the headroom of 8 is taken off) two and four blocks
++// after it, reported as 32 and 64 down-sampled samples.
++constexpr size_t kSettledLag = 40;
++constexpr size_t kJumpedLag = 80;
++constexpr size_t kSettledDelay = 32;
++constexpr size_t kJumpedDelay = 64;
++
++std::optional<DelayEstimate> AggregateLag(
++    MatchedFilterLagAggregator& aggregator,
++    size_t lag) {
++  return aggregator.Aggregate(
++      MatchedFilter::LagEstimate(/*lag=*/lag, /*pre_echo_lag=*/lag));
++}
++
++}  // namespace
++
++// Fogata: a settled estimate follows a jump of the echo's delay that nothing
++// marked after kFastJumpEstimates estimates at the new delay, not after the 126
++// it takes to win the histogram.
++TEST(MatchedFilterLagAggregator, SettledEstimateFollowsAnUnmarkedJumpAtOnce) {
++  ApmDataDumper data_dumper(0);
++  EchoCanceller3Config config;
++  MatchedFilterLagAggregator aggregator(&data_dumper, /*max_filter_lag=*/100,
++                                        config.delay);
++  std::optional<DelayEstimate> aggregated_lag;
++  for (int k = 0; k < MatchedFilterLagAggregator::kFastJumpHoldOffBlocks; ++k) {
++    aggregated_lag = AggregateLag(aggregator, kSettledLag);
++  }
++  ASSERT_TRUE(aggregated_lag);
++  EXPECT_EQ(kSettledDelay, aggregated_lag->delay);
++  EXPECT_EQ(DelayEstimate::Quality::kRefined, aggregated_lag->quality);
++
++  for (size_t k = 1; k < MatchedFilterLagAggregator::kFastJumpEstimates; ++k) {
++    aggregated_lag = AggregateLag(aggregator, kJumpedLag + k % 3);
++    ASSERT_TRUE(aggregated_lag);
++    EXPECT_EQ(kSettledDelay, aggregated_lag->delay);
++  }
++  aggregated_lag = AggregateLag(aggregator, kJumpedLag);
++  ASSERT_TRUE(aggregated_lag);
++  EXPECT_EQ(kJumpedDelay, aggregated_lag->delay);
++  EXPECT_EQ(DelayEstimate::Quality::kRefined, aggregated_lag->quality);
++
++  for (int k = 0; k < 300; ++k) {
++    aggregated_lag = AggregateLag(aggregator, kJumpedLag);
++    ASSERT_TRUE(aggregated_lag);
++    EXPECT_EQ(kJumpedDelay, aggregated_lag->delay);
++  }
++}
++
++// Fogata: after a hard reset (a realign for a change of devices) the estimate
++// follows a jump as before until the hold-off has passed.
++TEST(MatchedFilterLagAggregator, NoJumpAtOnceRightAfterAHardReset) {
++  ApmDataDumper data_dumper(0);
++  EchoCanceller3Config config;
++  MatchedFilterLagAggregator aggregator(&data_dumper, /*max_filter_lag=*/100,
++                                        config.delay);
++  for (int k = 0; k < MatchedFilterLagAggregator::kFastJumpHoldOffBlocks; ++k) {
++    AggregateLag(aggregator, kSettledLag);
++  }
++  aggregator.Reset(/*hard_reset=*/true);
++  std::optional<DelayEstimate> aggregated_lag;
++  for (int k = 0; k < 400; ++k) {
++    aggregated_lag = AggregateLag(aggregator, kSettledLag);
++  }
++  ASSERT_TRUE(aggregated_lag);
++  EXPECT_EQ(kSettledDelay, aggregated_lag->delay);
++
++  for (size_t k = 0; k < 3 * MatchedFilterLagAggregator::kFastJumpEstimates;
++       ++k) {
++    aggregated_lag = AggregateLag(aggregator, kJumpedLag);
++    ASSERT_TRUE(aggregated_lag);
++    EXPECT_EQ(kSettledDelay, aggregated_lag->delay);
++  }
++  for (int k = 0; k < 200; ++k) {
++    aggregated_lag = AggregateLag(aggregator, kJumpedLag);
++  }
++  ASSERT_TRUE(aggregated_lag);
++  EXPECT_EQ(kJumpedDelay, aggregated_lag->delay);
++}
++
++// Fogata: estimates at the settled delay among those at another one (an echo
++// that comes both ways) keep the estimate where it is.
++TEST(MatchedFilterLagAggregator, NoJumpAtOnceWhileTheSettledDelayIsSeen) {
++  ApmDataDumper data_dumper(0);
++  EchoCanceller3Config config;
++  MatchedFilterLagAggregator aggregator(&data_dumper, /*max_filter_lag=*/100,
++                                        config.delay);
++  for (int k = 0; k < MatchedFilterLagAggregator::kFastJumpHoldOffBlocks; ++k) {
++    AggregateLag(aggregator, kSettledLag);
++  }
++  std::optional<DelayEstimate> aggregated_lag;
++  for (size_t k = 0; k < 3 * MatchedFilterLagAggregator::kFastJumpEstimates;
++       ++k) {
++    aggregated_lag =
++        AggregateLag(aggregator, k % 10 == 9 ? kSettledLag : kJumpedLag);
++    ASSERT_TRUE(aggregated_lag);
++    EXPECT_EQ(kSettledDelay, aggregated_lag->delay);
++  }
++}
++
+ #if RTC_DCHECK_IS_ON && GTEST_HAS_DEATH_TEST && !defined(WEBRTC_ANDROID)
+ 
+ // Verifies the check for non-null data dumper.
