@@ -927,6 +927,12 @@ class PreCommit(Sandbox):
         self.assertIn("no cargo here", result.stderr)
         self.assertIn("no dart here", result.stderr)
 
+    def test_a_commit_with_nothing_staged_runs_no_formatter(self):
+        result = self.commit_check([], cargo_ok=False, dart_ok=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(self.calls_made(), "")
+
 
 if __name__ == "__main__":
     unittest.main()
