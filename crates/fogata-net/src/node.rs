@@ -691,6 +691,13 @@ const ON_ITS_WAY_AT_MOST: Duration = Duration::from_secs(60);
 /// after, or as long as its failures before ask for (see `RecordSent::unsent_again`).
 const RECORD_LOST_AGAIN: Duration = Duration::from_secs(2);
 const RECORD_LOST_TRIES: u8 = 4;
+/// How many of those failures in a row, counting from the first, are followed by the same
+/// record going again unasked, at the check of the links once [`RECORD_LOST_AGAIN`] (then
+/// twice that) has passed, so that a record that never got there (the connection closed, no
+/// answer in time) does not wait for the member's next roster, up to 20 s. Past these, only
+/// a roster that names another record sends it, as before: a member that has the record and
+/// whose answers are the ones lost is sent at most this many copies.
+const RECORD_LOST_UNASKED: u8 = 2;
 /// How long what is kept of a record lost on its way still counts, sent or lost last that
 /// long ago: the losses in a row outlast [`RECORD_AGAIN`], so that a member whose requests
 /// keep failing is sent the record once each [`RECORD_AGAIN`] after its few quick tries, not
@@ -770,7 +777,8 @@ impl RecordSent {
     /// Whether a record should go now, unasked, `digest` being the one to send and `room`
     /// whether the peer's outbox has none waiting: after this one was dropped before it
     /// left, once there is room, [`Self::unsent_again`] later, without pushing out another
-    /// request; after it failed on its way, only a newer one, at once.
+    /// request; after it failed on its way, a newer one at once, and this one a couple of
+    /// times soon (see [`RECORD_LOST_UNASKED`]).
     fn due_again(&self, digest: &[u8; 32], room: bool) -> bool {
         if !self.answered {
             return false;
@@ -778,7 +786,13 @@ impl RecordSent {
         if self.unsent > 0 {
             return room && self.at.elapsed() >= self.unsent_again();
         }
-        self.lost > 0 && self.digest != *digest
+        if self.lost == 0 {
+            return false;
+        }
+        // A newer one at once; this one, after a failure on its way, a couple of times
+        // soon, unasked (see [`RECORD_LOST_UNASKED`]).
+        self.digest != *digest
+            || (self.lost <= RECORD_LOST_UNASKED && self.at.elapsed() >= self.lost_again())
     }
 
     /// Whether a record with `digest` may go to a member that was sent `sent`, `refused`
