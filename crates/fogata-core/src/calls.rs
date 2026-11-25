@@ -554,12 +554,12 @@ impl Core {
                 .get(&group)
                 .is_some_and(|c| c.phase == CallPhase::Connected)
         };
-        if let Err(e) = rung {
-            if !in_room() {
-                finish(&self.inner, group, CallEnd::Unreachable).await;
-                let_go(&self.inner, group).await;
-                return Err(e);
-            }
+        if let Err(e) = rung
+            && !in_room()
+        {
+            finish(&self.inner, group, CallEnd::Unreachable).await;
+            let_go(&self.inner, group).await;
+            return Err(e);
         }
         if !self.inner.lock().calls.contains_key(&group) {
             // Hung up, or crossed by the friend's call, before its room was entered here:
