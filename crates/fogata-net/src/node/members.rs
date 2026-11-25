@@ -495,6 +495,8 @@ impl Node {
         } else {
             slot.roster_heard.insert(peer);
         }
+        // So may a line of this device's kept for it (see kept.rs).
+        self.kept_counted_in(group, peer, device);
         // Banners only to versions that say they keep them. Each costs this device
         // up to a few hundred KiB of upload: charged to the member, and sent once
         // per record however often it asks (see `RecordSent`).
