@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# Refuses a commit whose Rust or Dart code is not formatted, so a formatting fix never has to
+# follow it to main: `cargo fmt --all --check` when the commit changes a .rs file, and
+# `dart format` (as tools/ci.sh runs it) over the commit's .dart files under the folders ci.sh
+# formats. It reads the files as they are in the worktree; a commit of part of a file is
+# checked as the whole file. A computer without cargo or dart is told so and let through: the
+# checks of tools/ci.sh and GitHub's still catch it. Installed by tools/install-hooks.sh.
+set -euo pipefail
+top=$(git rev-parse --show-toplevel)
+cd "$top"
+mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+refused=0
+rust=0
+dart=()
+for path in "${staged[@]}"; do
+    case $path in
+        vendor/*) ;;
+        *.rs) rust=1 ;;
+        app/lib/*.dart | app/test/*.dart | app/integration_test/*.dart | app/test_driver/*.dart | \
+            app/packages/fogata_video/*.dart) dart+=("${path#app/}") ;;
+    esac
+done
+if [[ $rust == 1 ]]; then
+    if command -v cargo > /dev/null 2>&1; then
+        if ! cargo fmt --all --check > /dev/null 2>&1; then
+            echo "pre-commit: the Rust code is not formatted: run cargo fmt --all, then add it" >&2
+            refused=1
+        fi
+    else
+        echo "pre-commit: no cargo here, the Rust formatting is not checked" >&2
+    fi
+fi
+if ((${#dart[@]})); then
+    if command -v dart > /dev/null 2>&1; then
+        if ! (cd app && dart format --output=none --set-exit-if-changed "${dart[@]}") > /dev/null 2>&1; then
+            echo "pre-commit: Dart code is not formatted: run (cd app && dart format ${dart[*]})," \
+                "then add it" >&2
+            refused=1
+        fi
+    else
+        echo "pre-commit: no dart here, the Dart formatting is not checked" >&2
+    fi
+fi
+exit $refused

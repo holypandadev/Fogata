@@ -223,7 +223,7 @@ two copies it can still miss the test's waits.
 
 ```sh
 tools/ci.sh [--full] <commit>          # by default HEAD; --split app|checks: half of it
-tools/install-hooks.sh        # once per clone: installs the pre-push hook
+tools/install-hooks.sh        # once per clone: installs the pre-push and pre-commit hooks
 ```
 
 `tools/ci.sh` makes a clean temporary worktree of the commit (under `<git dir>/fogata-ci/`)
