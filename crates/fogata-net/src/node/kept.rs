@@ -265,7 +265,12 @@ impl KeptLines {
         device: &DevicePublicKey,
     ) -> Vec<([u8; 16], WireMessage)> {
         let mut again = Vec::new();
-        for line in self.lines.iter_mut().filter(|l| l.group == group) {
+        // Only lines the member still lacks: one it took keeps its `sent` entry.
+        for line in self
+            .lines
+            .iter_mut()
+            .filter(|l| l.group == group && l.lacking.contains(device))
+        {
             if line.refused.remove(device) {
                 again.push((line.id, line.wire.clone()));
             } else if line.sent.contains_key(device) {
