@@ -9,6 +9,13 @@ Windows legs are the workflow's other two jobs, `tools/ci-leg.sh macos` and
 by side. The run passes only when every job passes; `tools/beta/release.py` asks GitHub for
 the run's conclusion, not for any one job.
 
+A push to a `lab/` branch gets half of that at once, with no pull request: the job
+`linux-checks` (`tools/check.sh` strict and the fuzz targets built), from
+`.github/workflows/lab.yml`, which runs that job of `ci.yml` as it is
+(`tools/test_repo_checks.py` keeps the two the same). A newer push to the branch cancels the
+run of the one before. It is a workflow of its own so that `release.py`, which takes a passing
+run of `ci.yml` for the commit as its CI, never takes half the checks for all of them.
+
 None of this is enough for a release: calls with an optimised build, the network lab, a
 real call on Windows and on macOS, and a data folder of the last release are checked by
 hand before each one (docs/releasing-beta.md, "Checks before a release"); the push checks
