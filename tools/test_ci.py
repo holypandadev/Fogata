@@ -870,5 +870,63 @@ class InstallHooks(Sandbox):
         self.assertFalse((self.tmp / "out/pre-push").exists())
 
 
+class PreCommit(Sandbox):
+    """tools/hooks/pre-commit refuses unformatted Rust or Dart code and nothing else."""
+
+    def setUp(self):
+        super().setUp()
+        self.repo_dir = self.repo({"README.md": "x\n"})
+        self.hook = TOOLS / "hooks/pre-commit"
+
+    def commit_check(self, files, cargo_ok=True, dart_ok=True, have=("cargo", "dart")):
+        if "cargo" in have:
+            self.stand_in("cargo", "exit 0" if cargo_ok else "exit 1")
+        if "dart" in have:
+            self.stand_in("dart", "exit 0" if dart_ok else "exit 1")
+        for name in files:
+            write(self.repo_dir / name, "x\n")
+        self.git(self.repo_dir, "add", "-A")
+        # Only git, bash and the stand-ins: a cargo or dart of this computer is never found.
+        only = self.tmp / "only"
+        only.mkdir(exist_ok=True)
+        for tool in ("git", "bash"):
+            if not (only / tool).exists():
+                (only / tool).symlink_to(shutil.which(tool))
+        return self.run_in(self.repo_dir, only / "bash", self.hook,
+                           env={"PATH": f"{self.bin}:{only}"})
+
+    def calls_made(self):
+        return self.calls.read_text() if self.calls.exists() else ""
+
+    def test_formatted_code_passes(self):
+        result = self.commit_check(["crates/a/src/lib.rs", "app/lib/main.dart"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("cargo fmt --all --check", self.calls_made())
+        self.assertIn("dart format --output=none --set-exit-if-changed lib/main.dart",
+                      self.calls_made())
+
+    def test_unformatted_rust_is_refused(self):
+        result = self.commit_check(["crates/a/src/lib.rs"], cargo_ok=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cargo fmt --all", result.stderr)
+
+    def test_unformatted_dart_is_refused(self):
+        result = self.commit_check(["app/test/a_test.dart"], dart_ok=False)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("dart format", result.stderr)
+
+    def test_other_files_run_no_formatter(self):
+        result = self.commit_check(["docs/a.md", "vendor/x/src/lib.rs", "app/tool/x.dart"],
+                                   cargo_ok=False, dart_ok=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(self.calls_made(), "")
+
+    def test_a_computer_without_the_tools_is_let_through(self):
+        result = self.commit_check(["crates/a/src/lib.rs", "app/lib/main.dart"], have=())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("no cargo here", result.stderr)
+        self.assertIn("no dart here", result.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
