@@ -1,0 +1,206 @@
+# The half of the push checks that needs no app build, on every push to a lab/ branch: the job
+# linux-checks of ci.yml, copied here as it is (tools/test_repo_checks.py keeps the two the
+# same). tools/check.sh strict (formatting, clippy, every test, cargo deny with the RustSec
+# advisories, the release scripts' tests, THIRD-PARTY-NOTICES, the bridge code) and the fuzz
+# targets built, on one of GitHub's Linux computers, so a lab/ branch is checked as soon as it
+# is pushed, without a pull request and without the computer that pushed it.
+#
+# A workflow of its own, not a trigger of ci.yml: tools/beta/release.py takes any passing run
+# of ci.yml for the commit as its CI, and a run of half the checks must never be taken for one.
+# The macOS and Windows legs and the app's half stay with ci.yml (pull requests, main and by
+# hand): the macOS computers are the scarce ones. A newer push to the same branch cancels the
+# run of the one before. Nothing here signs, builds a release or saves a cache of the crates.
+name: Lab checks
+
+on:
+  push:
+    branches: ["lab/**"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lab-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FLUTTER_VERSION: 3.47.8
+  # The Xcode of the macOS builds, among those GitHub's image has: the image's default
+  # changes with it. The same in release-build.yml.
+  XCODE_VERSION: "16.4"
+  CARGO_TERM_COLOR: never
+  # The copies the checks start never read the releases page on GitHub.
+  FOGATA_UPDATE_WEB: "off"
+  # The nightly the fuzz targets are built with (tools/ci.sh, tools/fuzz.sh): a dated one, so
+  # a new nightly cannot break the run overnight. Moved forward by hand, like the stable Rust.
+  FOGATA_FUZZ_TOOLCHAIN: nightly-2026-11-10
+  CARGO_FUZZ_VERSION: 0.13.2
+
+jobs:
+  linux-checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tests' builds and the fuzz targets need more disk than the image leaves free.
+      - name: Make room on the disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /usr/share/swift /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      # The packages' archives of earlier runs, kept and checked as in ci.yml's linux job.
+      - name: Restore the Ubuntu packages
+        id: apt-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: apt-ci-linux-checks-ubuntu-24.04
+          restore-keys: apt-ci-linux-checks-ubuntu-24.04-
+
+      - name: Install the system packages
+        timeout-minutes: 20
+        env:
+          CI_APT_ARCHIVES: /tmp/fogata-apt
+        run: |
+          # Fetched with a time of its own, from another mirror when one stalls (see the script).
+          tools/ci-apt.sh \
+            clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libasound2-dev libpulse-dev libpipewire-0.3-dev xvfb dbus-x11 pipewire pipewire-pulse \
+            wireplumber pulseaudio-utils pipewire-alsa libasound2-plugins \
+            gstreamer1.0-tools gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad gstreamer1.0-libav
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Name the Ubuntu packages kept
+        id: apt-kept
+        if: always()
+        env:
+          PREFIX: ${{ steps.apt-cache.outputs.cache-primary-key }}
+        run: |
+          cd /tmp/fogata-apt 2> /dev/null && [[ -n $PREFIX ]] || exit 0
+          names=$(LC_ALL=C ls -- *.deb 2> /dev/null) || exit 0
+          echo "kept: $(wc -l <<< "$names") archives, $(du -ch -- *.deb | tail -n 1 | cut -f 1)"
+          echo "key=$PREFIX-$(sha256sum <<< "$names" | cut -c 1-16)" >> "$GITHUB_OUTPUT"
+      - name: Keep the Ubuntu packages
+        if: always() && steps.apt-kept.outputs.key != '' && steps.apt-kept.outputs.key != steps.apt-cache.outputs.cache-matched-key
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/fogata-apt/*.deb
+          key: ${{ steps.apt-kept.outputs.key }}
+
+      # As in the linux job: the Rust tests run beside a sound server of the job's own, as
+      # they did when one job ran everything.
+      - name: Start a sound server
+        run: |
+          runtime=$RUNNER_TEMP/xdg-runtime
+          mkdir -p "$runtime" && chmod 700 "$runtime"
+          export XDG_RUNTIME_DIR=$runtime
+          bus=unix:path=$runtime/bus
+          dbus-daemon --session --fork --address="$bus"
+          export DBUS_SESSION_BUS_ADDRESS=$bus
+          nohup pipewire > "$RUNNER_TEMP/pipewire.log" 2>&1 &
+          sleep 1
+          nohup wireplumber > "$RUNNER_TEMP/wireplumber.log" 2>&1 &
+          nohup pipewire-pulse > "$RUNNER_TEMP/pipewire-pulse.log" 2>&1 &
+          for _ in $(seq 30); do pactl info > /dev/null 2>&1 && break; sleep 1; done
+          pactl info
+          echo "XDG_RUNTIME_DIR=$runtime" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=$bus" >> "$GITHUB_ENV"
+
+      # The bridge generator (check.sh) and `flutter pub get` need Flutter.
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Install the Rust tools
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup toolchain install "$FOGATA_FUZZ_TOOLCHAIN" --profile minimal
+
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny@0.20.2,cargo-nextest@0.9.151,flutter_rust_bridge_codegen@2.13.0
+
+      # Built here: the published binary of cargo-fuzz is built for musl and builds the fuzz
+      # targets for musl, where the sanitizers do not work. Built once per version and kept in
+      # a folder of its own (saved only by a push to main, like the builds of the crates).
+      - name: Restore cargo-fuzz
+        id: cargo-fuzz
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/fogata-cargo-fuzz
+          key: cargo-fuzz-${{ env.CARGO_FUZZ_VERSION }}-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml') }}
+      - name: Install cargo-fuzz
+        run: |
+          root=$HOME/.cache/fogata-cargo-fuzz
+          if [[ ! -x $root/bin/cargo-fuzz ]]; then
+              cargo install cargo-fuzz --version "$CARGO_FUZZ_VERSION" --locked --root "$root"
+          fi
+          echo "$root/bin" >> "$GITHUB_PATH"
+          PATH=$root/bin:$PATH cargo fuzz --version
+      - name: Keep cargo-fuzz
+        if: steps.cargo-fuzz.outputs.cache-hit != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/fogata-cargo-fuzz
+          key: ${{ steps.cargo-fuzz.outputs.cache-primary-key }}
+
+      # As in the linux job (see there), a cache of this job's own: rust-cache names each
+      # job's cache apart.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: . -> .git/fogata-ci/target
+          cache-bin: "false"
+          save-if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+
+      # ci.sh runs `flutter pub get --offline` and cargo deny offline (over the crates of every
+      # system): the packages, the crates and the RustSec database are fetched here first.
+      - name: Fetch the Dart packages and the RustSec database
+        run: |
+          (cd app && flutter pub get)
+          cargo fetch
+          cargo fetch --manifest-path fuzz/Cargo.toml
+          cargo deny fetch db
+          git status --porcelain
+
+      - name: Record the toolchain
+        run: |
+          { echo '### Toolchain (linux-checks)'; echo '```'; tools/toolchain.sh linux; echo '```'; } |
+            tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: tools/ci.sh --full --split checks
+        id: ci
+        run: tools/ci.sh --full --split checks "$GITHUB_SHA"
+        continue-on-error: true
+
+      # ci.sh says `incomplete` here, since half its steps are the linux job's: every step of
+      # this half must have run and passed, nothing of check.sh left out.
+      - name: Judge the record
+        run: |
+          record=.git/fogata-ci/$GITHUB_SHA
+          cat "$record"
+          ok=1
+          for line in 'split: checks' 'linux: pass' 'codegen: checked' 'notices: checked'; do
+            grep -qx "$line" "$record" || { echo "::error::the record does not say '$line'"; ok=0; }
+          done
+          grep -q '^advisories: checked' "$record" ||
+            { echo "::error::the RustSec advisories were not checked"; ok=0; }
+          grep -qx 'result: fail' "$record" && { echo "::error::ci.sh says fail"; ok=0; }
+          [[ $ok == 1 ]]
+
+      - name: Keep the log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-linux-checks
+          path: |
+            .git/fogata-ci/${{ github.sha }}
+            .git/fogata-ci/${{ github.sha }}.log
+          if-no-files-found: ignore
+          retention-days: 14

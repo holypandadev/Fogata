@@ -591,6 +591,24 @@ class Workflows(unittest.TestCase):
         self.assertNotIn("tools/", job)
         self.assertIn("actions/attest-build-provenance@", job)
 
+    def test_the_lab_checks_are_ci_linux_checks_and_never_ci_yml(self):
+        # lab.yml runs ci.yml's linux-checks on every push to a lab/ branch: the same job and
+        # the same settings, word for word, or a lab/ branch would be checked otherwise than
+        # its pull request and main. And a workflow of its own: release.py takes any passing
+        # run of ci.yml for a commit as its CI, so ci.yml must keep running every job.
+        workflows = TOOLS.parent / ".github/workflows"
+        ci = (workflows / "ci.yml").read_text()
+        lab = (workflows / "lab.yml").read_text()
+        for part in (r"(?ms)^env:\n.*?(?=^jobs:)", r"(?ms)^  linux-checks:\n.*?(?=^  \S|\Z)"):
+            with self.subTest(part=part):
+                self.assertEqual(re.search(part, lab).group(0).rstrip(),
+                                 re.search(part, ci).group(0).rstrip())
+        self.assertEqual(re.findall(r"(?m)^  (\S+):$", lab.split("\njobs:\n", 1)[1]),
+                         ["linux-checks"])
+        self.assertRegex(lab, r'(?m)^on:\n  push:\n    branches: \["lab/\*\*"\]\n\n')
+        self.assertRegex(ci, r"(?m)^on:\n  push:\n    branches: \[main\]\n")
+        self.assertNotRegex(ci, r"(?m)^\s+if:.*refs/heads/lab/")
+
 
 if __name__ == "__main__":
     unittest.main()
