@@ -1,0 +1,69 @@
+Hold the microphone's gain through the pauses between words
+
+The legacy gain controller (AGC1, which Fogata's voice engine uses on the desktop in its
+adaptive analog mode) has a gate in its digital part (WebRtcAgc_ComputeDigitalGains,
+agc/legacy/digital_agc.cc): in a pause between words, once its fast envelope falls well
+below the level the gain is set from (the slow envelope, which decays slowly after
+speech), it keeps only (178 + gain_adj) / 256 of the gain above the table's lowest, down
+to 178 / 256 (3.2 dB less), and lets it back as the next word starts. It runs in every AGC1
+mode. The room's noise therefore sank about 2 dB in each pause and came back with each
+word: measured in the call lab (mic.sh unmute with the microphone tapped after the audio
+processing, no other side, 5 runs) 2.1 dB at the tap with AGC1 on and 0.2 dB with it off,
+the microphone's own noise steady (0.3 dB). Fogata's noise suppression is off unless the
+user turns it on, so nothing hides it. With AGC1 off the noise held but the speech went out
+7 dB lower; M158 has no field trial that moves the processing to AGC2.
+
+The gate is now measured but not applied: the gain holds through the pauses as it was in
+the words. The limiter and the rest of the digital gain are as they were. What it costs:
+the room's noise in the pauses goes out about 2 dB louder than before, as loud as it is
+under the words.
+
+Not measured with the patch. To measure (study notes a10/NOTES.md): the noise's fall in the
+pauses at the tap and at the other side (under 0.5 dB expected), the words' level (about
+-16 dBFS, as before), interleaved with the library without it.
+
+--- a/modules/audio_processing/agc/legacy/digital_agc.cc
++++ b/modules/audio_processing/agc/legacy/digital_agc.cc
+@@ -287,7 +287,7 @@
+   int16_t lower_thr, upper_thr;
+   int16_t zeros = 0, zeros_fast, frac = 0;
+   int16_t decay;
+-  int16_t gate, gain_adj;
++  int16_t gate;
+   int16_t k;
+   size_t n, L;
+ 
+@@ -419,26 +419,13 @@
+     gate = (int16_t)((gate + tmp32) >> 3);
+     stt->gatePrevious = gate;
+   }
+-  // gate < 0     -> no gate
+-  // gate > 2500  -> max gate
+-  if (gate > 0) {
+-    if (gate < 2500) {
+-      gain_adj = (2500 - gate) >> 5;
+-    } else {
+-      gain_adj = 0;
+-    }
+-    for (k = 0; k < 10; k++) {
+-      if ((gains[k + 1] - stt->gainTable[0]) > 8388608) {
+-        // To prevent wraparound
+-        tmp32 = (gains[k + 1] - stt->gainTable[0]) >> 8;
+-        tmp32 *= 178 + gain_adj;
+-      } else {
+-        tmp32 = (gains[k + 1] - stt->gainTable[0]) * (178 + gain_adj);
+-        tmp32 >>= 8;
+-      }
+-      gains[k + 1] = stt->gainTable[0] + tmp32;
+-    }
+-  }
++  // Fogata: the gate is still measured (gatePrevious) but no longer lowers the
++  // gain. In every pause between words it kept only (178 + gain_adj) / 256 of
++  // the gain above gainTable[0], down to 178 / 256 (3.2 dB less), so the room's
++  // noise sank about 2 dB in each pause and came back with the next word, which
++  // everyone heard: Fogata's own noise suppression is off unless asked for, and
++  // nothing else hides it. The gain now holds through the pauses as during the
++  // words; the limiter below and everything else are as they were.
+ 
+   // Limit gain to avoid overload distortion
+   for (k = 0; k < 10; k++) {
