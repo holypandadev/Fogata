@@ -18,6 +18,8 @@
 #                 FollowChosen moves it back)
 #   movesink:<sink>  the server moves a's playback to that sink (pactl move-sink-input)
 #   movesrc:<source> the server moves a's recording to that source (move-source-output)
+#   jump:<ms>     the loop of a's output Q made again <ms> later: the echo's delay jumps
+#                 with no device, stream or server changing (nothing tells WebRTC)
 #   unplug        a's output Q taken away (its playback falls to the default output,
 #                 looped back LOOP_DEFAULT ms later); plug: Q made again
 #   E:<label>     an event measured from here (events.log)
@@ -146,6 +148,10 @@ for s in json.load(sys.stdin):
         ;;
       movesink) pactl move-sink-input "$(stream sink-inputs)" "$arg" ;;
       movesrc) pactl move-source-output "$(stream source-outputs)" "$arg" ;;
+      jump) for m in $(pactl list short modules | awk '/module-loopback/ && /source=laba_quiet.monitor/ {print $1}'); do
+          pactl unload-module "$m"
+        done
+        loop laba_quiet.monitor laba_test "$arg" ;;
       unplug) pactl unload-module "$(pactl list short modules | awk '/sink_name=laba_quiet( |$)/ {print $1}')" ;;
       plug) pactl load-module module-null-sink sink_name=laba_quiet sink_properties=device.description=FogataQuietOut-laba. > /dev/null
         loop laba_quiet.monitor laba_test "${LOOP_Q:-60}" ;;
