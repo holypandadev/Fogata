@@ -483,6 +483,9 @@ jobs:
       - name: tools/ci-leg.sh macos
         env:
           FOGATA_TEST_NO_MULTICAST: "1"
+          # Two network tests timed out here once each on Nov 25 and never again in eight
+          # whole runs: they trace with this set, and nextest shows a failing test's traces.
+          FOGATA_TRACE: fogata_net=debug,fogata_core=debug,libp2p_swarm=debug
         run: FOGATA_CI_SHA=$GITHUB_SHA tools/ci-leg.sh macos
 
       # The application itself, which flutter test never compiles, as release-build.yml

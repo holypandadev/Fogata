@@ -246,6 +246,7 @@ fn sealed_key_name(dir: &Path) -> String {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_moved_account_talks_to_its_friend_and_group_and_the_old_copy_stops() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     let keys = keys();
     let base = base("whole");
     let (dir_a, dir_b) = friends(&base);
@@ -1345,4 +1346,14 @@ async fn room_lines_kept_stay_behind_when_the_account_moves() {
     assert!(key.open_whole("room lines", &bytes).is_ok());
     bea.shutdown().await.unwrap();
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// Traces with FOGATA_TRACE set (an env filter), shown with a failing test's output.
+fn trace() {
+    if let Ok(filter) = std::env::var("FOGATA_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_test_writer()
+            .try_init();
+    }
 }

@@ -92,6 +92,7 @@ async fn until_book(node: &NodeHandle, what: &str, done: impl Fn(&FriendBook) ->
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_member_asks_another_to_be_friends_and_accepting_makes_them_friends() {
+    trace();
     let _one = ONE_AT_A_TIME.lock().await;
     let ana = Arc::new(DeviceIdentity::generate().unwrap());
     let bea = Arc::new(DeviceIdentity::generate().unwrap());
@@ -242,4 +243,14 @@ async fn a_device_that_shares_no_group_cannot_ask_this_way() {
     assert!(!book.incoming.contains_key(&c));
     node_a.shutdown().await.unwrap();
     node_c.shutdown().await.unwrap();
+}
+
+/// Traces with FOGATA_TRACE set (an env filter), shown with a failing test's output.
+fn trace() {
+    if let Ok(filter) = std::env::var("FOGATA_TRACE") {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new(filter))
+            .with_test_writer()
+            .try_init();
+    }
 }
