@@ -545,10 +545,21 @@ impl Core {
             Ok(()) => send(&self.inner, friend, group, signal).await,
             Err(e) => Err(e),
         };
+        // A friend already in the call's room when this device came in (a call it went back
+        // to) answered it by being there (see `on_joined`): the ring not sent does not end it.
+        let in_room = || {
+            self.inner
+                .lock()
+                .calls
+                .get(&group)
+                .is_some_and(|c| c.phase == CallPhase::Connected)
+        };
         if let Err(e) = rung {
-            finish(&self.inner, group, CallEnd::Unreachable).await;
-            let_go(&self.inner, group).await;
-            return Err(e);
+            if !in_room() {
+                finish(&self.inner, group, CallEnd::Unreachable).await;
+                let_go(&self.inner, group).await;
+                return Err(e);
+            }
         }
         if !self.inner.lock().calls.contains_key(&group) {
             // Hung up, or crossed by the friend's call, before its room was entered here:
