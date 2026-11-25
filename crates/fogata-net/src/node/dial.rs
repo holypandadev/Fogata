@@ -69,9 +69,11 @@ impl Node {
             {
                 self.explicit_peers.insert(peer, now);
             }
+            // With the behaviours' addresses too: see `dial_candidate`.
             self.dial_opts(
                 DialOpts::peer_id(peer)
                     .addresses(addrs)
+                    .extend_addresses_through_behaviour()
                     .condition(PeerCondition::DisconnectedAndNotDialing)
                     .build(),
             );

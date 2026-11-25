@@ -994,8 +994,11 @@ impl Node {
         } else if !addrs.is_empty() {
             // The person gave the link.
             addr::vouch_for(Some(peer), &addrs);
+            // With the behaviours' addresses too (its sealed local ones once found): see
+            // `dial_candidate`.
             let opts = DialOpts::peer_id(peer)
                 .addresses(addrs)
+                .extend_addresses_through_behaviour()
                 .condition(PeerCondition::DisconnectedAndNotDialing)
                 .build();
             if let Err(e) = self.swarm.dial(opts) {
