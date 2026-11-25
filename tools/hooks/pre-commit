@@ -8,11 +8,11 @@
 set -euo pipefail
 top=$(git rev-parse --show-toplevel)
 cd "$top"
-mapfile -t staged < <(git diff --cached --name-only --diff-filter=ACMR)
+staged=(); while IFS= read -r p; do staged+=("$p"); done < <(git diff --cached --name-only --diff-filter=ACMR)
 refused=0
 rust=0
 dart=()
-for path in "${staged[@]}"; do
+for path in ${staged[@]+"${staged[@]}"}; do
     case $path in
         vendor/*) ;;
         *.rs) rust=1 ;;
