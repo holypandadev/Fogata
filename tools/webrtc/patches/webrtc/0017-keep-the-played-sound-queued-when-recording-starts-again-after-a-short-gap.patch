@@ -1,0 +1,475 @@
+Keep the played sound queued when recording starts again after a short gap
+
+When the sound server moves the recording to the same microphone, or restarts it for a
+moment, recording stops briefly while playout goes on feeding AEC3's render queue. At the
+restart (patches 0014 and 0015 mark it, patch 0010 restarts) AEC3 dropped what was queued
+and found the alignment again from nothing at the next fresh played sound, and the other
+side's voice leaked back for up to a second after the move.
+
+EchoCanceller3::RestartForRecording now counts the render frames since the last recorded
+frame (the render queue's size: both locks are held, and the capture side empties it at
+each recorded frame). With at most 25 of them (250 ms) and a delay reported by the audio
+device (SetAudioBufferDelay), it neither empties the queue nor restarts: the next recorded
+frame decides. If the reported delay moved by more than 8 ms through the gap, the render
+frames queued before the restart are removed and the block processor restarts as before
+(RestartForRecording); otherwise it restarts keeping the played sound queued
+(BlockProcessor::RestartForRecordingKeepingRender). A restart for other devices (patch
+0016), more render frames or no reported delay restart as before at once.
+
+Kept, the block processor processes the next recorded block without waiting for fresh
+played sound, resets its render buffer and delay controller at it as at any restart, and
+remembers the delay it had estimated before the gap. Once the render buffer has run dry
+(the recorded frames delivered late, before fresh played sound) and is read again, or
+after 10 blocks, it applies that delay again (AlignFromDelay). The recorded frames lost in
+the gap, the render frames in it less the recorded frames delivered before fresh played
+sound came, are skipped in the render buffer when it comes
+(RenderDelayBuffer::SkipLostCaptureBlocks, 2.5 blocks a frame, rounded half up), short of
+an underrun. The echo remover is reset at the restart's first block as with patches 0010
+and 0016, transparent mode included or not as they say.
+
+All new state of EchoCanceller3 is the capture side's, touched by the capture thread and
+by the restarts, which hold both locks; the render thread only queues, as before.
+
+Measured: not yet.
+
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -65,6 +65,8 @@
+ 
+   void RestartForRecording() override;
+   void RestartForOtherDevices() override;
++  void RestartForRecordingKeepingRender() override;
++  void SkipLostCaptureBlocks(size_t num_blocks) override;
+ 
+  private:
+   static std::atomic<int> instance_count_;
+@@ -73,6 +75,15 @@
+   bool capture_properly_started_ = false;
+   bool recording_restarted_ = false;
+   bool other_devices_ = false;
++  // Fogata, patch 0017: a restart for recording keeping the played sound queued
++  // (RestartForRecordingKeepingRender), the delay estimated before it, and,
++  // from its first recorded block on, whether that delay is still to be applied
++  // again, whether the render buffer ran dry since and how many blocks passed.
++  bool keeping_render_ = false;
++  std::optional<size_t> delay_before_restart_;
++  bool delay_to_apply_again_ = false;
++  bool underrun_since_restart_ = false;
++  size_t blocks_since_restart_ = 0;
+   bool render_properly_started_ = false;
+   const size_t sample_rate_hz_;
+   std::unique_ptr<RenderDelayBuffer> render_buffer_;
+@@ -158,10 +169,24 @@
+     // After a change of devices (patch 0016) the transparent mode goes too: a
+     // headset's "no echo" is not the speakers'.
+     echo_path_variability.recording_restarted = !other_devices_;
+-    RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
+-                     << capture_call_counter_
+-                     << ", render buffer aligned anew"
+-                     << (other_devices_ ? ", transparent mode reset" : "");
++    if (keeping_render_) {
++      // Fogata, patch 0017: the render buffer and the delay controller were
++      // reset above with the played sound queued in the gap; the delay
++      // estimated before it is applied again further on.
++      keeping_render_ = false;
++      delay_to_apply_again_ = delay_before_restart_.has_value();
++      underrun_since_restart_ = false;
++      blocks_since_restart_ = 0;
++      RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
++                       << capture_call_counter_
++                       << ", aligned anew with the played sound queued"
++                       << (other_devices_ ? ", transparent mode reset" : "");
++    } else {
++      RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
++                       << capture_call_counter_
++                       << ", render buffer aligned anew"
++                       << (other_devices_ ? ", transparent mode reset" : "");
++    }
+     other_devices_ = false;
+   }
+ 
+@@ -176,6 +201,28 @@
+       delay_controller_->Reset(false);
+   }
+ 
++  // Fogata, patch 0017: after a restart keeping the played sound queued, the
++  // delay estimated before the gap is applied again once the render buffer has
++  // run dry (the recorded frames delivered late, before fresh played sound) and
++  // is read again, or after 10 blocks.
++  if (delay_to_apply_again_) {
++    ++blocks_since_restart_;
++    if (buffer_event == RenderDelayBuffer::BufferingEvent::kRenderUnderrun) {
++      underrun_since_restart_ = true;
++    } else if (underrun_since_restart_ || blocks_since_restart_ > 10) {
++      delay_to_apply_again_ = false;
++      RTC_DCHECK(delay_before_restart_);
++      render_buffer_->AlignFromDelay(*delay_before_restart_);
++      RTC_LOG(LS_INFO) << "AEC3: delay " << *delay_before_restart_
++                       << " blocks from before the restart applied again at "
++                          "block "
++                       << capture_call_counter_
++                       << (underrun_since_restart_ ? ", after an underrun"
++                                                   : "");
++      delay_before_restart_.reset();
++    }
++  }
++
+   data_dumper_->DumpWav("aec3_processblock_capture_input2",
+                         capture_block->View(/*band=*/0, /*channel=*/0), 16000,
+                         1);
+@@ -257,6 +304,33 @@
+   render_properly_started_ = false;
+   capture_properly_started_ = false;
+   recording_restarted_ = true;
++  // Fogata, patch 0017: nothing kept from a restart keeping the played sound.
++  keeping_render_ = false;
++  delay_before_restart_.reset();
++  delay_to_apply_again_ = false;
++}
++
++void BlockProcessorImpl::RestartForRecordingKeepingRender() {
++  // As RestartForRecording, but the played sound queued in the gap is buffered
++  // and the next recorded block is processed without waiting for fresh played
++  // sound (render_properly_started_ stays as it is).
++  capture_properly_started_ = false;
++  recording_restarted_ = true;
++  keeping_render_ = true;
++  delay_to_apply_again_ = false;
++  delay_before_restart_.reset();
++  // AlignFromDelay is only for AEC3's own delay estimator.
++  if (estimated_delay_ && !config_.delay.use_external_delay_estimator) {
++    delay_before_restart_ = estimated_delay_->delay;
++  }
++}
++
++void BlockProcessorImpl::SkipLostCaptureBlocks(size_t num_blocks) {
++  const size_t skipped = render_buffer_->SkipLostCaptureBlocks(num_blocks);
++  RTC_LOG(LS_INFO) << "AEC3: " << skipped << " of " << num_blocks
++                   << " lost recorded blocks skipped in the render buffer at "
++                      "block "
++                   << capture_call_counter_;
+ }
+ 
+ void BlockProcessorImpl::RestartForOtherDevices() {
+diff --git a/modules/audio_processing/aec3/block_processor.h b/modules/audio_processing/aec3/block_processor.h
+--- a/modules/audio_processing/aec3/block_processor.h
++++ b/modules/audio_processing/aec3/block_processor.h
+@@ -85,6 +85,15 @@
+   virtual void RestartForRecording() {}
+   // Fogata, patch 0016: the same, forgetting the transparent mode too.
+   virtual void RestartForOtherDevices() { RestartForRecording(); }
++  // Fogata, patch 0017: recording starts again after a short gap, the played
++  // sound queued meanwhile kept: the render buffer and the delay controller are
++  // reset at the next recorded block as at RestartForRecording, but fresh
++  // played sound is not waited for, and the delay estimated before the gap is
++  // applied again once the render buffer has run dry once or after 10 blocks.
++  virtual void RestartForRecordingKeepingRender() {}
++  // Fogata, patch 0017: `num_blocks` recorded blocks were lost; see
++  // RenderDelayBuffer::SkipLostCaptureBlocks.
++  virtual void SkipLostCaptureBlocks(size_t /* num_blocks */) {}
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_canceller3.cc b/modules/audio_processing/aec3/echo_canceller3.cc
+--- a/modules/audio_processing/aec3/echo_canceller3.cc
++++ b/modules/audio_processing/aec3/echo_canceller3.cc
+@@ -12,6 +12,7 @@
+ #include <algorithm>
+ #include <atomic>
+ #include <cstddef>
++#include <cstdlib>
+ #include <memory>
+ #include <optional>
+ #include <span>
+@@ -45,6 +46,15 @@
+ 
+ enum class EchoCanceller3ApiCall { kCapture, kRender };
+ 
++// Fogata, patch 0017: a restart for recording with at most this many render
++// frames (10 ms each) since the last recorded one is put off to the next
++// recorded frame, the played sound queued kept.
++constexpr size_t kMaxRenderFramesForKeptRender = 25;
++// Fogata, patch 0017: a reported delay that moved by more than this through
++// the gap restarts as before (RestartForRecording), dropping the played sound
++// queued before the restart.
++constexpr int kMaxReportedDelayChangeMsForKeptRender = 8;
++
+ bool DetectSaturation(std::span<const float> y) {
+   for (size_t k = 0; k < y.size(); ++k) {
+     if (y[k] >= 32700.0f || y[k] <= -32700.0f) {
+@@ -901,7 +911,22 @@
+ 
+   data_dumper_->DumpWav("aec3_capture_input", capture_lower_band, 16000, 1);
+ 
+-  EmptyRenderQueue();
++  ++capture_frame_counter_;
++  // Fogata, patch 0017: a restart for recording put off is decided before the
++  // played sound queued in the gap is buffered.
++  const bool render_kept = restart_put_off_ && DecidePutOffRestart();
++
++  const size_t render_frames = EmptyRenderQueue();
++
++  if (render_kept) {
++    // The recorded frame that follows the gap, which comes before any fresh
++    // played sound: what was played in the gap was buffered just now.
++    lost_capture_pending_ = true;
++    gap_render_frames_ = render_frames;
++    captures_before_render_ = 1;
++  } else if (lost_capture_pending_) {
++    FollowLostCapture(render_frames);
++  }
+ 
+   ProcessCaptureFrameContent(
+       linear_output, capture, level_change,
+@@ -939,6 +964,12 @@
+ 
+ void EchoCanceller3::SetAudioBufferDelay(int delay_ms) {
+   RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
++  // Fogata, patch 0017: kept to tell whether it moved through a gap in the
++  // recording (DecidePutOffRestart).
++  if (!reported_delay_ms_ || *reported_delay_ms_ != delay_ms) {
++    reported_delay_ms_ = delay_ms;
++    reported_delay_changed_at_frame_ = capture_frame_counter_;
++  }
+   block_processor_->SetAudioBufferDelay(delay_ms);
+ }
+ 
+@@ -956,23 +987,114 @@
+ // their sound without echo.
+ // Called by AudioProcessingImpl::RestartEchoController with both its render and
+ // capture locks held, so that neither side runs meanwhile.
++//
++// Fogata, patch 0017: when the sound server moves the recording (to the same
++// microphone) or restarts it, recording stops for a moment while what is played
++// keeps coming. With at most 25 render frames (250 ms) since the last recorded
++// frame and a delay reported by the audio device, the restart is put off to the
++// next recorded frame and the played sound queued kept: dropping it and waiting
++// for the alignment to be found again from nothing let the echo through for up
++// to a second after the move. The next recorded frame decides
++// (DecidePutOffRestart).
+ bool EchoCanceller3::RestartForRecording() {
+   RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
+   // A scope of its own: each check declares a local of the same name.
+   {
+     RTC_DCHECK_RUNS_SERIALIZED(&render_race_checker_);
++    lost_capture_pending_ = false;
++    // Both locks are held: no render frame is being queued, and the capture
++    // side empties the queue at each recorded frame, so what it holds is
++    // exactly the render frames since the last recorded one.
++    const size_t render_frames = render_transfer_queue_.SizeAtLeast();
++    if (render_frames <= kMaxRenderFramesForKeptRender && reported_delay_ms_) {
++      // A second restart before the next recorded frame compares that frame's
++      // delay with the one before the first.
++      if (!restart_put_off_) {
++        reported_delay_ms_at_restart_ = *reported_delay_ms_;
++      }
++      restart_put_off_ = true;
++      render_frames_queued_at_restart_ = render_frames;
++      RTC_LOG(LS_INFO) << "AEC3: restart for recording put off to the next "
++                          "recorded frame, "
++                       << render_frames << " render frames queued, reported "
++                       << "delay " << reported_delay_ms_at_restart_ << " ms";
++      return true;
++    }
++    restart_put_off_ = false;
+     render_transfer_queue_.Clear();
+     block_processor_->RestartForRecording();
+   }
+   return true;
+ }
+ 
++bool EchoCanceller3::DecidePutOffRestart() {
++  RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
++  RTC_DCHECK(restart_put_off_);
++  RTC_DCHECK(reported_delay_ms_);
++  restart_put_off_ = false;
++  const int delay_ms =
++      reported_delay_ms_.value_or(reported_delay_ms_at_restart_);
++  if (std::abs(delay_ms - reported_delay_ms_at_restart_) >
++      kMaxReportedDelayChangeMsForKeptRender) {
++    // The device's delay moved: what was queued before the restart goes, as
++    // RestartForRecording dropped it then, and what was played since stays.
++    size_t dropped = 0;
++    while (dropped < render_frames_queued_at_restart_ &&
++           render_transfer_queue_.Remove(&render_queue_output_frame_)) {
++      ++dropped;
++    }
++    block_processor_->RestartForRecording();
++    RTC_LOG(LS_INFO) << "AEC3: reported delay moved from "
++                     << reported_delay_ms_at_restart_ << " to " << delay_ms
++                     << " ms (after recorded frame "
++                     << reported_delay_changed_at_frame_
++                     << ") through the gap: restarted for recording, "
++                     << dropped << " render frames queued before it dropped";
++    return false;
++  }
++  block_processor_->RestartForRecordingKeepingRender();
++  RTC_LOG(LS_INFO) << "AEC3: restarted for recording keeping "
++                   << render_transfer_queue_.SizeAtLeast()
++                   << " render frames queued, reported delay " << delay_ms
++                   << " ms (" << reported_delay_ms_at_restart_
++                   << " before the gap)";
++  return true;
++}
++
++void EchoCanceller3::FollowLostCapture(size_t render_frames) {
++  RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
++  RTC_DCHECK(lost_capture_pending_);
++  if (render_frames == 0) {
++    // Recorded in the gap and delivered late: not lost.
++    ++captures_before_render_;
++    return;
++  }
++  lost_capture_pending_ = false;
++  // Fresh played sound: what was recorded in the gap and not delivered is the
++  // played frames in it less the recorded frames delivered before this one.
++  if (gap_render_frames_ <= captures_before_render_) {
++    return;
++  }
++  const size_t lost_frames = gap_render_frames_ - captures_before_render_;
++  // 10 ms frames, 4 ms blocks: 2.5 blocks a frame, rounded half up.
++  const size_t lost_blocks = (lost_frames * 5 + 1) / 2;
++  RTC_LOG(LS_INFO) << "AEC3: " << lost_frames << " recorded frames lost ("
++                   << gap_render_frames_ << " render frames in the gap, "
++                   << captures_before_render_
++                   << " recorded before fresh render): skipping " << lost_blocks
++                   << " blocks";
++  block_processor_->SkipLostCaptureBlocks(lost_blocks);
++}
++
+ // Fogata, patch 0016: as RestartForRecording, after a change of audio devices: the
+ // block processor forgets the transparent mode too.
+ bool EchoCanceller3::RestartForOtherDevices() {
+   RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
+   {
+     RTC_DCHECK_RUNS_SERIALIZED(&render_race_checker_);
++    // Fogata, patch 0017: as before, whatever a restart for recording put off.
++    restart_put_off_ = false;
++    lost_capture_pending_ = false;
+     render_transfer_queue_.Clear();
+     block_processor_->RestartForOtherDevices();
+   }
+@@ -990,11 +1112,13 @@
+   block_processor_ = std::move(block_processor);
+ }
+ 
+-void EchoCanceller3::EmptyRenderQueue() {
++size_t EchoCanceller3::EmptyRenderQueue() {
+   RTC_DCHECK_RUNS_SERIALIZED(&capture_race_checker_);
++  size_t num_frames = 0;
+   bool frame_to_buffer =
+       render_transfer_queue_.Remove(&render_queue_output_frame_);
+   while (frame_to_buffer) {
++    ++num_frames;
+     // Report render call in the metrics.
+     api_call_metrics_.ReportRenderCall();
+ 
+@@ -1023,5 +1147,6 @@
+     frame_to_buffer =
+         render_transfer_queue_.Remove(&render_queue_output_frame_);
+   }
++  return num_frames;
+ }
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_canceller3.h b/modules/audio_processing/aec3/echo_canceller3.h
+--- a/modules/audio_processing/aec3/echo_canceller3.h
++++ b/modules/audio_processing/aec3/echo_canceller3.h
+@@ -177,8 +177,19 @@
+     return config_selector_.active_config();
+   }
+ 
+-  // Empties the render SwapQueue.
+-  void EmptyRenderQueue();
++  // Empties the render SwapQueue. Fogata, patch 0017: returns the number of
++  // render frames buffered.
++  size_t EmptyRenderQueue();
++
++  // Fogata, patch 0017: at the first recorded frame after a restart for
++  // recording that was put off (RestartForRecording), restarts the block
++  // processor keeping the played sound queued, or as RestartForRecording did
++  // before when the reported delay moved. Returns whether it was kept.
++  bool DecidePutOffRestart();
++  // Fogata, patch 0017: after a restart keeping the played sound queued, counts
++  // the recorded frames until fresh played sound arrives and then has the block
++  // processor skip the recorded blocks lost in the gap.
++  void FollowLostCapture(size_t render_frames);
+ 
+   // Analyzes and stores an internal copy of the split-band domain render
+   // signal.
+@@ -234,6 +245,26 @@
+   std::unique_ptr<BlockDelayBuffer> block_delay_buffer_
+       RTC_GUARDED_BY(capture_race_checker_);
+   ApiCallJitterMetrics api_call_metrics_ RTC_GUARDED_BY(capture_race_checker_);
++
++  // Fogata, patch 0017: the audio buffer delay last reported
++  // (SetAudioBufferDelay), and the recorded frame at which it last changed.
++  std::optional<int> reported_delay_ms_ RTC_GUARDED_BY(capture_race_checker_);
++  size_t reported_delay_changed_at_frame_
++      RTC_GUARDED_BY(capture_race_checker_) = 0;
++  size_t capture_frame_counter_ RTC_GUARDED_BY(capture_race_checker_) = 0;
++  // Fogata, patch 0017: a restart for recording put off to the next recorded
++  // frame, with the render frames queued and the reported delay as of the
++  // restart.
++  bool restart_put_off_ RTC_GUARDED_BY(capture_race_checker_) = false;
++  size_t render_frames_queued_at_restart_
++      RTC_GUARDED_BY(capture_race_checker_) = 0;
++  int reported_delay_ms_at_restart_ RTC_GUARDED_BY(capture_race_checker_) = 0;
++  // Fogata, patch 0017: after a restart keeping the played sound queued, until
++  // fresh played sound arrives: the render frames that came in the gap and the
++  // recorded frames since.
++  bool lost_capture_pending_ RTC_GUARDED_BY(capture_race_checker_) = false;
++  size_t gap_render_frames_ RTC_GUARDED_BY(capture_race_checker_) = 0;
++  size_t captures_before_render_ RTC_GUARDED_BY(capture_race_checker_) = 0;
+ };
+ }  // namespace webrtc
+ 
+diff --git a/modules/audio_processing/aec3/render_delay_buffer.cc b/modules/audio_processing/aec3/render_delay_buffer.cc
+--- a/modules/audio_processing/aec3/render_delay_buffer.cc
++++ b/modules/audio_processing/aec3/render_delay_buffer.cc
+@@ -67,6 +67,7 @@
+   int BufferLatency() const;
+   void SetAudioBufferDelay(int delay_ms) override;
+   bool HasReceivedBufferDelay() override;
++  size_t SkipLostCaptureBlocks(size_t num_blocks) override;
+ 
+  private:
+   static std::atomic<int> instance_count_;
+@@ -346,6 +347,20 @@
+   return external_audio_buffer_delay_.has_value();
+ }
+ 
++// Fogata, patch 0017: reads on as PrepareCaptureProcessing does for a capture
++// block, without its checks, as long as at least one render block stays unread
++// after it, so that the next capture block finds no underrun.
++size_t RenderDelayBufferImpl::SkipLostCaptureBlocks(size_t num_blocks) {
++  size_t skipped = 0;
++  while (skipped < num_blocks && BufferLatency() > 1) {
++    IncrementLowRateReadIndices();
++    IncrementReadIndices();
++    ++capture_call_counter_;
++    ++skipped;
++  }
++  return skipped;
++}
++
+ // Maps the externally computed delay to the delay used internally.
+ int RenderDelayBufferImpl::MapDelayToTotalDelay(
+     size_t external_delay_blocks) const {
+diff --git a/modules/audio_processing/aec3/render_delay_buffer.h b/modules/audio_processing/aec3/render_delay_buffer.h
+--- a/modules/audio_processing/aec3/render_delay_buffer.h
++++ b/modules/audio_processing/aec3/render_delay_buffer.h
+@@ -78,6 +78,13 @@
+   // Returns whether an external delay estimate has been reported via
+   // SetAudioBufferDelay.
+   virtual bool HasReceivedBufferDelay() = 0;
++
++  // Fogata, patch 0017: recorded blocks were lost while what was played kept
++  // coming (the sound server moved or restarted the recording): advances the
++  // reading of the render buffers by up to `num_blocks` blocks, as that many
++  // capture blocks would, but stops one block short of a render underrun.
++  // Returns the number of blocks skipped.
++  virtual size_t SkipLostCaptureBlocks(size_t /* num_blocks */) { return 0; }
+ };
+ 
+ }  // namespace webrtc
