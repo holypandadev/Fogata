@@ -18,7 +18,11 @@ frames queued before the restart are removed and the block processor restarts as
 
 Kept, the block processor processes the next recorded block without waiting for fresh
 played sound, resets its render buffer and delay controller at it as at any restart, and
-remembers the delay it had estimated before the gap. Once the render buffer has run dry
+remembers the delay it had estimated before the gap, if that is within 2 blocks
+(kMaxDelayToRestoreOffBlocks) of the delay the reported one gives the render buffer at
+that block; otherwise (the same reported delay with another echo path, another output) it
+logs "delay of the echo before the restart, N blocks, not applied: the reported delay puts
+M" and keeps none. Once the render buffer has run dry
 (the recorded frames delivered late, before fresh played sound) and is read again, or
 after 10 blocks, it applies that delay again (AlignFromDelay). The recorded frames lost in
 the gap, the render frames in it less the recorded frames delivered before fresh played
@@ -35,7 +39,27 @@ Measured: not yet.
 diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
 --- a/modules/audio_processing/aec3/block_processor.cc
 +++ b/modules/audio_processing/aec3/block_processor.cc
-@@ -65,6 +65,8 @@
+@@ -11,6 +11,7 @@
+ 
+ #include <atomic>
+ #include <cstddef>
++#include <cstdlib>
+ #include <memory>
+ #include <optional>
+ #include <utility>
+@@ -33,6 +34,11 @@
+ namespace webrtc {
+ namespace {
+ 
++// Fogata, patch 0017: the most, in blocks, by which the delay from before a
++// restart that kept the played sound may differ from the one the reported delay
++// gives the render buffer, for it to be applied again.
++constexpr int kMaxDelayToRestoreOffBlocks = 2;
++
+ enum class BlockProcessorApiCall { kCapture, kRender };
+ 
+ class BlockProcessorImpl final : public BlockProcessor {
+@@ -65,6 +71,8 @@
  
    void RestartForRecording() override;
    void RestartForOtherDevices() override;
@@ -44,7 +68,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
  
   private:
    static std::atomic<int> instance_count_;
-@@ -73,6 +75,15 @@
+@@ -73,6 +81,15 @@
    bool capture_properly_started_ = false;
    bool recording_restarted_ = false;
    bool other_devices_ = false;
@@ -60,7 +84,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
    bool render_properly_started_ = false;
    const size_t sample_rate_hz_;
    std::unique_ptr<RenderDelayBuffer> render_buffer_;
-@@ -158,10 +169,24 @@
+@@ -158,10 +175,40 @@
      // After a change of devices (patch 0016) the transparent mode goes too: a
      // headset's "no echo" is not the speakers'.
      echo_path_variability.recording_restarted = !other_devices_;
@@ -73,7 +97,23 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
 +      // reset above with the played sound queued in the gap; the delay
 +      // estimated before it is applied again further on.
 +      keeping_render_ = false;
-+      delay_to_apply_again_ = delay_before_restart_.has_value();
++      // The delay from before the restart is applied again only if the delay
++      // the render buffer now has from the reported one is within
++      // kMaxDelayToRestoreOffBlocks of it: the same reported delay with
++      // another echo path (another output) puts it elsewhere.
++      delay_to_apply_again_ = false;
++      if (delay_before_restart_) {
++        const int reported = static_cast<int>(render_buffer_->Delay());
++        const int before = static_cast<int>(*delay_before_restart_);
++        if (std::abs(before - reported) <= kMaxDelayToRestoreOffBlocks) {
++          delay_to_apply_again_ = true;
++        } else {
++          RTC_LOG(LS_INFO) << "AEC3: delay of the echo before the restart, "
++                           << before << " blocks, not applied: the reported "
++                           << "delay puts " << reported;
++          delay_before_restart_ = std::nullopt;
++        }
++      }
 +      underrun_since_restart_ = false;
 +      blocks_since_restart_ = 0;
 +      RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
@@ -89,7 +129,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
      other_devices_ = false;
    }
  
-@@ -176,6 +201,28 @@
+@@ -176,6 +223,28 @@
        delay_controller_->Reset(false);
    }
  
@@ -118,7 +158,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
    data_dumper_->DumpWav("aec3_processblock_capture_input2",
                          capture_block->View(/*band=*/0, /*channel=*/0), 16000,
                          1);
-@@ -257,6 +304,33 @@
+@@ -257,6 +326,33 @@
    render_properly_started_ = false;
    capture_properly_started_ = false;
    recording_restarted_ = true;
