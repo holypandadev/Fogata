@@ -1,0 +1,721 @@
+Let AEC3's linear filter learn through music beside an unchanged reference, mixing per bin
+
+At a call's start with music on the other side, AEC3 keeps using a linear filter that
+does not cancel the music for several seconds, and the music comes back to them for 2 to
+8 s. Music often leaves the render signal poorly excited (RenderSignalAnalyzer's
+PoorSignalExcitation: a few strong narrow bands), and while it is, the refined filter's
+gain (RefinedFilterUpdateGain) does not update at all, for size_partitions blocks after
+the last poorly excited one. An earlier candidate, using the linear filter only after
+sustained convergence, cut the music's echo but held a headset user's first words down
+longer, and was dropped. This one leaves headsets, voice, unmute and output changes as
+they are by keeping upstream's chain beside the new one and choosing, per frequency bin,
+between their outputs.
+
+The refined filter may now learn through poor excitation
+(RefinedFilterUpdateGain::SetLearnWithPoorExcitation, Subtractor::SetLearnWithPoorExcitation,
+which passes it on before each Compute; off by default): poor excitation then does not
+reset the counter that holds the update back, and the step size mu is halved while poor
+excitation was seen within the last size_partitions blocks (a new counter of blocks since
+it was last seen, kept also while learning through it, set as the old counter at an echo
+path change). The narrow bands stay masked as before (MaskRegionsAroundNarrowBands).
+AecState::FilterConvergenceSeen tells whether a converged filter (SubtractorOutputAnalyzer's
+any_filter_converged: the refined filter, or the coarse one by the strict criterion) has
+been seen since the filter quality analyzer's last reset (a delay change: a call's start,
+a restart for recording or for other devices, a new delay).
+
+EchoRemoverImpl, with one capture channel and no neural residual echo estimator, now runs
+a second, complete chain (ReferenceChain: its own Subtractor, AecState,
+RenderSignalAnalyzer, ResidualEchoEstimator without the neural estimator, SuppressionGain
+and ComfortNoiseGenerator) making exactly upstream's calls on the same capture, render and
+echo path variability (capture saturation, HandleEchoPathChange, SetInitialState,
+TransitionTriggered, Update, comfort noise from E2 when the linear estimate was usable
+before the Update), and never learning the new way: it gives what upstream gives, sample
+for sample, so patches 0010 to 0016 (recording_restarted, the kept transparent mode,
+RestartForOtherDevices) act on both chains alike. The first chain learns through poor
+excitation when a converged filter has been seen since its last reset and the previous
+block was not dominated by the near end (SuppressionGain::IsDominantNearend). Both
+chains' linear errors are smoothed per bin with 0.3: ev the first chain's E2, not bounded
+by Y2; em the reference's E2 as upstream gives it to its suppressor (bounded by Y2 while
+its linear estimate is usable). Per bin, the output (the gain on the linear output, or on
+the capture, with the comfort noise of the chain chosen):
+  ev > 1.5 em: the reference's;
+  ev > 0.7 em: the higher of the two in power, the first chain's capped at 4 times the
+    reference's by lowering its gain;
+  otherwise: the lower of the two.
+The high bands take the same rule from the sums of ev and em over bins 1 to 15: the
+reference's gain, the higher or the lower of the two gains, with that chain's high band
+comfort noise. One ApplyGain then forms the output from the mixed spectrum, gains and
+comfort noise.
+
+With more than one capture channel, or a neural residual echo estimator, there is no
+reference chain and the echo remover is upstream's, the first chain never learning the
+new way. The echo controller's metrics and the linear output it exports are the first
+chain's (with the mixed gains for the metrics). Everything the reference needs is
+allocated with the echo remover; it costs a second AEC3 echo remover's work on the
+capture thread.
+
+Constants: smoothing of the errors 0.3; ratios 1.5 (reference) and 0.7 (higher or lower);
+cap 4 times the reference's power; high bands' decision from bins 1 to 15; mu halved for
+size_partitions blocks after poor excitation.
+
+Measured: not yet.
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -400,6 +400,7 @@
+             usable_linear_filter_estimates_.end(), false);
+   overall_usable_linear_estimates_ = false;
+   filter_update_blocks_since_reset_ = 0;
++  convergence_seen_since_reset_ = false;
+ }
+ 
+ void AecState::FilteringQualityAnalyzer::Update(
+@@ -415,6 +416,8 @@
+ 
+   // Store convergence flag when observed.
+   convergence_seen_ = convergence_seen_ || any_filter_converged;
++  convergence_seen_since_reset_ =
++      convergence_seen_since_reset_ || any_filter_converged;
+ 
+   // Verify requirements for achieving a decent filter. The requirements for
+   // filter adaptation at call startup are more restrictive than after an
+diff --git a/modules/audio_processing/aec3/aec_state.h b/modules/audio_processing/aec3/aec_state.h
+--- a/modules/audio_processing/aec3/aec_state.h
++++ b/modules/audio_processing/aec3/aec_state.h
+@@ -62,6 +62,13 @@
+            config_.filter.use_linear_filter;
+   }
+ 
++  // Fogata: returns whether a converged filter (refined, or coarse by the
++  // strict criterion: SubtractorOutputAnalyzer's any_filter_converged) has been
++  // seen since the last reset (a delay change, HandleEchoPathChange).
++  bool FilterConvergenceSeen() const {
++    return filter_quality_state_.ConvergenceSeenSinceReset();
++  }
++
+   // Returns whether the render signal is currently active.
+   bool ActiveRender() const { return blocks_with_active_render_ > 200; }
+ 
+@@ -255,6 +262,12 @@
+       return usable_linear_filter_estimates_;
+     }
+ 
++    // Fogata: returns whether a converged filter was seen since the last
++    // Reset (convergence_seen_ counts since the start instead).
++    bool ConvergenceSeenSinceReset() const {
++      return convergence_seen_since_reset_;
++    }
++
+     // Resets the state of the analyzer.
+     void Reset();
+ 
+@@ -271,6 +284,7 @@
+     size_t filter_update_blocks_since_reset_ = 0;
+     size_t filter_update_blocks_since_start_ = 0;
+     bool convergence_seen_ = false;
++    bool convergence_seen_since_reset_ = false;
+     std::vector<bool> usable_linear_filter_estimates_;
+   } filter_quality_state_;
+ 
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -146,6 +146,96 @@
+                    output);
+ }
+ 
++// Fogata (A2): how the output is mixed per bin between the chain that may learn
++// through poor render excitation and the reference chain (upstream's).
++// Smoothing of the linear errors' spectra.
++constexpr float kMixErrorSmoothing = 0.3f;
++// The new chain's error over the reference's above which the reference's
++// output is used.
++constexpr float kMixReferenceRatio = 1.5f;
++// Above this ratio (and up to kMixReferenceRatio) the higher of the two outputs
++// is used, below it the lower.
++constexpr float kMixHigherRatio = 0.7f;
++// The new chain's power at most this times the reference's, where the higher
++// is used.
++constexpr float kMixNewPowerCap = 4.f;
++// Bins whose errors decide the high bands' gain.
++constexpr size_t kMixHighBandsFirstBin = 1;
++constexpr size_t kMixHighBandsLastBin = 15;
++
++// Fogata (A2): a complete second echo removal chain for one capture channel,
++// run exactly as upstream runs its own (its refined filter never learns
++// through poor render excitation, and it has no neural residual echo
++// estimator), with what is needed to mix its output with the first chain's.
++// Everything is allocated here, nothing per block.
++struct ReferenceChain {
++  ReferenceChain(const Environment& env,
++                 const EchoCanceller3Config& config,
++                 int sample_rate_hz,
++                 size_t num_render_channels,
++                 ApmDataDumper* data_dumper,
++                 Aec3Optimization optimization)
++      : subtractor(env,
++                   config,
++                   num_render_channels,
++                   /*num_capture_channels=*/1,
++                   data_dumper,
++                   optimization),
++        suppression_gain(config,
++                         optimization,
++                         sample_rate_hz,
++                         /*num_capture_channels=*/1),
++        cng(config, optimization, /*num_capture_channels=*/1),
++        render_signal_analyzer(config),
++        residual_echo_estimator(env,
++                                config,
++                                num_render_channels,
++                                /*neural_residual_echo_estimator=*/nullptr),
++        aec_state(env, config, /*num_capture_channels=*/1) {
++    e_old[0].fill(0.f);
++    G.fill(0.f);
++    em.fill(0.f);
++    ev.fill(0.f);
++  }
++  ReferenceChain(const ReferenceChain&) = delete;
++  ReferenceChain& operator=(const ReferenceChain&) = delete;
++
++  Subtractor subtractor;
++  SuppressionGain suppression_gain;
++  ComfortNoiseGenerator cng;
++  RenderSignalAnalyzer render_signal_analyzer;
++  ResidualEchoEstimator residual_echo_estimator;
++  AecState aec_state;
++  std::array<std::array<float, kFftLengthBy2>, 1> e_old;
++  bool refined_filter_output_last_selected = true;
++  bool ml_ree_was_active = false;
++
++  // The reference chain's data of the current block.
++  std::array<SubtractorOutput, 1> subtractor_output;
++  std::array<std::array<float, kFftLengthBy2>, 1> e;
++  std::array<FftData, 1> E;
++  std::array<std::array<float, kFftLengthBy2Plus1>, 1> E2;
++  std::array<std::array<float, kFftLengthBy2Plus1>, 1> S2_linear;
++  std::array<std::array<float, kFftLengthBy2Plus1>, 1> R2;
++  std::array<std::array<float, kFftLengthBy2Plus1>, 1> R2_unbounded;
++  std::array<FftData, 1> comfort_noise;
++  std::array<FftData, 1> high_band_comfort_noise;
++  std::array<float, kFftLengthBy2Plus1> G;
++  float high_bands_gain = 0.f;
++  bool use_linear_filter_output = false;
++
++  // Smoothed linear errors: `em` the reference's (E2 as upstream leaves it for
++  // the suppressor: bounded by Y2 while its linear estimate is usable), `ev`
++  // the other chain's, not bounded by Y2.
++  std::array<float, kFftLengthBy2Plus1> em;
++  std::array<float, kFftLengthBy2Plus1> ev;
++
++  // The mixed output of the current block.
++  std::array<FftData, 1> mixed_spectrum;
++  std::array<FftData, 1> mixed_comfort_noise;
++  std::array<FftData, 1> mixed_high_band_comfort_noise;
++};
++
+ // Class for removing the echo from the capture signal.
+ class EchoRemoverImpl final : public EchoRemover {
+  public:
+@@ -182,6 +272,33 @@
+   }
+ 
+  private:
++  // Fogata (A2): runs the reference chain on the current block as upstream's
++  // ProcessCapture runs its own, up to its gains, from the same capture,
++  // render and echo path variability, and the capture's spectra computed for
++  // the first chain.
++  void ProcessReference(
++      const EchoPathVariability& echo_path_variability,
++      bool audio_path_changed,
++      bool capture_signal_saturation,
++      const std::optional<DelayEstimate>& external_delay,
++      const RenderBuffer& render_buffer,
++      const Block& x,
++      const Block& y,
++      std::span<const FftData> Y,
++      std::span<const std::array<float, kFftLengthBy2Plus1>> Y2,
++      std::span<const std::array<float, kFftLengthBy2>> y_current,
++      bool clock_drift);
++
++  // Fogata (A2): mixes the first chain's output (`S`, gains `G` and
++  // `high_bands_gain`, comfort noise) with the reference chain's per bin into
++  // the reference chain's mixed_* buffers, `G` and `high_bands_gain`.
++  void MixWithReference(const FftData& S,
++                        const FftData& comfort_noise,
++                        const FftData& high_band_comfort_noise,
++                        const FftData& Y,
++                        std::array<float, kFftLengthBy2Plus1>* G,
++                        float* high_bands_gain);
++
+   static std::atomic<int> instance_count_;
+   const EchoCanceller3Config config_;
+   const std::optional<EchoCanceller3Config::Suppressor>
+@@ -221,6 +338,12 @@
+   std::vector<FftData> comfort_noise_heap_;
+   std::vector<FftData> high_band_comfort_noise_heap_;
+   std::vector<SubtractorOutput> subtractor_output_heap_;
++
++  // Fogata (A2): the reference chain, with one capture channel and no neural
++  // residual echo estimator; null otherwise (then this is upstream's echo
++  // remover).
++  std::unique_ptr<ApmDataDumper> reference_data_dumper_;
++  std::unique_ptr<ReferenceChain> reference_;
+ };
+ 
+ std::atomic<int> EchoRemoverImpl::instance_count_(0);
+@@ -280,6 +403,14 @@
+       high_band_comfort_noise_heap_(NumChannelsOnHeap(num_capture_channels_)),
+       subtractor_output_heap_(NumChannelsOnHeap(num_capture_channels_)) {
+   RTC_DCHECK(ValidFullBandRate(sample_rate_hz));
++  if (num_capture_channels_ == 1 &&
++      neural_residual_echo_estimator == nullptr) {
++    reference_data_dumper_ =
++        std::make_unique<ApmDataDumper>(instance_count_.fetch_add(1) + 1);
++    reference_ = std::make_unique<ReferenceChain>(
++        env, config_, sample_rate_hz_, num_render_channels_,
++        reference_data_dumper_.get(), optimization_);
++  }
+ }
+ 
+ EchoRemoverImpl::~EchoRemoverImpl() = default;
+@@ -382,7 +513,10 @@
+ 
+   aec_state_.UpdateCaptureSaturation(capture_signal_saturation);
+ 
+-  if (echo_path_variability.AudioPathChanged()) {
++  // Fogata (A2): whether the audio path changed, before the gain change's
++  // hangover below clears gain_change, for the reference chain as upstream.
++  const bool audio_path_changed = echo_path_variability.AudioPathChanged();
++  if (audio_path_changed) {
+     // Ensure that the gain change is only acted on once per frame.
+     if (echo_path_variability.gain_change) {
+       if (gain_change_hangover_ == 0) {
+@@ -420,6 +554,16 @@
+     suppression_gain_.SetInitialState(false);
+   }
+ 
++  // Fogata (A2): with the reference chain beside it, this chain's refined
++  // filter learns through poor render excitation once a converged filter has
++  // been seen since the last reset, unless the previous block was dominated by
++  // the near end.
++  if (reference_) {
++    subtractor_.SetLearnWithPoorExcitation(
++        aec_state_.FilterConvergenceSeen() &&
++        !suppression_gain_.IsDominantNearend());
++  }
++
+   // Perform linear echo cancellation.
+   subtractor_.Process(*render_buffer, *y, render_signal_analyzer_, aec_state_,
+                       subtractor_output);
+@@ -449,6 +593,13 @@
+     E[ch].Spectrum(optimization_, E2[ch]);
+   }
+   refined_filter_output_last_selected_ = use_refined_output;
++  if (reference_) {
++    // Fogata (A2): this chain's linear error, not bounded by Y2.
++    for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++      reference_->ev[k] +=
++          kMixErrorSmoothing * (E2[0][k] - reference_->ev[k]);
++    }
++  }
+   const auto& nearend_spectrum = aec_state_.UsableLinearEstimate() ? E2 : Y2;
+   // `y_old_` and `e_old_` now point to the current block. Though their channel
+   // layout is already suitable for residual echo estimation, an alias is
+@@ -485,6 +636,12 @@
+   // Only do the below processing if the output of the audio processing module
+   // is used.
+   std::array<float, kFftLengthBy2Plus1> G;
++  float high_bands_gain = 0.f;
++
++  // Determine if the suppressor should assume clock drift.
++  const bool clock_drift = config_.echo_removal_control.has_clock_drift ||
++                           echo_path_variability.clock_drift;
++
+   if (capture_output_used_) {
+     // Estimate the residual echo power.
+     residual_echo_estimator_.Estimate(
+@@ -505,10 +662,6 @@
+     const auto& echo_spectrum =
+         aec_state_.UsableLinearEstimate() ? S2_linear : R2;
+ 
+-    // Determine if the suppressor should assume clock drift.
+-    const bool clock_drift = config_.echo_removal_control.has_clock_drift ||
+-                             echo_path_variability.clock_drift;
+-
+     // Select the active suppressor configuration.
+     const EchoCanceller3Config::Suppressor& active_suppressor_config =
+         (ml_ree_is_active && ml_ree_suppressor_config_.has_value())
+@@ -520,19 +673,37 @@
+     ml_ree_was_active_ = ml_ree_is_active;
+ 
+     // Compute preferred gains.
+-    float high_bands_gain;
+     suppression_gain_.GetGain(active_suppressor_config, config_changed,
+                               nearend_spectrum, echo_spectrum, R2, R2_unbounded,
+                               cng_.NoiseSpectrum(), render_signal_analyzer_,
+                               aec_state_, x, clock_drift, &high_bands_gain, &G);
+-
+-    suppression_filter_.ApplyGain(comfort_noise, high_band_comfort_noise, G,
+-                                  high_bands_gain, Y_fft, y);
+-
+   } else {
+     G.fill(0.f);
+   }
+ 
++  // Fogata (A2): the reference chain, on the capture before the gains change
++  // it.
++  if (reference_) {
++    ProcessReference(echo_path_variability, audio_path_changed,
++                     capture_signal_saturation,
++                     external_delay, *render_buffer, x, *y, Y, Y2, y_current,
++                     clock_drift);
++  }
++
++  if (capture_output_used_) {
++    if (reference_) {
++      MixWithReference(Y_fft[0], comfort_noise[0], high_band_comfort_noise[0],
++                       Y[0], &G, &high_bands_gain);
++      suppression_filter_.ApplyGain(
++          reference_->mixed_comfort_noise,
++          reference_->mixed_high_band_comfort_noise, G, high_bands_gain,
++          reference_->mixed_spectrum, y);
++    } else {
++      suppression_filter_.ApplyGain(comfort_noise, high_band_comfort_noise, G,
++                                    high_bands_gain, Y_fft, y);
++    }
++  }
++
+   // Update the metrics.
+   metrics_.Update(aec_state_, cng_.NoiseSpectrum()[0], G);
+ 
+@@ -561,6 +732,200 @@
+                         aec_state_.SaturatedCapture() ? 1 : 0);
+ }
+ 
++void EchoRemoverImpl::ProcessReference(
++    const EchoPathVariability& echo_path_variability,
++    bool audio_path_changed,
++    bool capture_signal_saturation,
++    const std::optional<DelayEstimate>& external_delay,
++    const RenderBuffer& render_buffer,
++    const Block& x,
++    const Block& y,
++    std::span<const FftData> Y,
++    std::span<const std::array<float, kFftLengthBy2Plus1>> Y2,
++    std::span<const std::array<float, kFftLengthBy2>> y_current,
++    bool clock_drift) {
++  RTC_DCHECK(reference_);
++  RTC_DCHECK_EQ(1, num_capture_channels_);
++  ReferenceChain& r = *reference_;
++
++  r.aec_state.UpdateCaptureSaturation(capture_signal_saturation);
++
++  if (audio_path_changed) {
++    r.subtractor.HandleEchoPathChange(echo_path_variability);
++    r.aec_state.HandleEchoPathChange(echo_path_variability);
++
++    if (echo_path_variability.delay_change !=
++        EchoPathVariability::DelayAdjustment::kNone) {
++      r.suppression_gain.SetInitialState(true);
++    }
++  }
++
++  // Analyze the render signal.
++  r.render_signal_analyzer.Update(render_buffer,
++                                  r.aec_state.MinDirectPathFilterDelay());
++
++  // State transition.
++  if (r.aec_state.TransitionTriggered()) {
++    r.subtractor.ExitInitialState();
++    r.suppression_gain.SetInitialState(false);
++  }
++
++  // Perform linear echo cancellation.
++  r.subtractor.Process(render_buffer, y, r.render_signal_analyzer, r.aec_state,
++                       r.subtractor_output);
++
++  const bool ml_ree_is_active = r.residual_echo_estimator.IsMlReeActive();
++
++  // Compute spectra.
++  bool use_refined_output = true;
++  if (use_coarse_filter_output_ && !ml_ree_is_active) {
++    use_refined_output = UseRefinedOutput(r.subtractor_output[0]);
++  }
++  FormLinearFilterOutput(r.refined_filter_output_last_selected,
++                         use_refined_output, r.subtractor_output[0], r.e[0]);
++  WindowedPaddedFft(fft_, r.e[0], r.e_old[0], &r.E[0]);
++  LinearEchoPower(r.E[0], Y[0], &r.S2_linear[0]);
++  r.E[0].Spectrum(optimization_, r.E2[0]);
++  r.refined_filter_output_last_selected = use_refined_output;
++  const std::span<const std::array<float, kFftLengthBy2Plus1>>
++      nearend_spectrum =
++          r.aec_state.UsableLinearEstimate()
++              ? std::span<const std::array<float, kFftLengthBy2Plus1>>(r.E2)
++              : Y2;
++
++  // Update the AEC state information.
++  r.aec_state.Update(external_delay, r.subtractor.FilterFrequencyResponses(),
++                     r.subtractor.FilterImpulseResponses(), render_buffer,
++                     r.E2, Y2, r.subtractor_output);
++
++  // Choose the linear output.
++  r.use_linear_filter_output = r.aec_state.UseLinearFilterOutput();
++
++  // Estimate the comfort noise.
++  r.cng.Compute(r.aec_state.SaturatedCapture(), nearend_spectrum,
++                r.comfort_noise, r.high_band_comfort_noise);
++
++  // The reference's linear error, as the suppressor gets it.
++  const bool usable_linear_estimate = r.aec_state.UsableLinearEstimate();
++  for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++    const float e2 = usable_linear_estimate ? std::min(r.E2[0][k], Y2[0][k])
++                                            : r.E2[0][k];
++    r.em[k] += kMixErrorSmoothing * (e2 - r.em[k]);
++  }
++
++  if (!capture_output_used_) {
++    r.G.fill(0.f);
++    r.high_bands_gain = 0.f;
++    return;
++  }
++
++  // Estimate the residual echo power.
++  r.residual_echo_estimator.Estimate(
++      r.aec_state, render_buffer, y_current, r.e_old, r.S2_linear, Y2, r.E2,
++      r.suppression_gain.IsDominantNearend(), r.R2, r.R2_unbounded);
++
++  // Suppressor nearend estimate.
++  if (r.aec_state.UsableLinearEstimate()) {
++    // E2 is bound by Y2.
++    std::transform(r.E2[0].begin(), r.E2[0].end(), Y2[0].begin(),
++                   r.E2[0].begin(),
++                   [](float a, float b) { return std::min(a, b); });
++  }
++
++  // Suppressor echo estimate.
++  const std::span<const std::array<float, kFftLengthBy2Plus1>> echo_spectrum =
++      r.aec_state.UsableLinearEstimate()
++          ? std::span<const std::array<float, kFftLengthBy2Plus1>>(r.S2_linear)
++          : std::span<const std::array<float, kFftLengthBy2Plus1>>(r.R2);
++
++  // No neural residual echo estimator: the configured suppressor.
++  const bool config_changed = (ml_ree_is_active != r.ml_ree_was_active);
++  r.ml_ree_was_active = ml_ree_is_active;
++
++  // Compute preferred gains.
++  r.suppression_gain.GetGain(config_.suppressor, config_changed,
++                             nearend_spectrum, echo_spectrum, r.R2,
++                             r.R2_unbounded, r.cng.NoiseSpectrum(),
++                             r.render_signal_analyzer, r.aec_state, x,
++                             clock_drift, &r.high_bands_gain, &r.G);
++}
++
++void EchoRemoverImpl::MixWithReference(
++    const FftData& S,
++    const FftData& comfort_noise,
++    const FftData& high_band_comfort_noise,
++    const FftData& Y,
++    std::array<float, kFftLengthBy2Plus1>* G,
++    float* high_bands_gain) {
++  RTC_DCHECK(reference_);
++  ReferenceChain& r = *reference_;
++  // What the reference chain would output: its gains on its linear output or
++  // on the capture.
++  const FftData& S_ref = r.use_linear_filter_output ? r.E[0] : Y;
++  FftData& S_mix = r.mixed_spectrum[0];
++  FftData& N_mix = r.mixed_comfort_noise[0];
++
++  for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++    const float g = (*G)[k];
++    const float g_ref = r.G[k];
++    const float p = g * g * (S.re[k] * S.re[k] + S.im[k] * S.im[k]);
++    const float p_ref =
++        g_ref * g_ref * (S_ref.re[k] * S_ref.re[k] + S_ref.im[k] * S_ref.im[k]);
++
++    bool use_new;
++    float g_mix = g;
++    if (r.ev[k] > kMixReferenceRatio * r.em[k]) {
++      // This chain's filter is clearly worse: the reference's output.
++      use_new = false;
++    } else if (r.ev[k] > kMixHigherRatio * r.em[k]) {
++      // Alike: the higher of the two, this chain's capped.
++      use_new = p > p_ref;
++      if (use_new && p > kMixNewPowerCap * p_ref) {
++        g_mix = g * std::sqrt(kMixNewPowerCap * p_ref / p);
++      }
++    } else {
++      // This chain's filter is clearly better: the lower of the two.
++      use_new = p < p_ref;
++    }
++
++    if (use_new) {
++      S_mix.re[k] = S.re[k];
++      S_mix.im[k] = S.im[k];
++      N_mix.re[k] = comfort_noise.re[k];
++      N_mix.im[k] = comfort_noise.im[k];
++      (*G)[k] = g_mix;
++    } else {
++      S_mix.re[k] = S_ref.re[k];
++      S_mix.im[k] = S_ref.im[k];
++      N_mix.re[k] = r.comfort_noise[0].re[k];
++      N_mix.im[k] = r.comfort_noise[0].im[k];
++      (*G)[k] = g_ref;
++    }
++  }
++
++  // The high bands, from the errors of bins 1 to 15.
++  float ev_sum = 0.f;
++  float em_sum = 0.f;
++  for (size_t k = kMixHighBandsFirstBin; k <= kMixHighBandsLastBin; ++k) {
++    ev_sum += r.ev[k];
++    em_sum += r.em[k];
++  }
++  bool use_new_high_bands;
++  if (ev_sum > kMixReferenceRatio * em_sum) {
++    use_new_high_bands = false;
++  } else if (ev_sum > kMixHigherRatio * em_sum) {
++    use_new_high_bands = *high_bands_gain > r.high_bands_gain;
++  } else {
++    use_new_high_bands = *high_bands_gain < r.high_bands_gain;
++  }
++  if (use_new_high_bands) {
++    r.mixed_high_band_comfort_noise[0].Assign(high_band_comfort_noise);
++  } else {
++    *high_bands_gain = r.high_bands_gain;
++    r.mixed_high_band_comfort_noise[0].Assign(r.high_band_comfort_noise[0]);
++  }
++}
++
+ }  // namespace
+ 
+ std::unique_ptr<EchoRemover> EchoRemover::Create(
+diff --git a/modules/audio_processing/aec3/refined_filter_update_gain.cc b/modules/audio_processing/aec3/refined_filter_update_gain.cc
+--- a/modules/audio_processing/aec3/refined_filter_update_gain.cc
++++ b/modules/audio_processing/aec3/refined_filter_update_gain.cc
+@@ -14,6 +14,7 @@
+ #include <array>
+ #include <atomic>
+ #include <cstddef>
++#include <limits>
+ #include <span>
+ 
+ #include "api/audio/echo_canceller3_config.h"
+@@ -41,7 +42,8 @@
+     : data_dumper_(new ApmDataDumper(instance_count_.fetch_add(1) + 1)),
+       config_change_duration_blocks_(
+           static_cast<int>(config_change_duration_blocks)),
+-      poor_excitation_counter_(kPoorExcitationCounterInitial) {
++      poor_excitation_counter_(kPoorExcitationCounterInitial),
++      blocks_since_poor_excitation_(kPoorExcitationCounterInitial) {
+   SetConfig(config, true);
+   H_error_.fill(kHErrorInitial);
+   RTC_DCHECK_LT(0, config_change_duration_blocks_);
+@@ -63,6 +65,7 @@
+ 
+   if (!echo_path_variability.gain_change) {
+     poor_excitation_counter_ = kPoorExcitationCounterInitial;
++    blocks_since_poor_excitation_ = kPoorExcitationCounterInitial;
+     call_counter_ = 0;
+   }
+ }
+@@ -89,7 +92,20 @@
+   UpdateCurrentConfig();
+ 
+   if (render_signal_analyzer.PoorSignalExcitation()) {
+-    poor_excitation_counter_ = 0;
++    blocks_since_poor_excitation_ = 0;
++    // Fogata: while learning through poor excitation, it does not hold the
++    // update back.
++    if (!learn_with_poor_excitation_) {
++      poor_excitation_counter_ = 0;
++    }
++  }
++  // Fogata: half the step size while poor excitation was seen within the last
++  // `size_partitions` blocks and the filter learns through it.
++  const bool halve_step_size =
++      learn_with_poor_excitation_ &&
++      blocks_since_poor_excitation_ < size_partitions;
++  if (blocks_since_poor_excitation_ < std::numeric_limits<size_t>::max()) {
++    ++blocks_since_poor_excitation_;
+   }
+ 
+   // Do not update the filter if the render is not sufficiently excited.
+@@ -110,6 +126,12 @@
+       }
+     }
+ 
++    if (halve_step_size) {
++      for (float& mu_k : mu) {
++        mu_k *= 0.5f;
++      }
++    }
++
+     // Avoid updating the filter close to narrow bands in the render signals.
+     render_signal_analyzer.MaskRegionsAroundNarrowBands(&mu);
+ 
+diff --git a/modules/audio_processing/aec3/refined_filter_update_gain.h b/modules/audio_processing/aec3/refined_filter_update_gain.h
+--- a/modules/audio_processing/aec3/refined_filter_update_gain.h
++++ b/modules/audio_processing/aec3/refined_filter_update_gain.h
+@@ -55,6 +55,13 @@
+                bool disallow_leakage_diverged,
+                FftData* gain_fft);
+ 
++  // Fogata: lets the filter learn while the render signal is poorly excited
++  // (PoorSignalExcitation), at half the step size for `size_partitions` blocks
++  // after poor excitation was last seen. Off by default, as upstream.
++  void SetLearnWithPoorExcitation(bool learn) {
++    learn_with_poor_excitation_ = learn;
++  }
++
+   // Sets a new config.
+   void SetConfig(
+       const EchoCanceller3Config::Filter::RefinedConfiguration& config,
+@@ -79,6 +86,10 @@
+   EchoCanceller3Config::Filter::RefinedConfiguration old_target_config_;
+   std::array<float, kFftLengthBy2Plus1> H_error_;
+   size_t poor_excitation_counter_;
++  // Fogata: blocks since poor excitation was last seen, counted also while
++  // learning through it.
++  size_t blocks_since_poor_excitation_;
++  bool learn_with_poor_excitation_ = false;
+   size_t call_counter_ = 0;
+   int config_change_counter_ = 0;
+ 
+diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_processing/aec3/subtractor.cc
+--- a/modules/audio_processing/aec3/subtractor.cc
++++ b/modules/audio_processing/aec3/subtractor.cc
+@@ -266,6 +266,8 @@
+ 
+       std::array<float, kFftLengthBy2Plus1> erl;
+       ComputeErl(optimization_, refined_frequency_responses_[ch], erl);
++      refined_gains_[ch]->SetLearnWithPoorExcitation(
++          learn_with_poor_excitation_);
+       refined_gains_[ch]->Compute(X2_refined, render_signal_analyzer, output,
+                                   erl, refined_filters_[ch]->SizePartitions(),
+                                   aec_state.SaturatedCapture(),
+diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processing/aec3/subtractor.h
+--- a/modules/audio_processing/aec3/subtractor.h
++++ b/modules/audio_processing/aec3/subtractor.h
+@@ -61,6 +61,13 @@
+   // Exits the initial state.
+   void ExitInitialState();
+ 
++  // Fogata: lets the refined filters learn while the render signal is poorly
++  // excited (RefinedFilterUpdateGain::SetLearnWithPoorExcitation), from the
++  // next Process on. Off by default, as upstream.
++  void SetLearnWithPoorExcitation(bool learn) {
++    learn_with_poor_excitation_ = learn;
++  }
++
+   // Returns the block-wise frequency responses for the refined adaptive
+   // filters.
+   const std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>&
+@@ -132,6 +139,7 @@
+   const Aec3Optimization optimization_;
+   const EchoCanceller3Config config_;
+   const size_t num_capture_channels_;
++  bool learn_with_poor_excitation_ = false;
+ 
+   std::vector<std::unique_ptr<AdaptiveFirFilter>> refined_filters_;
+   std::vector<std::unique_ptr<AdaptiveFirFilter>> coarse_filter_;
