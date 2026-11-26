@@ -7,6 +7,8 @@
 #            the other (FogataOther) DELAY2 ms later (default 180): the echo's delay moves
 #   same     both DELAY1 ms later: only the restart
 #   headset  no loop: no echo path (the cost side)
+#   none     far's loops, the same words at the same moments, but no output is chosen: the
+#            exact control of far (each "change" logged at its asked moment)
 # After SETTLE s (default 25) of a watching b, every CYCLE s (default 20) a chooses the
 # other output (CYCLES times, default 8, starting with FogataOther), through the call's
 # own path (call_test.dart's far-echo case, `rig-output`). a's words (unmute-sound.sh's,
@@ -17,8 +19,8 @@
 # (asked, and done as a marked it), words.log each word's moment.
 # Measured, not judged: restart_echo.py <run>... (each run), restart_echo_sum.py <list>
 # (lines of "<build> <variant> <run>"; median and range per build and variant).
-# Usage: restart-echo.sh far|same|headset   (BUNDLE, CALL_LAB_RUNS, LAB_DISPLAY, FAR_FILE,
-# CYCLES, CYCLE, SETTLE, DELAY1, DELAY2, RIG_ENV: more VAR=value for both copies)
+# Usage: restart-echo.sh far|same|headset|none   (BUNDLE, CALL_LAB_RUNS, LAB_DISPLAY, FAR_FILE,
+# CYCLES, CYCLE, SETTLE, DELAY1, DELAY2, FAR_OFFSET, RIG_ENV: more VAR=value for both copies)
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 now() { date +%s%N | cut -c1-13; }
@@ -32,7 +34,7 @@ if [ "${1:-}" = --inside ]; then
   # a's second output, listed for it (its name ends as its devices' do).
   pactl load-module module-null-sink sink_name=laba_other sink_properties=device.description=FogataOther-laba. > /dev/null
   case "$V" in
-    far | same)
+    far | same | none)
       d2=${DELAY2:-180}
       [ "$V" = same ] && d2=${DELAY1:-60}
       pactl load-module module-loopback source=laba_quiet.monitor sink=laba_test latency_msec="${DELAY1:-60}" \
@@ -47,7 +49,8 @@ if [ "${1:-}" = --inside ]; then
   mean=$(ffmpeg -hide_banner -nostats -i "$FAR_FILE" -af volumedetect -f null - 2>&1 |
     sed -n 's/.*mean_volume: \(-\{0,1\}[0-9.]*\) dB.*/\1/p')
   : "${mean:?no mean_volume from the volumedetect of ffmpeg for $FAR_FILE: not a sound file it reads?}"
-  ffmpeg -hide_banner -loglevel error -y -i "$FAR_FILE" \
+  # FAR_OFFSET (s, default 0): b's voice from that far into FAR_FILE, so a run hears other speech.
+  ffmpeg -hide_banner -loglevel error -y -ss "${FAR_OFFSET:-0}" -i "$FAR_FILE" \
     -af "volume=$(python3 -I -c "print(round(-28 - ($mean), 2))")dB" -ar 48000 -ac 1 -sample_fmt s16 "$RUN/sound/far.wav"
   for name in played-b:labb_quiet.monitor mic-a:laba_test.monitor out1:laba_quiet.monitor out2:laba_other.monitor; do
     now > "$RUN/${name%%:*}.start"
@@ -90,6 +93,9 @@ if [ "${1:-}" = --inside ]; then
     if [ $((k % 2)) = 0 ]; then out=FogataOther-laba; else out=FogataQuietOut-laba; fi
     old=$(cat "$M/mark-a-output-$out" 2> /dev/null)
     asked=$(now)
+    if [ "$V" = none ]; then
+      echo "$k $out asked $asked done $asked" >> "$RUN/changes.log"
+    else
     echo "$out" > "$M/rig-output"
     ( for _ in $(seq 100); do
         done_at=$(cat "$M/mark-a-output-$out" 2> /dev/null)
@@ -97,6 +103,7 @@ if [ "${1:-}" = --inside ]; then
         sleep 0.05
       done
       echo "$k $out asked $asked done ${done_at:-none}" >> "$RUN/changes.log" ) &
+    fi
     if [ $((k % 2)) = 1 ]; then
       word $((asked + 500)) "$k dt0.5"
       word $((asked + 3500)) "$k dt3.5"
@@ -114,12 +121,12 @@ if [ "${1:-}" = --inside ]; then
   lab_stop
   exit 0
 fi
-V=${1:?usage: restart-echo.sh far|same|headset}
+V=${1:?usage: restart-echo.sh far|same|headset|none}
 REPO=$(cd "$HERE/../.." && pwd)
 export BUNDLE=${BUNDLE:-$REPO/app/build/linux/x64/debug/bundle/fogata}
 export FAR_FILE=${FAR_FILE:?FAR_FILE: a speech recording}
 export RUN=${CALL_LAB_RUNS:-$HOME/call-lab}/restart-$V-$(date +%m%d-%H%M%S)
 mkdir -p "$RUN"
-echo "restart-echo $V, started $(date -Is); BUNDLE=$BUNDLE DELAY1=${DELAY1:-60} DELAY2=${DELAY2:-180} CYCLES=${CYCLES:-8} CYCLE=${CYCLE:-20} SETTLE=${SETTLE:-25} RIG_ENV=${RIG_ENV:-}" > "$RUN/settings.txt"
+echo "restart-echo $V, started $(date -Is); BUNDLE=$BUNDLE DELAY1=${DELAY1:-60} DELAY2=${DELAY2:-180} FAR_OFFSET=${FAR_OFFSET:-0} CYCLES=${CYCLES:-8} CYCLE=${CYCLE:-20} SETTLE=${SETTLE:-25} RIG_ENV=${RIG_ENV:-}" > "$RUN/settings.txt"
 "$HERE/session.sh" "$RUN/session" "$0" --inside "$V"
 echo "  $RUN"
