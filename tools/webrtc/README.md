@@ -317,6 +317,14 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
    and is kept out; a headset taken off for speakers while unmuted keeps the transparent
    mode through that restart, and let the other side back for 0.1 s at -59 dBFS at the
    loudest (0.35 s at -18 dBFS without these patches).
+17. `0017-tell-why-a-camera-reached-through-pipewire-did-not-start` (Linux): PipeWire's
+   capture module (the Camera portal's path) keeps the first error its stream is told
+   after StartCapture and its last state, and `VideoCaptureModule::CaptureFailed` tells
+   them (the other modules answer false: they fail as StartCapture returns). A V4L2
+   camera another application streams fails only as PipeWire links it, and WirePlumber
+   0.5 sends the stream the link's error ("error set output format: -16 (Device or
+   resource busy)"), which reached only WebRTC's log while the application showed a
+   black picture. Wrapper patch 0028 waits for a camera's start with it.
 
 `patches/apple` (macOS only, after `patches/webrtc`): see `MACOS.md`.
 
@@ -442,6 +450,12 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     the change is not taken again at the next unmute; a change and a restart marked while
     recording is stopped, with a block recorded before the unmute's start returns, still
     give the restart for other devices.
+28. `RTCVideoCapturer::WaitForStart`: after StartCapture, a camera reached through the
+    Camera portal is waited for, up to the time given, until its first picture or until
+    PipeWire's stream says it failed (WebRTC's patch 0017), looking every 50 ms; a stream
+    that runs with its first picture late counts as started. Cameras opened directly
+    answer at once. The plugin waits up to 3 s and answers fogataCameraBusy for PipeWire's
+    EBUSY (`fogata_portal_camera.h`).
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

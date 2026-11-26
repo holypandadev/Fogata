@@ -114,6 +114,64 @@ void main() {
     );
   });
 
+  test(
+    'a camera through the portal another application holds is told apart',
+    () async {
+      // What the plugin answers when PipeWire's stream was told the link failed with
+      // EBUSY (fogata_portal_camera.h), in the sound server's language.
+      const said =
+          'error set output format: -16 (Dispositivo o recurso ocupado)';
+      answer(
+        (_) async => throw PlatformException(
+          code: 'NotReadableError',
+          message:
+              'NotReadableError: another application is using the camera '
+              '(fogataCameraBusy): $said',
+        ),
+      );
+      final printed = <String>[];
+      final print = debugPrint;
+      debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
+      addTearDown(() => debugPrint = print);
+      await expectLater(openCameraStream(null), throwsA(isA<CameraBusy>()));
+      expect(printed, contains(contains(said)));
+    },
+  );
+
+  test('a camera through the portal that did not start leaves its cause in the log', () async {
+    const said =
+        'NotReadableError: the camera did not start: '
+        'Format negotiation failed';
+    answer(
+      (_) async =>
+          throw PlatformException(code: 'NotReadableError', message: said),
+    );
+    final printed = <String>[];
+    final print = debugPrint;
+    debugPrint = (message, {wrapWidth}) => printed.add(message ?? '');
+    addTearDown(() => debugPrint = print);
+    Object? failure;
+    try {
+      await openCameraStream(null);
+    } catch (e) {
+      failure = e;
+    }
+    expect(failure, isA<PlatformException>());
+    expect(printed, contains(contains('PipeWire stream paused')));
+    // Told as a camera that failed, not as one of the failures with words of their own.
+    expect(
+      cameraFailure(failure),
+      isNot(
+        anyOf(
+          l10n.devicesNoCamera,
+          l10n.devicesCameraDenied,
+          l10n.devicesCameraUnavailable,
+          l10n.devicesCameraBusy,
+        ),
+      ),
+    );
+  });
+
   test('each failure has its own words', () {
     expect(cameraFailure(NoCamera()), l10n.devicesNoCamera);
     expect(cameraFailure(CameraDenied()), l10n.devicesCameraDenied);

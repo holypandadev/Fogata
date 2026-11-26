@@ -113,8 +113,8 @@ String cameraFailure(Object? error) => switch (error) {
 /// [CameraDenied] or [CameraUnavailable] when the system's Camera portal did not give
 /// the cameras (Linux, in a Flatpak: the plugin asks it first, which may show the
 /// system's question), and [CameraBusy] when another application holds the camera
-/// (Linux; the plugin's words, with the device and the system's answer, go to the
-/// diagnostics log).
+/// (Linux; the plugin's words, with the device and the system's answer or PipeWire's,
+/// go to the diagnostics log).
 Future<MediaStream> openCameraStream(String? id) async {
   final MediaStream stream;
   try {
@@ -141,6 +141,11 @@ Future<MediaStream> openCameraStream(String? id) async {
       // The mapped failure keeps no words: the cause goes to the day's log.
       debugPrint('camera busy: $e');
       throw CameraBusy();
+    }
+    // Linux, the camera through the Camera portal: PipeWire's words for the day's log;
+    // the failure is told as any other.
+    if ('$e'.contains('the camera did not start')) {
+      debugPrint('camera did not start: $e');
     }
     rethrow;
   }

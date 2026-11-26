@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstring>
 
+#include "fogata_portal_camera.h"
 #include "output_keeper.h"
 #include "test_camera.h"
 #endif
@@ -89,6 +90,13 @@ static bool CameraBusy(const std::string& unique_id, const std::string& name,
   }
   return false;
 }
+
+// Fogata: how long a camera reached through the Camera portal is waited for, for its
+// first picture or PipeWire's failure (fogata_portal_camera.h). A failure comes within
+// milliseconds and a working camera's first picture mostly within a second; the wait
+// blocks the platform thread, so it stops here and the camera is kept as before (a slow
+// camera, waking from USB suspend, is not refused).
+constexpr int kPortalCameraStartMs = 1000;
 
 // Fogata: the error for a camera that did not open or start: another application's
 // hold on it when it can be told (cameras reached directly only), the camera asked for
@@ -603,6 +611,28 @@ bool FlutterMediaStream::GetUserVideo(const EncodableMap& constraints,
 #endif
     return false;
   }
+
+#ifdef __linux__
+  // Fogata: a camera reached through the Camera portal starts before PipeWire
+  // links it, and one another application holds fails only then, which showed
+  // a black picture: wait for its first picture or PipeWire's failure. A camera
+  // that works answers with its first picture, a busy one within milliseconds;
+  // a stream still without a picture when the wait ends is kept, as before.
+  // Cameras reached directly told it as they were opened and started.
+  if (!TestCamera::Wanted() &&
+      base_->video_device_->GetCameraAccess() ==
+          RTCVideoDevice::kCameraAccessGranted) {
+    libwebrtc::string said;
+    const auto start = video_capturer->WaitForStart(kPortalCameraStartMs, said);
+    // Only a stream PipeWire said failed is refused; one with no picture yet is kept
+    // as before this wait (its state goes to the log from WaitForStart).
+    if (start == RTCVideoCapturer::kStartFailed) {
+      video_capturer = scoped_refptr<RTCVideoCapturer>();
+      *error = PortalCameraError(said.std_string());
+      return false;
+    }
+  }
+#endif
 
   const char* video_source_label = "video_input";
   if (!source.get()) {

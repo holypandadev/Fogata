@@ -1,0 +1,225 @@
+Wait for the first picture of a camera reached through the Camera portal, or its failure
+
+A camera reached through the Camera portal and PipeWire (patch 0009) starts as soon as
+its stream is asked to connect, before PipeWire links the camera to it, so a camera that
+cannot give pictures (another application holds it) still looked started, and the
+application showed a black picture. RTCVideoCapturer::WaitForStart waits after
+StartCapture, up to the time given, for the camera's first picture or for PipeWire's
+stream to say it failed (VideoCaptureModule::CaptureFailed, patches/webrtc/0017), looking
+every 50 ms on the cameras' thread. It tells kStartRunning for a picture, or at the end of
+the time for a stream that runs with its first picture late (a camera slow to start);
+kStartFailed with what the stream was told; kStartNoPicture, with the stream's state, for
+a stream that did not even run in that time. Cameras opened directly (V4L2, and the other
+systems' cameras) tell a failure as StartCapture returns and answer kStartRunning at
+once; so does a capturer made outside the library that does not override it.
+
+diff --git a/include/rtc_video_device.h b/include/rtc_video_device.h
+index 4ccda60..cf5f6c3 100644
+--- a/include/rtc_video_device.h
++++ b/include/rtc_video_device.h
+@@ -14,6 +14,29 @@ class RTCVideoCapturer : public RefCountInterface {
+   virtual bool CaptureStarted() = 0;
+ 
+   virtual void StopCapture() = 0;
++
++  // How a camera's start went, as WaitForStart tells it.
++  enum StartOutcome {
++    // A picture came, or the camera's stream runs and its first picture is
++    // late ([why] says so), or the camera tells a failure as StartCapture
++    // returns, so there is nothing to wait for.
++    kStartRunning = 0,
++    // The system said the camera cannot give pictures; [why] says what it said.
++    kStartFailed = 1,
++    // Within the time no picture came and the stream did not even run; [why]
++    // says what it was doing.
++    kStartNoPicture = 2,
++  };
++
++  // Waits, after StartCapture, up to [timeout_ms] for the camera's first picture
++  // or for the system to say that it cannot give any. Only cameras reached
++  // through the Camera portal (PipeWire, Linux) wait: their StartCapture returns
++  // at once, and a camera another application holds fails only as PipeWire
++  // links it. Every other camera answers kStartRunning at once.
++  virtual StartOutcome WaitForStart(int timeout_ms, string& why) {
++    why = std::string();
++    return kStartRunning;
++  }
+ };
+ 
+ class RTCVideoDevice : public RefCountInterface {
+diff --git a/src/internal/vcm_capturer.cc b/src/internal/vcm_capturer.cc
+index 09961dd..094aadf 100644
+--- a/src/internal/vcm_capturer.cc
++++ b/src/internal/vcm_capturer.cc
+@@ -12,11 +12,13 @@
+ 
+ #include <stdint.h>
+ 
++#include <algorithm>
+ #include <memory>
+ 
+ #include "modules/video_capture/video_capture_factory.h"
+ #include "rtc_base/checks.h"
+ #include "rtc_base/logging.h"
++#include "rtc_base/time_utils.h"
+ 
+ namespace webrtc {
+ namespace internal {
+@@ -56,6 +58,7 @@ bool VcmCapturer::Init(size_t width, size_t height, size_t target_fps,
+   wanted.maxFPS = static_cast<int32_t>(target_fps);
+   wanted.videoType = VideoType::kI420;
+   if (options) {
++    waits_for_start_ = true;
+     // PipeWire is asked for exactly one of the formats the camera offers (V4L2
+     // picks its own from the size and rate): the nearest to what was wanted.
+     if (device_info->GetBestMatchedCapability(vcm_->CurrentDeviceName(), wanted,
+@@ -91,6 +94,9 @@ std::shared_ptr<VcmCapturer> VcmCapturer::Create(
+ }
+ 
+ bool VcmCapturer::StartCapture() {
++  // Fogata: a picture of an earlier start is not this one's.
++  got_picture_ = false;
++  first_picture_.Reset();
+   int32_t result = capture_thread_->BlockingCall(
+       [&] { return vcm_->StartCapture(capability_); });
+ 
+@@ -125,7 +131,47 @@ void VcmCapturer::Destroy() {
+ 
+ VcmCapturer::~VcmCapturer() { Destroy(); }
+ 
++int VcmCapturer::WaitForStart(int timeout_ms, std::string& why) {
++  why.clear();
++  if (!waits_for_start_) return 0;
++  const int64_t end = webrtc::TimeMillis() + timeout_ms;
++  while (true) {
++    const int64_t left = end - webrtc::TimeMillis();
++    if (first_picture_.Wait(
++            webrtc::TimeDelta::Millis(std::max<int64_t>(
++                0, std::min<int64_t>(left, 50))))) {
++      return 0;
++    }
++    const bool last = webrtc::TimeMillis() >= end;
++    bool running = false;
++    const bool failed = capture_thread_->BlockingCall([&] {
++      if (!vcm_) {
++        why = "the camera was let go";
++        return true;
++      }
++      if (vcm_->CaptureFailed(why)) return true;
++      running = last && vcm_->CaptureStarted();
++      return false;
++    });
++    if (failed) {
++      RTC_LOG(LS_WARNING) << "The camera did not start: " << why;
++      return 1;
++    }
++    if (last) {
++      RTC_LOG(LS_WARNING) << "No picture from the camera in " << timeout_ms
++                          << " ms: " << why;
++      if (running) {
++        why = "no picture yet, the stream runs";
++        return 0;
++      }
++      return 2;
++    }
++  }
++}
++
+ void VcmCapturer::OnFrame(const VideoFrame& frame) {
++  // Fogata: the first picture of a start, for WaitForStart.
++  if (!got_picture_.exchange(true)) first_picture_.Set();
+   VideoCapturer::OnFrame(frame);
+ }
+ 
+diff --git a/src/internal/vcm_capturer.h b/src/internal/vcm_capturer.h
+index a186699..1d157b1 100644
+--- a/src/internal/vcm_capturer.h
++++ b/src/internal/vcm_capturer.h
+@@ -10,11 +10,14 @@
+ #ifndef INTERNAL_VCM_CAPTURER_H_
+ #define INTERNAL_VCM_CAPTURER_H_
+ 
++#include <atomic>
+ #include <memory>
++#include <string>
+ #include <vector>
+ 
+ #include "api/scoped_refptr.h"
+ #include "modules/video_capture/video_capture.h"
++#include "rtc_base/event.h"
+ #include "rtc_base/thread.h"
+ #include "src/internal/video_capturer.h"
+ 
+@@ -45,6 +48,12 @@ class VcmCapturer : public VideoCapturer,
+ 
+   void StopCapture() override;
+ 
++  // Cameras reached through PipeWire: waits for the first picture after
++  // StartCapture, or for the stream's failure (the module's CaptureFailed),
++  // looking every 50 ms; at the end of the time a stream that runs without a
++  // picture yet is a camera slow to start (0). Others answer 0 at once.
++  int WaitForStart(int timeout_ms, std::string& why) override;
++
+   void OnFrame(const VideoFrame& frame) override;
+ 
+  private:
+@@ -55,6 +64,13 @@ class VcmCapturer : public VideoCapturer,
+   webrtc::scoped_refptr<VideoCaptureModule> vcm_;
+   webrtc::Thread* capture_thread_ = nullptr;
+   VideoCaptureCapability capability_;
++  // Opened through VideoCaptureOptions (PipeWire on Linux): its start is
++  // waited for.
++  bool waits_for_start_ = false;
++  // The first picture since StartCapture.
++  std::atomic<bool> got_picture_{false};
++  webrtc::Event first_picture_{/*manual_reset=*/true,
++                               /*initially_signaled=*/false};
+ };
+ 
+ class CapturerTrackSource : public webrtc::VideoTrackSource {
+diff --git a/src/internal/video_capturer.h b/src/internal/video_capturer.h
+index 8d32390..d3c52e0 100644
+--- a/src/internal/video_capturer.h
++++ b/src/internal/video_capturer.h
+@@ -13,6 +13,7 @@
+ #include <stddef.h>
+ 
+ #include <memory>
++#include <string>
+ #include <vector>
+ 
+ #include "api/video/video_frame.h"
+@@ -41,6 +42,13 @@ class VideoCapturer : public webrtc::VideoSourceInterface<VideoFrame> {
+ 
+   virtual void StopCapture() {}
+ 
++  // As RTCVideoCapturer::WaitForStart (its StartOutcome's values): only
++  // cameras reached through PipeWire wait.
++  virtual int WaitForStart(int timeout_ms, std::string& why) {
++    why.clear();
++    return 0;
++  }
++
+   void AddOrUpdateSink(webrtc::VideoSinkInterface<VideoFrame>* sink,
+                        const webrtc::VideoSinkWants& wants) override;
+   void RemoveSink(webrtc::VideoSinkInterface<VideoFrame>* sink) override;
+diff --git a/src/rtc_video_device_impl.h b/src/rtc_video_device_impl.h
+index 1708371..b292a48 100644
+--- a/src/rtc_video_device_impl.h
++++ b/src/rtc_video_device_impl.h
+@@ -41,6 +41,15 @@ class RTCVideoCapturerImpl : public RTCVideoCapturer {
+     if (video_capturer_ != nullptr) video_capturer_->StopCapture();
+   }
+ 
++  StartOutcome WaitForStart(int timeout_ms, string& why) override {
++    std::string said;
++    const int outcome = video_capturer_ != nullptr
++                            ? video_capturer_->WaitForStart(timeout_ms, said)
++                            : kStartFailed;
++    why = said;
++    return static_cast<StartOutcome>(outcome);
++  }
++
+  private:
+   std::shared_ptr<webrtc::internal::VideoCapturer> video_capturer_;
+ };

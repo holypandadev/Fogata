@@ -1,0 +1,132 @@
+Tell whether a camera reached through PipeWire failed after its capture started, and why
+
+PipeWire's capture module (the Camera portal's path on Linux) returns from StartCapture as
+soon as its stream is asked to connect; the camera is linked to it afterwards, by the
+session manager. A camera that cannot stream then, for example a V4L2 camera another
+application streams (its VIDIOC_S_FMT answers EBUSY), fails the link: WirePlumber 0.5
+sends the stream that link's error ("error set output format: -16 (Device or resource
+busy)", in the sound server's language), which reached only WebRTC's log, and the
+application showed a black picture. The module now keeps the first error its stream was
+told since StartCapture and its last state, and VideoCaptureModule::CaptureFailed (on the
+API thread, as CaptureStarted) tells them: whether the capture failed, with the error, or
+else what the stream is doing. The other modules tell a failure as StartCapture returns
+and answer false. The wrapper waits for a camera's start with it
+(patches/wrapper/0028).
+
+diff --git a/modules/video_capture/linux/video_capture_pipewire.cc b/modules/video_capture/linux/video_capture_pipewire.cc
+index 2f4eb55..bf2a4db 100644
+--- a/modules/video_capture/linux/video_capture_pipewire.cc
++++ b/modules/video_capture/linux/video_capture_pipewire.cc
+@@ -232,6 +232,14 @@ int32_t VideoCaptureModulePipeWire::StartCapture(
+ 
+   pw_stream_add_listener(stream_, &stream_listener_, &stream_events, this);
+ 
++  {
++    // What an earlier stream said is not this one's.
++    MutexLock lock(&api_lock_);
++    failed_ = false;
++    error_.clear();
++    state_ = "unconnected";
++  }
++
+   spa_pod_builder builder =
+       spa_pod_builder{.data = buffer, .size = sizeof(buffer)};
+   std::vector<const spa_pod*> params;
+@@ -289,6 +297,14 @@ bool VideoCaptureModulePipeWire::CaptureStarted() {
+   return started_;
+ }
+ 
++bool VideoCaptureModulePipeWire::CaptureFailed(std::string& why) {
++  RTC_DCHECK_RUN_ON(&api_checker_);
++  MutexLock lock(&api_lock_);
++
++  why = failed_ ? error_ : std::string("PipeWire stream ") + state_;
++  return failed_;
++}
++
+ int32_t VideoCaptureModulePipeWire::CaptureSettings(
+     VideoCaptureCapability& settings) {
+   RTC_DCHECK_RUN_ON(&api_checker_);
+@@ -410,12 +426,21 @@ void VideoCaptureModulePipeWire::OnStreamStateChanged(
+   RTC_DCHECK(that);
+ 
+   MutexLock lock(&that->api_lock_);
++  that->state_ = pw_stream_state_as_string(state);
+   switch (state) {
+     case PW_STREAM_STATE_STREAMING:
+       that->started_ = true;
+       break;
+     case PW_STREAM_STATE_ERROR:
+       RTC_LOG(LS_ERROR) << "PipeWire stream state error: " << error_message;
++      // Kept for CaptureFailed: the first error says why the camera did not
++      // stream (WirePlumber 0.5 sends the stream a link that failed, such as
++      // "error set output format: -16 (Device or resource busy)" for a V4L2
++      // camera another application streams). Later ones follow from it.
++      if (!that->failed_) {
++        that->failed_ = true;
++        that->error_ = error_message ? error_message : "PipeWire stream error";
++      }
+       [[fallthrough]];
+     case PW_STREAM_STATE_PAUSED:
+     case PW_STREAM_STATE_UNCONNECTED:
+diff --git a/modules/video_capture/linux/video_capture_pipewire.h b/modules/video_capture/linux/video_capture_pipewire.h
+index 9be4979..74e7e39 100644
+--- a/modules/video_capture/linux/video_capture_pipewire.h
++++ b/modules/video_capture/linux/video_capture_pipewire.h
+@@ -16,6 +16,7 @@
+ #include <spa/utils/hook.h>
+ 
+ #include <cstdint>
++#include <string>
+ 
+ #include "api/scoped_refptr.h"
+ #include "common_video/libyuv/include/webrtc_libyuv.h"
+@@ -35,6 +36,7 @@ class VideoCaptureModulePipeWire : public VideoCaptureImpl {
+   int32_t StartCapture(const VideoCaptureCapability& capability) override;
+   int32_t StopCapture() override;
+   bool CaptureStarted() override;
++  bool CaptureFailed(std::string& why) override;
+   int32_t CaptureSettings(VideoCaptureCapability& settings) override;
+ 
+   static VideoType PipeWireRawFormatToVideoType(uint32_t format);
+@@ -58,6 +60,11 @@ class VideoCaptureModulePipeWire : public VideoCaptureImpl {
+       RTC_GUARDED_BY(api_checker_);
+   bool initialized_ RTC_GUARDED_BY(api_checker_);
+   bool started_ RTC_GUARDED_BY(api_lock_);
++  // What the stream said since StartCapture: whether it failed and why (the
++  // server's or the session manager's words), and its last state.
++  bool failed_ RTC_GUARDED_BY(api_lock_) = false;
++  std::string error_ RTC_GUARDED_BY(api_lock_);
++  const char* state_ RTC_GUARDED_BY(api_lock_) = "unconnected";
+   int node_id_ RTC_GUARDED_BY(capture_checker_);
+   VideoCaptureCapability configured_capability_
+       RTC_GUARDED_BY(capture_checker_);
+diff --git a/modules/video_capture/video_capture.h b/modules/video_capture/video_capture.h
+index fcde4cb..137079f 100644
+--- a/modules/video_capture/video_capture.h
++++ b/modules/video_capture/video_capture.h
+@@ -12,6 +12,7 @@
+ #define MODULES_VIDEO_CAPTURE_VIDEO_CAPTURE_H_
+ 
+ #include <cstdint>
++#include <string>
+ 
+ #include "api/ref_count.h"
+ #include "api/video/video_frame.h"
+@@ -96,6 +97,16 @@ class VideoCaptureModule : public RefCountInterface {
+   // Returns true if the capture device is running
+   virtual bool CaptureStarted() = 0;
+ 
++  // Whether the capture failed since StartCapture, which some modules learn only
++  // after it returned (PipeWire's: the camera's stream fails as it is linked,
++  // for example because another application holds the camera). `why` gets the
++  // failure, or else what the capture is doing (for a log). The others tell a
++  // failure as StartCapture returns, and answer false.
++  virtual bool CaptureFailed(std::string& why) {
++    why.clear();
++    return false;
++  }
++
+   // Gets the current configuration.
+   virtual int32_t CaptureSettings(VideoCaptureCapability& settings) = 0;
+ 
