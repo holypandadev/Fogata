@@ -429,6 +429,7 @@ fn alone(base: &Path, name: &str) -> PathBuf {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_wrong_code_sends_nothing_and_three_stop_the_code() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("wrong");
     let dir_old = alone(&base, "Ana");
@@ -475,6 +476,7 @@ async fn a_wrong_code_sends_nothing_and_three_stop_the_code() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_third_computer_on_the_rendezvous_gets_nothing() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("third");
     let dir_old = alone(&base, "Ana");
@@ -530,6 +532,7 @@ async fn a_third_computer_on_the_rendezvous_gets_nothing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_stranger_answering_first_does_not_keep_the_move_from_the_new_computer() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("first");
     let dir_old = alone(&base, "Ana");
@@ -577,6 +580,7 @@ async fn a_stranger_answering_first_does_not_keep_the_move_from_the_new_computer
 #[tokio::test(flavor = "multi_thread")]
 async fn strangers_get_three_guesses_of_a_code_typed_and_no_more() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("strangers");
     let dir_old = alone(&base, "Ana");
@@ -622,6 +626,7 @@ async fn strangers_get_three_guesses_of_a_code_typed_and_no_more() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_computer_without_room_for_the_account_takes_none_of_it() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("room");
     let dir_old = alone(&base, "Ana");
@@ -650,6 +655,7 @@ async fn a_computer_without_room_for_the_account_takes_none_of_it() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_code_runs_out() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("expired");
     let mut opts = options(free_port(), &[], "new");
@@ -665,6 +671,7 @@ async fn a_code_runs_out() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_new_computer_takes_an_account_only_with_its_own_yes() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("new-yes");
     let dir_old = alone(&base, "Ana");
@@ -693,6 +700,7 @@ async fn the_new_computer_takes_an_account_only_with_its_own_yes() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_folder_is_free_when_the_end_of_a_move_is_told() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("free");
     let dir_old = alone(&base, "Ana");
@@ -767,6 +775,7 @@ fn attachments(dir: &Path, count: usize, size: usize, large: usize) -> Vec<(Stri
 #[tokio::test(flavor = "multi_thread")]
 async fn many_and_large_attachments_move_whole() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("large");
     let dir_old = alone(&base, "Ana");
@@ -816,6 +825,7 @@ async fn many_and_large_attachments_move_whole() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_move_cut_short_leaves_both_as_they_were() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("cut");
     let dir_old = alone(&base, "Ana");
@@ -897,6 +907,7 @@ async fn a_move_cut_short_leaves_both_as_they_were() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_last_step_is_finished_with_a_new_code_or_undone_by_hand() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("lost");
     let dir_old = alone(&base, "Ana");
@@ -995,6 +1006,7 @@ fn moved_in_days_ago(dir: &Path, days: u64) {
 #[tokio::test(flavor = "multi_thread")]
 async fn friends_files_set_aside_as_damaged_move_with_the_account() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("damaged-friends");
     let dir_old = alone(&base, "Ana");
@@ -1052,6 +1064,7 @@ async fn friends_files_set_aside_as_damaged_move_with_the_account() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_secret_of_a_move_whose_last_word_is_lost_goes_a_week_on() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("last-word");
     for old_heard in [false, true] {
@@ -1107,6 +1120,7 @@ async fn the_secret_of_a_move_whose_last_word_is_lost_goes_a_week_on() {
 #[tokio::test(flavor = "multi_thread")]
 async fn a_lost_word_before_the_end_is_finished_or_moved_again_with_a_new_code() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("lost-words");
     let dir_old = alone(&base, "Ana");
@@ -1288,6 +1302,7 @@ async fn say_out_of_reach(
 #[tokio::test(flavor = "multi_thread")]
 async fn room_lines_kept_stay_behind_when_the_account_moves() {
     let _one = ONE_AT_A_TIME.lock().await;
+    trace();
     keys();
     let base = base("lines");
     let (dir_a, dir_b, dir_new) = (base.join("ana"), base.join("bea"), base.join("new"));

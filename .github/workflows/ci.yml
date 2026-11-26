@@ -574,6 +574,9 @@ jobs:
         shell: pwsh
         env:
           FOGATA_CI_LEG_SKIP: smoke
+          # fogata-core's transfer tests timed out here twice (Nov 25 and 26): they trace with
+          # this set, and nextest shows a failing test's traces.
+          FOGATA_TRACE: fogata_net=debug,fogata_core=debug,libp2p_swarm=debug
         run: |
           $env:FOGATA_CI_SHA = $env:GITHUB_SHA
           powershell -NoProfile -ExecutionPolicy Bypass -File tools\ci-leg.ps1
