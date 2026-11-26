@@ -1,0 +1,862 @@
+Reuse the echo canceller's filter from before recording started again, and its ERLE
+
+Patches 0010 and 0014 align AEC3 again when recording starts again in a call (a
+microphone turned on again, or the audio device restarting by itself for an output
+changed): the render buffer and delay estimator start over, and so do both linear
+filters and the ERLE (kBufferFlush with recording_restarted; the transparent mode is
+kept). The room has not changed, only the alignment, but AEC3 takes its filters for
+unconverged again (their adaptation, its filter quality) and starts its ERLE over, and
+meanwhile it suppresses by its nonlinear estimate. Measured in the call
+lab against the same call with no change: a word said in double talk in the seconds
+after an output change or an unmute loses 5.3 dB at 0.5 s and 1.9 dB at 3.5 s, and the
+other side's echo comes back in bursts in 4 of 16 changes.
+
+Now, at that restart (recording_restarted: not the restart for other devices of patch
+0016, which forgets the transparent mode and may be another room) the subtractor keeps
+its refined filter (GetFilter()) and its size (SizePartitions()), and the AEC state its
+ERLE (Erle(false), Erle(true), ErleUnbounded()), before resetting them as before. Any
+other flush of the render buffer (kBufferFlush without a restart: a render overrun, the
+restart for other devices) forgets both. A restart again while they are kept and no
+reused filter is in use (0015's two realigns a few ms apart) keeps the ones from before
+the first, as the filters and ERLE then were just reset; its window starts again.
+
+At each new delay found (kNewDetectedDelay) within kReuseWindowBlocks of the restart
+while no reused filter is in use, the filters are reset as before and the saved one is
+tried, shifted by -kReuseMaxShiftPartitions to +kReuseMaxShiftPartitions partitions
+(partition p taking partition p + shift; the delay estimator puts the echo at the same
+partition after the restart, so no shift is the expected one), over the next
+kReuseTrialBlocks blocks whose capture is over kReuseMinTrialPower (y2 summed over the
+capture channels); a trial still running when the window closes ends there. Each
+candidate's output s is compared with the capture y, each
+capture channel with its gain sy/ss clamped to [-kReuseMaxTrialGain,
+kReuseMaxTrialGain], and the one leaving the least (e2/y2, e2 = yy - 2 g sy + g^2 ss) is
+put in both filters, scaled by its gain, if that residual is under kReuseMaxResidual
+and every channel's gain is within [1/kReuseMaxGain, kReuseMaxGain]; the log says
+"AEC3: filter from before recording started again reused" with the shift, gain,
+residual and how long after the restart. A new delay during the trial starts it over;
+a trial that fails leaves the filters as they adapted meanwhile, and the next new delay
+in the window tries again.
+
+While the reused filter is in use (Subtractor::FilterReusedAfterRestart, told to the
+AEC state after each block's subtraction and to the block processor through the echo
+remover):
+- a new delay at most kReuseMaxShiftPartitions blocks from the one before shifts both
+  filters by the blocks the render buffer moved (EchoPathVariability::
+  delay_change_blocks, new) instead of resetting them; a larger one, or any flush, ends
+  the reuse and resets them as before (the AEC state resets as before at every delay
+  change, the ERLE estimator with it);
+- for its first kReuseWindowBlocks blocks, the block processor does not align to an
+  estimate within one block of the one it aligned to, taking it as the estimator's
+  jitter;
+- out of the transparent mode, the linear estimate is usable and the linear output used
+  (UsableLinearEstimate, UseLinearFilterOutput), as once a filter has converged;
+- on the blocks where the linear output keeps at most half of the capture (E2 <=
+  0.5 Y2 summed over the bands), y2 and e2 are summed per band with a forgetting factor
+  of 0.98; from 5 such blocks on, Erle(false), Erle(true) and ErleUnbounded() return
+  max(the estimator's, min(the one saved at the restart, y2/e2)) per band. The
+  unbounded one goes, as upstream, through the residual echo estimator's
+  LinearEstimate to R2_unbounded and the suppressor's dominant nearend detector; the
+  values stay over the estimator's, so positive.
+The reuse lasts until a reset of the filters ends it. The saved filter is forgotten
+kReuseWindowBlocks after the restart unless a reuse is in use.
+
+AdaptiveFirFilter::SetSizePartitions now does nothing when asked, without immediate
+effect, for the size the filter already has and is not changing (the initial state's
+end asking the reused filter for the size it was given at once).
+
+Left alone: a call's start and an echo controller made anew, the restart for other
+devices (0016), the transparent mode (kept as 0010 keeps it), the delay estimator, the
+suppressor's and residual echo's models, any delay change while no filter is reused, and
+the refined filter's gain state (it starts over at the reset as before, also for the
+reused filter). All of it runs on the capture thread, in the block processor's capture
+call. No test reaches it: none restarts recording.
+
+Constants (Subtractor): kReuseWindowBlocks 2500 (10 s), kReuseMaxShiftPartitions 8,
+kReuseTrialBlocks 25, kReuseMinTrialPower 50^2 * 64, kReuseMaxResidual 0.5,
+kReuseMaxTrialGain 4, kReuseMaxGain 1.41; in the AEC state: 0.5 (E2/Y2), 0.98 and 5
+blocks.
+
+Measured: not yet.
+
+diff --git a/modules/audio_processing/aec3/adaptive_fir_filter.cc b/modules/audio_processing/aec3/adaptive_fir_filter.cc
+--- a/modules/audio_processing/aec3/adaptive_fir_filter.cc
++++ b/modules/audio_processing/aec3/adaptive_fir_filter.cc
+@@ -515,6 +515,16 @@
+   RTC_DCHECK_EQ(max_size_partitions_, H_.size());
+   RTC_DCHECK_LE(size, max_size_partitions_);
+ 
++  // Fogata, patch 0017: asking again for the size the filter already has, with
++  // no change under way, changes nothing (a reused filter given its size at
++  // once keeps it when the initial state ends).
++  if (!immediate_effect && std::min(max_size_partitions_, size) ==
++                               target_size_partitions_ &&
++      current_size_partitions_ == target_size_partitions_ &&
++      size_change_counter_ == 0) {
++    return;
++  }
++
+   target_size_partitions_ = std::min(max_size_partitions_, size);
+   if (immediate_effect) {
+     size_t old_size_partitions_ = current_size_partitions_;
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -30,6 +30,7 @@
+ #include "modules/audio_processing/aec3/render_buffer.h"
+ #include "modules/audio_processing/aec3/reverb_model.h"
+ #include "modules/audio_processing/aec3/spectrum_buffer.h"
++#include "modules/audio_processing/aec3/subtractor.h"
+ #include "modules/audio_processing/aec3/subtractor_output.h"
+ #include "modules/audio_processing/aec3/transparent_mode.h"
+ #include "modules/audio_processing/logging/apm_data_dumper.h"
+@@ -136,12 +137,48 @@
+       echo_audibility_(
+           config_.echo_audibility.use_stationarity_properties_at_init),
+       reverb_model_estimator_(config_, num_capture_channels_),
+-      subtractor_output_analyzer_(num_capture_channels_) {}
++      subtractor_output_analyzer_(num_capture_channels_),
++      erle_at_restart_(num_capture_channels_),
++      erle_onset_compensated_at_restart_(num_capture_channels_),
++      erle_unbounded_at_restart_(num_capture_channels_),
++      reused_filter_y2_(num_capture_channels_),
++      reused_filter_e2_(num_capture_channels_),
++      reused_filter_blocks_(num_capture_channels_, 0),
++      erle_from_before_restart_(num_capture_channels_),
++      erle_onset_compensated_from_before_restart_(num_capture_channels_),
++      erle_unbounded_from_before_restart_(num_capture_channels_) {}
+ 
+ AecState::~AecState() = default;
+ 
+ void AecState::HandleEchoPathChange(
+     const EchoPathVariability& echo_path_variability) {
++  // Fogata, patch 0017: recording starting again (not for other devices) keeps
++  // the ERLE it resets, for the filter from before it if the subtractor reuses
++  // it; any other flush forgets it, as the subtractor forgets that filter. A
++  // restart again within Subtractor::kReuseWindowBlocks while none is in use
++  // keeps the ERLE from before the first (the one now was just reset), as the
++  // subtractor keeps its filter.
++  if (echo_path_variability.recording_restarted && erle_saved_at_restart_ &&
++      !filter_reused_ &&
++      blocks_since_erle_saved_ <= Subtractor::kReuseWindowBlocks) {
++    blocks_since_erle_saved_ = 0;
++  } else if (echo_path_variability.recording_restarted) {
++    blocks_since_erle_saved_ = 0;
++    const auto erle = Erle(/*onset_compensated=*/false);
++    const auto erle_onset_compensated = Erle(/*onset_compensated=*/true);
++    const auto erle_unbounded = ErleUnbounded();
++    RTC_DCHECK_EQ(num_capture_channels_, erle.size());
++    std::copy(erle.begin(), erle.end(), erle_at_restart_.begin());
++    std::copy(erle_onset_compensated.begin(), erle_onset_compensated.end(),
++              erle_onset_compensated_at_restart_.begin());
++    std::copy(erle_unbounded.begin(), erle_unbounded.end(),
++              erle_unbounded_at_restart_.begin());
++    erle_saved_at_restart_ = true;
++  } else if (echo_path_variability.delay_change ==
++             EchoPathVariability::DelayAdjustment::kBufferFlush) {
++    erle_saved_at_restart_ = false;
++  }
++
+   const auto full_reset = [&]() {
+     filter_analyzer_.Reset();
+     capture_signal_saturation_ = false;
+@@ -250,6 +287,10 @@
+   erle_estimator_.Update(render_buffer, adaptive_filter_frequency_responses,
+                          avg_render_spectrum_with_reverb, Y2, E2_refined,
+                          subtractor_output_analyzer_.ConvergedFilters());
++  if (blocks_since_erle_saved_ <= Subtractor::kReuseWindowBlocks) {
++    ++blocks_since_erle_saved_;
++  }
++  UpdateErleFromBeforeRestart(E2_refined, Y2);
+ 
+   erl_estimator_.Update(
+       subtractor_output_analyzer_.ConvergedFilters(),
+@@ -326,6 +367,83 @@
+                         subtractor_output[0].e2_refined);
+ }
+ 
++void AecState::SetFilterReusedAfterRestart(bool reused) {
++  if (reused == filter_reused_) {
++    return;
++  }
++  // Fogata, patch 0017: what the reused filter shows is counted from the block
++  // it comes in use.
++  filter_reused_ = reused;
++  erle_from_before_restart_active_ = false;
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    reused_filter_y2_[ch].fill(0.f);
++    reused_filter_e2_[ch].fill(0.f);
++    reused_filter_blocks_[ch] = 0;
++  }
++}
++
++void AecState::UpdateErleFromBeforeRestart(
++    std::span<const std::array<float, kFftLengthBy2Plus1>> E2,
++    std::span<const std::array<float, kFftLengthBy2Plus1>> Y2) {
++  // Fogata, patch 0017: blocks the reused filter cancels at least half of
++  // count, each band's power forgotten by kForgetting at each such block; from
++  // kMinBlocks of them on, the ERLE is max(estimator, min(at restart, y2/e2)).
++  constexpr float kMaxResidual = 0.5f;
++  constexpr float kForgetting = 0.98f;
++  constexpr int kMinBlocks = 5;
++  erle_from_before_restart_active_ = false;
++  if (!filter_reused_ || !erle_saved_at_restart_) {
++    return;
++  }
++  RTC_DCHECK_EQ(num_capture_channels_, E2.size());
++  RTC_DCHECK_EQ(num_capture_channels_, Y2.size());
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    const float e2 = std::accumulate(E2[ch].begin(), E2[ch].end(), 0.f);
++    const float y2 = std::accumulate(Y2[ch].begin(), Y2[ch].end(), 0.f);
++    if (y2 > 0.f && e2 <= kMaxResidual * y2) {
++      for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++        reused_filter_y2_[ch][k] =
++            kForgetting * reused_filter_y2_[ch][k] + Y2[ch][k];
++        reused_filter_e2_[ch][k] =
++            kForgetting * reused_filter_e2_[ch][k] + E2[ch][k];
++      }
++      ++reused_filter_blocks_[ch];
++    }
++    erle_from_before_restart_active_ =
++        erle_from_before_restart_active_ ||
++        reused_filter_blocks_[ch] >= kMinBlocks;
++  }
++  if (!erle_from_before_restart_active_) {
++    return;
++  }
++  const auto erle = erle_estimator_.Erle(/*onset_compensated=*/false);
++  const auto erle_onset_compensated =
++      erle_estimator_.Erle(/*onset_compensated=*/true);
++  const auto erle_unbounded = erle_estimator_.ErleUnbounded();
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    const bool shown = reused_filter_blocks_[ch] >= kMinBlocks;
++    for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++      const auto from_before = [&](float estimate, float at_restart) {
++        if (!shown) {
++          return estimate;
++        }
++        const float measured =
++            reused_filter_e2_[ch][k] > 0.f
++                ? reused_filter_y2_[ch][k] / reused_filter_e2_[ch][k]
++                : at_restart;
++        return std::max(estimate, std::min(at_restart, measured));
++      };
++      erle_from_before_restart_[ch][k] =
++          from_before(erle[ch][k], erle_at_restart_[ch][k]);
++      erle_onset_compensated_from_before_restart_[ch][k] =
++          from_before(erle_onset_compensated[ch][k],
++                      erle_onset_compensated_at_restart_[ch][k]);
++      erle_unbounded_from_before_restart_[ch][k] =
++          from_before(erle_unbounded[ch][k], erle_unbounded_at_restart_[ch][k]);
++    }
++  }
++}
++
+ AecState::InitialState::InitialState(const EchoCanceller3Config& config)
+     : conservative_initial_phase_(config.filter.conservative_initial_phase),
+       initial_state_seconds_(config.filter.initial_state_seconds) {
+diff --git a/modules/audio_processing/aec3/aec_state.h b/modules/audio_processing/aec3/aec_state.h
+--- a/modules/audio_processing/aec3/aec_state.h
++++ b/modules/audio_processing/aec3/aec_state.h
+@@ -51,17 +51,26 @@
+ 
+   // Returns whether the echo subtractor can be used to determine the residual
+   // echo.
++  // Fogata, patch 0017: also while the filter from before recording started
++  // again is in use, out of the transparent mode.
+   bool UsableLinearEstimate() const {
+-    return filter_quality_state_.LinearFilterUsable() &&
++    return (filter_quality_state_.LinearFilterUsable() ||
++            ReusedFilterUsable()) &&
+            config_.filter.use_linear_filter;
+   }
+ 
+   // Returns whether the echo subtractor output should be used as output.
+   bool UseLinearFilterOutput() const {
+-    return filter_quality_state_.LinearFilterUsable() &&
++    return (filter_quality_state_.LinearFilterUsable() ||
++            ReusedFilterUsable()) &&
+            config_.filter.use_linear_filter;
+   }
+ 
++  // Fogata, patch 0017: whether the subtractor's refined filter is the one from
++  // before recording started again (Subtractor::FilterReusedAfterRestart). Set
++  // at each block, after the subtractor's processing.
++  void SetFilterReusedAfterRestart(bool reused);
++
+   // Returns whether the render signal is currently active.
+   bool ActiveRender() const { return blocks_with_active_render_ > 200; }
+ 
+@@ -76,13 +85,23 @@
+   }
+ 
+   // Returns the ERLE.
++  // Fogata, patch 0017: while the filter from before recording started again
++  // is in use, the ERLE it had before, as far as it shows now
++  // (UpdateErleFromBeforeRestart).
+   std::span<const std::array<float, kFftLengthBy2Plus1>> Erle(
+       bool onset_compensated) const {
++    if (erle_from_before_restart_active_) {
++      return onset_compensated ? erle_onset_compensated_from_before_restart_
++                               : erle_from_before_restart_;
++    }
+     return erle_estimator_.Erle(onset_compensated);
+   }
+ 
+   // Returns the non-capped ERLE.
+   std::span<const std::array<float, kFftLengthBy2Plus1>> ErleUnbounded() const {
++    if (erle_from_before_restart_active_) {
++      return erle_unbounded_from_before_restart_;
++    }
+     return erle_estimator_.ErleUnbounded();
+   }
+ 
+@@ -302,6 +321,36 @@
+   ReverbModelEstimator reverb_model_estimator_;
+   ReverbModel avg_render_reverb_;
+   SubtractorOutputAnalyzer subtractor_output_analyzer_;
++
++  // Fogata, patch 0017: the filter from before recording started again.
++  bool ReusedFilterUsable() const {
++    return filter_reused_ && !TransparentModeActive();
++  }
++  // While it is in use, the ERLE is at least what the linear output shows of
++  // it now (y2/e2 over the blocks it cancels at least half of), up to what it
++  // was before the restart.
++  void UpdateErleFromBeforeRestart(
++      std::span<const std::array<float, kFftLengthBy2Plus1>> E2,
++      std::span<const std::array<float, kFftLengthBy2Plus1>> Y2);
++  bool filter_reused_ = false;
++  // The ERLE at the restart (Erle(false), Erle(true), ErleUnbounded()).
++  bool erle_saved_at_restart_ = false;
++  int blocks_since_erle_saved_ = 0;
++  std::vector<std::array<float, kFftLengthBy2Plus1>> erle_at_restart_;
++  std::vector<std::array<float, kFftLengthBy2Plus1>>
++      erle_onset_compensated_at_restart_;
++  std::vector<std::array<float, kFftLengthBy2Plus1>> erle_unbounded_at_restart_;
++  // What the reused filter shows: y2 and e2 per band, and how many blocks.
++  std::vector<std::array<float, kFftLengthBy2Plus1>> reused_filter_y2_;
++  std::vector<std::array<float, kFftLengthBy2Plus1>> reused_filter_e2_;
++  std::vector<int> reused_filter_blocks_;
++  // The ERLE returned while it is active.
++  bool erle_from_before_restart_active_ = false;
++  std::vector<std::array<float, kFftLengthBy2Plus1>> erle_from_before_restart_;
++  std::vector<std::array<float, kFftLengthBy2Plus1>>
++      erle_onset_compensated_from_before_restart_;
++  std::vector<std::array<float, kFftLengthBy2Plus1>>
++      erle_unbounded_from_before_restart_;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -11,6 +11,7 @@
+ 
+ #include <atomic>
+ #include <cstddef>
++#include <cstdlib>
+ #include <memory>
+ #include <optional>
+ #include <utility>
+@@ -26,6 +27,7 @@
+ #include "modules/audio_processing/aec3/echo_remover.h"
+ #include "modules/audio_processing/aec3/render_delay_buffer.h"
+ #include "modules/audio_processing/aec3/render_delay_controller.h"
++#include "modules/audio_processing/aec3/subtractor.h"
+ #include "modules/audio_processing/logging/apm_data_dumper.h"
+ #include "rtc_base/checks.h"
+ #include "rtc_base/logging.h"
+@@ -82,6 +84,11 @@
+   RenderDelayBuffer::BufferingEvent render_event_;
+   size_t capture_call_counter_ = 0;
+   std::optional<DelayEstimate> estimated_delay_;
++  // Fogata, patch 0017: the delay estimate the render buffer was last aligned
++  // to, and for how many blocks the filter from before recording started again
++  // has been in use.
++  std::optional<size_t> aligned_delay_;
++  int filter_reused_blocks_ = 0;
+ };
+ 
+ std::atomic<int> BlockProcessorImpl::instance_count_(0);
+@@ -125,6 +132,7 @@
+     if (!capture_properly_started_) {
+       capture_properly_started_ = true;
+       render_buffer_->Reset();
++      aligned_delay_ = std::nullopt;
+       if (delay_controller_)
+         delay_controller_->Reset(true);
+     }
+@@ -189,9 +197,24 @@
+         render_buffer_->GetDownsampledRenderBuffer(), render_buffer_->Delay(),
+         *capture_block);
+ 
+-    if (estimated_delay_) {
++    // Fogata, patch 0017: while the filter from before recording started again
++    // is in use (Subtractor::FilterReusedAfterRestart), a new estimate within
++    // a block of the one applied is taken as the estimator's jitter, not as a
++    // move of the echo, for kReuseWindowBlocks: each delay change shifts or
++    // resets that filter.
++    const bool filter_reused = echo_remover_->FilterReusedAfterRestart();
++    filter_reused_blocks_ = filter_reused ? filter_reused_blocks_ + 1 : 0;
++    const bool ignore_estimate =
++        estimated_delay_ && filter_reused && aligned_delay_ &&
++        filter_reused_blocks_ <= Subtractor::kReuseWindowBlocks &&
++        std::abs(static_cast<int>(estimated_delay_->delay) -
++                 static_cast<int>(*aligned_delay_)) <= 1;
++
++    if (estimated_delay_ && !ignore_estimate) {
++      const int delay_before = static_cast<int>(render_buffer_->Delay());
+       bool delay_change =
+           render_buffer_->AlignFromDelay(estimated_delay_->delay);
++      aligned_delay_ = estimated_delay_->delay;
+       if (delay_change) {
+         LoggingSeverity log_level =
+             config_.delay.log_warning_on_delay_changes ? LS_WARNING : LS_INFO;
+@@ -199,6 +222,8 @@
+                              << " at block " << capture_call_counter_;
+         echo_path_variability.delay_change =
+             EchoPathVariability::DelayAdjustment::kNewDetectedDelay;
++        echo_path_variability.delay_change_blocks =
++            static_cast<int>(render_buffer_->Delay()) - delay_before;
+       }
+     }
+ 
+diff --git a/modules/audio_processing/aec3/echo_path_variability.h b/modules/audio_processing/aec3/echo_path_variability.h
+--- a/modules/audio_processing/aec3/echo_path_variability.h
++++ b/modules/audio_processing/aec3/echo_path_variability.h
+@@ -29,6 +29,10 @@
+   // Fogata: the change is recording starting again
+   // (BlockProcessor::RestartForRecording).
+   bool recording_restarted = false;
++  // Fogata, patch 0017: for kNewDetectedDelay, how many blocks later the played
++  // sound is now taken than before the change (the render buffer's delay after
++  // it less the one before); 0 otherwise.
++  int delay_change_blocks = 0;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -181,6 +181,11 @@
+     capture_output_used_ = capture_output_used;
+   }
+ 
++  // Fogata, patch 0017: see Subtractor::FilterReusedAfterRestart.
++  bool FilterReusedAfterRestart() const override {
++    return subtractor_.FilterReusedAfterRestart();
++  }
++
+  private:
+   static std::atomic<int> instance_count_;
+   const EchoCanceller3Config config_;
+@@ -423,6 +428,10 @@
+   // Perform linear echo cancellation.
+   subtractor_.Process(*render_buffer, *y, render_signal_analyzer_, aec_state_,
+                       subtractor_output);
++  // Fogata, patch 0017: the state follows the filter from before recording
++  // started again, put in use (or shifted, or dropped) by the subtractor.
++  aec_state_.SetFilterReusedAfterRestart(
++      subtractor_.FilterReusedAfterRestart());
+ 
+   const bool ml_ree_is_active = residual_echo_estimator_.IsMlReeActive();
+ 
+diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_processing/aec3/echo_remover.h
+--- a/modules/audio_processing/aec3/echo_remover.h
++++ b/modules/audio_processing/aec3/echo_remover.h
+@@ -61,6 +61,10 @@
+   // resulting output is anyway not used, for instance when the endpoint is
+   // muted.
+   virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
++
++  // Fogata, patch 0017: whether the linear filter in use is the one from before
++  // recording started again (Subtractor::FilterReusedAfterRestart).
++  virtual bool FilterReusedAfterRestart() const { return false; }
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_processing/aec3/subtractor.cc
+--- a/modules/audio_processing/aec3/subtractor.cc
++++ b/modules/audio_processing/aec3/subtractor.cc
+@@ -12,7 +12,9 @@
+ 
+ #include <algorithm>
+ #include <array>
++#include <cmath>
+ #include <cstddef>
++#include <cstdlib>
+ #include <memory>
+ #include <span>
+ #include <vector>
+@@ -34,6 +36,7 @@
+ #include "modules/audio_processing/aec3/subtractor_output.h"
+ #include "modules/audio_processing/logging/apm_data_dumper.h"
+ #include "rtc_base/checks.h"
++#include "rtc_base/logging.h"
+ #include "rtc_base/numerics/safe_minmax.h"
+ 
+ namespace webrtc {
+@@ -70,6 +73,29 @@
+   }
+ }
+ 
++// Fogata, patch 0017: a copy of the first `size` partitions of `H` in which
++// partition p is partition p + shift of `H`, zero where that is outside them.
++std::vector<std::vector<FftData>> ShiftedPartitions(
++    const std::vector<std::vector<FftData>>& H,
++    size_t size,
++    int shift) {
++  std::vector<std::vector<FftData>> shifted(H.size(),
++                                            std::vector<FftData>(H[0].size()));
++  for (auto& H_p : shifted) {
++    for (auto& H_p_ch : H_p) {
++      H_p_ch.Clear();
++    }
++  }
++  const int num_partitions = static_cast<int>(std::min(size, H.size()));
++  for (int p = 0; p < num_partitions; ++p) {
++    const int source = p + shift;
++    if (source >= 0 && source < num_partitions) {
++      shifted[p] = H[source];
++    }
++  }
++  return shifted;
++}
++
+ }  // namespace
+ 
+ Subtractor::Subtractor(const Environment& env,
+@@ -162,9 +188,50 @@
+     }
+   };
+ 
+-  if (echo_path_variability.delay_change !=
+-      EchoPathVariability::DelayAdjustment::kNone) {
++  // Fogata, patch 0017: recording starting again (patch 0010, not the restart
++  // for other devices of patch 0016) keeps the refined filter it resets, to be
++  // tried again at the delay found next; any other flush of the render buffer
++  // forgets it. A restart again while one is kept and none is in use (two
++  // realigns a few ms apart, patch 0015) keeps the one from before the first:
++  // the filters it would save now were just reset.
++  if (echo_path_variability.recording_restarted) {
++    if (!saved_filters_.empty() && !filter_reused_ &&
++        blocks_since_restart_ <= kReuseWindowBlocks) {
++      EndFilterReuse(/*forget=*/false);
++    } else {
++      EndFilterReuse(/*forget=*/true);
++      saved_filters_.resize(num_capture_channels_);
++      for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++        saved_filters_[ch] = refined_filters_[ch]->GetFilter();
++      }
++      saved_size_partitions_ = refined_filters_[0]->SizePartitions();
++    }
++    blocks_since_restart_ = 0;
++  } else if (echo_path_variability.delay_change ==
++             EchoPathVariability::DelayAdjustment::kBufferFlush) {
++    EndFilterReuse(/*forget=*/true);
++  }
++
++  // Fogata, patch 0017: while the reused filter is in use, a new delay close to
++  // the one before shifts it, as the played sound is now taken that many blocks
++  // later or sooner, instead of starting over.
++  const bool new_delay =
++      echo_path_variability.delay_change ==
++      EchoPathVariability::DelayAdjustment::kNewDetectedDelay;
++  if (new_delay && filter_reused_ &&
++      std::abs(echo_path_variability.delay_change_blocks) <=
++          kReuseMaxShiftPartitions) {
++    ShiftFilters(echo_path_variability.delay_change_blocks);
++  } else if (echo_path_variability.delay_change !=
++             EchoPathVariability::DelayAdjustment::kNone) {
+     full_reset();
++    if (new_delay) {
++      EndFilterReuse(/*forget=*/false);
++      if (!saved_filters_.empty() &&
++          blocks_since_restart_ <= kReuseWindowBlocks) {
++        StartFilterReuseTrial();
++      }
++    }
+   }
+ 
+   if (echo_path_variability.gain_change) {
+@@ -185,6 +252,173 @@
+   }
+ }
+ 
++void Subtractor::StartFilterReuseTrial() {
++  RTC_DCHECK_EQ(saved_filters_.size(), num_capture_channels_);
++  reuse_candidates_.clear();
++  reuse_candidates_.resize(2 * kReuseMaxShiftPartitions + 1);
++  for (int k = 0; k < static_cast<int>(reuse_candidates_.size()); ++k) {
++    ReuseCandidate& candidate = reuse_candidates_[k];
++    candidate.shift = k - kReuseMaxShiftPartitions;
++    candidate.H.resize(num_capture_channels_);
++    for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++      candidate.H[ch] = ShiftedPartitions(
++          saved_filters_[ch], saved_size_partitions_, candidate.shift);
++    }
++    candidate.sy.assign(num_capture_channels_, 0.f);
++    candidate.ss.assign(num_capture_channels_, 0.f);
++  }
++  reuse_trial_yy_.assign(num_capture_channels_, 0.f);
++  reuse_trial_blocks_ = 0;
++  reuse_trial_active_ = true;
++}
++
++void Subtractor::UpdateFilterReuseTrial(const RenderBuffer& render_buffer,
++                                        const Block& capture) {
++  if (!reuse_trial_active_) {
++    return;
++  }
++  // Only blocks with enough capture count.
++  float y2 = 0.f;
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    std::span<const float> y = capture.View(/*band=*/0, ch);
++    for (float y_k : y) {
++      y2 += y_k * y_k;
++    }
++  }
++  if (y2 <= kReuseMinTrialPower) {
++    return;
++  }
++
++  // Each candidate's echo estimate, and its sums against the capture.
++  constexpr float kScale = 1.0f / kFftLengthBy2;
++  std::array<float, kFftLength> s;
++  FftData S;
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    std::span<const float> y = capture.View(/*band=*/0, ch);
++    for (float y_k : y) {
++      reuse_trial_yy_[ch] += y_k * y_k;
++    }
++    for (ReuseCandidate& candidate : reuse_candidates_) {
++      ApplyFilter(render_buffer, saved_size_partitions_, candidate.H[ch], &S);
++      fft_.Ifft(S, &s);
++      for (size_t k = 0; k < kBlockSize; ++k) {
++        const float s_k = kScale * s[k + kFftLengthBy2];
++        candidate.sy[ch] += s_k * y[k];
++        candidate.ss[ch] += s_k * s_k;
++      }
++    }
++  }
++  if (++reuse_trial_blocks_ < kReuseTrialBlocks) {
++    return;
++  }
++  reuse_trial_active_ = false;
++
++  // The candidate leaving the least of the capture, each channel's estimate
++  // scaled by its gain (sy/ss, clamped to +-kReuseMaxTrialGain).
++  const auto gain = [](float sy, float ss) {
++    return ss > 0.f
++               ? SafeClamp(sy / ss, -kReuseMaxTrialGain, kReuseMaxTrialGain)
++               : 0.f;
++  };
++  float yy = 0.f;
++  for (float yy_ch : reuse_trial_yy_) {
++    yy += yy_ch;
++  }
++  const ReuseCandidate* best = nullptr;
++  float best_residual = 0.f;
++  for (const ReuseCandidate& candidate : reuse_candidates_) {
++    float e2 = 0.f;
++    for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++      const float g = gain(candidate.sy[ch], candidate.ss[ch]);
++      e2 += std::max(reuse_trial_yy_[ch] - 2.f * g * candidate.sy[ch] +
++                         g * g * candidate.ss[ch],
++                     0.f);
++    }
++    const float residual = yy > 0.f ? e2 / yy : 1.f;
++    if (!best || residual < best_residual) {
++      best = &candidate;
++      best_residual = residual;
++    }
++  }
++  RTC_DCHECK(best);
++  bool reuse = best_residual < kReuseMaxResidual;
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    const float g = gain(best->sy[ch], best->ss[ch]);
++    reuse = reuse && g >= 1.f / kReuseMaxGain && g <= kReuseMaxGain;
++  }
++  if (reuse) {
++    // In use from this block on: both filters take it, scaled.
++    for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++      const float g = gain(best->sy[ch], best->ss[ch]);
++      refined_filters_[ch]->SetSizePartitions(saved_size_partitions_, true);
++      refined_filters_[ch]->SetFilter(saved_size_partitions_, best->H[ch]);
++      refined_filters_[ch]->ScaleFilter(g);
++      coarse_filter_[ch]->SetFilter(saved_size_partitions_, best->H[ch]);
++      coarse_filter_[ch]->ScaleFilter(g);
++      UpdateRefinedImpulseResponse(ch);
++      filter_misadjustment_estimators_[ch].Reset();
++      poor_coarse_filter_counters_[ch] = 0;
++    }
++    filter_reused_ = true;
++    RTC_LOG(LS_INFO) << "AEC3: filter from before recording started again "
++                        "reused, shifted by "
++                     << best->shift << " partitions, gain "
++                     << gain(best->sy[0], best->ss[0]) << ", residual "
++                     << best_residual << ", "
++                     << blocks_since_restart_ << " blocks after the restart";
++  }
++  reuse_candidates_.clear();
++  reuse_trial_yy_.clear();
++}
++
++void Subtractor::EndFilterReuse(bool forget) {
++  filter_reused_ = false;
++  reuse_trial_active_ = false;
++  reuse_candidates_.clear();
++  reuse_trial_yy_.clear();
++  if (forget) {
++    saved_filters_.clear();
++    saved_size_partitions_ = 0;
++  }
++}
++
++void Subtractor::ShiftFilters(int shift) {
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    const size_t refined_size = refined_filters_[ch]->SizePartitions();
++    refined_filters_[ch]->SetFilter(
++        refined_size,
++        ShiftedPartitions(refined_filters_[ch]->GetFilter(), refined_size,
++                          shift));
++    const size_t coarse_size = coarse_filter_[ch]->SizePartitions();
++    coarse_filter_[ch]->SetFilter(
++        coarse_size, ShiftedPartitions(coarse_filter_[ch]->GetFilter(),
++                                       coarse_size, shift));
++    UpdateRefinedImpulseResponse(ch);
++  }
++}
++
++void Subtractor::UpdateRefinedImpulseResponse(size_t ch) {
++  const size_t size = refined_filters_[ch]->SizePartitions();
++  const std::vector<std::vector<FftData>>& H =
++      refined_filters_[ch]->GetFilter();
++  std::vector<float>& h = refined_impulse_responses_[ch];
++  h.resize(GetTimeDomainLength(static_cast<int>(size)));
++  std::fill(h.begin(), h.end(), 0.f);
++  constexpr float kScale = 1.0f / kFftLengthBy2;
++  std::array<float, kFftLength> h_p;
++  for (size_t p = 0; p < size; ++p) {
++    for (size_t render_ch = 0; render_ch < H[p].size(); ++render_ch) {
++      fft_.Ifft(H[p][render_ch], &h_p);
++      for (size_t k = 0, j = p * kFftLengthBy2; k < kFftLengthBy2; ++k, ++j) {
++        const float h_k = kScale * h_p[k];
++        if (render_ch == 0 || std::fabs(h[j]) < std::fabs(h_k)) {
++          h[j] = h_k;
++        }
++      }
++    }
++  }
++}
++
+ void Subtractor::Process(const RenderBuffer& render_buffer,
+                          const Block& capture,
+                          const RenderSignalAnalyzer& render_signal_analyzer,
+@@ -192,6 +426,19 @@
+                          std::span<SubtractorOutput> outputs) {
+   RTC_DCHECK_EQ(num_capture_channels_, capture.NumChannels());
+ 
++  // Fogata, patch 0017: the filter from before recording started again is
++  // tried at a new delay within kReuseWindowBlocks of the restart, and is
++  // forgotten after it unless in use (a trial still running then ends, so none
++  // puts it in use later than that).
++  if (!saved_filters_.empty()) {
++    if (blocks_since_restart_ <= kReuseWindowBlocks) {
++      ++blocks_since_restart_;
++    } else if (!filter_reused_) {
++      EndFilterReuse(/*forget=*/true);
++    }
++  }
++  UpdateFilterReuseTrial(render_buffer, capture);
++
+   // Compute the render powers.
+   const bool same_filter_sizes = refined_filters_[0]->SizePartitions() ==
+                                  coarse_filter_[0]->SizePartitions();
+diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processing/aec3/subtractor.h
+--- a/modules/audio_processing/aec3/subtractor.h
++++ b/modules/audio_processing/aec3/subtractor.h
+@@ -27,6 +27,7 @@
+ #include "modules/audio_processing/aec3/block.h"
+ #include "modules/audio_processing/aec3/coarse_filter_update_gain.h"
+ #include "modules/audio_processing/aec3/echo_path_variability.h"
++#include "modules/audio_processing/aec3/fft_data.h"
+ #include "modules/audio_processing/aec3/refined_filter_update_gain.h"
+ #include "modules/audio_processing/aec3/render_buffer.h"
+ #include "modules/audio_processing/aec3/render_signal_analyzer.h"
+@@ -39,6 +40,23 @@
+ // Proves linear echo cancellation functionality
+ class Subtractor {
+  public:
++  // Fogata, patch 0017: reuse of the refined filter from before recording
++  // started again (EchoPathVariability::recording_restarted). How long after
++  // the restart a new delay may start a trial of it, in blocks.
++  static constexpr int kReuseWindowBlocks = 2500;
++  // How far the filter is shifted, either way, in its trial and at a delay
++  // change while it is in use, in partitions (blocks).
++  static constexpr int kReuseMaxShiftPartitions = 8;
++  // How many blocks of capture over kReuseMinTrialPower a trial takes.
++  static constexpr int kReuseTrialBlocks = 25;
++  static constexpr float kReuseMinTrialPower = 50.f * 50.f * kBlockSize;
++  // The largest residual (e2/y2 over the trial) of a filter reused.
++  static constexpr float kReuseMaxResidual = 0.5f;
++  // The range the trial's gain is clamped to, and the one it must be in for the
++  // filter to be reused.
++  static constexpr float kReuseMaxTrialGain = 4.f;
++  static constexpr float kReuseMaxGain = 1.41f;
++
+   Subtractor(const Environment& env,
+              const EchoCanceller3Config& config,
+              size_t num_render_channels,
+@@ -61,6 +79,10 @@
+   // Exits the initial state.
+   void ExitInitialState();
+ 
++  // Fogata, patch 0017: whether the refined filter in use is the one from
++  // before recording started again, reused (shifted and scaled) after a trial.
++  bool FilterReusedAfterRestart() const { return filter_reused_; }
++
+   // Returns the block-wise frequency responses for the refined adaptive
+   // filters.
+   const std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>&
+@@ -127,6 +149,40 @@
+     int overhang_ = 0.f;
+   };
+ 
++  // Fogata, patch 0017: the reuse of the filter from before recording started
++  // again.
++  // Tries the saved filter, shifted, against the capture from the next blocks.
++  void StartFilterReuseTrial();
++  // Adds a block to the trial, and at its end puts the best candidate in use
++  // when it is good enough.
++  void UpdateFilterReuseTrial(const RenderBuffer& render_buffer,
++                              const Block& capture);
++  // Ends the trial and the use of the reused filter, and with `forget` drops
++  // the saved filter.
++  void EndFilterReuse(bool forget);
++  // Shifts the refined and coarse filters by `shift` partitions: partition p
++  // takes partition p + shift.
++  void ShiftFilters(int shift);
++  // Recomputes the refined impulse response of a channel from its filter.
++  void UpdateRefinedImpulseResponse(size_t ch);
++
++  struct ReuseCandidate {
++    int shift = 0;
++    // Per capture channel: the shifted filter and the trial's sums.
++    std::vector<std::vector<std::vector<FftData>>> H;
++    std::vector<float> sy;
++    std::vector<float> ss;
++  };
++  // The refined filters at the restart and their size; empty when none.
++  std::vector<std::vector<std::vector<FftData>>> saved_filters_;
++  size_t saved_size_partitions_ = 0;
++  int blocks_since_restart_ = 0;
++  bool reuse_trial_active_ = false;
++  int reuse_trial_blocks_ = 0;
++  std::vector<float> reuse_trial_yy_;
++  std::vector<ReuseCandidate> reuse_candidates_;
++  bool filter_reused_ = false;
++
+   const Aec3Fft fft_;
+   ApmDataDumper* data_dumper_;
+   const Aec3Optimization optimization_;
