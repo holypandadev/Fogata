@@ -22,6 +22,7 @@ part 'call/peer.dart';
 part 'call/screen_sound.dart';
 part 'call/sdp.dart';
 part 'call/signalling.dart';
+part 'call/test_taps.dart';
 
 /// Every connection carries four channels in this order, so turning the microphone,
 /// camera or screen on and off only swaps tracks and never renegotiates.
@@ -2648,6 +2649,12 @@ class Call extends ChangeNotifier {
     }
     peer.connection = connection;
     peer._madeAt = callClock();
+    // Tests only (FOGATA_TEST_TAP_DIR): its received sound's statistics, every 100 ms.
+    _tapStats(
+      connection,
+      peer.id,
+      () => !_closed && peer.connection == connection,
+    );
     // Nothing of it sent yet (see [_sentWhileGone]).
     peer._blind = false;
     peer.state = RTCPeerConnectionState.RTCPeerConnectionStateNew;

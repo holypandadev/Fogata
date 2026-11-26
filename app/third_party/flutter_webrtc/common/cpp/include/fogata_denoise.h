@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 
+#include "fogata_test_tap.h"
 #include "rtc_audio_processing.h"
 
 namespace flutter_webrtc_plugin {
@@ -32,7 +33,7 @@ class FogataDenoiser : public libwebrtc::RTCAudioProcessing::CustomProcessing {
   static constexpr int kMaxFrames = 480;
 
   explicit FogataDenoiser(const FogataDenoiseApi* api)
-      : api_(api), state_(api->create()) {}
+      : api_(api), state_(api->create()), tap_(FogataNewTap("apm")) {}
   ~FogataDenoiser() override = default;
 
   void SetOn(bool on) { on_.store(on, std::memory_order_relaxed); }
@@ -48,6 +49,10 @@ class FogataDenoiser : public libwebrtc::RTCAudioProcessing::CustomProcessing {
         buffer_size < num_frames) {
       return;
     }
+    // Tests (FOGATA_TEST_TAP_DIR, fogata_test_tap.h): the frame as the processing left it.
+    if (tap_ != nullptr) {
+      tap_->WriteFloat(buffer, static_cast<size_t>(num_frames), num_frames * 100);
+    }
     api_->process(state_, on_.load(std::memory_order_relaxed), num_frames * 100,
                   buffer, static_cast<size_t>(num_frames));
   }
@@ -60,6 +65,7 @@ class FogataDenoiser : public libwebrtc::RTCAudioProcessing::CustomProcessing {
  private:
   const FogataDenoiseApi* api_;
   void* state_;
+  FogataTapWriter* const tap_;
   std::atomic<bool> on_{false};
 };
 

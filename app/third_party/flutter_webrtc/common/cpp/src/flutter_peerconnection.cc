@@ -3,6 +3,7 @@
 #include "base/scoped_ref_ptr.h"
 #include "flutter_data_channel.h"
 #include "flutter_frame_capturer.h"
+#include "fogata_test_tap.h"
 #include "rtc_dtmf_sender.h"
 #include "rtc_rtp_parameters.h"
 
@@ -1481,12 +1482,52 @@ void FlutterPeerConnectionObserver::OnAddTrack(
   }
 }
 
+// Fogata, for tests only (FOGATA_TEST_TAP_DIR, fogata_test_tap.h): each received voice as
+// its jitter buffer gives it out, before the volume and the mixing (libwebrtc hands a
+// track's sinks the decoded frame before its gain). The wrapper makes a new track object
+// for every receiver->track() and takes the sink off when that object goes, so the tap
+// keeps the object it gave the sink, with the sink, for the rest of the process.
+class FogataRemoteAudioTap : public libwebrtc::AudioTrackSink {
+ public:
+  explicit FogataRemoteAudioTap(FogataTapWriter* writer) : writer_(writer) {}
+  void OnData(const void* audio_data, int bits_per_sample, int sample_rate,
+              size_t number_of_channels, size_t number_of_frames) override {
+    if (audio_data == nullptr || bits_per_sample != 16) return;
+    writer_->WriteInterleaved(static_cast<const int16_t*>(audio_data),
+                              number_of_channels, number_of_frames, sample_rate);
+  }
+
+ private:
+  FogataTapWriter* const writer_;
+};
+
+static void FogataTapReceivedVoice(const scoped_refptr<RTCMediaTrack>& track) {
+  if (FogataTapDir().empty() || !track.get() ||
+      track->kind().std_string() != "audio") {
+    return;
+  }
+  // Never freed (see above); one tap for each track id.
+  static std::mutex* mutex = new std::mutex();
+  static auto* kept =
+      new std::map<std::string, scoped_refptr<RTCAudioTrack>>();
+  const std::string id = track->id().std_string();
+  std::lock_guard<std::mutex> guard(*mutex);
+  if (kept->count(id) != 0) return;
+  FogataTapWriter* writer = FogataNewTap("neteq");
+  if (writer == nullptr) return;
+  scoped_refptr<RTCAudioTrack> audio(static_cast<RTCAudioTrack*>(track.get()));
+  audio->AddSink(new FogataRemoteAudioTap(writer));
+  (*kept)[id] = audio;
+  std::fprintf(stderr, "Fogata: tap on the received voice %s\n", id.c_str());
+}
+
 void FlutterPeerConnectionObserver::OnTrack(
     scoped_refptr<RTCRtpTransceiver> transceiver) {
   auto receiver = transceiver->receiver();
   auto track = receiver->track();
   if (track.get()) {
     remote_.AddTrack(track->id().std_string(), track);
+    FogataTapReceivedVoice(track);
   }
   EncodableMap params;
   EncodableList streams_info;
