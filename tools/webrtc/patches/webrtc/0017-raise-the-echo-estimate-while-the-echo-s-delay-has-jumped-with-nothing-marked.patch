@@ -19,13 +19,16 @@ active and the render signal has had no narrow peak for 5 s, the echo remover ke
 refined filters' frequency responses as they were at the jump's first block and raises
 the linear echo estimate and the residual echo estimates (S2_linear, R2, R2_unbounded) to
 at least that filter applied to the render spectra the jump points to, J - 1, J and J + 1
-blocks away (the largest of the three), so the suppressor holds the leaked echo down
-until the delay estimator realigns. Each jump is logged once ("AEC3: echo delay jumped N
+blocks away (the largest of the three), except in the bands where the microphone
+brings more than 4 times that (Y2 > 4 r: the near end talking), so the suppressor holds
+the leaked echo down until the delay estimator realigns without holding a word said
+meanwhile. Each jump is logged once ("AEC3: echo delay jumped N
 blocks with nothing marked"). Everything else is as before.
 
-In a simulation of an unmarked jump between 60 and 180 ms (384 jumps), the echo from
-0.4 to 1.3 s after the jump went from -13.2 to -23.6 dB, and a word said 0.5 s after it
-lost 0.04 dB (1.5 dB at the worst).
+In a simulation of an unmarked jump between 60 and 180 ms (384 + 192 jumps), the echo
+from 0.4 to 1.3 s after the jump went from -13.2 to -23.2/-23.9 dB, and a word said
+0.5 s after it lost 0.06/0.09 dB on average (1.2/1.9 dB at the worst; 2.5/2.1 dB without
+the near-end bands left out).
 
 Measured: not yet.
 diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
@@ -99,7 +102,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
  #include "modules/audio_processing/aec3/subtractor.h"
  #include "modules/audio_processing/aec3/subtractor_output.h"
  #include "modules/audio_processing/aec3/suppression_filter.h"
-@@ -56,6 +57,11 @@
+@@ -56,6 +57,14 @@
  // stack using a fixed maximum value.
  constexpr size_t kMaxNumChannelsOnStack = 2;
  
@@ -107,11 +110,14 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
 +// before a jump of the echo's delay that nothing marked raises the residual
 +// echo estimate; the count of blocks without one stops there.
 +constexpr int kEchoJumpMinBlocksWithoutNarrowPeak = 5 * kNumBlocksPerSecond;
++// Fogata, patch 0017 (variant b): the raise leaves out the bands where the
++// microphone brings more than this many times the raised estimate.
++constexpr float kEchoJumpNearEndRatio = 4.f;
 +
  // Chooses the number of channels to store on the heap when that is required due
  // to the number of capture channels being larger than the pre-defined number
  // of channels to store on the stack.
-@@ -181,6 +187,10 @@
+@@ -181,6 +190,10 @@
      capture_output_used_ = capture_output_used;
    }
  
@@ -122,7 +128,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
   private:
    static std::atomic<int> instance_count_;
    const EchoCanceller3Config config_;
-@@ -221,6 +231,24 @@
+@@ -221,6 +234,25 @@
    std::vector<FftData> comfort_noise_heap_;
    std::vector<FftData> high_band_comfort_noise_heap_;
    std::vector<SubtractorOutput> subtractor_output_heap_;
@@ -132,6 +138,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
 +  // they were at the jump's first block.
 +  void RaiseForEchoJump(
 +      const RenderBuffer& render_buffer,
++      std::span<const std::array<float, kFftLengthBy2Plus1>> Y2,
 +      std::span<std::array<float, kFftLengthBy2Plus1>> S2_linear,
 +      std::span<std::array<float, kFftLengthBy2Plus1>> R2,
 +      std::span<std::array<float, kFftLengthBy2Plus1>> R2_unbounded) const;
@@ -147,7 +154,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
  };
  
  std::atomic<int> EchoRemoverImpl::instance_count_(0);
-@@ -278,7 +306,13 @@
+@@ -278,7 +310,13 @@
        E_heap_(NumChannelsOnHeap(num_capture_channels_)),
        comfort_noise_heap_(NumChannelsOnHeap(num_capture_channels_)),
        high_band_comfort_noise_heap_(NumChannelsOnHeap(num_capture_channels_)),
@@ -162,7 +169,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
    RTC_DCHECK(ValidFullBandRate(sample_rate_hz));
  }
  
-@@ -414,6 +448,14 @@
+@@ -414,6 +452,14 @@
    render_signal_analyzer_.Update(*render_buffer,
                                   aec_state_.MinDirectPathFilterDelay());
  
@@ -177,7 +184,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
    // State transition.
    if (aec_state_.TransitionTriggered()) {
      subtractor_.ExitInitialState();
-@@ -482,6 +524,30 @@
+@@ -482,6 +528,30 @@
    cng_.Compute(aec_state_.SaturatedCapture(), nearend_spectrum, comfort_noise,
                 high_band_comfort_noise);
  
@@ -208,18 +215,18 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
    // Only do the below processing if the output of the audio processing module
    // is used.
    std::array<float, kFftLengthBy2Plus1> G;
-@@ -501,6 +567,10 @@
+@@ -501,6 +571,10 @@
        }
      }
  
 +    if (raise_for_echo_jump && echo_jump_held_) {
-+      RaiseForEchoJump(*render_buffer, S2_linear, R2, R2_unbounded);
++      RaiseForEchoJump(*render_buffer, Y2, S2_linear, R2, R2_unbounded);
 +    }
 +
      // Suppressor echo estimate.
      const auto& echo_spectrum =
          aec_state_.UsableLinearEstimate() ? S2_linear : R2;
-@@ -561,6 +631,62 @@
+@@ -561,6 +635,68 @@
                          aec_state_.SaturatedCapture() ? 1 : 0);
  }
  
@@ -235,6 +242,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
 +// skipped.
 +void EchoRemoverImpl::RaiseForEchoJump(
 +    const RenderBuffer& render_buffer,
++    std::span<const std::array<float, kFftLengthBy2Plus1>> Y2,
 +    std::span<std::array<float, kFftLengthBy2Plus1>> S2_linear,
 +    std::span<std::array<float, kFftLengthBy2Plus1>> R2,
 +    std::span<std::array<float, kFftLengthBy2Plus1>> R2_unbounded) const {
@@ -272,6 +280,11 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
 +      }
 +    }
 +    for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++      // Not where the microphone brings more than 4 times the estimate: the
++      // near end talking.
++      if (Y2[ch][k] > kEchoJumpNearEndRatio * r[k]) {
++        continue;
++      }
 +      S2_linear[ch][k] = std::max(S2_linear[ch][k], r[k]);
 +      R2[ch][k] = std::max(R2[ch][k], r[k]);
 +      R2_unbounded[ch][k] = std::max(R2_unbounded[ch][k], r[k]);
