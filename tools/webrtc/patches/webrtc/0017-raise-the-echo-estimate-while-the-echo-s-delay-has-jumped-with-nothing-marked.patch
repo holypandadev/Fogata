@@ -1,0 +1,502 @@
+Raise the echo estimate while the echo's delay has jumped with nothing marked
+
+When the delay between what is played and what comes back in the microphone jumps with
+nothing marked (no change of devices, no restart or move of a stream: a device's glitch,
+the sound server's own buffering), AEC3 keeps its render buffer aligned to the old delay
+until its delay estimator reports the new one, and the echo leaks through meanwhile: the
+linear filter, and the residual echo estimate built on it, look at render blocks the echo
+no longer comes from.
+
+This patch moves no delay and restarts nothing. The matched filters' lag aggregator keeps
+its last 16 lags and the delay it last reported; once the estimate is settled (a
+significant candidate, 5 s since a hard reset) and the 16 lags have left the reported
+delay (none within a block of it, at least 12 within a block of their median, the median
+more than 8 blocks away), it sees a jump (MatchedFilterLagAggregator::EchoJumpLag,
+EchoPathDelayEstimator::EchoJumpBlocks, RenderDelayController::EchoJumpBlocks). The block
+processor hands the jump in blocks to the echo remover (EchoRemover::SetEchoJump) before
+each capture block. While a jump is seen, the neural residual echo estimator is not
+active and the render signal has had no narrow peak for 5 s, the echo remover keeps the
+refined filters' frequency responses as they were at the jump's first block and raises
+the linear echo estimate and the residual echo estimates (S2_linear, R2, R2_unbounded) to
+at least that filter applied to the render spectra the jump points to, J - 1, J and J + 1
+blocks away (the largest of the three), so the suppressor holds the leaked echo down
+until the delay estimator realigns. Each jump is logged once ("AEC3: echo delay jumped N
+blocks with nothing marked"). Everything else is as before.
+
+In a simulation of an unmarked jump between 60 and 180 ms (384 jumps), the echo from
+0.4 to 1.3 s after the jump went from -13.2 to -23.6 dB, and a word said 0.5 s after it
+lost 0.04 dB (1.5 dB at the worst).
+
+Measured: not yet.
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -210,6 +210,11 @@
+ 
+   // Remove the echo from the capture signal.
+   if (has_delay_estimator || render_buffer_->HasReceivedBufferDelay()) {
++    // Fogata: a jump of the echo's delay that nothing marked and the delay
++    // estimator has not reported yet raises the residual echo estimate.
++    echo_remover_->SetEchoJump(has_delay_estimator && delay_controller_
++                                   ? delay_controller_->EchoJumpBlocks()
++                                   : std::nullopt);
+     echo_remover_->ProcessCapture(
+         echo_path_variability, capture_signal_saturation, estimated_delay_,
+         render_buffer_->GetRenderBuffer(), linear_output, capture_block);
+diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator.cc b/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+--- a/modules/audio_processing/aec3/echo_path_delay_estimator.cc
++++ b/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+@@ -10,6 +10,7 @@
+ #include "modules/audio_processing/aec3/echo_path_delay_estimator.h"
+ 
+ #include <array>
++#include <cmath>
+ #include <cstddef>
+ #include <optional>
+ #include <span>
+@@ -120,6 +121,18 @@
+   return aggregated_matched_filter_lag;
+ }
+ 
++std::optional<int> EchoPathDelayEstimator::EchoJumpBlocks() const {
++  const std::optional<int> jump_lag =
++      matched_filter_lag_aggregator_.EchoJumpLag();
++  if (!jump_lag) {
++    return std::nullopt;
++  }
++  return static_cast<int>(
++      std::lround(static_cast<float>(
++                      *jump_lag - matched_filter_lag_aggregator_.ReportedLag()) /
++                  static_cast<float>(sub_block_size_)));
++}
++
+ void EchoPathDelayEstimator::Reset(bool reset_lag_aggregator,
+                                    bool reset_delay_confidence) {
+   if (reset_lag_aggregator) {
+diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator.h b/modules/audio_processing/aec3/echo_path_delay_estimator.h
+--- a/modules/audio_processing/aec3/echo_path_delay_estimator.h
++++ b/modules/audio_processing/aec3/echo_path_delay_estimator.h
+@@ -59,6 +59,11 @@
+     return clockdrift_detector_.ClockdriftLevel();
+   }
+ 
++  // Fogata: how many blocks the echo's delay seems to have jumped from the
++  // last reported delay with nothing marked (positive: the echo comes later),
++  // nullopt when no such jump is seen.
++  std::optional<int> EchoJumpBlocks() const;
++
+  private:
+   ApmDataDumper* const data_dumper_;
+   const size_t down_sampling_factor_;
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -35,6 +35,7 @@
+ #include "modules/audio_processing/aec3/render_buffer.h"
+ #include "modules/audio_processing/aec3/render_signal_analyzer.h"
+ #include "modules/audio_processing/aec3/residual_echo_estimator.h"
++#include "modules/audio_processing/aec3/spectrum_buffer.h"
+ #include "modules/audio_processing/aec3/subtractor.h"
+ #include "modules/audio_processing/aec3/subtractor_output.h"
+ #include "modules/audio_processing/aec3/suppression_filter.h"
+@@ -56,6 +57,11 @@
+ // stack using a fixed maximum value.
+ constexpr size_t kMaxNumChannelsOnStack = 2;
+ 
++// Fogata: how long the render signal must have gone without a narrow peak
++// before a jump of the echo's delay that nothing marked raises the residual
++// echo estimate; the count of blocks without one stops there.
++constexpr int kEchoJumpMinBlocksWithoutNarrowPeak = 5 * kNumBlocksPerSecond;
++
+ // Chooses the number of channels to store on the heap when that is required due
+ // to the number of capture channels being larger than the pre-defined number
+ // of channels to store on the stack.
+@@ -181,6 +187,10 @@
+     capture_output_used_ = capture_output_used;
+   }
+ 
++  void SetEchoJump(std::optional<int> jump_blocks) override {
++    echo_jump_blocks_ = jump_blocks;
++  }
++
+  private:
+   static std::atomic<int> instance_count_;
+   const EchoCanceller3Config config_;
+@@ -221,6 +231,24 @@
+   std::vector<FftData> comfort_noise_heap_;
+   std::vector<FftData> high_band_comfort_noise_heap_;
+   std::vector<SubtractorOutput> subtractor_output_heap_;
++
++  // Fogata: raises the echo estimates for a jump of the echo's delay that
++  // nothing marked (SetEchoJump()), using the filters' frequency responses as
++  // they were at the jump's first block.
++  void RaiseForEchoJump(
++      const RenderBuffer& render_buffer,
++      std::span<std::array<float, kFftLengthBy2Plus1>> S2_linear,
++      std::span<std::array<float, kFftLengthBy2Plus1>> R2,
++      std::span<std::array<float, kFftLengthBy2Plus1>> R2_unbounded) const;
++
++  std::optional<int> echo_jump_blocks_;
++  bool echo_jump_held_ = false;
++  int blocks_without_narrow_peak_ = 0;
++  // Per capture channel, the refined filter's frequency response per
++  // partition, and how many partitions of it were copied.
++  std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>
++      echo_jump_H2_;
++  std::vector<size_t> echo_jump_num_partitions_;
+ };
+ 
+ std::atomic<int> EchoRemoverImpl::instance_count_(0);
+@@ -278,7 +306,13 @@
+       E_heap_(NumChannelsOnHeap(num_capture_channels_)),
+       comfort_noise_heap_(NumChannelsOnHeap(num_capture_channels_)),
+       high_band_comfort_noise_heap_(NumChannelsOnHeap(num_capture_channels_)),
+-      subtractor_output_heap_(NumChannelsOnHeap(num_capture_channels_)) {
++      subtractor_output_heap_(NumChannelsOnHeap(num_capture_channels_)),
++      echo_jump_H2_(num_capture_channels_,
++                    std::vector<std::array<float, kFftLengthBy2Plus1>>(
++                        std::max(config_.filter.refined_initial.length_blocks,
++                                 config_.filter.refined.length_blocks),
++                        std::array<float, kFftLengthBy2Plus1>())),
++      echo_jump_num_partitions_(num_capture_channels_, 0) {
+   RTC_DCHECK(ValidFullBandRate(sample_rate_hz));
+ }
+ 
+@@ -414,6 +448,14 @@
+   render_signal_analyzer_.Update(*render_buffer,
+                                  aec_state_.MinDirectPathFilterDelay());
+ 
++  // Fogata: count the blocks since the render signal last had a narrow peak.
++  if (render_signal_analyzer_.NarrowPeakBand()) {
++    blocks_without_narrow_peak_ = 0;
++  } else if (blocks_without_narrow_peak_ <
++             kEchoJumpMinBlocksWithoutNarrowPeak) {
++    ++blocks_without_narrow_peak_;
++  }
++
+   // State transition.
+   if (aec_state_.TransitionTriggered()) {
+     subtractor_.ExitInitialState();
+@@ -482,6 +524,30 @@
+   cng_.Compute(aec_state_.SaturatedCapture(), nearend_spectrum, comfort_noise,
+                high_band_comfort_noise);
+ 
++  // Fogata: a jump of the echo's delay that nothing marked, seen with the
++  // learned (not the neural) residual echo estimate and no narrow peak in the
++  // render signal for 5 s, raises the echo estimates below. Its first such
++  // block keeps the filters' frequency responses; without a jump they are
++  // forgotten.
++  const bool raise_for_echo_jump =
++      echo_jump_blocks_.has_value() && !ml_ree_is_active &&
++      blocks_without_narrow_peak_ >= kEchoJumpMinBlocksWithoutNarrowPeak;
++  if (!echo_jump_blocks_) {
++    echo_jump_held_ = false;
++  } else if (raise_for_echo_jump && !echo_jump_held_) {
++    echo_jump_held_ = true;
++    const auto& H2 = subtractor_.FilterFrequencyResponses();
++    for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++      const size_t num_partitions =
++          std::min(H2[ch].size(), echo_jump_H2_[ch].size());
++      std::copy(H2[ch].begin(), H2[ch].begin() + num_partitions,
++                echo_jump_H2_[ch].begin());
++      echo_jump_num_partitions_[ch] = num_partitions;
++    }
++    RTC_LOG(LS_INFO) << "AEC3: echo delay jumped " << *echo_jump_blocks_
++                     << " blocks with nothing marked";
++  }
++
+   // Only do the below processing if the output of the audio processing module
+   // is used.
+   std::array<float, kFftLengthBy2Plus1> G;
+@@ -501,6 +567,10 @@
+       }
+     }
+ 
++    if (raise_for_echo_jump && echo_jump_held_) {
++      RaiseForEchoJump(*render_buffer, S2_linear, R2, R2_unbounded);
++    }
++
+     // Suppressor echo estimate.
+     const auto& echo_spectrum =
+         aec_state_.UsableLinearEstimate() ? S2_linear : R2;
+@@ -561,6 +631,62 @@
+                         aec_state_.SaturatedCapture() ? 1 : 0);
+ }
+ 
++// Fogata: with the echo's delay jumped J blocks from the delay the render
++// buffer is aligned to, the echo is estimated from the frequency responses kept
++// at the jump's first block applied to the render spectra J - 1, J and J + 1
++// blocks away, E_j[k] = sum_p H2_p[k] * max_c X2_{p+j}[c][k], and the largest
++// of the three bounds S2_linear, R2 and R2_unbounded from below. In the
++// spectrum buffer the read position is the aligned block (offset 0), positive
++// offsets are older blocks (offset p for partition p), and the
++// (read - write + size) % size blocks newer than it, back to the newest written
++// at `write`, are negative offsets; offsets past those or the buffer's size are
++// skipped.
++void EchoRemoverImpl::RaiseForEchoJump(
++    const RenderBuffer& render_buffer,
++    std::span<std::array<float, kFftLengthBy2Plus1>> S2_linear,
++    std::span<std::array<float, kFftLengthBy2Plus1>> R2,
++    std::span<std::array<float, kFftLengthBy2Plus1>> R2_unbounded) const {
++  RTC_DCHECK(echo_jump_blocks_);
++  const SpectrumBuffer& spectrum_buffer = render_buffer.GetSpectrumBuffer();
++  const int size = spectrum_buffer.size;
++  const int num_newer =
++      (spectrum_buffer.read - spectrum_buffer.write + size) % size;
++  const int jump = *echo_jump_blocks_;
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    std::array<float, kFftLengthBy2Plus1> r;
++    r.fill(0.f);
++    for (int j = jump - 1; j <= jump + 1; ++j) {
++      std::array<float, kFftLengthBy2Plus1> E_j;
++      E_j.fill(0.f);
++      for (size_t p = 0; p < echo_jump_num_partitions_[ch]; ++p) {
++        const int offset = static_cast<int>(p) + j;
++        // Older than the oldest block kept: offset size - num_newer is the
++        // newest block again (write), so the range ends there.
++        if (offset < -num_newer || offset >= size - num_newer) {
++          continue;
++        }
++        const auto X2 = render_buffer.Spectrum(offset);
++        const auto& H2_p = echo_jump_H2_[ch][p];
++        for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++          float X2_max = 0.f;
++          for (const auto& X2_c : X2) {
++            X2_max = std::max(X2_max, X2_c[k]);
++          }
++          E_j[k] += H2_p[k] * X2_max;
++        }
++      }
++      for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++        r[k] = std::max(r[k], E_j[k]);
++      }
++    }
++    for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++      S2_linear[ch][k] = std::max(S2_linear[ch][k], r[k]);
++      R2[ch][k] = std::max(R2[ch][k], r[k]);
++      R2_unbounded[ch][k] = std::max(R2_unbounded[ch][k], r[k]);
++    }
++  }
++}
++
+ }  // namespace
+ 
+ std::unique_ptr<EchoRemover> EchoRemover::Create(
+diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_processing/aec3/echo_remover.h
+--- a/modules/audio_processing/aec3/echo_remover.h
++++ b/modules/audio_processing/aec3/echo_remover.h
+@@ -61,6 +61,12 @@
+   // resulting output is anyway not used, for instance when the endpoint is
+   // muted.
+   virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
++
++  // Fogata: how many blocks the echo's delay seems to have jumped from the
++  // delay the render buffer is aligned to with nothing marked (positive: the
++  // echo comes later), nullopt when no such jump is seen. Applies to the next
++  // ProcessCapture() call.
++  virtual void SetEchoJump(std::optional<int> /* jump_blocks */) {}
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+@@ -10,7 +10,9 @@
+ #include "modules/audio_processing/aec3/matched_filter_lag_aggregator.h"
+ 
+ #include <algorithm>
++#include <array>
+ #include <cstddef>
++#include <cstdlib>
+ #include <iterator>
+ #include <memory>
+ #include <optional>
+@@ -28,6 +30,13 @@
+ namespace {
+ constexpr int kPreEchoHistogramDataNotUpdated = -1;
+ 
++// Fogata: how long after a hard reset, and how far from the reported delay
++// (in blocks), the recent lags must be to be taken as a jump of the echo's
++// delay; how many of them must gather within a block of their median.
++constexpr int kEchoJumpMinBlocksSinceHardReset = 5 * kNumBlocksPerSecond;
++constexpr int kEchoJumpMinDistanceBlocks = 8;
++constexpr int kEchoJumpMinLagsNearMedian = 12;
++
+ int GetDownSamplingBlockSizeLog2(int down_sampling_factor) {
+   int down_sampling_factor_log2 = 0;
+   down_sampling_factor >>= 1;
+@@ -49,7 +58,12 @@
+       thresholds_(delay_config.delay_selection_thresholds),
+       headroom_(static_cast<int>(delay_config.delay_headroom_samples /
+                                  delay_config.down_sampling_factor)),
+-      highest_peak_aggregator_(max_filter_lag) {
++      highest_peak_aggregator_(max_filter_lag),
++      block_lag_(static_cast<int>(
++          delay_config.down_sampling_factor != 0
++              ? kBlockSize / delay_config.down_sampling_factor
++              : kBlockSize)) {
++  recent_lags_.fill(0);
+   if (delay_config.detect_pre_echo) {
+     pre_echo_lag_aggregator_ = std::make_unique<PreEchoLagAggregator>(
+         max_filter_lag, delay_config.down_sampling_factor);
+@@ -67,7 +81,12 @@
+   }
+   if (hard_reset) {
+     significant_candidate_found_ = false;
++    reported_lag_ = -1;
++    blocks_since_hard_reset_ = 0;
+   }
++  recent_lags_index_ = 0;
++  num_recent_lags_ = 0;
++  echo_jump_lag_ = std::nullopt;
+ }
+ 
+ std::optional<DelayEstimate> MatchedFilterLagAggregator::Aggregate(
+@@ -78,9 +97,19 @@
+         std::max(0, static_cast<int>(lag_estimate->pre_echo_lag) - headroom_));
+   }
+ 
++  if (blocks_since_hard_reset_ < kEchoJumpMinBlocksSinceHardReset) {
++    ++blocks_since_hard_reset_;
++  }
++
++  std::optional<DelayEstimate> delay_estimate;
+   if (lag_estimate) {
+-    highest_peak_aggregator_.Aggregate(
+-        std::max(0, static_cast<int>(lag_estimate->lag) - headroom_));
++    const int lag =
++        std::max(0, static_cast<int>(lag_estimate->lag) - headroom_);
++    recent_lags_[recent_lags_index_] = lag;
++    recent_lags_index_ = (recent_lags_index_ + 1) % kNumRecentLags;
++    num_recent_lags_ = std::min(num_recent_lags_ + 1, kNumRecentLags);
++
++    highest_peak_aggregator_.Aggregate(lag);
+     std::span<const int> histogram = highest_peak_aggregator_.histogram();
+     int candidate = highest_peak_aggregator_.candidate();
+     significant_candidate_found_ = significant_candidate_found_ ||
+@@ -94,11 +123,48 @@
+       int reported_delay = pre_echo_lag_aggregator_ != nullptr
+                                ? pre_echo_lag_aggregator_->pre_echo_candidate()
+                                : candidate;
+-      return DelayEstimate(quality, reported_delay);
++      reported_lag_ = candidate;
++      delay_estimate = DelayEstimate(quality, reported_delay);
+     }
+   }
+ 
+-  return std::nullopt;
++  UpdateEchoJump();
++  return delay_estimate;
++}
++
++// Fogata: the recent lags are taken as a jump of the echo's delay that nothing
++// marked when a delay has been reported, the estimate is settled (a
++// significant candidate, 5 s since a hard reset), the window is full, none of
++// its lags is within a block of the reported delay, at least 12 of them are
++// within a block of their median, and the median is more than 8 blocks away
++// from the reported delay.
++void MatchedFilterLagAggregator::UpdateEchoJump() {
++  echo_jump_lag_ = std::nullopt;
++  if (!significant_candidate_found_ || reported_lag_ < 0 ||
++      blocks_since_hard_reset_ < kEchoJumpMinBlocksSinceHardReset ||
++      num_recent_lags_ < kNumRecentLags) {
++    return;
++  }
++  std::array<int, kNumRecentLags> sorted = recent_lags_;
++  std::nth_element(sorted.begin(), sorted.begin() + kNumRecentLags / 2,
++                   sorted.end());
++  const int median = sorted[kNumRecentLags / 2];
++  if (std::abs(median - reported_lag_) <=
++      kEchoJumpMinDistanceBlocks * block_lag_) {
++    return;
++  }
++  int num_near_median = 0;
++  for (int lag : recent_lags_) {
++    if (std::abs(lag - reported_lag_) <= block_lag_) {
++      return;
++    }
++    if (std::abs(lag - median) <= block_lag_) {
++      ++num_near_median;
++    }
++  }
++  if (num_near_median >= kEchoJumpMinLagsNearMedian) {
++    echo_jump_lag_ = median;
++  }
+ }
+ 
+ MatchedFilterLagAggregator::HighestPeakAggregator::HighestPeakAggregator(
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.h b/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
+@@ -57,6 +57,16 @@
+     return highest_peak_aggregator_.candidate();
+   }
+ 
++  // Fogata: the lag (down-sampled samples, headroom taken off) the recent lags
++  // gather around when the echo's delay seems to have jumped away from the
++  // last reported delay with nothing marked; nullopt otherwise. See
++  // UpdateEchoJump().
++  std::optional<int> EchoJumpLag() const { return echo_jump_lag_; }
++
++  // Fogata: the candidate last reported as the delay (down-sampled samples,
++  // headroom taken off), -1 when none has been reported since a hard reset.
++  int ReportedLag() const { return reported_lag_; }
++
+  private:
+   class PreEchoLagAggregator {
+    public:
+@@ -90,12 +100,27 @@
+     int candidate_ = -1;
+   };
+ 
++  // Fogata: recomputes `echo_jump_lag_` from the recent lags.
++  void UpdateEchoJump();
++
+   ApmDataDumper* const data_dumper_;
+   bool significant_candidate_found_ = false;
+   const EchoCanceller3Config::Delay::DelaySelectionThresholds thresholds_;
+   const int headroom_;
+   HighestPeakAggregator highest_peak_aggregator_;
+   std::unique_ptr<PreEchoLagAggregator> pre_echo_lag_aggregator_;
++
++  // Fogata: a block of down-sampled samples, kBlockSize / down_sampling_factor.
++  const int block_lag_;
++  // Fogata: the last kNumRecentLags lags, oldest overwritten first.
++  static constexpr int kNumRecentLags = 16;
++  std::array<int, kNumRecentLags> recent_lags_;
++  int recent_lags_index_ = 0;
++  int num_recent_lags_ = 0;
++  // Fogata: blocks aggregated since the last hard reset, capped.
++  int blocks_since_hard_reset_ = 0;
++  int reported_lag_ = -1;
++  std::optional<int> echo_jump_lag_;
+ };
+ }  // namespace webrtc
+ 
+diff --git a/modules/audio_processing/aec3/render_delay_controller.cc b/modules/audio_processing/aec3/render_delay_controller.cc
+--- a/modules/audio_processing/aec3/render_delay_controller.cc
++++ b/modules/audio_processing/aec3/render_delay_controller.cc
+@@ -48,6 +48,9 @@
+       size_t render_delay_buffer_delay,
+       const Block& capture) override;
+   bool HasClockdrift() const override;
++  std::optional<int> EchoJumpBlocks() const override {
++    return delay_estimator_.EchoJumpBlocks();
++  }
+ 
+  private:
+   static std::atomic<int> instance_count_;
+diff --git a/modules/audio_processing/aec3/render_delay_controller.h b/modules/audio_processing/aec3/render_delay_controller.h
+--- a/modules/audio_processing/aec3/render_delay_controller.h
++++ b/modules/audio_processing/aec3/render_delay_controller.h
+@@ -44,6 +44,10 @@
+ 
+   // Returns true if clockdrift has been detected.
+   virtual bool HasClockdrift() const = 0;
++
++  // Fogata: how many blocks the echo's delay seems to have jumped from the
++  // reported delay with nothing marked, nullopt when no such jump is seen.
++  virtual std::optional<int> EchoJumpBlocks() const { return std::nullopt; }
+ };
+ }  // namespace webrtc
+ 
