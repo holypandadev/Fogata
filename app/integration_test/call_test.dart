@@ -15,7 +15,8 @@
 //
 // Without more, the copies only connect. FOGATA_TEST_MIC=1 adds sound with virtual devices
 // only: an input called FogataMic that carries a tone, a silent one called FogataQuiet and
-// an output called FogataTest. FOGATA_TEST_MIC=off enters with the microphone off, with
+// an output called FogataTest (FogataDrain, which no input hears, with
+// FOGATA_TEST_QUIET_OUTPUT=1). FOGATA_TEST_MIC=off enters with the microphone off, with
 // the same virtual devices. FOGATA_TEST_MIC=system uses the computer's own microphone and
 // speakers instead, where that is allowed: the system's defaults, or with FOGATA_TEST_INPUT
 // and FOGATA_TEST_OUTPUT the input and the output whose names contain them, chosen as the
@@ -582,6 +583,14 @@ Future<void> _call(WidgetTester tester) async {
         _env['FOGATA_TEST_MIC_CASE'] == 'noise' ||
         _env['FOGATA_TEST_MIC_CASE'] == 'unmute') {
       state.prefs.audioOutput = pick('audiooutput', 'FogataQuietOut');
+    }
+    // FOGATA_TEST_QUIET_OUTPUT=1, for a copy whose others are on another computer (the
+    // Windows calls): what they say plays into an output no microphone hears. Played into
+    // the shared microphone, the other side's steady tone came back as loud as it played
+    // and, summed with this copy's own tone, clipped it, which the echo canceller takes for
+    // all echo; FogataQuietOut feeds FogataQuiet, the microphone the quiet step chooses.
+    if (_env['FOGATA_TEST_QUIET_OUTPUT'] == '1') {
+      state.prefs.audioOutput = pick('audiooutput', 'FogataDrain');
     }
     // Were the microphone opened anyway, it would hear only silence.
     if (_mic == 'off') state.prefs.audioInput = _quiet;
