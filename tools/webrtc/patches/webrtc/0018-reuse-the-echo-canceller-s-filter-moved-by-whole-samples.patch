@@ -1,0 +1,195 @@
+Reuse the echo canceller's filter from before recording started again, moved by whole samples
+
+Patch 0017 tries the refined filter from before recording started again at the next new
+delay, moved by whole partitions (64 samples) only. In 12 of 40 changes in the call lab
+it was not reused; the delay found after the restart seems to come back a few ms off,
+less than a block, and then the old filter fits no whole partition.
+
+Now the trial (Subtractor::StartFilterReuseTrial) tries the saved filter moved by
+-kReuseMaxShiftSamples to +kReuseMaxShiftSamples samples (-512 to +512, the same reach
+as 0017's -8 to +8 partitions) in steps of kReuseShiftStepSamples, 65 candidates
+instead of 17. A move of N samples gives the filter whose sample n is sample n + N of
+the saved one (for N = 64 k, 0017's "partition p takes partition p + k"). It is made in
+two steps: by whole partitions, k = N / 64 rounded down (0017's shift), and then by the
+samples left, r = N - 64 k, from 0 to 63 (SampleShiftedFilter: each partition's inverse
+FFT gives its 64 taps, the first 64 samples scaled by 1/64, as AdaptiveFirFilter's
+Constrain takes them; the whole response is moved by r, what goes past its start
+dropped and the end filled with zeros, and cut back into partitions of 64 taps and 64
+zeros by FFT; with r = 0 the filter is kept as it is). For a move back by a part of a
+partition (N < 0, not a multiple of 64) the response's last r samples come out zero, as
+the whole-partition step dropped them first.
+
+The candidates are made once, at the trial's start; each trial block still filters
+the render once and takes one inverse FFT per candidate, now for 65 of them. Nothing
+else of 0017 changes: the best candidate is put in use when its residual is under
+kReuseMaxResidual and its gain within [1/kReuseMaxGain, kReuseMaxGain]. The log says
+"AEC3: filter from before recording started again reused, moved N samples, gain G,
+residual R, B blocks after the restart"; when the best candidate fails either test, it
+says "AEC3: filter from before recording started again not reused: best moved N samples,
+gain G, residual R, B blocks after the restart" at the trial's end (a trial cut short by
+a new delay, a flush or the window's end logs nothing). Delay changes while the reused
+filter is in use still shift it by whole partitions, as in 0017.
+
+Constants (Subtractor): kReuseMaxShiftSamples 512 (kReuseMaxShiftPartitions x 64),
+kReuseShiftStepSamples 16; from 0017, unchanged: kReuseWindowBlocks 2500,
+kReuseTrialBlocks 25, kReuseMaxResidual 0.5, kReuseMaxGain 1.41.
+
+Measured: not yet.
+
+diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_processing/aec3/subtractor.cc
+--- a/modules/audio_processing/aec3/subtractor.cc
++++ b/modules/audio_processing/aec3/subtractor.cc
+@@ -96,6 +96,54 @@
+   return shifted;
+ }
+ 
++// Fogata, patch 0018: a copy of the first `size` partitions of `H` whose
++// impulse response is moved by `shift_samples` (0 to kBlockSize - 1): sample n
++// is sample n + shift_samples of `H`'s, zero past its end; with 0, `H` as it
++// is. Each partition holds the 128-point FFT of its 64 taps followed by 64
++// zeros (AdaptiveFirFilter::Constrain), so the response is the first 64
++// samples of each partition's inverse FFT, scaled by 1/64, and the copy's
++// partitions are made back the same way.
++std::vector<std::vector<FftData>> SampleShiftedFilter(
++    const Aec3Fft& fft,
++    const std::vector<std::vector<FftData>>& H,
++    size_t size,
++    int shift_samples) {
++  RTC_DCHECK_GE(shift_samples, 0);
++  RTC_DCHECK_LT(shift_samples, static_cast<int>(kBlockSize));
++  if (shift_samples == 0) {
++    return H;
++  }
++  std::vector<std::vector<FftData>> shifted(H.size(),
++                                            std::vector<FftData>(H[0].size()));
++  for (auto& H_p : shifted) {
++    for (auto& H_p_ch : H_p) {
++      H_p_ch.Clear();
++    }
++  }
++  const size_t num_partitions = std::min(size, H.size());
++  const size_t length = num_partitions * kFftLengthBy2;
++  constexpr float kScale = 1.0f / kFftLengthBy2;
++  std::vector<float> h(length);
++  std::array<float, kFftLength> h_p;
++  for (size_t ch = 0; ch < H[0].size(); ++ch) {
++    for (size_t p = 0; p < num_partitions; ++p) {
++      fft.Ifft(H[p][ch], &h_p);
++      for (size_t k = 0; k < kFftLengthBy2; ++k) {
++        h[p * kFftLengthBy2 + k] = kScale * h_p[k];
++      }
++    }
++    for (size_t p = 0; p < num_partitions; ++p) {
++      for (size_t k = 0; k < kFftLengthBy2; ++k) {
++        const size_t source = p * kFftLengthBy2 + k + shift_samples;
++        h_p[k] = source < length ? h[source] : 0.f;
++      }
++      std::fill(h_p.begin() + kFftLengthBy2, h_p.end(), 0.f);
++      fft.Fft(&h_p, &shifted[p][ch]);
++    }
++  }
++  return shifted;
++}
++
+ }  // namespace
+ 
+ Subtractor::Subtractor(const Environment& env,
+@@ -254,15 +302,33 @@
+ 
+ void Subtractor::StartFilterReuseTrial() {
+   RTC_DCHECK_EQ(saved_filters_.size(), num_capture_channels_);
++  // Fogata, patch 0018: moved by -kReuseMaxShiftSamples to
++  // +kReuseMaxShiftSamples samples in steps of kReuseShiftStepSamples, sample n
++  // taking sample n + shift_samples: by whole partitions (shift, rounded down)
++  // and then by the samples left (0 to kBlockSize - 1).
++  constexpr int kPartitionLength = static_cast<int>(kBlockSize);
++  static_assert(kReuseMaxShiftSamples % kReuseShiftStepSamples == 0);
++  static_assert(kReuseMaxShiftSamples % kPartitionLength == 0);
++  constexpr int kNumCandidates =
++      2 * kReuseMaxShiftSamples / kReuseShiftStepSamples + 1;
+   reuse_candidates_.clear();
+-  reuse_candidates_.resize(2 * kReuseMaxShiftPartitions + 1);
+-  for (int k = 0; k < static_cast<int>(reuse_candidates_.size()); ++k) {
++  reuse_candidates_.resize(kNumCandidates);
++  for (int k = 0; k < kNumCandidates; ++k) {
+     ReuseCandidate& candidate = reuse_candidates_[k];
+-    candidate.shift = k - kReuseMaxShiftPartitions;
++    candidate.shift_samples =
++        k * kReuseShiftStepSamples - kReuseMaxShiftSamples;
++    candidate.shift =
++        (candidate.shift_samples + kReuseMaxShiftSamples) / kPartitionLength -
++        kReuseMaxShiftSamples / kPartitionLength;
++    const int remainder =
++        candidate.shift_samples - candidate.shift * kPartitionLength;
+     candidate.H.resize(num_capture_channels_);
+     for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
+-      candidate.H[ch] = ShiftedPartitions(
+-          saved_filters_[ch], saved_size_partitions_, candidate.shift);
++      candidate.H[ch] = SampleShiftedFilter(
++          fft_,
++          ShiftedPartitions(saved_filters_[ch], saved_size_partitions_,
++                            candidate.shift),
++          saved_size_partitions_, remainder);
+     }
+     candidate.sy.assign(num_capture_channels_, 0.f);
+     candidate.ss.assign(num_capture_channels_, 0.f);
+@@ -361,8 +427,15 @@
+     }
+     filter_reused_ = true;
+     RTC_LOG(LS_INFO) << "AEC3: filter from before recording started again "
+-                        "reused, shifted by "
+-                     << best->shift << " partitions, gain "
++                        "reused, moved "
++                     << best->shift_samples << " samples, gain "
++                     << gain(best->sy[0], best->ss[0]) << ", residual "
++                     << best_residual << ", "
++                     << blocks_since_restart_ << " blocks after the restart";
++  } else {
++    RTC_LOG(LS_INFO) << "AEC3: filter from before recording started again "
++                        "not reused: best moved "
++                     << best->shift_samples << " samples, gain "
+                      << gain(best->sy[0], best->ss[0]) << ", residual "
+                      << best_residual << ", "
+                      << blocks_since_restart_ << " blocks after the restart";
+diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processing/aec3/subtractor.h
+--- a/modules/audio_processing/aec3/subtractor.h
++++ b/modules/audio_processing/aec3/subtractor.h
+@@ -47,6 +47,12 @@
+   // How far the filter is shifted, either way, in its trial and at a delay
+   // change while it is in use, in partitions (blocks).
+   static constexpr int kReuseMaxShiftPartitions = 8;
++  // Fogata, patch 0018: in its trial, the filter is moved by whole samples,
++  // up to kReuseMaxShiftPartitions partitions either way, in steps of
++  // kReuseShiftStepSamples (65 candidates).
++  static constexpr int kReuseMaxShiftSamples =
++      kReuseMaxShiftPartitions * static_cast<int>(kBlockSize);
++  static constexpr int kReuseShiftStepSamples = 16;
+   // How many blocks of capture over kReuseMinTrialPower a trial takes.
+   static constexpr int kReuseTrialBlocks = 25;
+   static constexpr float kReuseMinTrialPower = 50.f * 50.f * kBlockSize;
+@@ -152,9 +158,11 @@
+   // Fogata, patch 0017: the reuse of the filter from before recording started
+   // again.
+   // Tries the saved filter, shifted, against the capture from the next blocks.
++  // Fogata, patch 0018: moved by whole samples (ReuseCandidate::shift_samples).
+   void StartFilterReuseTrial();
+   // Adds a block to the trial, and at its end puts the best candidate in use
+-  // when it is good enough.
++  // when it is good enough (Fogata, patch 0018: and logs the best one when it
++  // is not).
+   void UpdateFilterReuseTrial(const RenderBuffer& render_buffer,
+                               const Block& capture);
+   // Ends the trial and the use of the reused filter, and with `forget` drops
+@@ -167,7 +175,12 @@
+   void UpdateRefinedImpulseResponse(size_t ch);
+ 
+   struct ReuseCandidate {
++    // Fogata, patch 0018: how far the filter is moved, in samples (sample n
++    // taking sample n + shift_samples), and its whole partitions, rounded down
++    // (partition p taking partition p + shift); the samples left,
++    // shift_samples - kBlockSize * shift, are 0 to kBlockSize - 1.
+     int shift = 0;
++    int shift_samples = 0;
+     // Per capture channel: the shifted filter and the trial's sums.
+     std::vector<std::vector<std::vector<FftData>>> H;
+     std::vector<float> sy;
