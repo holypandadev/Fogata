@@ -1267,7 +1267,9 @@ mod tests {
         let (dialed, (peer, _connection)) = futures::join!(dial, accept);
         dialed.unwrap();
         assert_eq!(peer, dialer_key.public().to_peer_id());
-        assert_eq!(retries.load(Ordering::SeqCst), 1);
+        // At least one: every unproven Initial that arrives is sent a retry, and on macOS
+        // CI the dialer was once sent two.
+        assert!(retries.load(Ordering::SeqCst) >= 1);
         assert_eq!(pending.load(Ordering::SeqCst), 0);
     }
 }
