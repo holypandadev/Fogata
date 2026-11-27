@@ -1,27 +1,47 @@
 Test that an output back at a moved delay, not taken back, leaves the other output's slot
 
-B, then A (kept at 10 blocks), then A restarted with its echo changed 4 blocks later so its kept
-filters fit nowhere and are not taken back, then B: A's filters are kept in A's slot, B's slot
-still holds B at its delay, and B is taken back.
+B, then A (kept at 10 blocks), then A restarted at 14 blocks (its echo 4 blocks later) with its
+kept filters made not to fit, so nothing is taken back, then B: A's filters are kept in A's slot
+(they match there, each aligned to its delay), B's slot still holds B at its delay, and B is
+taken back.
 
 diff --git a/modules/audio_processing/aec3/block_processor_unittest.cc b/modules/audio_processing/aec3/block_processor_unittest.cc
-index 0c7b737..91fa5ec 100644
+index 0c7b737..1111a0e 100644
 --- a/modules/audio_processing/aec3/block_processor_unittest.cc
 +++ b/modules/audio_processing/aec3/block_processor_unittest.cc
-@@ -682,6 +682,51 @@ TEST(BlockProcessor, OtherOutputFiltersSurviveAnOutputBackAtAnotherDelay) {
+@@ -148,6 +148,10 @@ struct KeptFiltersWorld {
+   // The output in use, and the samples its echo comes after the render.
+   int output = 0;
+   int echo_samples = 0;
++  // While false, kept filters tested fit nowhere (the output's echo changed
++  // beyond what the tests accept), though they still match as filters of
++  // their output (KeptFiltersMatch).
++  bool kept_filters_fit = true;
+ };
+ 
+ // Filters of an output that estimate its echo `echo_samples` after the render
+@@ -222,7 +226,8 @@ class FakeKeptFiltersEchoRemover : public EchoRemover {
+     const int lag = world_->echo_samples -
+                     (static_cast<int>(delay_blocks) * kBlock +
+                      kept->echo_samples);
+-    fit_[slot] = kept->output == world_->output &&
++    fit_[slot] = world_->kept_filters_fit &&
++                 kept->output == world_->output &&
+                  std::abs(lag) <= kKeptFiltersMaxLagBlocks * kBlock - 16;
+     lags_[slot] = *fit_[slot] ? lag : 0;
+   }
+@@ -682,6 +687,51 @@ TEST(BlockProcessor, OtherOutputFiltersSurviveAnOutputBackAtAnotherDelay) {
    EXPECT_EQ(0, echo_remover.take_backs()[2].shift_samples);
  }
  
-+// Fogata: output A restarts and comes back 4 blocks later with its echo changed
-+// (in the fake, filters of another echo path: A's kept filters fit nowhere), so
-+// nothing is taken back, and the output then changes to B. The filters A
-+// learnt anew are kept in A's slot: those of B, kept in the other slot, stay
-+// as they are, at their delay, and are taken back for B.
++// Fogata: output A restarts and comes back 4 blocks later, its kept filters
++// fitting nowhere (they are not taken back, at the delay they were kept at or
++// at the delay found), and the output then changes to B. The filters A learnt
++// anew are kept in A's slot: those of B, kept in the other slot, stay as they
++// are, at their delay, and are taken back for B.
 +TEST(BlockProcessor, OtherOutputFiltersSurviveAnOutputBackNotTakenBack) {
 +  constexpr int kOutputA = 1;
 +  constexpr int kOutputB = 2;
-+  // A after the restart: its echo changed, its kept filters do not fit.
-+  constexpr int kOutputAChanged = 3;
 +  constexpr int kBlocks = 600;
 +  KeptFiltersBlockProcessor processor;
 +  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
@@ -34,10 +54,12 @@ index 0c7b737..91fa5ec 100644
 +  ASSERT_EQ(1u, echo_remover.keeps().size());
 +  const size_t slot_b = echo_remover.keeps()[0];
 +
-+  // A restarts 4 blocks later with its echo changed: its filters are kept in
-+  // the other slot, at 10, and are not taken back, at 10 or at 14.
-+  processor.Restart(kOutputAChanged, 14 * kBlock, 14);
++  // A restarts 4 blocks later: its filters are kept in the other slot, at 10,
++  // and do not fit, at 10 or at 14: they are not taken back.
++  processor.world().kept_filters_fit = false;
++  processor.Restart(kOutputA, 14 * kBlock, 14);
 +  processor.Run(kBlocks);
++  processor.world().kept_filters_fit = true;
 +  ASSERT_EQ(2u, echo_remover.keeps().size());
 +  const size_t slot_a = echo_remover.keeps()[1];
 +  ASSERT_NE(slot_a, slot_b);
