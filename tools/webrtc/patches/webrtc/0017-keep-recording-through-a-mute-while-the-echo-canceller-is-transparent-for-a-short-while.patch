@@ -71,10 +71,15 @@ recording stops at the mute as before.
 
 Measured: not yet.
 
+Unit tests (AudioStateRecordingHoldTest, simulated clock): the cap stops the recording once,
+exactly at FOGATA_A1_HOLD_MS; an unmute during the hold keeps it recording; the hold ends at the
+next 10 ms poll once the echo controller is no longer transparent.
+
 diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
+index a915dd1..2aa4c2d 100644
 --- a/api/audio/audio_processing.h
 +++ b/api/audio/audio_processing.h
-@@ -542,6 +542,13 @@
+@@ -542,6 +542,13 @@ class RTC_EXPORT AudioProcessing : public RefCountInterface {
      RestartEchoControllerForRecording();
    }
  
@@ -89,9 +94,10 @@ diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
    // other way not used. Ideally, the captured audio would still be processed,
    // but some components may change behavior based on this information.
 diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
+index 5d2ba0c..953b3b1 100644
 --- a/api/audio/echo_control.h
 +++ b/api/audio/echo_control.h
-@@ -73,6 +73,11 @@
+@@ -73,6 +73,11 @@ class EchoControl {
    // transparent mode, which a headset gives and speakers must not keep).
    virtual bool RestartForOtherDevices() { return RestartForRecording(); }
  
@@ -103,7 +109,29 @@ diff --git a/api/audio/echo_control.h b/api/audio/echo_control.h
    virtual ~EchoControl() {}
  };
  
+diff --git a/audio/BUILD.gn b/audio/BUILD.gn
+index 068bc6d..f7d9b00 100644
+--- a/audio/BUILD.gn
++++ b/audio/BUILD.gn
+@@ -276,6 +276,8 @@ if (rtc_include_tests) {
+       "../api/audio:audio_mixer_api",
+       "../api/task_queue",
+       "../api/task_queue/test:mock_task_queue_base",
++      "../api/units:time_delta",
++      "../api/units:timestamp",
+       "../call:call_interfaces",
+       "../call:mock_call_interfaces",
+       "../modules/async_audio_processing",
+@@ -285,6 +287,7 @@ if (rtc_include_tests) {
+       "../rtc_base:task_queue_for_test",
+       "../rtc_base:threading",
+       "../test:test_support",
++      "../test/time_controller",
+       "//third_party/abseil-cpp/absl/functional:any_invocable",
+       "//third_party/abseil-cpp/absl/strings:string_view",
+     ]
 diff --git a/audio/audio_state.cc b/audio/audio_state.cc
+index 297d965..54a87e9 100644
 --- a/audio/audio_state.cc
 +++ b/audio/audio_state.cc
 @@ -13,6 +13,7 @@
@@ -162,7 +190,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
        audio_transport_(
            config_.audio_transport_factory
                ? config_.audio_transport_factory->Create(
-@@ -56,6 +85,9 @@
+@@ -56,6 +85,9 @@ AudioState::~AudioState() {
    RTC_DCHECK(receiving_streams_.empty());
    RTC_DCHECK(sending_streams_.empty());
    RTC_DCHECK(!null_audio_poller_.Running());
@@ -172,7 +200,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
  }
  
  AudioProcessing* AudioState::audio_processing() {
-@@ -82,6 +114,8 @@
+@@ -82,6 +114,8 @@ void AudioState::SetPlayout(bool enabled) {
      // Disable playout.
      config_.audio_device_module->StopPlayout();
      stopped_in_call_ = false;
@@ -181,7 +209,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    }
    playout_enabled_ = enabled;
    UpdateNullAudioPollerState();
-@@ -93,6 +127,8 @@
+@@ -93,6 +127,8 @@ void AudioState::AddReceivingStream(AudioReceiveStreamInterface* stream) {
    receiving_streams_.insert(stream);
    // Fogata: another one heard is not the call recording stopped in (patch 0010).
    stopped_in_call_ = false;
@@ -190,7 +218,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    if (!config_.audio_mixer->AddSource(stream->source())) {
      RTC_DLOG(LS_ERROR) << "Failed to add source to mixer.";
    }
-@@ -119,6 +155,8 @@
+@@ -119,6 +155,8 @@ void AudioState::RemoveReceivingStream(AudioReceiveStreamInterface* stream) {
    // Fogata: one heard gone is not the call recording stopped in either: someone left,
    // or the call ended (patch 0010).
    stopped_in_call_ = false;
@@ -199,7 +227,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    if (receiving_streams_.empty()) {
      config_.audio_device_module->StopPlayout();
    }
-@@ -141,6 +179,8 @@
+@@ -141,6 +179,8 @@ void AudioState::SetRecording(bool enabled) {
      // Disable recording.
      adm->StopRecording();
      stopped_in_call_ = false;
@@ -208,7 +236,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    }
    recording_enabled_ = enabled;
  }
-@@ -149,6 +189,19 @@
+@@ -149,6 +189,19 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
                                    int sample_rate_hz,
                                    size_t num_channels) {
    RTC_DCHECK_RUN_ON(&worker_thread_checker_);
@@ -228,7 +256,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    auto& properties = sending_streams_[stream];
    properties.sample_rate_hz = sample_rate_hz;
    properties.num_channels = num_channels;
-@@ -157,7 +210,12 @@
+@@ -157,7 +210,12 @@ void AudioState::AddSendingStream(webrtc::AudioSendStream* stream,
    // Make sure recording is initialized; start recording if enabled.
    auto* adm = config_.audio_device_module.get();
    if (recording_enabled_) {
@@ -242,7 +270,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
        if (adm->InitRecording() == 0) {
          StartRecordingForCall();
        } else {
-@@ -172,16 +230,34 @@
+@@ -172,16 +230,34 @@ void AudioState::RemoveSendingStream(webrtc::AudioSendStream* stream) {
    auto count = sending_streams_.erase(stream);
    RTC_DCHECK_EQ(1, count);
    if (sending_streams_.empty()) {
@@ -285,7 +313,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    }
    UpdateAudioTransportWithSendingStreams();
  }
-@@ -239,7 +315,7 @@
+@@ -239,7 +315,7 @@ void AudioState::UpdateAudioTransportWithSendingStreams() {
  // echo controller for recording, which keeps what it learned of the room (with a
  // headset, that there is no echo). A call's start makes it anew as above: between
  // calls the room and the devices may have changed.
@@ -294,7 +322,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    // Fogata, patch 0011: and with the same devices: any change of them seen since
    // recording last started (MarkAudioDevicesChanged) may have changed the room (a
    // headset taken off for speakers), and makes it anew.
-@@ -250,15 +326,25 @@
+@@ -250,15 +326,25 @@ void AudioState::StartRecordingForCall() {
    // realign; if it comes first, it takes the counts as seen.
    const uint64_t devices = AudioDevicesChangedCount().load();
    const uint64_t handled = AudioDevicesHandledCount().load();
@@ -322,7 +350,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    devices_seen_ = devices;
    if (!config_.audio_processing) {
      return;
-@@ -278,6 +364,107 @@
+@@ -278,6 +364,107 @@ void AudioState::StartRecordingForCall() {
    }
  }
  
@@ -431,6 +459,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    // Run NullAudioPoller when there are receiving streams and playout is
    // disabled.
 diff --git a/audio/audio_state.h b/audio/audio_state.h
+index 9dfa35a..d6d2712 100644
 --- a/audio/audio_state.h
 +++ b/audio/audio_state.h
 @@ -12,10 +12,12 @@
@@ -446,7 +475,7 @@ diff --git a/audio/audio_state.h b/audio/audio_state.h
  #include "audio/audio_transport_impl.h"
  #include "call/audio_state.h"
  #include "rtc_base/checks.h"
-@@ -69,7 +71,28 @@
+@@ -69,7 +71,28 @@ class AudioState : public webrtc::AudioState {
    void UpdateNullAudioPollerState() RTC_RUN_ON(&worker_thread_checker_);
    // Fogata: starts the audio device's recording, and once it records makes the
    // echo controller anew, or restarts it in the call it stopped in (patch 0010).
@@ -476,7 +505,7 @@ diff --git a/audio/audio_state.h b/audio/audio_state.h
  
    RTC_NO_UNIQUE_ADDRESS SequenceChecker worker_thread_checker_{
        SequenceChecker::kDetached};
-@@ -81,6 +104,28 @@
+@@ -81,6 +104,28 @@ class AudioState : public webrtc::AudioState {
    bool stopped_in_call_ RTC_GUARDED_BY(&worker_thread_checker_) = false;
    // Fogata: AudioDevicesChangedCount() when recording last started (patch 0011).
    uint64_t devices_seen_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
@@ -505,10 +534,195 @@ diff --git a/audio/audio_state.h b/audio/audio_state.h
  
    // Transports mixed audio from the mixer to the audio device and
    // recorded audio to the sending streams.
+diff --git a/audio/audio_state_unittest.cc b/audio/audio_state_unittest.cc
+index 7b6f9f5..7c641c0 100644
+--- a/audio/audio_state_unittest.cc
++++ b/audio/audio_state_unittest.cc
+@@ -16,6 +16,7 @@
+ #include <cstdlib>
+ #include <memory>
+ #include <numbers>
++#include <string>
+ #include <utility>
+ #include <vector>
+ 
+@@ -31,6 +32,8 @@
+ #include "api/task_queue/task_queue_base.h"
+ #include "api/task_queue/task_queue_factory.h"
+ #include "api/task_queue/test/mock_task_queue_base.h"
++#include "api/units/time_delta.h"
++#include "api/units/timestamp.h"
+ #include "call/audio_state.h"
+ #include "call/test/mock_audio_receive_stream.h"
+ #include "call/test/mock_audio_send_stream.h"
+@@ -42,6 +45,7 @@
+ #include "rtc_base/thread.h"
+ #include "test/gmock.h"
+ #include "test/gtest.h"
++#include "test/time_controller/simulated_time_controller.h"
+ 
+ namespace webrtc {
+ namespace test {
+@@ -560,5 +564,154 @@ INSTANTIATE_TEST_SUITE_P(AudioStateTest,
+                                 ConfigHelper::Params({false, true}),
+                                 ConfigHelper::Params({true, true})));
+ 
++// Fogata, patch 0017: recording kept through a mute while the echo
++// controller is transparent (FOGATA_A1_HOLD_MS). The worker is a task queue of
++// a simulated clock: the hold's 10 ms poll and its cap run in simulated time,
++// and the audio device's StartRecording and StopRecording are counted.
++class TransparentAudioProcessing : public MockAudioProcessing {
++ public:
++  bool EchoControllerTransparent() const override { return transparent; }
++  bool transparent = false;
++};
++
++class AudioStateRecordingHoldTest : public ::testing::Test {
++ protected:
++  AudioStateRecordingHoldTest()
++      : time_(Timestamp::Seconds(1000)),
++        worker_(time_.GetTaskQueueFactory()->CreateTaskQueue(
++            "worker",
++            TaskQueueFactory::Priority::NORMAL)),
++        helper_(ConfigHelper::Params({false, false})),
++        apm_(make_ref_counted<NiceMock<TransparentAudioProcessing>>()) {
++    helper_.config().audio_processing = apm_;
++    adm_ = static_cast<MockAudioDeviceModule*>(
++        helper_.config().audio_device_module.get());
++    ON_CALL(*adm_, StartRecording()).WillByDefault([this] {
++      ++starts_;
++      recording_ = true;
++      return 0;
++    });
++    ON_CALL(*adm_, StopRecording()).WillByDefault([this] {
++      ++stops_;
++      recording_ = false;
++      return 0;
++    });
++    ON_CALL(*adm_, Recording()).WillByDefault([this] { return recording_; });
++    // Read once, as the AudioState is made.
++    const char* old = std::getenv("FOGATA_A1_HOLD_MS");
++    const bool had_old = old != nullptr;
++    const std::string old_value = had_old ? old : "";
++    setenv("FOGATA_A1_HOLD_MS", "200", /*overwrite=*/1);
++    audio_state_ = make_ref_counted<internal::AudioState>(helper_.config());
++    if (had_old) {
++      setenv("FOGATA_A1_HOLD_MS", old_value.c_str(), /*overwrite=*/1);
++    } else {
++      unsetenv("FOGATA_A1_HOLD_MS");
++    }
++  }
++
++  ~AudioStateRecordingHoldTest() override {
++    apm_->transparent = false;
++    OnWorker([this] {
++      if (sending_) {
++        audio_state_->RemoveSendingStream(&send_stream_);
++      }
++      audio_state_->RemoveReceivingStream(&receive_stream_);
++      audio_state_ = nullptr;
++    });
++  }
++
++  // Runs `task` on the worker, now in simulated time.
++  void OnWorker(absl::AnyInvocable<void() &&> task) {
++    worker_->PostTask(std::move(task));
++    time_.AdvanceTime(TimeDelta::Zero());
++  }
++  void AdvanceMs(int ms) { time_.AdvanceTime(TimeDelta::Millis(ms)); }
++
++  // A call that plays and records, then the microphone turned off in it while
++  // the echo controller is transparent: the hold begins, recording goes on.
++  void StartCallAndMuteTransparent() {
++    OnWorker([this] {
++      audio_state_->AddReceivingStream(&receive_stream_);
++      audio_state_->AddSendingStream(&send_stream_, kSampleRate,
++                                     kNumberOfChannels);
++    });
++    sending_ = true;
++    ASSERT_EQ(starts_, 1);
++    ASSERT_TRUE(recording_);
++    apm_->transparent = true;
++    OnWorker([this] { audio_state_->RemoveSendingStream(&send_stream_); });
++    sending_ = false;
++    ASSERT_EQ(stops_, 0) << "the mute stopped recording: no hold";
++    ASSERT_TRUE(recording_);
++  }
++
++  void Unmute() {
++    OnWorker([this] {
++      audio_state_->AddSendingStream(&send_stream_, kSampleRate,
++                                     kNumberOfChannels);
++    });
++    sending_ = true;
++  }
++
++  GlobalSimulatedTimeController time_;
++  std::unique_ptr<TaskQueueBase, TaskQueueDeleter> worker_;
++  ConfigHelper helper_;
++  scoped_refptr<NiceMock<TransparentAudioProcessing>> apm_;
++  MockAudioDeviceModule* adm_ = nullptr;
++  MockAudioReceiveStream receive_stream_;
++  MockAudioSendStream send_stream_;
++  scoped_refptr<internal::AudioState> audio_state_;
++  bool sending_ = false;
++  bool recording_ = false;
++  int starts_ = 0;
++  int stops_ = 0;
++};
++
++TEST_F(AudioStateRecordingHoldTest, CapStopsRecordingOnceAtHoldMs) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(199);
++  EXPECT_EQ(stops_, 0);
++  EXPECT_TRUE(recording_);
++  AdvanceMs(1);
++  EXPECT_EQ(stops_, 1);
++  EXPECT_FALSE(recording_);
++  AdvanceMs(1000);
++  EXPECT_EQ(stops_, 1);
++  EXPECT_EQ(starts_, 1);
++}
++
++TEST_F(AudioStateRecordingHoldTest, UnmuteDuringHoldKeepsRecording) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(150);
++  ASSERT_EQ(stops_, 0);
++  // The unmute restarts the echo controller as any unmute in the call does,
++  // and touches nothing of the audio device.
++  EXPECT_CALL(*apm_, RestartEchoControllerForRecording()).Times(1);
++  Unmute();
++  EXPECT_EQ(stops_, 0);
++  EXPECT_EQ(starts_, 1);
++  EXPECT_TRUE(recording_);
++  // The cap posted for the hold, at 200 ms, finds it over.
++  AdvanceMs(1050);
++  EXPECT_EQ(stops_, 0);
++  EXPECT_EQ(starts_, 1);
++  EXPECT_TRUE(recording_);
++}
++
++TEST_F(AudioStateRecordingHoldTest, PollStopsRecordingWhenNotTransparent) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(50);
++  ASSERT_EQ(stops_, 0);
++  apm_->transparent = false;
++  // The next poll, 10 ms at most.
++  AdvanceMs(10);
++  EXPECT_EQ(stops_, 1);
++  EXPECT_FALSE(recording_);
++  AdvanceMs(1000);
++  EXPECT_EQ(stops_, 1);
++  EXPECT_EQ(starts_, 1);
++}
++
+ }  // namespace test
+ }  // namespace webrtc
 diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index 0d42ab2..6396330 100644
 --- a/modules/audio_processing/aec3/block_processor.cc
 +++ b/modules/audio_processing/aec3/block_processor.cc
-@@ -65,6 +65,7 @@
+@@ -65,6 +65,7 @@ class BlockProcessorImpl final : public BlockProcessor {
  
    void RestartForRecording() override;
    void RestartForOtherDevices() override;
@@ -516,7 +730,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
  
   private:
    static std::atomic<int> instance_count_;
-@@ -264,6 +265,10 @@
+@@ -264,6 +265,10 @@ void BlockProcessorImpl::RestartForOtherDevices() {
    other_devices_ = true;
  }
  
@@ -528,9 +742,10 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
    echo_remover_->SetCaptureOutputUsage(capture_output_used);
  }
 diff --git a/modules/audio_processing/aec3/block_processor.h b/modules/audio_processing/aec3/block_processor.h
+index 0412c87..ff0ce11 100644
 --- a/modules/audio_processing/aec3/block_processor.h
 +++ b/modules/audio_processing/aec3/block_processor.h
-@@ -85,6 +85,8 @@
+@@ -85,6 +85,8 @@ class BlockProcessor {
    virtual void RestartForRecording() {}
    // Fogata, patch 0016: the same, forgetting the transparent mode too.
    virtual void RestartForOtherDevices() { RestartForRecording(); }
@@ -540,9 +755,10 @@ diff --git a/modules/audio_processing/aec3/block_processor.h b/modules/audio_pro
  
  }  // namespace webrtc
 diff --git a/modules/audio_processing/aec3/echo_canceller3.cc b/modules/audio_processing/aec3/echo_canceller3.cc
+index e6f4db4..57a0013 100644
 --- a/modules/audio_processing/aec3/echo_canceller3.cc
 +++ b/modules/audio_processing/aec3/echo_canceller3.cc
-@@ -979,6 +979,13 @@
+@@ -979,6 +979,13 @@ bool EchoCanceller3::RestartForOtherDevices() {
    return true;
  }
  
@@ -557,9 +773,10 @@ diff --git a/modules/audio_processing/aec3/echo_canceller3.cc b/modules/audio_pr
    return true;
  }
 diff --git a/modules/audio_processing/aec3/echo_canceller3.h b/modules/audio_processing/aec3/echo_canceller3.h
+index 540f729..9132cd2 100644
 --- a/modules/audio_processing/aec3/echo_canceller3.h
 +++ b/modules/audio_processing/aec3/echo_canceller3.h
-@@ -137,6 +137,8 @@
+@@ -137,6 +137,8 @@ class EchoCanceller3 : public EchoControl {
    bool RestartForRecording() override;
    // Fogata: see EchoControl::RestartForOtherDevices.
    bool RestartForOtherDevices() override;
@@ -569,9 +786,10 @@ diff --git a/modules/audio_processing/aec3/echo_canceller3.h b/modules/audio_pro
    // Signals whether an external detector has detected echo leakage from the
    // echo canceller.
 diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+index 9919b6f..2ced503 100644
 --- a/modules/audio_processing/aec3/echo_remover.cc
 +++ b/modules/audio_processing/aec3/echo_remover.cc
-@@ -181,6 +181,10 @@
+@@ -181,6 +181,10 @@ class EchoRemoverImpl final : public EchoRemover {
      capture_output_used_ = capture_output_used;
    }
  
@@ -583,9 +801,10 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
    static std::atomic<int> instance_count_;
    const EchoCanceller3Config config_;
 diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_processing/aec3/echo_remover.h
+index afacbdb..291ed31 100644
 --- a/modules/audio_processing/aec3/echo_remover.h
 +++ b/modules/audio_processing/aec3/echo_remover.h
-@@ -61,6 +61,10 @@
+@@ -61,6 +61,10 @@ class EchoRemover {
    // resulting output is anyway not used, for instance when the endpoint is
    // muted.
    virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
@@ -597,9 +816,10 @@ diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_proces
  
  }  // namespace webrtc
 diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_processing/audio_processing_impl.cc
+index 82b8bcf..991071b 100644
 --- a/modules/audio_processing/audio_processing_impl.cc
 +++ b/modules/audio_processing/audio_processing_impl.cc
-@@ -1011,7 +1011,10 @@
+@@ -1011,7 +1011,10 @@ int AudioProcessingImpl::ProcessStream(const float* const* src,
      capture_.capture_fullband_audio->CopyFrom(
          src, formats_.api_format.input_stream());
    }
@@ -611,7 +831,7 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
    if (capture_.capture_fullband_audio) {
      capture_.capture_fullband_audio->CopyTo(formats_.api_format.output_stream(),
                                              dest);
-@@ -1285,7 +1288,10 @@
+@@ -1285,7 +1288,10 @@ int AudioProcessingImpl::ProcessStream(const int16_t* const src,
    if (capture_.capture_fullband_audio) {
      capture_.capture_fullband_audio->CopyFrom(src, input_config);
    }
@@ -623,7 +843,7 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
    if (submodule_states_.CaptureMultiBandProcessingPresent() ||
        submodule_states_.CaptureFullBandProcessingActive()) {
      if (capture_.capture_fullband_audio) {
-@@ -1973,8 +1979,24 @@
+@@ -1973,8 +1979,24 @@ void AudioProcessingImpl::RestartEchoControllerForOtherDevices() {
    InitializeEchoController();
  }
  
@@ -649,9 +869,10 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
    submodules_.post_filter.reset();
  
 diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
+index 3dd5a61..7b6a7d3 100644
 --- a/modules/audio_processing/audio_processing_impl.h
 +++ b/modules/audio_processing/audio_processing_impl.h
-@@ -96,6 +96,7 @@
+@@ -96,6 +96,7 @@ class AudioProcessingImpl : public AudioProcessing {
    void RestartEchoController() override;
    void RestartEchoControllerForRecording() override;
    void RestartEchoControllerForOtherDevices() override;
@@ -659,7 +880,7 @@ diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_pr
  
    // Capture-side exclusive methods possibly running APM in a
    // multi-threaded manner. Acquire the capture lock.
-@@ -173,6 +174,12 @@
+@@ -173,6 +174,12 @@ class AudioProcessingImpl : public AudioProcessing {
    std::atomic<uint64_t> device_restarts_seen_{AudioDeviceRestartsCount().load()};
    std::atomic<uint64_t> devices_seen_{AudioDevicesChangedCount().load()};
  
