@@ -1,0 +1,454 @@
+Say whether the sound plays to headphones in the audio device modules
+
+Patch 0018 lets AEC3's transparent mode decide sooner that a capture without any sign of
+echo has none while the sound plays to headphones or a headset (PlayoutToHeadphones, in
+api/audio/audio_device.h), and nothing set it. The audio device modules now set it from
+what the system says of the device the playout plays on, and set it false when playout
+stops: with no playout there is no sound to headphones. The ALSA module and the macOS
+engine device leave it false.
+
+- PulseAudio (Linux): when the playout stream is connected and ready (a start of
+  playout), when the server moves it to another sink (the moved callback of patch 0011),
+  and at every info of that sink the module gets (the sink changes patch 0011 asks for,
+  such as an analog jack switching its port from speakers to headphones), the sink's info
+  is asked for without waiting, and the answer, on PulseAudio's thread, sets the value:
+  true when the sink's active port is of type headphones or headset, or its
+  device.form_factor is "headphone" or "headset"; false otherwise. The port's type is in
+  PulseAudio's headers and library from 14.0 on (WebRTC's Debian bullseye sysroot has
+  14.2); the library is loaded at run time and may be older, so the type is read only
+  when the loaded library is 14 or newer, and the form factor alone decides otherwise.
+  An answer about a sink the playout left, or one that comes after playout stopped,
+  changes nothing. Two more symbols are loaded: pa_get_library_version and
+  pa_proplist_gets.
+- Windows Core Audio (AudioDeviceWindowsCore): at a start of playout, the render
+  endpoint's form factor (PKEY_AudioEndpoint_FormFactor): Headphones or Headset is true,
+  anything else or nothing false. It is read again when that endpoint says its form
+  factor changed, and the value is false while the endpoint is not active (unplugged or
+  disabled) and read again when it is active again. A change of the default output is
+  not followed: the module's playout stays on the endpoint it was opened on (patch
+  0015), and another device chosen starts playout again, which reads it.
+
+Logged (info) when the value is set and what the system says is new, not again for a
+sink's other changes (its volume):
+  PulseAudio: playout on sink <name> (<index>), port <name or none> (type <number or
+    unknown>), form factor <value or none>: sound to headphones yes|no
+  PulseAudio: playout stopped: sound to headphones no
+  Core Audio: playout on endpoint <name>, form factor <number> [(speakers|headphones|
+    headset)] or unknown (playout started|form factor changed|endpoint active again):
+    sound to headphones yes|no
+  Core Audio: the playout's endpoint is not active (state <number>): sound to
+    headphones no
+  Core Audio: playout stopped: sound to headphones no
+
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
+index 2ed1782..75e0682 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.cc
++++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
+@@ -15,6 +15,7 @@
+ #include <algorithm>
+ #include <cstddef>
+ #include <cstdint>
++#include <cstdlib>
+ #include <cstring>
+ #include <string>
+ #include <utility>
+@@ -78,6 +79,19 @@ TimeDelta ReconnectDelay(int tries) {
+   return std::min(delay, kMost);
+ }
+ 
++#if PA_CHECK_VERSION(14, 0, 0)
++// Fogata: a sink port's type (pa_sink_port_info::type) is there from PulseAudio 14
++// on, in the headers and in the library that fills the port's info (loaded at run
++// time, possibly older): read only when both have it.
++bool PortTypesKnown() {
++  static const bool known = [] {
++    const char* version = LATE(pa_get_library_version)();
++    return version != nullptr && std::atoi(version) >= 14;
++  }();
++  return known;
++}
++#endif
++
+ // Fogata: how long before starting again what did not start once the server was
+ // back (its devices may not be there yet): a second for the first 5 tries, then 5 s.
+ TimeDelta RestoreDelay(int round) {
+@@ -1385,6 +1399,15 @@ int32_t AudioDeviceLinuxPulse::StopPlayout() {
+   LATE(pa_stream_set_state_callback)(_playStream, nullptr, nullptr);
+   LATE(pa_stream_set_moved_callback)(_playStream, nullptr, nullptr);
+ 
++  // Fogata: no playout, no sound to headphones; an answer still on its way about
++  // this stream's sink finds no stream to follow (NotePlayoutSink).
++  playout_sink_stream_ = nullptr;
++  if (!playout_sink_note_.empty()) {
++    playout_sink_note_.clear();
++    RTC_LOG(LS_INFO) << "PulseAudio: playout stopped: sound to headphones no";
++  }
++  PlayoutToHeadphones().store(false, std::memory_order_relaxed);
++
+   const pa_stream_state_t stream_state = LATE(pa_stream_get_state)(_playStream);
+   if (stream_state != PA_STREAM_UNCONNECTED &&
+       stream_state != PA_STREAM_FAILED &&
+@@ -1866,8 +1889,11 @@ void AudioDeviceLinuxPulse::PaPortSinkCallback(pa_context* /*c*/,
+                                                int eol,
+                                                void* pThis) {
+   if (eol == 0 && i != nullptr) {
+-    static_cast<AudioDeviceLinuxPulse*>(pThis)->NotePort(
+-        false, i->index, i->active_port ? i->active_port->name : nullptr);
++    auto* self = static_cast<AudioDeviceLinuxPulse*>(pThis);
++    self->NotePort(false, i->index,
++                   i->active_port ? i->active_port->name : nullptr);
++    // Fogata: the playout's sink changed (its port, say): headphones or not again.
++    self->NotePlayoutSink(i);
+   }
+ }
+ 
+@@ -1902,8 +1928,7 @@ void AudioDeviceLinuxPulse::PaDefaultsCallback(pa_context* /*c*/,
+   self->defaults_known_ = true;
+ }
+ 
+-void AudioDeviceLinuxPulse::PaStreamMovedCallback(pa_stream* /*p*/,
+-                                                  void* /*pThis*/) {
++void AudioDeviceLinuxPulse::PaStreamMovedCallback(pa_stream* p, void* pThis) {
+   RTC_LOG(LS_INFO) << "PulseAudio: a stream moved to another device: audio "
+                       "devices changed";
+   MarkAudioDevicesChanged();
+@@ -1912,6 +1937,85 @@ void AudioDeviceLinuxPulse::PaStreamMovedCallback(pa_stream* /*p*/,
+   // reaches the microphone by another path, and the echo controller aligns again
+   // at the next recorded block (taken as seen by a start of recording).
+   MarkAudioDeviceRestarted();
++  // Fogata: the playout on another sink: headphones or not, as that sink says.
++  auto* self = static_cast<AudioDeviceLinuxPulse*>(pThis);
++  if (p != nullptr && p == self->playout_sink_stream_) {
++    self->AskPlayoutSink();
++  }
++}
++
++void AudioDeviceLinuxPulse::AskPlayoutSink() {
++  // Under the mainloop's lock, or on its thread: the answer comes on that thread
++  // (PaPlayoutSinkCallback), and nothing waits for it.
++  if (playout_sink_stream_ == nullptr) {
++    return;
++  }
++  const uint32_t index =
++      LATE(pa_stream_get_device_index)(playout_sink_stream_);
++  if (index == PA_INVALID_INDEX) {
++    return;
++  }
++  pa_operation* op = LATE(pa_context_get_sink_info_by_index)(
++      _paContext, index, PaPlayoutSinkCallback, this);
++  if (op != nullptr) {
++    LATE(pa_operation_unref)(op);
++  }
++}
++
++void AudioDeviceLinuxPulse::PaPlayoutSinkCallback(pa_context* /*c*/,
++                                                  const pa_sink_info* i,
++                                                  int eol,
++                                                  void* pThis) {
++  if (eol == 0 && i != nullptr) {
++    static_cast<AudioDeviceLinuxPulse*>(pThis)->NotePlayoutSink(i);
++  }
++}
++
++void AudioDeviceLinuxPulse::NotePlayoutSink(const pa_sink_info* i) {
++  // On the mainloop thread. Only the sink the playout plays on now: an answer
++  // about the one it left, or after playout stopped, changes nothing.
++  if (playout_sink_stream_ == nullptr ||
++      LATE(pa_stream_get_device_index)(playout_sink_stream_) != i->index) {
++    return;
++  }
++  const char* port = i->active_port != nullptr && i->active_port->name != nullptr
++                         ? i->active_port->name
++                         : "";
++  int type = -1;  // Not known.
++#if PA_CHECK_VERSION(14, 0, 0)
++  if (i->active_port != nullptr && PortTypesKnown()) {
++    type = static_cast<int>(i->active_port->type);
++  }
++#endif
++  const char* form = i->proplist != nullptr
++                         ? LATE(pa_proplist_gets)(i->proplist,
++                                                  PA_PROP_DEVICE_FORM_FACTOR)
++                         : nullptr;
++  const std::string form_factor = form != nullptr ? form : "";
++  bool headphones = form_factor == "headphone" || form_factor == "headset";
++#if PA_CHECK_VERSION(14, 0, 0)
++  headphones = headphones || type == PA_DEVICE_PORT_TYPE_HEADPHONES ||
++               type == PA_DEVICE_PORT_TYPE_HEADSET;
++#endif
++  PlayoutToHeadphones().store(headphones, std::memory_order_relaxed);
++  // Logged when it is new: at a start of playout, a move, a change of the sink's
++  // port; not again for the sink's other changes (its volume).
++  std::string note = std::string(i->name != nullptr ? i->name : "") + "|" +
++                     std::to_string(i->index) + "|" + port + "|" +
++                     std::to_string(type) + "|" + form_factor + "|" +
++                     (headphones ? "1" : "0");
++  if (note == playout_sink_note_) {
++    return;
++  }
++  playout_sink_note_ = std::move(note);
++  RTC_LOG(LS_INFO) << "PulseAudio: playout on sink "
++                   << (i->name != nullptr ? i->name : "") << " (" << i->index
++                   << "), port " << (*port != '\0' ? port : "none")
++                   << " (type "
++                   << (type >= 0 ? std::to_string(type) : std::string("unknown"))
++                   << "), form factor "
++                   << (form_factor.empty() ? "none" : form_factor)
++                   << ": sound to headphones " << (headphones ? "yes" : "no");
+ }
+ 
+ void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
+@@ -2760,6 +2864,11 @@ bool AudioDeviceLinuxPulse::PlayThreadProcess() {
+     // We can now handle write callbacks
+     EnableWriteCallback();
+ 
++    // Fogata: whether its sink plays to headphones or a headset, followed from now
++    // on (PlayoutToHeadphones).
++    playout_sink_stream_ = _playStream;
++    AskPlayoutSink();
++
+     PaUnLock();
+ 
+     // Clear device name
+diff --git a/modules/audio_device/linux/audio_device_pulse_linux.h b/modules/audio_device/linux/audio_device_pulse_linux.h
+index 4fe0c52..8f78caa 100644
+--- a/modules/audio_device/linux/audio_device_pulse_linux.h
++++ b/modules/audio_device/linux/audio_device_pulse_linux.h
+@@ -242,6 +242,15 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+   static void PaDefaultsCallback(pa_context* c,
+                                  const pa_server_info* i,
+                                  void* pThis);
++  // Fogata: whether the playout stream's sink plays to headphones or a headset
++  // (PlayoutToHeadphones). AskPlayoutSink asks for the sink's info (under the
++  // mainloop's lock, without waiting); NotePlayoutSink sets the value from it.
++  void AskPlayoutSink();
++  void NotePlayoutSink(const pa_sink_info* i);
++  static void PaPlayoutSinkCallback(pa_context* c,
++                                    const pa_sink_info* i,
++                                    int eol,
++                                    void* pThis);
+   void PostToWorker(absl::AnyInvocable<void() &&> task,
+                     TimeDelta delay = TimeDelta::Zero());
+   // The sound server's own name of the device at `index` of the list (empty for
+@@ -427,6 +436,11 @@ class AudioDeviceLinuxPulse : public AudioDeviceGeneric {
+   std::string default_sink_;
+   std::string default_source_;
+   bool defaults_known_ = false;
++  // Fogata: the playout stream once it plays (connected and ready), whose sink
++  // NotePlayoutSink follows, and what it last logged of that sink; under the
++  // mainloop's lock (set and cleared there, read on the mainloop thread).
++  pa_stream* playout_sink_stream_ = nullptr;
++  std::string playout_sink_note_;
+   Mutex observer_mutex_;
+   AudioDeviceObserver* observer_ RTC_GUARDED_BY(observer_mutex_) = nullptr;
+   ScopedTaskSafety task_safety_;
+diff --git a/modules/audio_device/linux/pulseaudiosymboltable_linux.h b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
+index 62840c9..b8655b5 100644
+--- a/modules/audio_device/linux/pulseaudiosymboltable_linux.h
++++ b/modules/audio_device/linux/pulseaudiosymboltable_linux.h
+@@ -61,9 +61,11 @@ namespace adm_linux_pulse {
+   X(pa_context_subscribe)                  \
+   X(pa_context_unref)                      \
+   X(pa_cvolume_set)                        \
++  X(pa_get_library_version)                \
+   X(pa_operation_cancel)                   \
+   X(pa_operation_get_state)                \
+   X(pa_operation_unref)                    \
++  X(pa_proplist_gets)                      \
+   X(pa_stream_connect_playback)            \
+   X(pa_stream_connect_record)              \
+   X(pa_stream_disconnect)                  \
+diff --git a/modules/audio_device/win/audio_device_core_win.cc b/modules/audio_device/win/audio_device_core_win.cc
+index 2cd79ee..b2f067d 100644
+--- a/modules/audio_device/win/audio_device_core_win.cc
++++ b/modules/audio_device/win/audio_device_core_win.cc
+@@ -26,6 +26,7 @@
+ #include <windows.h>
+ 
+ #include <iomanip>
++#include <string>
+ 
+ #include "api/make_ref_counted.h"
+ #include "rtc_base/checks.h"
+@@ -161,6 +162,46 @@ class MediaBufferImpl final : public IMediaBuffer {
+   const DWORD _maxLength;
+   LONG _refCount;
+ };
++
++// Fogata: whether the render endpoint `device` is headphones or a headset, by its
++// form factor (PKEY_AudioEndpoint_FormFactor: Headphones or Headset); false when
++// it says something else or nothing. Sets PlayoutToHeadphones and logs it.
++void NotePlayoutFormFactor(IMMDevice* device, const char* why) {
++  std::string name = "unknown";
++  std::string form = "unknown";
++  bool headphones = false;
++  IPropertyStore* props = nullptr;
++  if (device != nullptr &&
++      SUCCEEDED(device->OpenPropertyStore(STGM_READ, &props))) {
++    PROPVARIANT value;
++    PropVariantInit(&value);
++    if (SUCCEEDED(props->GetValue(PKEY_Device_FriendlyName, &value)) &&
++        value.vt == VT_LPWSTR && value.pwszVal != nullptr) {
++      name = ToUtf8(value.pwszVal);
++    }
++    PropVariantClear(&value);
++    if (SUCCEEDED(props->GetValue(PKEY_AudioEndpoint_FormFactor, &value)) &&
++        value.vt == VT_UI4) {
++      const ULONG factor = value.ulVal;
++      headphones = factor == static_cast<ULONG>(Headphones) ||
++                   factor == static_cast<ULONG>(Headset);
++      form = std::to_string(factor);
++      if (factor == static_cast<ULONG>(Speakers)) {
++        form += " (speakers)";
++      } else if (factor == static_cast<ULONG>(Headphones)) {
++        form += " (headphones)";
++      } else if (factor == static_cast<ULONG>(Headset)) {
++        form += " (headset)";
++      }
++    }
++    PropVariantClear(&value);
++    props->Release();
++  }
++  PlayoutToHeadphones().store(headphones, std::memory_order_relaxed);
++  RTC_LOG(LS_INFO) << "Core Audio: playout on endpoint " << name
++                   << ", form factor " << form << " (" << why
++                   << "): sound to headphones " << (headphones ? "yes" : "no");
++}
+ }  // namespace
+ 
+ // ============================================================================
+@@ -2551,6 +2592,13 @@ int32_t AudioDeviceWindowsCore::StartPlayout() {
+   _playing = true;
+   RTC_LOG(LS_VERBOSE) << "rendering audio stream has now started...";
+ 
++  // Fogata: whether this endpoint is headphones or a headset
++  // (PlayoutToHeadphones), followed until playout stops.
++  {
++    MutexLock lockScoped(&mutex_);
++    _deviceStateListener->SetPlayoutEndpoint(_ptrDeviceOut);
++  }
++
+   return 0;
+ }
+ 
+@@ -2563,6 +2611,9 @@ int32_t AudioDeviceWindowsCore::StopPlayout() {
+     return 0;
+   }
+ 
++  // Fogata: no playout, no sound to headphones.
++  _deviceStateListener->SetPlayoutEndpoint(nullptr);
++
+   {
+     MutexLock lockScoped(&mutex_);
+ 
+@@ -3980,10 +4031,54 @@ void AudioDeviceWindowsCore::DeviceStateListener::SetObserver(AudioDeviceObserve
+   callback_ = observer;
+ }
+ 
++AudioDeviceWindowsCore::DeviceStateListener::~DeviceStateListener() {
++  MutexLock lock(&playout_mutex_);
++  SAFE_RELEASE(playout_endpoint_);
++}
++
++void AudioDeviceWindowsCore::DeviceStateListener::SetPlayoutEndpoint(
++    IMMDevice* device) {
++  MutexLock lock(&playout_mutex_);
++  const bool was_playing = playout_endpoint_ != nullptr;
++  SAFE_RELEASE(playout_endpoint_);
++  playout_endpoint_id_.clear();
++  if (device == nullptr) {
++    PlayoutToHeadphones().store(false, std::memory_order_relaxed);
++    if (was_playing) {
++      RTC_LOG(LS_INFO) << "Core Audio: playout stopped: sound to headphones no";
++    }
++    return;
++  }
++  device->AddRef();
++  playout_endpoint_ = device;
++  LPWSTR id = nullptr;
++  if (SUCCEEDED(device->GetId(&id)) && id != nullptr) {
++    playout_endpoint_id_ = id;
++  }
++  CoTaskMemFree(id);
++  NotePlayoutFormFactor(device, "playout started");
++}
++
+ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDeviceStateChanged(LPCWSTR pwstrDeviceId, DWORD dwNewState) {
+   RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnDeviceStateChanged => " << pwstrDeviceId << ", NewState => " << dwNewState;
+   // Fogata, patch 0011: an endpoint came, went or changed its state.
+   MarkAudioDevicesChanged();
++  // Fogata: the playout's endpoint changed its state: its form factor again, or
++  // no sound to headphones while it is not active (unplugged, disabled).
++  {
++    MutexLock lock(&playout_mutex_);
++    if (playout_endpoint_ != nullptr && pwstrDeviceId != nullptr &&
++        _wcsicmp(pwstrDeviceId, playout_endpoint_id_.c_str()) == 0) {
++      if (dwNewState == DEVICE_STATE_ACTIVE) {
++        NotePlayoutFormFactor(playout_endpoint_, "endpoint active again");
++      } else {
++        PlayoutToHeadphones().store(false, std::memory_order_relaxed);
++        RTC_LOG(LS_INFO) << "Core Audio: the playout's endpoint is not active "
++                            "(state "
++                         << dwNewState << "): sound to headphones no";
++      }
++    }
++  }
+   if(callback_) callback_->OnDevicesUpdated();
+   return S_OK;
+ }
+@@ -4008,6 +4103,15 @@ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDefaultDeviceChanged(EDat
+ 
+ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnPropertyValueChanged(LPCWSTR pwstrDeviceId, const PROPERTYKEY key) {
+   //RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnPropertyValueChanged => " << pwstrDeviceId;
++  // Fogata: the playout's endpoint says another form factor (a jack's driver
++  // telling headphones from speakers on one endpoint).
++  if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_FormFactor)) {
++    MutexLock lock(&playout_mutex_);
++    if (playout_endpoint_ != nullptr && pwstrDeviceId != nullptr &&
++        _wcsicmp(pwstrDeviceId, playout_endpoint_id_.c_str()) == 0) {
++      NotePlayoutFormFactor(playout_endpoint_, "form factor changed");
++    }
++  }
+   return S_OK;
+ }
+ 
+diff --git a/modules/audio_device/win/audio_device_core_win.h b/modules/audio_device/win/audio_device_core_win.h
+index 8692215..fd6d5c5 100644
+--- a/modules/audio_device/win/audio_device_core_win.h
++++ b/modules/audio_device/win/audio_device_core_win.h
+@@ -23,6 +23,8 @@
+ #include <comdef.h>
+ #include <objbase.h>
+ 
++#include <string>
++
+ #include "api/scoped_refptr.h"
+ #include "modules/audio_device/audio_device_generic.h"
+ #include "rtc_base/synchronization/mutex.h"
+@@ -52,7 +54,7 @@ class AudioDeviceWindowsCore : public AudioDeviceGeneric {
+ 
+   class DeviceStateListener : public IMMNotificationClient {
+    public:
+-    virtual ~DeviceStateListener() = default;
++    virtual ~DeviceStateListener();
+     HRESULT __stdcall OnDeviceStateChanged(LPCWSTR pwstrDeviceId,
+                                            DWORD dwNewState) override;
+     HRESULT __stdcall OnDeviceAdded(LPCWSTR pwstrDeviceId) override;
+@@ -73,9 +75,17 @@ class AudioDeviceWindowsCore : public AudioDeviceGeneric {
+ 
+     void SetObserver(AudioDeviceObserver *sink);
+ 
++    // Fogata: the render endpoint playout plays on (nullptr when it stops): its
++    // form factor tells PlayoutToHeadphones, read now and again when the endpoint
++    // says its form factor or its state changed.
++    void SetPlayoutEndpoint(IMMDevice* device);
++
+    private:
+     LONG ref_count_ = 1;
+     AudioDeviceObserver *callback_ = nullptr;
++    Mutex playout_mutex_;
++    IMMDevice* playout_endpoint_ RTC_GUARDED_BY(playout_mutex_) = nullptr;
++    std::wstring playout_endpoint_id_ RTC_GUARDED_BY(playout_mutex_);
+   };
+ 
+   static bool CoreAudioIsSupported();
