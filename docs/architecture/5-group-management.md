@@ -557,10 +557,11 @@ the new log. Removals, leaves and adds written apart from the move (kept and par
 are named by `GroupLog::apart_from_move`, for the first member to write again in the new
 log. A
 device knows how full a log is (`GroupLog::fill`) and who wrote most of it
-(`GroupLog::writers`). How the new log reaches the members, the removals written again, and
-how the application offers the move, are not in this version yet: until they are, a
-manager's device raises its groups to four at most (`Level::RAISED_TO`), and judges at five
-a group a newer version raised.
+(`GroupLog::writers`). Members ask each other for the new log (`MovedLog`) and follow it, the
+first member writes again what was written apart from the move, and the application warns as
+a log fills and offers the move to the first member. So a manager's device raises its groups
+to five (`Level::RAISED_TO`) like any other level: once every member's copy judges at five, or
+anyway after the wait, when its person agrees to leave the others behind.
 
 Two first members could each move the group apart from each other (a ladder change racing a
 move): every copy applies the first in the order, and a member that followed the other

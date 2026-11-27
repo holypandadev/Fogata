@@ -184,11 +184,10 @@ impl Level {
     /// at.
     pub const CURRENT: Level = Level::Five;
 
-    /// The highest level a manager's device raises its groups to, by itself or anyway: four
-    /// until a member's device follows a group that moved (see [`Moved`]) and the
-    /// application offers the move. This version judges at five already, so a group a newer
-    /// one raised goes on here.
-    pub const RAISED_TO: Level = Level::Four;
+    /// The highest level a manager's device raises its groups to, by itself or anyway: five,
+    /// now that members follow a group that moved (see [`Moved`]) and the application offers
+    /// the move.
+    pub const RAISED_TO: Level = Level::Five;
 
     /// The number this level has in a `Level` entry and among the network's capability
     /// levels: a level of judgment comes with the capability level of its number, so a

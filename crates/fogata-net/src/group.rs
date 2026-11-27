@@ -2297,6 +2297,33 @@ mod tests {
         assert_eq!(crate::GroupSummary::of(&log).level_ahead, None);
     }
 
+    /// Members follow a group that moved, so a group whose members all judge at five goes to
+    /// five, where its log has a ceiling and can be moved; one whose members judge at four
+    /// stays at four.
+    #[test]
+    fn a_group_goes_up_to_five_once_every_member_judges_at_five() {
+        let ana = Arc::new(DeviceIdentity::generate().unwrap());
+        let luis = Arc::new(DeviceIdentity::generate().unwrap());
+        let mut log = GroupLog::create(&ana, "g", 1).unwrap();
+        log.add(&ana, luis.public_key(), "luis", 2).unwrap();
+        log.raise_level(&ana, fogata_state::Level::Four, 3).unwrap();
+        let mut at_ana = ctx(&ana, &log);
+        let at = |n: u32| move |_: &DevicePublicKey| n;
+        let four = fogata_state::Level::Four.number();
+        assert!(
+            at_ana
+                .raise_level_when_all_judge(4, false, at(four))
+                .is_empty()
+        );
+        assert_eq!(at_ana.log().level(), fogata_state::Level::Four);
+        let five = fogata_state::Level::Five.number();
+        assert_eq!(
+            at_ana.raise_level_when_all_judge(5, false, at(five)).len(),
+            1
+        );
+        assert_eq!(at_ana.log().level(), fogata_state::Level::Five);
+    }
+
     /// A manager raises the group to this version's level of judgment once every other
     /// member was seen at it, never before, and only once; to the level before it while
     /// a member was seen at that one only; one with a manager above it connected leaves it

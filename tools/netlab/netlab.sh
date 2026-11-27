@@ -922,11 +922,9 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
     group-move)
         # A group at level five whose log two of its members, F1 and F2, filled up to the
         # ceiling; they stay offline from then on. Only B holds the full log. A, first on the
-        # ladder, removes F1 on the copy it has. Then A, B and C meet across their NATs: A
+        # ladder, removes them on the copy it has. Then A, B and C meet across their NATs: A
         # moves the group to a new log, B and C follow it there from A, and the three go on
-        # talking in the new log, whose size is the group's and not the flood's. One removal
-        # only: after two made offline, A announces under neither epoch B and C know, and
-        # behind these NATs nobody can reach it.
+        # talking in the new log, whose size is the group's and not the flood's.
         nat_host A 203.0.113.21 cone
         nat_host B 203.0.113.22 cone
         nat_host C 203.0.113.23 cone
@@ -938,7 +936,7 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
             key=$("$BIN" --data-dir "$WORK/data-$device" id | awk '/Device key/ {print $3}')
             "$BIN" --data-dir "$WORK/data-A" group add club "$key" --nick "$device" > /dev/null
         done
-        # Levels this version does not raise a group to yet are raised here by hand.
+        # A group goes up a level once every member was seen judging at it; here, at once.
         "$BIN" --data-dir "$WORK/data-A" lab-level club 5 > /dev/null
         for device in B C F1; do
             mkdir -p "$WORK/data-$device/logs"
@@ -948,7 +946,9 @@ json.dump(m, open(sys.argv[2], "w"), indent=2)
         "$BIN" --data-dir "$WORK/data-F1" lab-flood-log club --with "$WORK/data-F2" \
             > "$WORK/flood.out"
         cp "$WORK/data-F1/logs/"*.log "$WORK/data-B/logs/"
-        "$BIN" --data-dir "$WORK/data-A" group remove club "$(short_id F1)" > /dev/null
+        for device in F1 F2; do
+            "$BIN" --data-dir "$WORK/data-A" group remove club "$(short_id "$device")" > /dev/null
+        done
         old=$(basename "$(ls "$WORK/data-A/logs/"*.log)" .log)
         (sleep 100; echo /move; sleep 70; echo "hello from A after the move"; sleep 50) |
             ip netns exec A timeout 230 "$BIN" --data-dir "$WORK/data-A" chat club --nick A \
