@@ -37,25 +37,36 @@ a wrong peak, no lag 16 samples or more away may come within 0.6 of the best.
 
 On a fit, the render is aligned to their delay (or the end of the buffer, the rest shifted
 within the filters), the filters are shifted by the lag found (whole blocks into the delay,
-the rest within the filters), they and their ERLE are taken back (partitions beyond those
-kept are cleared), and the alignment is held for 250 blocks (ended by a flush or a render
-underrun). Their slot then holds the delay they were taken back at, unless they were the
-filters just kept and fit at another delay, the echo of another output: the slot keeps the
-delay they were kept at, where they fit too. After the hold, a delay found within a block of
-it is taken for the same echo (the delay search rounds it either way), and the render is not
-aligned to it: that would set the filters taken back aside, a second or so after taking them
-back, in 2 to 4 of 7 changes per run with outputs up to 30 ms off. The filters and the
-suppressor then leave their initial state, as they would once converged. The initial state
-itself goes on until its end, 2.5 s of render later, which then keeps the ERLE taken back
-instead of setting it to nothing (the words starting then would be suppressed more than
-without this change); ending it at the take-back cost words after a later switch to a
-headset. The delay the render is aligned to is noted with every delay applied, also one
-where the buffer already stood (a delay given from outside). Logs "kept filters of slot S
-tested, ..., fit" or "do not fit" for each test, "kept filters of slot S tested again at
-delay D", "filters of delay D taken back at block N (slot S, shifted by X samples)" after
-"Delay changed to D", "kept filters fit but are not taken back" and "kept filters tests
+the rest within the filters, at most the two blocks their test looks either way: filters whose
+echo lies further beyond the end of the buffer would not be aligned to it, and are not taken
+back, the render staying where it was), they and their ERLE are taken back (partitions beyond
+those kept are cleared), and the alignment is held for 250 blocks (ended by a flush or a
+render underrun). Their slot then holds them as shifted, at the delay they were taken back at,
+unless they were the filters just kept and fit more than two blocks from the delay they were
+kept at (the echo of another output, or the same output come back further off): the slot then
+keeps them as they were kept, at that delay, where they fit too. Either way they are the
+filters of the output in use, kept in their slot at the next restart, never in the slot of
+another output (an output come back three blocks off, as after a PulseAudio move, would
+otherwise have its filters kept over those of the other output). After the hold, a delay found
+within a block of it is taken for the same echo (the delay search rounds it either way), and
+the render is not aligned to it: that would set the filters taken back aside, a second or so
+after taking them back, in 2 to 4 of 7 changes per run with outputs up to 30 ms off. The
+filters and the suppressor then leave their initial state, as they would once converged. The
+initial state itself goes on until its end, 2.5 s of render later, which then keeps the ERLE
+taken back instead of setting it to nothing (the words starting then would be suppressed more
+than without this change); a gain change on the block they are taken back keeps it too; ending
+it at the take-back cost words after a later switch to a headset. The delay the render is
+aligned to is noted with every delay applied, also one where the buffer already stood (a delay
+given from outside). Logs "kept filters of slot S tested, ..., fit" or "do not fit" for each
+test, "kept filters of slot S tested again at delay D", "filters of delay D taken back at
+block N (slot S, shifted by X samples)" after "Delay changed to D", "kept filters fit but are
+not taken back" (the delay changed, or beyond the render buffer) and "kept filters tests
 stopped" (no render or capture, or a flush).
 
+(The figures below were measured before the slot of an output come back more than two blocks
+off, the cap of the shift and the gain change on the take-back block were fixed; the runs
+with the device's delay up to 30 ms off and with a new output's delay 8 or 16 ms longer can
+differ.)
 Measured in an AEC3-only simulation (16 kHz, far speech a 30 s recording, 48 runs of 8
 changes in double talk, echo +1.8 dB over the words; against the same runs without this
 change; dt0.5/dt3.5 are the mean loss of a word starting 0.5 s and 3.5 s after the change,
@@ -81,9 +92,10 @@ over the same stretch with no change):
 - music and unmuting: the same to the sample. Echo bursts at a restart the same or lower,
   none more than 0.6 dB higher.
 diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+index 7136aae..5afa760 100644
 --- a/modules/audio_processing/aec3/aec_state.cc
 +++ b/modules/audio_processing/aec3/aec_state.cc
-@@ -148,6 +148,7 @@
+@@ -148,6 +148,7 @@ void AecState::HandleEchoPathChange(
      strong_not_saturated_render_blocks_ = 0;
      blocks_with_active_render_ = 0;
      initial_state_.Reset();
@@ -91,7 +103,18 @@ diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processi
      // Fogata: recording starting again keeps the transparent mode: whether there
      // is an echo path is the room's, not the alignment's.
      if (transparent_state_ && !echo_path_variability.recording_restarted) {
-@@ -176,6 +177,25 @@
+@@ -169,13 +170,37 @@ void AecState::HandleEchoPathChange(
+       convergence_needed_since_flush_ = true;
+     }
+   } else if (echo_path_variability.gain_change) {
+-    erle_estimator_.Reset(false);
++    // Fogata: not an ERLE taken back on this block (see UseKeptErle).
++    if (!erle_just_taken_back_) {
++      erle_estimator_.Reset(false);
++    }
+   }
+   if (subtractor_analyzer_reset_at_echo_path_change_) {
+     subtractor_output_analyzer_.HandleEchoPathChange();
    }
  }
  
@@ -112,12 +135,14 @@ diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processi
 +  convergence_needed_since_flush_ = false;
 +  // The initial state goes on until its end, which keeps this ERLE.
 +  erle_taken_back_ = true;
++  // A gain change on the block it is taken back keeps it too.
++  erle_just_taken_back_ = true;
 +}
 +
  void AecState::Update(
      const std::optional<DelayEstimate>& external_delay,
      std::span<const std::vector<std::array<float, kFftLengthBy2Plus1>>>
-@@ -248,7 +268,11 @@
+@@ -248,9 +273,14 @@ void AecState::Update(
  
    // Update the ERL and ERLE measures.
    if (initial_state_.TransitionTriggered()) {
@@ -129,35 +154,152 @@ diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processi
 +    erle_taken_back_ = false;
    }
  
++  erle_just_taken_back_ = false;
    erle_estimator_.Update(render_buffer, adaptive_filter_frequency_responses,
+                          avg_render_spectrum_with_reverb, Y2, E2_refined,
+                          subtractor_output_analyzer_.ConvergedFilters());
 diff --git a/modules/audio_processing/aec3/aec_state.h b/modules/audio_processing/aec3/aec_state.h
+index 36d39d5..7182e3b 100644
 --- a/modules/audio_processing/aec3/aec_state.h
 +++ b/modules/audio_processing/aec3/aec_state.h
-@@ -129,6 +129,13 @@
+@@ -129,6 +129,15 @@ class AecState {
    // Takes appropriate action at an echo path change.
    void HandleEchoPathChange(const EchoPathVariability& echo_path_variability);
  
 +  // Fogata: keeps the ERLE estimate aside in `slot` with the filters the
 +  // subtractor keeps (see Subtractor::KeepFilters), to take it back with them.
 +  // The end of the initial state, which sets the ERLE back, keeps the ERLE
-+  // taken back: the filters taken back have converged.
++  // taken back: the filters taken back have converged. So does a gain change
++  // on the block it is taken back (UseKeptErle comes before
++  // HandleEchoPathChange there).
 +  void KeepErle(size_t slot);
 +  void UseKeptErle(size_t slot);
 +
    // Returns the decay factor for the echo reverberation. The parameter `mild`
    // indicates which exponential decay to return. The default one or a milder
    // one that can be used during nearend regions.
-@@ -304,6 +311,9 @@
+@@ -304,6 +313,12 @@ class AecState {
  
    ErlEstimator erl_estimator_;
    ErleEstimator erle_estimator_;
 +  std::vector<std::optional<ErleEstimator::State>> kept_erle_;
 +  // Whether the ERLE was taken back since the last reset.
 +  bool erle_taken_back_ = false;
++  // Whether the ERLE was taken back since the last update: on the block it is
++  // taken back, a gain change does not set it back.
++  bool erle_just_taken_back_ = false;
    size_t strong_not_saturated_render_blocks_ = 0;
    size_t blocks_with_active_render_ = 0;
    bool capture_signal_saturation_ = false;
+diff --git a/modules/audio_processing/aec3/aec_state_unittest.cc b/modules/audio_processing/aec3/aec_state_unittest.cc
+index 807c45c..4832274 100644
+--- a/modules/audio_processing/aec3/aec_state_unittest.cc
++++ b/modules/audio_processing/aec3/aec_state_unittest.cc
+@@ -308,4 +308,102 @@ TEST(AecState, ConvergedFilterDelay) {
+   }
+ }
+ 
++// Fogata: a gain change on the block the ERLE is taken back with kept filters
++// (AecState::UseKeptErle, before HandleEchoPathChange in the echo remover)
++// keeps it; on a later block, it sets the ERLE back as before.
++TEST(AecState, GainChangeKeepsTheErleTakenBackOnItsBlock) {
++  constexpr int kSampleRateHz = 48000;
++  constexpr size_t kNumBands = NumBandsForRate(kSampleRateHz);
++  constexpr size_t kNumChannels = 1;
++  EchoCanceller3Config config;
++  AecState state(CreateTestEnvironment(), config, kNumChannels);
++  std::optional<DelayEstimate> delay_estimate =
++      DelayEstimate(DelayEstimate::Quality::kRefined, 10);
++  std::unique_ptr<RenderDelayBuffer> render_delay_buffer(
++      RenderDelayBuffer::Create(config, kSampleRateHz, kNumChannels));
++  std::vector<std::array<float, kFftLengthBy2Plus1>> E2_refined(kNumChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> Y2(kNumChannels);
++  Block x(kNumBands, kNumChannels);
++  std::array<float, kBlockSize> y;
++  y.fill(1000.f);
++  std::vector<SubtractorOutput> subtractor_output(kNumChannels);
++  subtractor_output[0].Reset();
++  subtractor_output[0].s_refined.fill(100.f);
++  subtractor_output[0].e_refined.fill(100.f);
++  E2_refined[0].fill(0.f);
++  Y2[0].fill(0.f);
++  std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>
++      frequency_response(kNumChannels,
++                         std::vector<std::array<float, kFftLengthBy2Plus1>>(
++                             10));
++  for (auto& v : frequency_response[0]) {
++    v.fill(0.01f);
++  }
++  frequency_response[0][2].fill(100.f);
++  frequency_response[0][2][0] = 1.f;
++  std::vector<std::vector<float>> impulse_response(
++      kNumChannels,
++      std::vector<float>(
++          GetTimeDomainLength(config.filter.refined.length_blocks), 0.f));
++  auto update = [&]() {
++    subtractor_output[0].ComputeMetrics(y);
++    state.Update(delay_estimate, frequency_response, impulse_response,
++                 *render_delay_buffer->GetRenderBuffer(), E2_refined, Y2,
++                 subtractor_output);
++  };
++
++  // The ERLE is built up as in NormalUsage.
++  for (size_t band = 0; band < kNumBands; ++band) {
++    std::fill(x.begin(band, 0), x.end(band, 0), 101.f);
++  }
++  for (int k = 0; k < 3000; ++k) {
++    render_delay_buffer->Insert(x);
++    update();
++  }
++  for (int band = 0; band < x.NumBands(); ++band) {
++    std::fill(x.begin(band, 0), x.end(band, 0), 0.f);
++  }
++  x.View(/*band=*/0, /*channel=*/0)[0] = 5000.f;
++  for (size_t k = 0;
++       k < render_delay_buffer->GetRenderBuffer()->GetFftBuffer().size(); ++k) {
++    render_delay_buffer->Insert(x);
++    if (k == 0) {
++      render_delay_buffer->Reset();
++    }
++    render_delay_buffer->PrepareCaptureProcessing();
++  }
++  E2_refined[0].fill(1.f * 10000.f * 10000.f);
++  Y2[0].fill(10.f * E2_refined[0][0]);
++  for (int k = 0; k < 1000; ++k) {
++    update();
++  }
++  const std::array<float, kFftLengthBy2Plus1> erle_kept =
++      state.Erle(/*onset_compensated=*/true)[0];
++  ASSERT_NEAR(4.f, erle_kept[2], 0.1);
++
++  // Kept, set back by a flush, and taken back.
++  state.KeepErle(/*slot=*/0);
++  state.HandleEchoPathChange(EchoPathVariability(
++      false, EchoPathVariability::DelayAdjustment::kBufferFlush, false));
++  ASSERT_EQ(config.erle.min, state.Erle(/*onset_compensated=*/true)[0][2]);
++  state.UseKeptErle(/*slot=*/0);
++
++  // A gain change on the same block keeps it.
++  state.HandleEchoPathChange(EchoPathVariability(
++      true, EchoPathVariability::DelayAdjustment::kNone, false));
++  {
++    const auto& erle = state.Erle(/*onset_compensated=*/true)[0];
++    for (size_t k = 0; k < erle.size(); ++k) {
++      EXPECT_EQ(erle_kept[k], erle[k]) << "bin " << k;
++    }
++  }
++  update();
++  EXPECT_NEAR(4.f, state.Erle(/*onset_compensated=*/true)[0][2], 0.1);
++
++  // A gain change on a later block sets it back.
++  state.HandleEchoPathChange(EchoPathVariability(
++      true, EchoPathVariability::DelayAdjustment::kNone, false));
++  EXPECT_EQ(config.erle.min, state.Erle(/*onset_compensated=*/true)[0][2]);
++}
++
+ }  // namespace webrtc
 diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index 0d42ab2..5354c68 100644
 --- a/modules/audio_processing/aec3/block_processor.cc
 +++ b/modules/audio_processing/aec3/block_processor.cc
 @@ -9,8 +9,11 @@
@@ -172,7 +314,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
  #include <memory>
  #include <optional>
  #include <utility>
-@@ -82,8 +85,54 @@
+@@ -82,8 +85,54 @@ class BlockProcessorImpl final : public BlockProcessor {
    RenderDelayBuffer::BufferingEvent render_event_;
    size_t capture_call_counter_ = 0;
    std::optional<DelayEstimate> estimated_delay_;
@@ -227,7 +369,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
  std::atomic<int> BlockProcessorImpl::instance_count_(0);
  
  BlockProcessorImpl::BlockProcessorImpl(
-@@ -158,6 +207,55 @@
+@@ -158,6 +207,55 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
      // After a change of devices (patch 0016) the transparent mode goes too: a
      // headset's "no echo" is not the speakers'.
      echo_path_variability.recording_restarted = !other_devices_;
@@ -283,7 +425,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
      RTC_LOG(LS_INFO) << "AEC3: recording started again at block "
                       << capture_call_counter_
                       << ", render buffer aligned anew"
-@@ -174,6 +272,16 @@
+@@ -174,6 +272,16 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
    if (buffer_event == RenderDelayBuffer::BufferingEvent::kRenderUnderrun) {
      if (delay_controller_)
        delay_controller_->Reset(false);
@@ -300,7 +442,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
    }
  
    data_dumper_->DumpWav("aec3_processblock_capture_input2",
-@@ -189,10 +297,30 @@
+@@ -189,10 +297,30 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
          render_buffer_->GetDownsampledRenderBuffer(), render_buffer_->Delay(),
          *capture_block);
  
@@ -332,7 +474,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
          LoggingSeverity log_level =
              config_.delay.log_warning_on_delay_changes ? LS_WARNING : LS_INFO;
          RTC_LOG_V(log_level) << "Delay changed to " << estimated_delay_->delay
-@@ -202,6 +330,129 @@
+@@ -202,6 +330,155 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
        }
      }
  
@@ -346,6 +488,7 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
 +    // and they are taken back, with no change of the echo path.
 +    if (std::optional<size_t> slot =
 +            echo_remover_->KeptFiltersFit(just_kept_filters_slot_)) {
++      const char* not_taken_back = "the delay changed";
 +      if (echo_path_variability.delay_change ==
 +              EchoPathVariability::DelayAdjustment::kNone &&
 +          kept_filters_test_delays_[*slot]) {
@@ -356,6 +499,8 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
 +        size_t delay = *kept_filters_test_delays_[*slot];
 +        int shift = echo_remover_->KeptFiltersLag(*slot);
 +        constexpr int kBlock = static_cast<int>(kBlockSize);
++        constexpr int kMaxShift =
++            EchoRemover::kKeptFiltersMaxLagBlocks * kBlock;
 +        while (shift < -kBlock / 4 && delay > 0) {
 +          --delay;
 +          shift += kBlock;
@@ -364,46 +509,69 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
 +          ++delay;
 +          shift -= kBlock;
 +        }
-+        if (render_buffer_->AlignFromDelay(delay)) {
-+          // A delay beyond the buffer is aligned to its end, and the filters
-+          // are shifted by the rest (as far as they can be).
-+          const size_t aligned = render_buffer_->Delay();
-+          if (aligned < delay) {
-+            shift += static_cast<int>(delay - aligned) * kBlock;
-+            delay = aligned;
++        const size_t delay_before = render_buffer_->Delay();
++        const bool delay_change = render_buffer_->AlignFromDelay(delay);
++        // A delay beyond the buffer is aligned to its end (also when the
++        // buffer already stood there), and the filters are shifted by the
++        // rest.
++        const size_t aligned = render_buffer_->Delay();
++        if (aligned < delay) {
++          shift += static_cast<int>(delay - aligned) * kBlock;
++          delay = aligned;
++        }
++        if (std::abs(shift) > kMaxShift) {
++          // The filters are shifted by at most the lags of their test (see
++          // EchoRemover::UseKeptFilters): further, they would not be aligned
++          // to the echo they fit. They are not taken back, and the render
++          // goes back to the delay it was aligned to.
++          if (delay_change) {
++            render_buffer_->AlignFromDelay(
++                estimated_delay_ ? estimated_delay_->delay : delay_before);
 +          }
++          not_taken_back = "beyond the render buffer";
++        } else if (delay_change) {
 +          RTC_LOG_V(config_.delay.log_warning_on_delay_changes ? LS_WARNING
 +                                                               : LS_INFO)
 +              << "Delay changed to " << delay << " at block "
 +              << capture_call_counter_;
 +        }
-+        echo_remover_->UseKeptFilters(*slot, shift);
-+        delay_hold_blocks_ = kDelayHoldAfterKeptFilters;
-+        aligned_delay_ = delay;
-+        taken_back_delay_ = delay;
-+        // Filters of another slot, or taken back within the lags of their
-+        // test from the delay they were kept at, are those of the output in
-+        // use: the slot follows them, and they are kept there at the next
-+        // restart. The filters just kept that fit at another delay match the
-+        // echo of another output: their slot keeps the delay they also fit at.
-+        if (*slot != just_kept_filters_slot_ ||
-+            (kept_filters_delays_[*slot] &&
-+             std::abs(static_cast<int>(delay) -
-+                      static_cast<int>(*kept_filters_delays_[*slot])) <=
-+                 EchoRemover::kKeptFiltersMaxLagBlocks)) {
-+          kept_filters_delays_[*slot] = delay;
++        if (std::abs(shift) <= kMaxShift) {
++          // Filters of another slot, or taken back within the lags of their
++          // test from the delay they were kept at, are those of the output in
++          // use: the slot follows them (shifted, at this delay). The filters
++          // just kept that fit at another delay can match the echo of another
++          // output: their slot keeps them as kept, at the delay they also fit
++          // at, until they are kept again. Either way they are the filters of
++          // the output in use, kept in their slot at the next restart, never
++          // in the slot of another output: an output that came back more than
++          // the lags of the tests off is too far for the match of the slots.
++          const bool shift_slot =
++              *slot != just_kept_filters_slot_ ||
++              (kept_filters_delays_[*slot] &&
++               std::abs(static_cast<int>(delay) -
++                        static_cast<int>(*kept_filters_delays_[*slot])) <=
++                   EchoRemover::kKeptFiltersMaxLagBlocks);
++          echo_remover_->UseKeptFilters(*slot, shift, shift_slot);
++          delay_hold_blocks_ = kDelayHoldAfterKeptFilters;
++          aligned_delay_ = delay;
++          taken_back_delay_ = delay;
++          if (shift_slot) {
++            kept_filters_delays_[*slot] = delay;
++          }
 +          output_filters_slot_ = *slot;
++          blocks_to_end_kept_filters_retests_ = 0;
++          RTC_LOG(LS_INFO) << "AEC3: filters of delay " << delay
++                           << " taken back at block " << capture_call_counter_
++                           << " (slot " << *slot << ", shifted by " << shift
++                           << " samples)";
++          not_taken_back = nullptr;
 +        }
-+        blocks_to_end_kept_filters_retests_ = 0;
-+        RTC_LOG(LS_INFO) << "AEC3: filters of delay " << delay
-+                         << " taken back at block " << capture_call_counter_
-+                         << " (slot " << *slot << ", shifted by " << shift
-+                         << " samples)";
-+      } else {
++      }
++      if (not_taken_back) {
 +        echo_remover_->StopKeptFiltersTests();
 +        RTC_LOG(LS_INFO) << "AEC3: kept filters fit but are not taken back at "
 +                            "block "
-+                         << capture_call_counter_ << ": the delay changed";
++                         << capture_call_counter_ << ": " << not_taken_back;
 +      }
 +    }
 +    if (blocks_to_kept_filters_test_ > 0 &&
@@ -462,10 +630,411 @@ diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_pr
      echo_path_variability.clock_drift = delay_controller_->HasClockdrift();
  
    } else {
+diff --git a/modules/audio_processing/aec3/block_processor_unittest.cc b/modules/audio_processing/aec3/block_processor_unittest.cc
+index fa5d144..0c7b737 100644
+--- a/modules/audio_processing/aec3/block_processor_unittest.cc
++++ b/modules/audio_processing/aec3/block_processor_unittest.cc
+@@ -10,19 +10,25 @@
+ 
+ #include "modules/audio_processing/aec3/block_processor.h"
+ 
++#include <algorithm>
++#include <array>
+ #include <cstddef>
++#include <cstdlib>
+ #include <memory>
+ #include <optional>
+ #include <span>
+ #include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include "api/audio/echo_canceller3_config.h"
+ #include "api/environment/environment.h"
+ #include "modules/audio_processing/aec3/aec3_common.h"
+ #include "modules/audio_processing/aec3/block.h"
+ #include "modules/audio_processing/aec3/delay_estimate.h"
++#include "modules/audio_processing/aec3/downsampled_render_buffer.h"
+ #include "modules/audio_processing/aec3/echo_path_variability.h"
++#include "modules/audio_processing/aec3/echo_remover.h"
+ #include "modules/audio_processing/aec3/mock/mock_echo_remover.h"
+ #include "modules/audio_processing/aec3/mock/mock_render_delay_buffer.h"
+ #include "modules/audio_processing/aec3/mock/mock_render_delay_controller.h"
+@@ -124,6 +130,262 @@ void FillSampleVector(int call_counter, int delay, std::span<float> samples) {
+   }
+ }
+ 
++// Fogata: the reuse of the filters of an output used before (see
++// EchoRemover::KeepFilters) on the real block processor, with a render buffer
++// and a delay estimator the test drives and an echo remover whose filters are
++// the echo path they were learnt on.
++constexpr int kBlock = static_cast<int>(kBlockSize);
++
++struct KeptFiltersWorld {
++  // The render buffer: the delay asked for last, and the delay it is aligned
++  // to, at most `end` (a delay beyond is aligned to it).
++  std::optional<size_t> requested_delay;
++  size_t delay = 0;
++  size_t end = 30;
++  size_t max_delay = 30;
++  // The delay the delay estimator finds.
++  size_t estimated_delay = 0;
++  // The output in use, and the samples its echo comes after the render.
++  int output = 0;
++  int echo_samples = 0;
++};
++
++// Filters of an output that estimate its echo `echo_samples` after the render
++// they are aligned to.
++struct FakeFilters {
++  int output = 0;
++  int echo_samples = 0;
++};
++
++class FakeKeptFiltersEchoRemover : public EchoRemover {
++ public:
++  struct TakeBack {
++    size_t slot;
++    int shift_samples;
++    bool shift_slot;
++  };
++  struct Test {
++    size_t slot;
++    size_t delay_blocks;
++    bool at_detected_delay;
++  };
++
++  explicit FakeKeptFiltersEchoRemover(const KeptFiltersWorld* world)
++      : world_(world) {}
++
++  void GetMetrics(EchoControl::Metrics* /* metrics */) const override {}
++  void ProcessCapture(EchoPathVariability echo_path_variability,
++                      bool /* capture_signal_saturation */,
++                      const std::optional<DelayEstimate>& /* external_delay */,
++                      RenderBuffer* /* render_buffer */,
++                      Block* /* linear_output */,
++                      Block* /* capture */) override {
++    if (echo_path_variability.delay_change !=
++        EchoPathVariability::DelayAdjustment::kNone) {
++      // The filters start anew and converge at once on the echo in use.
++      in_use_ = {world_->output, world_->echo_samples -
++                                     static_cast<int>(world_->delay) * kBlock};
++      ++delay_changes_;
++    }
++    if (echo_path_variability.delay_change ==
++        EchoPathVariability::DelayAdjustment::kBufferFlush) {
++      StopKeptFiltersTests();
++    }
++  }
++  void UpdateEchoLeakageStatus(bool /* leakage_detected */) override {}
++  void SetCaptureOutputUsage(bool /* capture_output_used */) override {}
++
++  bool FilterConvergenceSeen() const override { return true; }
++  bool KeptFiltersMatch(size_t slot, int delay_blocks) const override {
++    const std::optional<FakeFilters>& kept = slots_[slot];
++    return kept && kept->output == in_use_.output &&
++           std::abs(delay_blocks * kBlock + in_use_.echo_samples -
++                    kept->echo_samples) <= kKeptFiltersMaxLagBlocks * kBlock;
++  }
++  void KeepFilters(size_t slot) override {
++    slots_[slot] = in_use_;
++    fit_[slot].reset();
++    keeps_.push_back(slot);
++  }
++  // A test decides at once: the kept filters fit if they are those of the
++  // output in use and its echo is within the lags of the test (but those at
++  // its edge) from the one they estimate at that delay.
++  void StartKeptFiltersTest(size_t slot,
++                            size_t delay_blocks,
++                            int /* delay_offset_blocks */,
++                            bool at_detected_delay) override {
++    tests_.push_back({slot, delay_blocks, at_detected_delay});
++    const std::optional<FakeFilters>& kept = slots_[slot];
++    if (!kept) {
++      return;
++    }
++    const int lag = world_->echo_samples -
++                    (static_cast<int>(delay_blocks) * kBlock +
++                     kept->echo_samples);
++    fit_[slot] = kept->output == world_->output &&
++                 std::abs(lag) <= kKeptFiltersMaxLagBlocks * kBlock - 16;
++    lags_[slot] = *fit_[slot] ? lag : 0;
++  }
++  void StopKeptFiltersTests() override {
++    for (std::optional<bool>& fit : fit_) {
++      fit.reset();
++    }
++  }
++  bool KeptFiltersTestRunning() const override { return false; }
++  // As Subtractor::KeptFiltersFit, with tests that decide at once.
++  std::optional<size_t> KeptFiltersFit(
++      std::optional<size_t> slot_last) const override {
++    for (size_t slot = 0; slot < kKeptFiltersSlots; ++slot) {
++      if (slot != slot_last && fit_[slot].value_or(false)) {
++        ++fits_returned_;
++        return slot;
++      }
++    }
++    if (slot_last && fit_[*slot_last].value_or(false)) {
++      ++fits_returned_;
++      return slot_last;
++    }
++    return std::nullopt;
++  }
++  int KeptFiltersLag(size_t slot) const override { return lags_[slot]; }
++  // As Subtractor::UseKeptFilters, which shifts them by at most the lags of
++  // the tests.
++  void UseKeptFilters(size_t slot,
++                      int shift_samples,
++                      bool shift_slot) override {
++    take_backs_.push_back({slot, shift_samples, shift_slot});
++    const int applied =
++        std::clamp(shift_samples, -kKeptFiltersMaxLagBlocks * kBlock,
++                   kKeptFiltersMaxLagBlocks * kBlock);
++    if (slots_[slot]) {
++      in_use_ = *slots_[slot];
++      in_use_.echo_samples += applied;
++      if (shift_slot) {
++        slots_[slot]->echo_samples += applied;
++      }
++    }
++    StopKeptFiltersTests();
++  }
++
++  const std::vector<size_t>& keeps() const { return keeps_; }
++  const std::vector<Test>& tests() const { return tests_; }
++  const std::vector<TakeBack>& take_backs() const { return take_backs_; }
++  const std::optional<FakeFilters>& slot(size_t slot) const {
++    return slots_[slot];
++  }
++  int delay_changes() const { return delay_changes_; }
++  // How many times a slot that fits was reported.
++  int fits_returned() const { return fits_returned_; }
++
++ private:
++  const KeptFiltersWorld* const world_;
++  FakeFilters in_use_;
++  std::array<std::optional<FakeFilters>, kKeptFiltersSlots> slots_;
++  std::array<std::optional<bool>, kKeptFiltersSlots> fit_;
++  std::array<int, kKeptFiltersSlots> lags_ = {};
++  std::vector<size_t> keeps_;
++  std::vector<Test> tests_;
++  std::vector<TakeBack> take_backs_;
++  int delay_changes_ = 0;
++  mutable int fits_returned_ = 0;
++};
++
++class KeptFiltersBlockProcessor {
++ public:
++  static constexpr int kSampleRateHz = 16000;
++
++  KeptFiltersBlockProcessor()
++      : render_block_(NumBandsForRate(kSampleRateHz), 1),
++        capture_block_(NumBandsForRate(kSampleRateHz), 1) {
++    auto render_delay_buffer =
++        std::make_unique<NiceMock<test::MockRenderDelayBuffer>>(kSampleRateHz,
++                                                                1);
++    KeptFiltersWorld* world = &world_;
++    ON_CALL(*render_delay_buffer, Insert(_))
++        .WillByDefault(Return(RenderDelayBuffer::BufferingEvent::kNone));
++    ON_CALL(*render_delay_buffer, PrepareCaptureProcessing())
++        .WillByDefault(Return(RenderDelayBuffer::BufferingEvent::kNone));
++    ON_CALL(*render_delay_buffer, Reset()).WillByDefault([world] {
++      world->requested_delay.reset();
++      world->delay = 0;
++    });
++    ON_CALL(*render_delay_buffer, AlignFromDelay(_))
++        .WillByDefault([world](size_t delay) {
++          if (world->requested_delay == delay) {
++            return false;
++          }
++          world->requested_delay = delay;
++          world->delay = std::min(delay, world->end);
++          return true;
++        });
++    ON_CALL(*render_delay_buffer, Delay()).WillByDefault([world] {
++      return world->delay;
++    });
++    ON_CALL(*render_delay_buffer, MaxDelay()).WillByDefault([world] {
++      return world->max_delay;
++    });
++    auto delay_controller =
++        std::make_unique<NiceMock<test::MockRenderDelayController>>();
++    ON_CALL(*delay_controller, GetDelay(_, _, _))
++        .WillByDefault([world](const DownsampledRenderBuffer&, size_t,
++                               const Block&) {
++          return std::optional<DelayEstimate>(DelayEstimate(
++              DelayEstimate::Quality::kRefined, world->estimated_delay));
++        });
++    auto echo_remover = std::make_unique<FakeKeptFiltersEchoRemover>(world);
++    echo_remover_ = echo_remover.get();
++    block_processor_ = BlockProcessor::Create(
++        EchoCanceller3Config(), kSampleRateHz, 1, 1,
++        std::move(render_delay_buffer), std::move(delay_controller),
++        std::move(echo_remover));
++  }
++
++  // The output in use, its echo `echo_samples` after the render, found by the
++  // delay estimator at `estimated_delay`.
++  void SetOutput(int output, int echo_samples, size_t estimated_delay) {
++    world_.output = output;
++    world_.echo_samples = echo_samples;
++    world_.estimated_delay = estimated_delay;
++  }
++  // Recording starts again with that output.
++  void Restart(int output, int echo_samples, size_t estimated_delay) {
++    block_processor_->RestartForRecording();
++    SetOutput(output, echo_samples, estimated_delay);
++    tests_before_restart_ = echo_remover_->tests().size();
++  }
++  void Run(int blocks) {
++    for (int k = 0; k < blocks; ++k) {
++      block_processor_->BufferRender(render_block_);
++      block_processor_->ProcessCapture(false, false, nullptr, &capture_block_);
++    }
++  }
++  // Whether the filters of `slot` were tested at `delay_blocks`, at the delay
++  // they were kept at, since the last restart.
++  bool TestedAtTheirDelay(size_t slot, size_t delay_blocks) const {
++    const auto& tests = echo_remover_->tests();
++    for (size_t k = tests_before_restart_; k < tests.size(); ++k) {
++      if (tests[k].slot == slot && !tests[k].at_detected_delay) {
++        return tests[k].delay_blocks == delay_blocks;
++      }
++    }
++    return false;
++  }
++
++  KeptFiltersWorld& world() { return world_; }
++  const FakeKeptFiltersEchoRemover& echo_remover() const {
++    return *echo_remover_;
++  }
++
++ private:
++  KeptFiltersWorld world_;
++  FakeKeptFiltersEchoRemover* echo_remover_ = nullptr;
++  std::unique_ptr<BlockProcessor> block_processor_;
++  Block render_block_;
++  Block capture_block_;
++  size_t tests_before_restart_ = 0;
++};
++
++
+ }  // namespace
+ 
+ // Verifies that the delay controller functionality is properly integrated with
+@@ -358,4 +620,105 @@ TEST(BlockProcessor, ExternalDelayAppliedCorrectlyWithInitialCaptureCalls) {
+   block_processor->ProcessCapture(false, false, nullptr, &capture_block);
+ }
+ 
++// Fogata: output A restarts and comes back 3 blocks (and 20 samples) later, its
++// filters just kept are taken back at the delay found, and the output then
++// changes to B and back to A. The filters of A are kept in A's slot each time:
++// those of B, kept in the other slot, stay as they are, at their delay, and are
++// taken back for B.
++TEST(BlockProcessor, OtherOutputFiltersSurviveAnOutputBackAtAnotherDelay) {
++  constexpr int kOutputA = 1;
++  constexpr int kOutputB = 2;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  // B, then A: B's filters are kept.
++  processor.SetOutput(kOutputB, 20 * kBlock, 20);
++  processor.Run(kBlocks);
++  processor.Restart(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  const size_t slot_b = echo_remover.keeps()[0];
++  ASSERT_TRUE(echo_remover.take_backs().empty());
++
++  // A restarts 3 blocks and 20 samples later: its filters, kept in the other
++  // slot, do not fit at the delay they were kept at, are tested again at the
++  // delay found and taken back there, the slot keeping them as kept.
++  processor.Restart(kOutputA, 13 * kBlock + 20, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(2u, echo_remover.keeps().size());
++  const size_t slot_a = echo_remover.keeps()[1];
++  ASSERT_NE(slot_a, slot_b);
++  ASSERT_EQ(1u, echo_remover.take_backs().size());
++  EXPECT_EQ(slot_a, echo_remover.take_backs()[0].slot);
++  EXPECT_EQ(20, echo_remover.take_backs()[0].shift_samples);
++  EXPECT_FALSE(echo_remover.take_backs()[0].shift_slot);
++
++  // B: A's filters are kept in A's slot, and B's, intact at their delay, are
++  // taken back.
++  processor.Restart(kOutputB, 20 * kBlock, 20);
++  processor.Run(kBlocks);
++  ASSERT_EQ(3u, echo_remover.keeps().size());
++  EXPECT_EQ(slot_a, echo_remover.keeps()[2]);
++  ASSERT_TRUE(echo_remover.slot(slot_b));
++  EXPECT_EQ(kOutputB, echo_remover.slot(slot_b)->output);
++  EXPECT_TRUE(processor.TestedAtTheirDelay(slot_b, 20));
++  ASSERT_EQ(2u, echo_remover.take_backs().size());
++  EXPECT_EQ(slot_b, echo_remover.take_backs()[1].slot);
++  EXPECT_EQ(0, echo_remover.take_backs()[1].shift_samples);
++
++  // A: B's filters are kept in B's slot, and A's are taken back at the delay
++  // A came back at.
++  processor.Restart(kOutputA, 13 * kBlock + 20, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(4u, echo_remover.keeps().size());
++  EXPECT_EQ(slot_b, echo_remover.keeps()[3]);
++  ASSERT_TRUE(echo_remover.slot(slot_b));
++  EXPECT_EQ(kOutputB, echo_remover.slot(slot_b)->output);
++  EXPECT_TRUE(processor.TestedAtTheirDelay(slot_b, 20));
++  EXPECT_TRUE(processor.TestedAtTheirDelay(slot_a, 13));
++  ASSERT_EQ(3u, echo_remover.take_backs().size());
++  EXPECT_EQ(slot_a, echo_remover.take_backs()[2].slot);
++  EXPECT_EQ(0, echo_remover.take_backs()[2].shift_samples);
++}
++
++// Fogata: kept filters that fit, but whose echo lies further beyond the end of
++// the render buffer than they can be shifted (the lags of their test), are not
++// taken back: nothing is applied or recorded beyond that shift, and the render
++// stays aligned where the delay estimator put it.
++TEST(BlockProcessor, KeptFiltersBeyondTheirShiftAreNotTakenBack) {
++  constexpr int kOutput = 1;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  processor.SetOutput(kOutput, 20 * kBlock, 20);
++  processor.Run(kBlocks);
++
++  // The output restarts with the render buffer ending at 18 blocks, and its
++  // echo 100 samples later than before. Its filters fit at the delay they were
++  // kept at, but the render can be aligned no later than 18 blocks: they would
++  // have to be shifted by 228 samples.
++  processor.world().end = 18;
++  processor.Restart(kOutput, 20 * kBlock + 100, 18);
++  const int delay_changes_before = echo_remover.delay_changes();
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  ASSERT_FALSE(echo_remover.tests().empty());
++  EXPECT_EQ(20u, echo_remover.tests()[0].delay_blocks);
++  // They did fit: what follows is about filters that fit.
++  EXPECT_GE(echo_remover.fits_returned(), 1);
++
++  for (const FakeKeptFiltersEchoRemover::TakeBack& take_back :
++       echo_remover.take_backs()) {
++    EXPECT_LE(std::abs(take_back.shift_samples),
++              EchoRemover::kKeptFiltersMaxLagBlocks * kBlock);
++  }
++  EXPECT_TRUE(echo_remover.take_backs().empty());
++  EXPECT_EQ(18u, processor.world().delay);
++  EXPECT_EQ(std::optional<size_t>(18), processor.world().requested_delay);
++  // The alignment at the restart only.
++  EXPECT_EQ(1, echo_remover.delay_changes() - delay_changes_before);
++}
++
+ }  // namespace webrtc
+\ No newline at end of file
 diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+index 5ae2ff7..b314cd4 100644
 --- a/modules/audio_processing/aec3/echo_remover.cc
 +++ b/modules/audio_processing/aec3/echo_remover.cc
-@@ -200,6 +200,55 @@
+@@ -200,6 +200,58 @@ class EchoRemoverImpl final : public EchoRemover {
      capture_output_used_ = capture_output_used;
    }
  
@@ -507,12 +1076,15 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
 +  int KeptFiltersLag(size_t slot) const override {
 +    return subtractor_.KeptFiltersLag(slot);
 +  }
-+  void UseKeptFilters(size_t slot, int shift_samples) override {
-+    subtractor_.UseKeptFilters(slot, shift_samples);
++  void UseKeptFilters(size_t slot,
++                      int shift_samples,
++                      bool shift_slot) override {
++    subtractor_.UseKeptFilters(slot, shift_samples, shift_slot);
 +    aec_state_.UseKeptErle(slot);
 +    suppression_gain_.SetInitialState(false);
 +    if (reference_subtractor_) {
-+      reference_subtractor_->UseKeptFilters(slot, shift_samples);
++      reference_subtractor_->UseKeptFilters(slot, shift_samples,
++                                             shift_slot);
 +      reference_aec_state_->UseKeptErle(slot);
 +      reference_suppression_gain_->SetInitialState(false);
 +    }
@@ -522,9 +1094,10 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
    static std::atomic<int> instance_count_;
    const EchoCanceller3Config config_;
 diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_processing/aec3/echo_remover.h
+index afacbdb..427ec6e 100644
 --- a/modules/audio_processing/aec3/echo_remover.h
 +++ b/modules/audio_processing/aec3/echo_remover.h
-@@ -61,6 +61,47 @@
+@@ -61,6 +61,51 @@ class EchoRemover {
    // resulting output is anyway not used, for instance when the endpoint is
    // muted.
    virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
@@ -567,15 +1140,20 @@ diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_proces
 +  // they were kept, as their test found.
 +  virtual int KeptFiltersLag(size_t /* slot */) const { return 0; }
 +  // Takes the filters of `slot` back once the render is aligned to them,
-+  // delayed by `shift_samples` (at most a block either way).
-+  virtual void UseKeptFilters(size_t /* slot */, int /* shift_samples */) {}
++  // delayed by `shift_samples` (at most kKeptFiltersMaxLagBlocks blocks either
++  // way). With `shift_slot`, the slot holds them as shifted (its delay follows
++  // them); otherwise it keeps them as they were kept.
++  virtual void UseKeptFilters(size_t /* slot */,
++                              int /* shift_samples */,
++                              bool /* shift_slot */) {}
  };
  
  }  // namespace webrtc
 diff --git a/modules/audio_processing/aec3/erle_estimator.h b/modules/audio_processing/aec3/erle_estimator.h
+index fb27510..b9cd1f5 100644
 --- a/modules/audio_processing/aec3/erle_estimator.h
 +++ b/modules/audio_processing/aec3/erle_estimator.h
-@@ -94,6 +94,23 @@
+@@ -94,6 +94,23 @@ class ErleEstimator {
      return fullband_erle_estimator_.GetInstLinearQualityEstimates();
    }
  
@@ -600,9 +1178,10 @@ diff --git a/modules/audio_processing/aec3/erle_estimator.h b/modules/audio_proc
  
   private:
 diff --git a/modules/audio_processing/aec3/fullband_erle_estimator.h b/modules/audio_processing/aec3/fullband_erle_estimator.h
+index 17af958..da9cc63 100644
 --- a/modules/audio_processing/aec3/fullband_erle_estimator.h
 +++ b/modules/audio_processing/aec3/fullband_erle_estimator.h
-@@ -56,6 +56,20 @@
+@@ -56,6 +56,20 @@ class FullBandErleEstimator {
      return linear_filters_qualities_;
    }
  
@@ -624,9 +1203,10 @@ diff --git a/modules/audio_processing/aec3/fullband_erle_estimator.h b/modules/a
  
   private:
 diff --git a/modules/audio_processing/aec3/subband_erle_estimator.h b/modules/audio_processing/aec3/subband_erle_estimator.h
+index 5e639fe..e95017a 100644
 --- a/modules/audio_processing/aec3/subband_erle_estimator.h
 +++ b/modules/audio_processing/aec3/subband_erle_estimator.h
-@@ -60,6 +60,30 @@
+@@ -60,6 +60,30 @@ class SubbandErleEstimator {
      return erle_during_onsets_;
    }
  
@@ -658,6 +1238,7 @@ diff --git a/modules/audio_processing/aec3/subband_erle_estimator.h b/modules/au
  
   private:
 diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_processing/aec3/subtractor.cc
+index ab00fcd..1f597a8 100644
 --- a/modules/audio_processing/aec3/subtractor.cc
 +++ b/modules/audio_processing/aec3/subtractor.cc
 @@ -12,8 +12,11 @@
@@ -680,7 +1261,7 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
  #include "rtc_base/numerics/safe_minmax.h"
  
  namespace webrtc {
-@@ -58,6 +62,49 @@
+@@ -58,6 +62,49 @@ void PredictionError(const Aec3Fft& fft,
    }
  }
  
@@ -730,7 +1311,7 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
  void ScaleFilterOutput(std::span<const float> y,
                         float factor,
                         std::span<float> e,
-@@ -145,6 +192,338 @@
+@@ -145,6 +192,356 @@ Subtractor::Subtractor(const Environment& env,
  
  Subtractor::~Subtractor() = default;
  
@@ -904,15 +1485,33 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
 +  return kept_filters_[slot].lag;
 +}
 +
-+void Subtractor::UseKeptFilters(size_t slot, int shift_samples) {
++void Subtractor::UseKeptFilters(size_t slot,
++                                int shift_samples,
++                                bool shift_slot) {
 +  RTC_DCHECK_LT(slot, kKeptFiltersSlots);
 +  KeptFilters& kept = kept_filters_[slot];
 +  if (kept.refined_partitions > 0) {
 +    shift_samples =
 +        SafeClamp(shift_samples, -kKeptFiltersMaxLag, kKeptFiltersMaxLag);
-+    ShiftFilter(fft_, shift_samples, kept.refined_partitions, kept.refined);
-+    ShiftFilter(fft_, shift_samples, kept.coarse_partitions, kept.coarse);
-+    ShiftImpulseResponse(shift_samples, kept.refined_impulse_response);
++    // A slot that keeps the delay its filters were kept at keeps them as they
++    // were: the filters taken back are then shifted copies.
++    std::vector<std::vector<FftData>> refined_copy;
++    std::vector<std::vector<FftData>> coarse_copy;
++    std::vector<float> impulse_response_copy;
++    if (!shift_slot) {
++      refined_copy = kept.refined;
++      coarse_copy = kept.coarse;
++      impulse_response_copy = kept.refined_impulse_response;
++    }
++    std::vector<std::vector<FftData>>& refined =
++        shift_slot ? kept.refined : refined_copy;
++    std::vector<std::vector<FftData>>& coarse =
++        shift_slot ? kept.coarse : coarse_copy;
++    std::vector<float>& impulse_response =
++        shift_slot ? kept.refined_impulse_response : impulse_response_copy;
++    ShiftFilter(fft_, shift_samples, kept.refined_partitions, refined);
++    ShiftFilter(fft_, shift_samples, kept.coarse_partitions, coarse);
++    ShiftImpulseResponse(shift_samples, impulse_response);
 +    refined_gains_[0]->SetConfig(config_.filter.refined, true);
 +    coarse_gains_[0]->SetConfig(config_.filter.coarse, true);
 +    refined_filters_[0]->SetSizePartitions(config_.filter.refined.length_blocks,
@@ -921,17 +1520,17 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
 +                                         true);
 +    // The partitions beyond those kept are set to zero, not left as they are.
 +    for (auto [H, partitions] :
-+         {std::pair(&kept.refined, kept.refined_partitions),
-+          std::pair(&kept.coarse, kept.coarse_partitions)}) {
++         {std::pair(&refined, kept.refined_partitions),
++          std::pair(&coarse, kept.coarse_partitions)}) {
 +      for (size_t p = partitions; p < H->size(); ++p) {
 +        for (FftData& H_p_ch : (*H)[p]) {
 +          H_p_ch.Clear();
 +        }
 +      }
 +    }
-+    refined_filters_[0]->SetFilter(kept.refined.size(), kept.refined);
-+    coarse_filter_[0]->SetFilter(kept.coarse.size(), kept.coarse);
-+    refined_impulse_responses_[0] = kept.refined_impulse_response;
++    refined_filters_[0]->SetFilter(refined.size(), refined);
++    coarse_filter_[0]->SetFilter(coarse.size(), coarse);
++    refined_impulse_responses_[0] = impulse_response;
 +  }
 +  StopKeptFiltersTests();
 +}
@@ -1069,7 +1668,7 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
  void Subtractor::HandleEchoPathChange(
      const EchoPathVariability& echo_path_variability) {
    const auto full_reset = [&]() {
-@@ -166,6 +545,15 @@
+@@ -166,6 +563,15 @@ void Subtractor::HandleEchoPathChange(
        EchoPathVariability::DelayAdjustment::kNone) {
      full_reset();
    }
@@ -1085,7 +1684,7 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
  
    if (echo_path_variability.gain_change) {
      for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
-@@ -212,6 +600,13 @@
+@@ -212,6 +618,13 @@ void Subtractor::Process(const RenderBuffer& render_buffer,
                                 &X2_coarse);
    }
  
@@ -1100,6 +1699,7 @@ diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_process
    for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
      SubtractorOutput& output = outputs[ch];
 diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processing/aec3/subtractor.h
+index c25900c..8953f14 100644
 --- a/modules/audio_processing/aec3/subtractor.h
 +++ b/modules/audio_processing/aec3/subtractor.h
 @@ -15,6 +15,7 @@
@@ -1110,7 +1710,7 @@ diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processi
  #include <span>
  #include <vector>
  
-@@ -61,6 +62,45 @@
+@@ -61,6 +62,48 @@ class Subtractor {
    // Exits the initial state.
    void ExitInitialState();
  
@@ -1149,14 +1749,17 @@ diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processi
 +  // samples off).
 +  int KeptFiltersLag(size_t slot) const;
 +  // Takes the filters of `slot` back once the render is aligned to them,
-+  // delayed by `shift_samples` (at most a block either way). They have
-+  // converged, so the filters leave their initial state with them.
-+  void UseKeptFilters(size_t slot, int shift_samples);
++  // delayed by `shift_samples` (at most kKeptFiltersMaxLagBlocks blocks
++  // either way). They have converged, so the filters leave their initial
++  // state with them. With `shift_slot`, the slot holds them as shifted (its
++  // delay follows them); otherwise it keeps them as they were kept, at the
++  // delay they were kept at.
++  void UseKeptFilters(size_t slot, int shift_samples, bool shift_slot);
 +
    // Lets the refined filter learn while the render is poorly excited.
    void SetLearnWithPoorExcitation(bool learn) {
      learn_with_poor_excitation_ = learn;
-@@ -150,6 +190,62 @@
+@@ -150,6 +193,62 @@ class Subtractor {
        refined_frequency_responses_;
    std::vector<std::vector<float>> refined_impulse_responses_;
    std::vector<std::vector<float>> coarse_impulse_responses_;
