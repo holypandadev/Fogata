@@ -339,7 +339,7 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
      // Suppressor nearend estimate.
      if (aec_state_.UsableLinearEstimate()) {
        // E2 is bound by Y2.
-@@ -526,8 +647,115 @@
+@@ -526,8 +647,118 @@
                                cng_.NoiseSpectrum(), render_signal_analyzer_,
                                aec_state_, x, clock_drift, &high_bands_gain, &G);
  
@@ -362,10 +362,13 @@ diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_proce
 +          reference_R2_unbounded);
 +      std::array<std::array<float, kFftLengthBy2Plus1>, 1> reference_N2 =
 +          reference_E2;
++      // As main: E2 or Y2 chosen with the linear estimate's usability from
++      // before the AEC state's update, E2 bound by Y2 with the one after it.
 +      for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
-+        reference_N2[0][k] = reference_usable
-+                                 ? std::min(reference_E2[0][k], Y2[0][k])
-+                                 : Y2[0][k];
++        reference_N2[0][k] =
++            !reference_usable_linear_estimate ? Y2[0][k]
++            : reference_usable ? std::min(reference_E2[0][k], Y2[0][k])
++                               : reference_E2[0][k];
 +      }
 +      float reference_high_bands_gain;
 +      std::array<float, kFftLengthBy2Plus1> reference_G;
