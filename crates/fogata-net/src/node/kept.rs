@@ -20,10 +20,16 @@
 //! was not given it yet is not counted until it is). What is known of a member goes when it
 //! is no longer connected, and is learnt again at its next proof. A refusal (a member far
 //! behind, or still checking this device) keeps the line for that member, and it goes again
-//! at the next room heartbeat; so does one whose request failed or was dropped. Otherwise a
-//! line goes to a member at most once each [`AGAIN`], at its proof or at a heartbeat, and
-//! sooner only after that member refused it, a send to it did not get there, or it came to
-//! be known to read the line's key: at most [`MOST`] kept lines at once, each under 16 KiB
+//! at the next room heartbeat; so does one whose request failed or was dropped. A member
+//! still checking this device has it sooner: each side sends its lines right after checking
+//! the other, so a line may come before this device's proof does. Each line it refused goes
+//! again as soon as the member asks for this device's roster (it counts this device in
+//! then), and each line that went to it before that ask goes again at once if refused: once
+//! each, for each ask, so a member that keeps refusing makes no loop of it, and a refusal of
+//! a line sent after the ask waits for the next one. Otherwise a line goes to a member at
+//! most once each [`AGAIN`], at its proof or at a heartbeat, and sooner only after that
+//! member refused it, a send to it did not get there, or it came to be known to read the
+//! line's key: at most [`MOST`] kept lines at once, each under 16 KiB
 //! as a room takes them, well within what a member takes of one author before it drops the
 //! rest unseen (256 messages and 8 MiB at once, 32 and 512 KiB more each second, see
 //! limits.rs). A line sent again names every connected member as reached, so that a member
@@ -77,7 +83,8 @@ pub(super) const MOST_PER_GROUP: usize = 16;
 /// Lines kept at most, of every group.
 pub(super) const MOST: usize = 64;
 /// How long after a line went to a member that lacks it it goes to it again, at its proof or
-/// at a room heartbeat; a refusal has it go at the next heartbeat.
+/// at a room heartbeat; a refusal has it go at the next heartbeat, or once the member counts
+/// this device in.
 const AGAIN: Duration = Duration::from_secs(60);
 /// How long after a change the file follows it, at the next check of the links.
 const SETTLE: Duration = LINK_CHECK;
@@ -98,6 +105,14 @@ struct Line {
     wire: WireMessage,
     lacking: BTreeSet<DevicePublicKey>,
     sent: HashMap<DevicePublicKey, Instant>,
+    /// Members that refused it since it last went to them: it goes to each again when it
+    /// next asks for this device's roster, counting this device in (a refusal may have come
+    /// before it did). Cleared as the line goes to them, or they take it.
+    refused: BTreeSet<DevicePublicKey>,
+    /// Members it went to before they asked for this device's roster, unanswered then: a
+    /// refusal from one of them may be of a line that came before this device's proof did,
+    /// and has it go again at once, once. Cleared the same way.
+    sent_before_counted_in: BTreeSet<DevicePublicKey>,
 }
 
 /// This device's lines kept, the oldest first, and the file they are kept in.
@@ -183,6 +198,8 @@ impl KeptLines {
             wire: wire.clone(),
             lacking,
             sent,
+            refused: BTreeSet::new(),
+            sent_before_counted_in: BTreeSet::new(),
         });
         let mut of_group = self.lines.iter().filter(|l| l.group == group).count();
         while of_group > MOST_PER_GROUP {
@@ -203,17 +220,31 @@ impl KeptLines {
     }
 
     /// Member `device` answered line `id`: taken, it is let go of it once known to read it;
-    /// refused, the line goes to it again at the next heartbeat.
-    fn answered(&mut self, id: &[u8; 16], device: &DevicePublicKey, taken: bool) {
-        let Some(at) = self.lines.iter().position(|l| l.id == *id) else {
-            return;
-        };
+    /// refused, the line goes to it again at the next heartbeat, or when it next counts this
+    /// device in. Returns the line's group and the line, when it goes again now: it went
+    /// before the member counted this device in, so it may have come before this device's
+    /// proof did.
+    fn answered(
+        &mut self,
+        id: &[u8; 16],
+        device: &DevicePublicKey,
+        taken: bool,
+    ) -> Option<(GroupId, WireMessage)> {
+        let at = self.lines.iter().position(|l| l.id == *id)?;
+        let line = &mut self.lines[at];
+        // An answer settles what was waiting on one, either way.
+        let racing = line.sent_before_counted_in.remove(device);
+        line.refused.remove(device);
         if !taken {
-            self.lines[at].sent.remove(device);
-            return;
+            line.sent.remove(device);
+            if racing {
+                return Some((line.group, line.wire.clone()));
+            }
+            line.refused.insert(*device);
+            return None;
         }
         if !self.reads(&self.lines[at], device) {
-            return;
+            return None;
         }
         let line = &mut self.lines[at];
         line.lacking.remove(device);
@@ -221,6 +252,32 @@ impl KeptLines {
             self.lines.remove(at);
             self.changed();
         }
+        None
+    }
+
+    /// Member `device` of `group` asked for this device's roster, so it counts this device
+    /// in now. Returns the lines of `group` that go to it again now: those it refused since
+    /// they last went to it. Those on their way to it, unanswered, go again at once if it
+    /// refuses them (see [`Self::answered`]).
+    fn counted_in_by(
+        &mut self,
+        group: GroupId,
+        device: &DevicePublicKey,
+    ) -> Vec<([u8; 16], WireMessage)> {
+        let mut again = Vec::new();
+        // Only lines the member still lacks: one it took keeps its `sent` entry.
+        for line in self
+            .lines
+            .iter_mut()
+            .filter(|l| l.group == group && l.lacking.contains(device))
+        {
+            if line.refused.remove(device) {
+                again.push((line.id, line.wire.clone()));
+            } else if line.sent.contains_key(device) {
+                line.sent_before_counted_in.insert(*device);
+            }
+        }
+        again
     }
 
     /// Whether member `device` is known to read `group`'s `epoch`.
@@ -249,6 +306,8 @@ impl KeptLines {
         self.reads.remove(&(group, *device));
         for line in self.lines.iter_mut().filter(|l| l.group == group) {
             line.sent.remove(device);
+            line.refused.remove(device);
+            line.sent_before_counted_in.remove(device);
         }
     }
 
@@ -258,13 +317,18 @@ impl KeptLines {
         (self.reads).retain(|(g, device), _| *g != group || connected.contains(device));
         for line in self.lines.iter_mut().filter(|l| l.group == group) {
             line.sent.retain(|device, _| connected.contains(device));
+            line.refused.retain(|device| connected.contains(device));
+            (line.sent_before_counted_in).retain(|device| connected.contains(device));
         }
     }
 
-    /// Line `id` went to `device` at `now`.
+    /// Line `id` went to `device` at `now`: what its answer to an earlier send would have
+    /// done is up to its answer to this one.
     fn sent(&mut self, id: &[u8; 16], device: DevicePublicKey, now: Instant) {
         if let Some(line) = self.lines.iter_mut().find(|l| l.id == *id) {
             line.sent.insert(device, now);
+            line.refused.remove(&device);
+            line.sent_before_counted_in.remove(&device);
         }
     }
 
@@ -448,6 +512,8 @@ fn decode(bytes: &[u8]) -> Option<Vec<Line>> {
             wire,
             lacking,
             sent: HashMap::new(),
+            refused: BTreeSet::new(),
+            sent_before_counted_in: BTreeSet::new(),
         });
         rest = after;
     }
@@ -552,10 +618,44 @@ impl Node {
     }
 
     /// Member `peer` answered a request carrying this device's room event `id`: `taken`,
-    /// or refused.
+    /// or refused. A kept line it refused that went to it before it counted this device in
+    /// goes to it again at once: it may have come before this device's proof did.
     pub(super) fn kept_answered(&mut self, peer: PeerId, id: [u8; 16], taken: bool) {
-        if let Some(device) = self.members.get(&peer).map(|m| m.device) {
-            self.kept_lines.answered(&id, &device, taken);
+        let Some(device) = self.members.get(&peer).map(|m| m.device) else {
+            return;
+        };
+        if let Some((group, wire)) = self.kept_lines.answered(&id, &device, taken) {
+            self.send_kept_again(group, peer, device, vec![(id, wire)]);
+        }
+    }
+
+    /// Member `peer` of `group`, of `device`, asked for this device's roster: it counts this
+    /// device in now. Each line it refused since it last went to it, maybe as it came before
+    /// this device's proof did, goes to it again at once, not at the next heartbeat.
+    pub(super) fn kept_counted_in(
+        &mut self,
+        group: GroupId,
+        peer: PeerId,
+        device: DevicePublicKey,
+    ) {
+        let again = self.kept_lines.counted_in_by(group, &device);
+        self.send_kept_again(group, peer, device, again);
+    }
+
+    /// Sends member `peer`, of `device`, the kept lines `again` of `group` it refused; each
+    /// counts as sent to it once it went.
+    fn send_kept_again(
+        &mut self,
+        group: GroupId,
+        peer: PeerId,
+        device: DevicePublicKey,
+        again: Vec<([u8; 16], WireMessage)>,
+    ) {
+        let now = Instant::now();
+        for (id, wire) in again {
+            if self.send_kept_line(group, id, peer, wire) {
+                self.kept_lines.sent(&id, device, now);
+            }
         }
     }
 
@@ -825,6 +925,262 @@ mod tests {
             .chain(waiting)
             .filter(|kind| matches!(kind, Pending::Own(_, i, _) if *i == id))
             .count()
+    }
+
+    /// Member `peer` asks for Ana's roster in `group`, so it counts her in, naming no log
+    /// heads (nothing is learnt of the keys it reads).
+    fn ask_roster_of(n: &mut Node, peer: PeerId, group: GroupId) {
+        n.on_request(
+            peer,
+            MemberRequest::Roster {
+                group_id: group.as_bytes().to_vec(),
+                heads: None,
+                banner: None,
+                picture: None,
+            },
+        );
+    }
+
+    /// A line's id and the line.
+    type Said = ([u8; 16], WireMessage);
+
+    /// Runs `steps` on a node of Ana's keeping `count` lines for Bea that went to her at her
+    /// proof, with Bea connected as a peer, the lines' group, their ids, and `later` lines of
+    /// Ana's made but not said yet.
+    async fn with_lines_gone_at_the_proof<T: Send + 'static>(
+        name: &str,
+        count: usize,
+        later: usize,
+        steps: impl FnOnce(&mut Node, PeerId, GroupId, Vec<[u8; 16]>, Vec<Said>) -> T + Send + 'static,
+    ) -> T {
+        let (ana, mut log, _) = group();
+        let bea = someone();
+        log.add(&ana, bea, "bea", 2).unwrap();
+        let group = log.group_id();
+        let keys = log.current_keys(&ana).unwrap();
+        let (node, _events) = node(&ana, log);
+        let file = TempFile::new(name);
+        let (path, key) = (file.0.clone(), DataKey::generate().unwrap());
+        let lines: Vec<Said> = (0..count)
+            .map(|i| line(&keys, &ana, &format!("while away {i}"), now_ms()))
+            .collect();
+        let later = (0..later)
+            .map(|i| line(&keys, &ana, &format!("back {i}"), now_ms()))
+            .collect();
+        let epoch = keys.epoch();
+        let found = inspect(&node, move |n| {
+            n.keep_own_lines(path, key, true);
+            let dropped = n.kept_lines.dropped.entry((group, FIRST_ROOM)).or_default();
+            dropped.insert(bea);
+            for (id, wire) in &lines {
+                n.keep_line(group, FIRST_ROOM, *id, wire);
+            }
+            let peer = connect(n, group, bea);
+            n.kept_proved(group, peer, epoch);
+            let ids: Vec<[u8; 16]> = lines.iter().map(|(id, _)| *id).collect();
+            for id in &ids {
+                assert_eq!(sent(n, peer, *id), 1);
+            }
+            steps(n, peer, group, ids, later)
+        })
+        .await;
+        node.shutdown().await.unwrap();
+        found
+    }
+
+    /// As [`with_lines_gone_at_the_proof`], with one line and none later.
+    async fn with_a_line_gone_at_the_proof<T: Send + 'static>(
+        name: &str,
+        steps: impl FnOnce(&mut Node, PeerId, GroupId, [u8; 16]) -> T + Send + 'static,
+    ) -> T {
+        with_lines_gone_at_the_proof(name, 1, 0, move |n, peer, group, ids, _| {
+            steps(n, peer, group, ids[0])
+        })
+        .await
+    }
+
+    /// How many requests carried each of `ids` to `peer`.
+    fn each_sent(n: &Node, peer: PeerId, ids: &[[u8; 16]]) -> Vec<usize> {
+        ids.iter().map(|id| sent(n, peer, *id)).collect()
+    }
+
+    /// A line that reached a member before this device's proof did is refused, the member
+    /// not having counted this device in yet: it goes again as soon as the member asks for
+    /// this device's roster, so counting it in, not at the next heartbeat up to 20 s later.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_refused_before_the_proof_got_there_goes_again_once_the_member_counts_this_device_in()
+     {
+        let found = with_a_line_gone_at_the_proof("refused-first", |n, peer, group, id| {
+            answer(n, peer, group, id, MemberResponse::Refused);
+            let after_refusal = sent(n, peer, id);
+            ask_roster_of(n, peer, group);
+            let counted_in = sent(n, peer, id);
+            answer(n, peer, group, id, MemberResponse::Ack);
+            (after_refusal, counted_in, n.kept_lines.lines.len())
+        })
+        .await;
+        assert_eq!(found, (1, 2, 0));
+    }
+
+    /// A line refused by a member that asked for this device's roster already (it counts
+    /// this device in by now: the refusal was of a line sent before) goes again at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_line_refused_by_a_member_that_counts_this_device_in_already_goes_again_at_once() {
+        let found = with_a_line_gone_at_the_proof("counted-first", |n, peer, group, id| {
+            ask_roster_of(n, peer, group);
+            let counted_in = sent(n, peer, id);
+            answer(n, peer, group, id, MemberResponse::Refused);
+            let after_refusal = sent(n, peer, id);
+            answer(n, peer, group, id, MemberResponse::Ack);
+            (counted_in, after_refusal, n.kept_lines.lines.len())
+        })
+        .await;
+        assert_eq!(found, (1, 2, 0));
+    }
+
+    /// A member that keeps refusing a line (far behind, say) has it again once for each
+    /// ask of this device's roster, and at heartbeats, not at every refusal: no loop.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_that_keeps_refusing_a_line_has_it_again_only_once_for_each_ask() {
+        let found = with_a_line_gone_at_the_proof("keeps-refusing", |n, peer, group, id| {
+            answer(n, peer, group, id, MemberResponse::Refused);
+            ask_roster_of(n, peer, group);
+            let counted_in = sent(n, peer, id);
+            // Refused again, and again: nothing goes until something new.
+            answer(n, peer, group, id, MemberResponse::Refused);
+            answer(n, peer, group, id, MemberResponse::Refused);
+            let refused_again = sent(n, peer, id);
+            ask_roster_of(n, peer, group);
+            let asked_again = sent(n, peer, id);
+            answer(n, peer, group, id, MemberResponse::Refused);
+            n.kept_heartbeat();
+            let at_heartbeat = sent(n, peer, id);
+            answer(n, peer, group, id, MemberResponse::Refused);
+            let refused_once_more = sent(n, peer, id);
+            (
+                counted_in,
+                refused_again,
+                asked_again,
+                at_heartbeat,
+                refused_once_more,
+                n.kept_lines.lines.len(),
+            )
+        })
+        .await;
+        assert_eq!(found, (2, 2, 3, 4, 4, 1));
+    }
+
+    /// Several lines that went at the proof, refused one after another once the member
+    /// counted this device in (they came before the proof did): each goes again at once,
+    /// not only the first, and once only: refused again, they wait.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn several_lines_refused_after_the_member_counts_this_device_in_each_go_again_at_once() {
+        let found =
+            with_lines_gone_at_the_proof("several-counted", 3, 0, |n, peer, group, ids, _| {
+                ask_roster_of(n, peer, group);
+                for id in &ids {
+                    answer(n, peer, group, *id, MemberResponse::Refused);
+                }
+                let after_refusals = each_sent(n, peer, &ids);
+                for id in &ids {
+                    answer(n, peer, group, *id, MemberResponse::Refused);
+                }
+                let refused_again = each_sent(n, peer, &ids);
+                for id in &ids {
+                    answer(n, peer, group, *id, MemberResponse::Ack);
+                }
+                (after_refusals, refused_again, n.kept_lines.lines.len())
+            })
+            .await;
+        assert_eq!(found, (vec![2; 3], vec![2; 3], 0));
+    }
+
+    /// Several lines refused before the member counted this device in all go again at once
+    /// when it asks for this device's roster; refused again, they wait for the heartbeat.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn several_lines_refused_before_the_member_counts_this_device_in_all_go_again_at_its_ask()
+    {
+        let found =
+            with_lines_gone_at_the_proof("several-refused", 3, 0, |n, peer, group, ids, _| {
+                for id in &ids {
+                    answer(n, peer, group, *id, MemberResponse::Refused);
+                }
+                let after_refusals = each_sent(n, peer, &ids);
+                ask_roster_of(n, peer, group);
+                let counted_in = each_sent(n, peer, &ids);
+                for id in &ids {
+                    answer(n, peer, group, *id, MemberResponse::Refused);
+                }
+                let refused_again = each_sent(n, peer, &ids);
+                n.kept_heartbeat();
+                let at_heartbeat = each_sent(n, peer, &ids);
+                (after_refusals, counted_in, refused_again, at_heartbeat)
+            })
+            .await;
+        assert_eq!(found, (vec![1; 3], vec![2; 3], vec![2; 3], vec![3; 3]));
+    }
+
+    /// What a member's ask for this device's roster left on a line it then took does not
+    /// have a later line it refuses go again at once, outside the throttle of [`AGAIN`]: a
+    /// line said after the ask came after this device's proof, and its refusal waits for the
+    /// heartbeat.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_mark_left_on_a_line_taken_does_not_send_a_later_line_again_at_its_refusal() {
+        let found = with_lines_gone_at_the_proof("stale", 1, 1, |n, peer, group, ids, later| {
+            ask_roster_of(n, peer, group);
+            answer(n, peer, group, ids[0], MemberResponse::Ack);
+            let taken = n.kept_lines.lines.len();
+            // Said while she is connected: it goes to her now (see `deliver`).
+            let (id, wire) = &later[0];
+            n.keep_line(group, FIRST_ROOM, *id, wire);
+            answer(n, peer, group, *id, MemberResponse::Refused);
+            let after_refusal = sent(n, peer, *id);
+            n.kept_heartbeat();
+            let at_heartbeat = sent(n, peer, *id);
+            (taken, after_refusal, at_heartbeat, n.kept_lines.lines.len())
+        })
+        .await;
+        assert_eq!(found, (0, 0, 1, 1));
+    }
+
+    /// A member no longer connected leaves no mark on the lines kept for it: neither a line
+    /// it refused nor one that went before it counted this device in goes again at once.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_member_gone_leaves_no_mark_to_send_a_line_again_at_once() {
+        let found = with_lines_gone_at_the_proof("gone-marks", 2, 0, |n, peer, group, ids, _| {
+            let bea = n.members[&peer].device;
+            // The first refused before she counts Ana in, the second still on its way.
+            answer(n, peer, group, ids[0], MemberResponse::Refused);
+            let marked = |n: &Node| {
+                (n.kept_lines.lines.iter())
+                    .map(|l| {
+                        [
+                            l.refused.contains(&bea),
+                            l.sent_before_counted_in.contains(&bea),
+                        ]
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let refused = marked(n);
+            ask_roster_of(n, peer, group);
+            answer(n, peer, group, ids[0], MemberResponse::Refused);
+            let before = (marked(n), each_sent(n, peer, &ids));
+            n.kept_member_gone(group, &bea);
+            let after = marked(n);
+            answer(n, peer, group, ids[1], MemberResponse::Refused);
+            (refused, before, after, each_sent(n, peer, &ids))
+        })
+        .await;
+        let (no, refused, on_its_way) = ([false; 2], [true, false], [false, true]);
+        assert_eq!(
+            found,
+            (
+                vec![refused, no],
+                (vec![refused, on_its_way], vec![2, 1]),
+                vec![no, no],
+                vec![2, 1],
+            )
+        );
     }
 
     /// A line is kept for a member until it takes it, also for a later session: a refusal
