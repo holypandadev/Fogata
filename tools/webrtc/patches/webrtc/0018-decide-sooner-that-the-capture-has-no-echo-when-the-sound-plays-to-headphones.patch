@@ -33,11 +33,11 @@ double talk from the start with music at -30 dB and 200 ms lets the echo through
 s instead of 3 in one of two seeds.
 
 diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
-index eae43a1..7a57a50 100644
+index 0e22525..95fbd93 100644
 --- a/api/audio/audio_device.h
 +++ b/api/audio/audio_device.h
-@@ -49,6 +49,17 @@ inline void MarkAudioDevicesChanged() {
-   AudioDevicesChangedCount().fetch_add(1, std::memory_order_relaxed);
+@@ -63,6 +63,17 @@ inline std::atomic<uint64_t>& AudioDevicesHandledCount() {
+   return count;
  }
  
 +// Fogata: whether the sound plays to headphones or a headset, as the system
@@ -55,7 +55,7 @@ index eae43a1..7a57a50 100644
   public:
    enum AudioLayer {
 diff --git a/modules/audio_processing/aec3/BUILD.gn b/modules/audio_processing/aec3/BUILD.gn
-index 22b5419..e6ce2fe 100644
+index a2363f5..1a5f75c 100644
 --- a/modules/audio_processing/aec3/BUILD.gn
 +++ b/modules/audio_processing/aec3/BUILD.gn
 @@ -145,6 +145,7 @@ rtc_library("aec3") {
