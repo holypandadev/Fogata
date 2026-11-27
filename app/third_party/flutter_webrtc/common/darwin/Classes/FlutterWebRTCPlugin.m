@@ -178,9 +178,20 @@ static BOOL gZeroPlayoutDelayEnabled = NO;
 // with cameras at 540p ran nine encoder threads: on a 16-thread desktop they took
 // 2.1 cores and sent 21 frames a second, against 0.63 cores and 30 frames on one
 // thread each (measured with tools/call-lab).
+// The echo canceller decides there is no echo to cancel (a headset) with its newer
+// classifier (`WebRTC-Aec3TransparentModeHmm`): at a call's start with a headset while
+// the other side talks, the near end came through held down for a median of 4 s (0-9 s)
+// with the older one, 2.3 s (0-3 s) with it; with speakers, at an unmute and with a
+// headset taken off while muted, no more echo let through than with the older one
+// (measured on Linux with tools/call-lab, Nov 24).
+// The framework's own audio processing (RTCDefaultAudioProcessingModule, Apple patch 1)
+// is built with no field trials, so on macOS the echo canceller does not read this one
+// yet and keeps the older classifier: it takes effect once that processing is built
+// with the factory's trials.
 static NSString* const kFogataFieldTrials =
     @"WebRTC-Bwe-LossBasedBweV2/Enabled:false/"
-    @"WebRTC-VideoEncoderSettings/encoder_thread_limit:1/";
+    @"WebRTC-VideoEncoderSettings/encoder_thread_limit:1/"
+    @"WebRTC-Aec3TransparentModeHmm/Enabled/";
 
 // Fogata: the connections that send a shared screen at one size share one encoder of
 // it (FOGATA.md, "One encode of a shared screen"): one encode of each frame instead
