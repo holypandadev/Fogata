@@ -42,10 +42,38 @@ not end the second, 10 dB over it ends it within 2 updates and the talk
 is taken from then on; after a full reset, the first partial reset once
 the delay is reliable again starts the second again.
 
+The ceiling the second is ended over is the highest ratio recorded in the
+last half second of updates (125) before the partial reset, not the highest
+of the last 125 ratios recorded: each ratio keeps the update it was recorded
+at. With the far end quiet for part of that half second (its updates, weak
+render or a silent capture, are left out of the ratios), the last 125 ratios
+reached back into the near end's talk before it; that talk set the ceiling,
+the near end talking again stayed under it, and its floor was gone for up to
+the whole second. When no ratio was recorded in that half second, there is
+nothing to tell the echo from the talk by: the reset does not start the
+second and leaves it for the next partial reset of the stretch.
+
+Two more unit tests: with the far end quiet for most of the half second
+before the reset and the near end's talk just before it, the echo alone is
+still not taken for talk after the reset, and the near end talking again
+ends the second within 2 updates; a full reset starts a new stretch at once,
+so the first partial reset with the delay reliable after it starts the
+second although no 3 s passed between partial resets, while without the
+full reset the same partial reset does not.
+
 diff --git a/modules/audio_processing/aec3/matched_filter.cc b/modules/audio_processing/aec3/matched_filter.cc
+index 58ee27a..6161b80 100644
 --- a/modules/audio_processing/aec3/matched_filter.cc
 +++ b/modules/audio_processing/aec3/matched_filter.cc
-@@ -67,6 +67,25 @@ constexpr float kNearTalkRatioFactor = 3.981f;
+@@ -24,6 +24,7 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <cstddef>
++#include <cstdint>
+ #include <initializer_list>
+ #include <limits>
+ #include <optional>
+@@ -67,6 +68,30 @@ constexpr float kNearTalkRatioFactor = 3.981f;
  // through.
  constexpr float kNearTalkReliableRatioFactor = 6.310f;
  constexpr int kNearTalkMaxReliableUpdates = 50;
@@ -61,17 +89,30 @@ diff --git a/modules/audio_processing/aec3/matched_filter.cc b/modules/audio_pro
 +// without a partial reset (the delay did not stay: the near end talked), or
 +// with a full reset. The second ends as soon as the capture to render ratio
 +// comes more than kNearTalkEchoOnlyReleaseFactor (6 dB) above the highest of
-+// the last kNearTalkEchoOnlyRatios (half a second) before the reset, the echo
-+// alone: the echo stays under it, with the render that makes it, while the
-+// near end talking again goes over it at once.
++// the ratios recorded in the last kNearTalkEchoOnlyCeilingUpdates (half a
++// second) before the reset, the echo alone: the echo stays under it, with the
++// render that makes it, while the near end talking again goes over it at once.
++// Only the ratios of that half second count, not the last 125 recorded: with
++// the far end quiet for part of it (updates left out of the ratios), those
++// would reach back into the near end's talk before it. When none was recorded
++// in that half second, there is nothing to tell the echo from the talk by: the
++// reset does not start the second, and the next one of the stretch may.
 +constexpr int kNearTalkEchoOnlyUpdates = 250;
 +constexpr int kNearTalkEchoOnlyRearmUpdates = 750;
-+constexpr size_t kNearTalkEchoOnlyRatios = 125;
++constexpr int64_t kNearTalkEchoOnlyCeilingUpdates = 125;
 +constexpr float kNearTalkEchoOnlyReleaseFactor = 3.981f;
  constexpr float kNearTalkSilentCapture = 64.f;
  constexpr float kNearTalkPauseSpread = 10.f;
  constexpr float kNearTalkEchoCorrelation = 0.86f;
-@@ -710,6 +729,26 @@ void MatchedFilter::Reset(bool full_reset) {
+@@ -652,6 +677,7 @@ MatchedFilter::MatchedFilter(ApmDataDumper* data_dumper,
+       capture_to_render_ratios_(kNearTalkRatios, 0.f),
+       ratio_scratch_(kNearTalkRatios, 0.f),
+       capture_energies_(kNearTalkRatios, 0.f),
++      ratio_updates_(kNearTalkRatios, 0),
+       capture_levels_(kNearTalkRatios, 0.f),
+       render_levels_(kNearTalkRatios + render_sub_block_energies_.size(), 0.f) {
+   RTC_DCHECK(data_dumper);
+@@ -710,6 +736,35 @@ void MatchedFilter::Reset(bool full_reset) {
        std::fill(e.begin(), e.end(), 1.0f);
      }
      number_pre_echo_updates_ = 0;
@@ -82,26 +123,36 @@ diff --git a/modules/audio_processing/aec3/matched_filter.cc b/modules/audio_pro
 +  } else {
 +    if (echo_only_armed_ && last_delay_found_) {
 +      // The first partial reset of a stretch of echo alone once the delay is
-+      // reliable: the capture is the echo (see kNearTalkEchoOnlyUpdates).
-+      echo_only_updates_ = kNearTalkEchoOnlyUpdates;
-+      echo_only_armed_ = false;
-+      echo_only_ratio_ceiling_ = 0.f;
-+      const size_t num_ratios = std::min(num_ratios_, kNearTalkEchoOnlyRatios);
-+      for (size_t k = 1; k <= num_ratios; ++k) {
-+        echo_only_ratio_ceiling_ = std::max(
-+            echo_only_ratio_ceiling_,
-+            capture_to_render_ratios_[(ratio_index_ + kNearTalkRatios - k) %
-+                                      kNearTalkRatios]);
++      // reliable: the capture is the echo (see kNearTalkEchoOnlyUpdates). The
++      // ceiling is the highest ratio recorded in the last half second of
++      // updates; the ratios are in the order recorded, newest last.
++      float ceiling = 0.f;
++      bool any_ratio = false;
++      for (size_t k = 1; k <= num_ratios_; ++k) {
++        const size_t index =
++            (ratio_index_ + kNearTalkRatios - k) % kNearTalkRatios;
++        if (num_near_talk_updates_ - ratio_updates_[index] >=
++            kNearTalkEchoOnlyCeilingUpdates) {
++          break;
++        }
++        ceiling = std::max(ceiling, capture_to_render_ratios_[index]);
++        any_ratio = true;
++      }
++      if (any_ratio) {
++        echo_only_updates_ = kNearTalkEchoOnlyUpdates;
++        echo_only_armed_ = false;
++        echo_only_ratio_ceiling_ = ceiling;
 +      }
 +    }
 +    updates_since_partial_reset_ = 0;
    }
  }
  
-@@ -718,6 +757,11 @@ bool MatchedFilter::NearTalkHoldsAdaptation(
+@@ -718,6 +773,12 @@ bool MatchedFilter::NearTalkHoldsAdaptation(
      std::span<const float> capture,
      bool delay_found,
      float x2_sum_threshold) {
++  ++num_near_talk_updates_;
 +  last_delay_found_ = delay_found;
 +  if (!echo_only_armed_ &&
 +      ++updates_since_partial_reset_ > kNearTalkEchoOnlyRearmUpdates) {
@@ -110,7 +161,15 @@ diff --git a/modules/audio_processing/aec3/matched_filter.cc b/modules/audio_pro
    float render_energy = 0.f;
    for (size_t k = 0; k < sub_block_size_; ++k) {
      const float x =
-@@ -810,6 +854,15 @@ bool MatchedFilter::NearTalkHoldsAdaptation(
+@@ -785,6 +846,7 @@ bool MatchedFilter::NearTalkHoldsAdaptation(
+   const float ratio = capture_sum / max_render_sum;
+   capture_to_render_ratios_[ratio_index_] = ratio;
+   capture_energies_[ratio_index_] = capture_sum;
++  ratio_updates_[ratio_index_] = num_near_talk_updates_;
+   ratio_index_ = (ratio_index_ + 1) % kNearTalkRatios;
+   num_ratios_ = std::min(num_ratios_ + 1, kNearTalkRatios);
+   if (num_ratios_ >= kNearTalkMinRatios &&
+@@ -810,6 +872,15 @@ bool MatchedFilter::NearTalkHoldsAdaptation(
    near_talk_now_ =
        near_talk_hold_ && capture_has_pauses_ && !capture_follows_render_ &&
        num_ratios_ >= kNearTalkMinRatios && ratio > talk_factor * low_ratio_;
@@ -127,9 +186,27 @@ diff --git a/modules/audio_processing/aec3/matched_filter.cc b/modules/audio_pro
    near_talk_held_ = near_talk_held_ || hold;
    return hold;
 diff --git a/modules/audio_processing/aec3/matched_filter.h b/modules/audio_processing/aec3/matched_filter.h
+index e98d7a7..2721c89 100644
 --- a/modules/audio_processing/aec3/matched_filter.h
 +++ b/modules/audio_processing/aec3/matched_filter.h
-@@ -199,6 +199,11 @@ class MatchedFilter {
+@@ -14,6 +14,7 @@
+ #include <stddef.h>
+ 
+ #include <array>
++#include <cstdint>
+ #include <optional>
+ #include <span>
+ #include <vector>
+@@ -194,11 +195,20 @@ class MatchedFilter {
+   size_t num_ratios_ = 0;
+   float low_ratio_ = 0.f;
+   std::vector<float> capture_energies_;
++  // Fogata: the update (num_near_talk_updates_) at which each ratio in
++  // capture_to_render_ratios_ was recorded.
++  std::vector<int64_t> ratio_updates_;
++  int64_t num_near_talk_updates_ = 0;
+   int updates_with_render_ = 0;
+   int reliable_updates_ = 0;
    bool near_talk_hold_ = false;
    bool near_talk_held_ = false;
    bool near_talk_now_ = false;
@@ -142,6 +219,7 @@ diff --git a/modules/audio_processing/aec3/matched_filter.h b/modules/audio_proc
    std::vector<float> capture_levels_;
    std::vector<float> render_levels_;
 diff --git a/modules/audio_processing/aec3/matched_filter_unittest.cc b/modules/audio_processing/aec3/matched_filter_unittest.cc
+index b0fab7f..c63fde0 100644
 --- a/modules/audio_processing/aec3/matched_filter_unittest.cc
 +++ b/modules/audio_processing/aec3/matched_filter_unittest.cc
 @@ -133,6 +133,10 @@ class ExactLevelNearTalk {
@@ -155,7 +233,7 @@ diff --git a/modules/audio_processing/aec3/matched_filter_unittest.cc b/modules/
    const MatchedFilter& filter() const { return filter_; }
  
   private:
-@@ -644,6 +648,179 @@ TEST(MatchedFilter, ReliableDelayTakesNearTalkOnlyOverEightDb) {
+@@ -644,6 +648,287 @@ TEST(MatchedFilter, ReliableDelayTakesNearTalkOnlyOverEightDb) {
    EXPECT_TRUE(call.filter().NearTalkNow());
  }
  
@@ -330,6 +408,114 @@ diff --git a/modules/audio_processing/aec3/matched_filter_unittest.cc b/modules/
 +    call.Step(kTalk, /*delay_found=*/true);
 +    EXPECT_TRUE(call.filter().NearTalkNow()) << "talk again, update " << k;
 +  }
++}
++
++// Fogata: the ceiling over which the capture ends the second after a partial
++// reset is the loudest ratio recorded in the half second (125 updates) before
++// the reset, not the loudest of the last 125 recorded. Here the far end is
++// quiet for most of that half second (a silent capture, left out of the ratios
++// as a weak render is), so the last 125 recorded ratios reach back into the
++// near end's talk before it. The echo alone, louder than the pauses, is still
++// not taken for talk after the reset; the near end talking again is, at once.
++TEST(MatchedFilter, PartialResetCeilingIsOnlyTheHalfSecondBeforeIt) {
++  constexpr float kTalk = ExactLevelNearTalk::kTalkAmplitude;
++  // 10 dB over the pauses: talk to the filter (more than 8 dB) but for the
++  // second.
++  const float echo =
++      ExactLevelNearTalk::kPauseAmplitude * std::pow(10.f, 10.f / 20.f);
++  ExactLevelNearTalk call;
++
++  // As in PartialResetTakesNoNearTalkForASecondOnceDelayFound: the hold
++  // starts, then the delay is reliable. The near end's last talk is updates
++  // 400 to 459 of the 500; 40 updates of pauses follow.
++  ExactLevelNearTalk::TalkSeen seen =
++      call.TalkAndPauses(2000, /*delay_found=*/false);
++  ASSERT_TRUE(call.filter().NearTalkHeld());
++  seen = call.TalkAndPauses(500, /*delay_found=*/true);
++  ASSERT_TRUE(seen.in_talk);
++  ASSERT_FALSE(seen.in_pause);
++
++  // The echo alone for 30 updates, taken for talk without the second.
++  for (int k = 0; k < 30; ++k) {
++    call.Step(echo, /*delay_found=*/true);
++  }
++  ASSERT_TRUE(call.filter().NearTalkNow());
++  // Then the far end is quiet for 100 updates: only the first 3 are recorded
++  // (the capture's level, over 4 sub-blocks, still holds the echo). The half
++  // second before the reset records 25 updates of the echo and those 3; the
++  // last 125 recorded ratios take 52 more from the near end's talk.
++  for (int k = 0; k < 100; ++k) {
++    call.Step(0.f, /*delay_found=*/true);
++  }
++  ASSERT_FALSE(call.filter().NearTalkNow());
++
++  call.Reset(/*full_reset=*/false);
++
++  // The far end talks again: its echo is not taken for talk.
++  for (int k = 0; k < 20; ++k) {
++    call.Step(echo, /*delay_found=*/true);
++    ASSERT_FALSE(call.filter().NearTalkNow()) << "echo, update " << k;
++  }
++  // The near end talks again, 10 dB over the echo: its capture's level is
++  // more than 6 dB over the echo's from the second sub-block of talk, which
++  // ends the second, and the talk is taken from then on.
++  call.Step(kTalk, /*delay_found=*/true);
++  ASSERT_FALSE(call.filter().NearTalkNow());
++  call.Step(kTalk, /*delay_found=*/true);
++  EXPECT_TRUE(call.filter().NearTalkNow());
++  for (int k = 0; k < 10; ++k) {
++    call.Step(kTalk, /*delay_found=*/true);
++    EXPECT_TRUE(call.filter().NearTalkNow()) << "talk, update " << k;
++  }
++}
++
++namespace {
++
++// Fogata: the first partial reset with the delay reliable starts the second;
++// the partial resets that follow come less than 3 s (750 updates) apart, the
++// delay not reliable at those but the last, with or without a full reset
++// 100 updates after the first. Returns how many of the first 10 updates of
++// talk after the last partial reset take the capture for the near end's talk.
++int TalkTakenAfterCloseResets(bool full_reset) {
++  ExactLevelNearTalk call;
++  call.TalkAndPauses(2000, /*delay_found=*/false);
++  call.TalkAndPauses(500, /*delay_found=*/true);
++  call.Reset(/*full_reset=*/false);
++  call.TalkAndPauses(100, /*delay_found=*/true);
++  if (full_reset) {
++    call.Reset(/*full_reset=*/true);
++    EXPECT_FALSE(call.filter().NearTalkHeld());
++  }
++  // A partial reset every 500 updates (the first 600 after the one that
++  // started the second). After the full reset, the 1500 updates bring the
++  // hold back (it starts after 5 s of render).
++  for (int k = 0; k < 3; ++k) {
++    call.TalkAndPauses(500, /*delay_found=*/false);
++    call.Reset(/*full_reset=*/false);
++  }
++  const ExactLevelNearTalk::TalkSeen seen =
++      call.TalkAndPauses(500, /*delay_found=*/true);
++  EXPECT_TRUE(call.filter().NearTalkHeld());
++  EXPECT_TRUE(seen.in_talk);
++  EXPECT_FALSE(seen.in_pause);
++  call.Reset(/*full_reset=*/false);
++  int taken = 0;
++  for (int k = 0; k < 10; ++k) {
++    call.Step(ExactLevelNearTalk::kTalkAmplitude, /*delay_found=*/true);
++    taken += call.filter().NearTalkNow() ? 1 : 0;
++  }
++  return taken;
++}
++
++}  // namespace
++
++// Fogata: a full reset starts a new stretch at once: the first partial reset
++// after it with the delay reliable starts the second again, though no 3 s
++// passed without a partial reset. Without the full reset, the same partial
++// reset does not, and the near end's talk is taken.
++TEST(MatchedFilter, FullResetRearmsTheSecondWithinThreeSeconds) {
++  EXPECT_EQ(TalkTakenAfterCloseResets(/*full_reset=*/true), 0);
++  EXPECT_EQ(TalkTakenAfterCloseResets(/*full_reset=*/false), 10);
 +}
 +
  #if RTC_DCHECK_IS_ON && GTEST_HAS_DEATH_TEST && !defined(WEBRTC_ANDROID)
