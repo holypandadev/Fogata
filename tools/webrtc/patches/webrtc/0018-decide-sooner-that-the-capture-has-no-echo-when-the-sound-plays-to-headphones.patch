@@ -19,8 +19,9 @@ So the audio device module now says whether the sound plays to headphones or a h
 waits 3 s instead of 5 and 6 only while it does and nothing shows an echo path: no delay
 found for the echo since the last reset, the filters converged in no more than 25 blocks,
 and the least ratio of the capture to the render a lag before, over 4 blocks, below -35 dB
-at every lag up to 512 ms. A delay found, more convergence or a larger ratio keep the usual
-wait. The mode logs when it turns on or off.
+at every lag up to 512 ms (no ratio is taken while a saturated capture block is in the
+sum, and the histories still move on at every block). A delay found, more convergence or a
+larger ratio keep the usual wait. The mode logs when it turns on or off.
 
 Simulator: with the sound to headphones, the near voice is suppressed 2.0 s instead of 5.0
 (last loss at 3.5 s, not 7.5), also with room noise at -52 dBFS; with a quiet far end 0.5
@@ -109,7 +110,7 @@ index cf50821..62e8449 100644
  
    // Analyze the quality of the filter.
 diff --git a/modules/audio_processing/aec3/transparent_mode.cc b/modules/audio_processing/aec3/transparent_mode.cc
-index 84316ac..52c2eaa 100644
+index 84316ac..e7de510 100644
 --- a/modules/audio_processing/aec3/transparent_mode.cc
 +++ b/modules/audio_processing/aec3/transparent_mode.cc
 @@ -10,9 +10,13 @@
@@ -182,7 +183,7 @@ index 84316ac..52c2eaa 100644
      if (linear_and_stable_echo_path_) {
        recent_convergence_during_activity_ = false;
      }
-@@ -150,11 +178,28 @@ class LegacyTransparentModeImpl : public TransparentMode {
+@@ -150,11 +178,26 @@ class LegacyTransparentModeImpl : public TransparentMode {
                bool /* any_coarse_filter_converged */,
                bool all_filters_diverged,
                bool active_render,
@@ -200,9 +201,7 @@ index 84316ac..52c2eaa 100644
 +        converged_blocks_since_reset_ <= kMaxConvergedBlocksWithoutEcho) {
 +      ++converged_blocks_since_reset_;
 +    }
-+    if (!saturated_capture) {
-+      UpdateGainBounds(render_energy, capture_energy);
-+    }
++    UpdateGainBounds(render_energy, capture_energy, saturated_capture);
 +    const bool no_echo_seen =
 +        PlayoutToHeadphones().load(std::memory_order_relaxed) &&
 +        !echo_delay_found_ &&
@@ -212,7 +211,7 @@ index 84316ac..52c2eaa 100644
      if (any_filter_consistent && filter_delay_blocks < 5) {
        sane_filter_observed_ = true;
        active_blocks_since_sane_filter_ = 0;
-@@ -165,7 +210,9 @@ class LegacyTransparentModeImpl : public TransparentMode {
+@@ -165,7 +208,9 @@ class LegacyTransparentModeImpl : public TransparentMode {
      bool sane_filter_recently_seen;
      if (!sane_filter_observed_) {
        sane_filter_recently_seen =
@@ -223,7 +222,7 @@ index 84316ac..52c2eaa 100644
      } else {
        sane_filter_recently_seen =
            active_blocks_since_sane_filter_ <= 30 * kNumBlocksPerSecond;
-@@ -202,6 +249,7 @@ class LegacyTransparentModeImpl : public TransparentMode {
+@@ -202,6 +247,7 @@ class LegacyTransparentModeImpl : public TransparentMode {
        finite_erl_recently_detected_ = true;
      }
  
@@ -231,7 +230,7 @@ index 84316ac..52c2eaa 100644
      if (finite_erl_recently_detected_) {
        transparency_activated_ = false;
      } else if (sane_filter_recently_seen &&
-@@ -209,12 +257,61 @@ class LegacyTransparentModeImpl : public TransparentMode {
+@@ -209,12 +255,74 @@ class LegacyTransparentModeImpl : public TransparentMode {
        transparency_activated_ = false;
      } else {
        const bool filter_should_have_converged =
@@ -259,18 +258,31 @@ index 84316ac..52c2eaa 100644
 +    capture_energies_.fill(0.f);
 +    gain_bounds_.fill(std::numeric_limits<float>::max());
 +    max_gain_bound_ = std::numeric_limits<float>::max();
++    saturated_blocks_in_sums_ = 0;
 +  }
 +
 +  // The capture holds at least the echo, so the least ratio seen between the
 +  // capture and the render a lag before bounds the echo path's gain at that
-+  // lag; sums over a few blocks take in how one block's echo spreads.
-+  void UpdateGainBounds(float render_energy, float capture_energy) {
++  // lag; sums over a few blocks take in how one block's echo spreads. The
++  // histories move on at every block so that each lag stays a lag, but no
++  // bound is taken while a saturated capture block is in the capture's sum:
++  // its energy understates the echo.
++  void UpdateGainBounds(float render_energy,
++                        float capture_energy,
++                        bool saturated_capture) {
 +    std::copy_backward(render_energies_.begin(), render_energies_.end() - 1,
 +                       render_energies_.end());
 +    render_energies_[0] = render_energy;
 +    std::copy_backward(capture_energies_.begin(), capture_energies_.end() - 1,
 +                       capture_energies_.end());
 +    capture_energies_[0] = capture_energy;
++    if (saturated_capture) {
++      saturated_blocks_in_sums_ = kGainBoundBlocks;
++    }
++    if (saturated_blocks_in_sums_ > 0) {
++      --saturated_blocks_in_sums_;
++      return;
++    }
 +    float capture_sum = 0.f;
 +    for (float energy : capture_energies_) {
 +      capture_sum += energy;
@@ -294,7 +306,7 @@ index 84316ac..52c2eaa 100644
    const bool linear_and_stable_echo_path_;
    size_t capture_block_counter_ = 0;
    bool transparency_activated_ = false;
-@@ -227,6 +324,13 @@ class LegacyTransparentModeImpl : public TransparentMode {
+@@ -227,6 +335,14 @@ class LegacyTransparentModeImpl : public TransparentMode {
    size_t num_converged_blocks_ = 0;
    bool recent_convergence_during_activity_ = false;
    size_t strong_not_saturated_render_blocks_ = 0;
@@ -305,6 +317,7 @@ index 84316ac..52c2eaa 100644
 +  std::array<float, kGainBoundBlocks> capture_energies_;
 +  std::array<float, kGainBoundLags> gain_bounds_;
 +  float max_gain_bound_;
++  int saturated_blocks_in_sums_ = 0;
  };
  
  std::unique_ptr<TransparentMode> TransparentMode::Create(
