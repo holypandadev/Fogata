@@ -41,7 +41,7 @@ sink's other changes (its volume):
   Core Audio: playout stopped: sound to headphones no
 
 diff --git a/modules/audio_device/linux/audio_device_pulse_linux.cc b/modules/audio_device/linux/audio_device_pulse_linux.cc
-index 2ed1782..75e0682 100644
+index 2ed1782..850f49d 100644
 --- a/modules/audio_device/linux/audio_device_pulse_linux.cc
 +++ b/modules/audio_device/linux/audio_device_pulse_linux.cc
 @@ -15,6 +15,7 @@
@@ -72,7 +72,22 @@ index 2ed1782..75e0682 100644
  // Fogata: how long before starting again what did not start once the server was
  // back (its devices may not be there yet): a second for the first 5 tries, then 5 s.
  TimeDelta RestoreDelay(int round) {
-@@ -1385,6 +1399,15 @@ int32_t AudioDeviceLinuxPulse::StopPlayout() {
+@@ -272,6 +286,14 @@ int32_t AudioDeviceLinuxPulse::Terminate() {
+     RTC_LOG(LS_ERROR) << "failed to terminate PulseAudio";
+     return -1;
+   }
++  // Fogata: ended while playing (no StopPlayout): no sound to headphones left
++  // behind for another module; PulseAudio's thread is stopped, nothing answers.
++  playout_sink_stream_ = nullptr;
++  if (!playout_sink_note_.empty()) {
++    playout_sink_note_.clear();
++    RTC_LOG(LS_INFO) << "PulseAudio: playout stopped: sound to headphones no";
++  }
++  PlayoutToHeadphones().store(false, std::memory_order_relaxed);
+ 
+ #if defined(WEBRTC_USE_X11)
+   if (_XDisplay) {
+@@ -1385,6 +1407,15 @@ int32_t AudioDeviceLinuxPulse::StopPlayout() {
    LATE(pa_stream_set_state_callback)(_playStream, nullptr, nullptr);
    LATE(pa_stream_set_moved_callback)(_playStream, nullptr, nullptr);
  
@@ -88,7 +103,7 @@ index 2ed1782..75e0682 100644
    const pa_stream_state_t stream_state = LATE(pa_stream_get_state)(_playStream);
    if (stream_state != PA_STREAM_UNCONNECTED &&
        stream_state != PA_STREAM_FAILED &&
-@@ -1866,8 +1889,11 @@ void AudioDeviceLinuxPulse::PaPortSinkCallback(pa_context* /*c*/,
+@@ -1866,8 +1897,11 @@ void AudioDeviceLinuxPulse::PaPortSinkCallback(pa_context* /*c*/,
                                                 int eol,
                                                 void* pThis) {
    if (eol == 0 && i != nullptr) {
@@ -102,7 +117,7 @@ index 2ed1782..75e0682 100644
    }
  }
  
-@@ -1902,8 +1928,7 @@ void AudioDeviceLinuxPulse::PaDefaultsCallback(pa_context* /*c*/,
+@@ -1902,8 +1936,7 @@ void AudioDeviceLinuxPulse::PaDefaultsCallback(pa_context* /*c*/,
    self->defaults_known_ = true;
  }
  
@@ -112,7 +127,7 @@ index 2ed1782..75e0682 100644
    RTC_LOG(LS_INFO) << "PulseAudio: a stream moved to another device: audio "
                        "devices changed";
    MarkAudioDevicesChanged();
-@@ -1912,6 +1937,85 @@ void AudioDeviceLinuxPulse::PaStreamMovedCallback(pa_stream* /*p*/,
+@@ -1912,6 +1945,85 @@ void AudioDeviceLinuxPulse::PaStreamMovedCallback(pa_stream* /*p*/,
    // reaches the microphone by another path, and the echo controller aligns again
    // at the next recorded block (taken as seen by a start of recording).
    MarkAudioDeviceRestarted();
@@ -198,7 +213,7 @@ index 2ed1782..75e0682 100644
  }
  
  void AudioDeviceLinuxPulse::PaContextStateCallbackHandler(pa_context* c) {
-@@ -2760,6 +2864,11 @@ bool AudioDeviceLinuxPulse::PlayThreadProcess() {
+@@ -2760,6 +2872,11 @@ bool AudioDeviceLinuxPulse::PlayThreadProcess() {
      // We can now handle write callbacks
      EnableWriteCallback();
  
@@ -259,7 +274,7 @@ index 62840c9..b8655b5 100644
    X(pa_stream_connect_record)              \
    X(pa_stream_disconnect)                  \
 diff --git a/modules/audio_device/win/audio_device_core_win.cc b/modules/audio_device/win/audio_device_core_win.cc
-index 2cd79ee..b2f067d 100644
+index 2cd79ee..76f945b 100644
 --- a/modules/audio_device/win/audio_device_core_win.cc
 +++ b/modules/audio_device/win/audio_device_core_win.cc
 @@ -26,6 +26,7 @@
@@ -317,7 +332,20 @@ index 2cd79ee..b2f067d 100644
  }  // namespace
  
  // ============================================================================
-@@ -2551,6 +2592,13 @@ int32_t AudioDeviceWindowsCore::StartPlayout() {
+@@ -623,6 +664,12 @@ int32_t AudioDeviceWindowsCore::Terminate() {
+   _playing = false;
+   _recording = false;
+ 
++  // Fogata: ended while playing (no StopPlayout): no sound to headphones left
++  // behind for another module.
++  if (_deviceStateListener) {
++    _deviceStateListener->SetPlayoutEndpoint(nullptr);
++  }
++
+   SAFE_RELEASE(_ptrRenderCollection);
+   SAFE_RELEASE(_ptrCaptureCollection);
+   SAFE_RELEASE(_ptrDeviceOut);
+@@ -2551,6 +2598,13 @@ int32_t AudioDeviceWindowsCore::StartPlayout() {
    _playing = true;
    RTC_LOG(LS_VERBOSE) << "rendering audio stream has now started...";
  
@@ -331,7 +359,7 @@ index 2cd79ee..b2f067d 100644
    return 0;
  }
  
-@@ -2563,6 +2611,9 @@ int32_t AudioDeviceWindowsCore::StopPlayout() {
+@@ -2563,6 +2617,9 @@ int32_t AudioDeviceWindowsCore::StopPlayout() {
      return 0;
    }
  
@@ -341,7 +369,7 @@ index 2cd79ee..b2f067d 100644
    {
      MutexLock lockScoped(&mutex_);
  
-@@ -3980,10 +4031,54 @@ void AudioDeviceWindowsCore::DeviceStateListener::SetObserver(AudioDeviceObserve
+@@ -3980,10 +4037,54 @@ void AudioDeviceWindowsCore::DeviceStateListener::SetObserver(AudioDeviceObserve
    callback_ = observer;
  }
  
@@ -396,7 +424,7 @@ index 2cd79ee..b2f067d 100644
    if(callback_) callback_->OnDevicesUpdated();
    return S_OK;
  }
-@@ -4008,6 +4103,15 @@ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDefaultDeviceChanged(EDat
+@@ -4008,6 +4109,15 @@ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDefaultDeviceChanged(EDat
  
  HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnPropertyValueChanged(LPCWSTR pwstrDeviceId, const PROPERTYKEY key) {
    //RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnPropertyValueChanged => " << pwstrDeviceId;
