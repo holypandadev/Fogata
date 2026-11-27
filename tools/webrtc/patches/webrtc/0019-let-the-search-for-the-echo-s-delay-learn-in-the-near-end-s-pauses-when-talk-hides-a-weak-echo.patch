@@ -97,7 +97,7 @@ index 1a5f75c..e2085c6 100644
        "../../../rtc_base:random",
        "../../../rtc_base:stringutils",
 diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
-index 62e8449..152fcf9 100644
+index 62e8449..22e6f29 100644
 --- a/modules/audio_processing/aec3/aec_state.cc
 +++ b/modules/audio_processing/aec3/aec_state.cc
 @@ -14,6 +14,7 @@
@@ -121,7 +121,7 @@ index 62e8449..152fcf9 100644
    if (echo_path_variability.delay_change !=
        EchoPathVariability::DelayAdjustment::kNone) {
      full_reset();
-@@ -203,6 +210,40 @@ void AecState::Update(
+@@ -203,6 +210,41 @@ void AecState::Update(
      std::span<const SubtractorOutput> subtractor_output) {
    RTC_DCHECK_EQ(num_capture_channels_, Y2.size());
    RTC_DCHECK_EQ(num_capture_channels_, subtractor_output.size());
@@ -130,9 +130,10 @@ index 62e8449..152fcf9 100644
 +  // words for echo; it eases in on them (NearTalkGainFloor), not in its pauses.
 +  // It ends at any later change of the delay (HandleEchoPathChange), when the
 +  // delay is lost, and when the delay in use is no longer one found in the near
-+  // end's talk (a delay from the usual search, or headphones). A change of up to 2 blocks, that the search gives as it
-+  // settles, leaves it as it is: the filter starts again, and the near end's
-+  // words would be cut as on a delay found anew.
++  // end's talk (a delay from the usual search, or headphones). A change of up
++  // to 2 blocks, that the search gives as it settles, leaves it as it is: the
++  // filter starts again, and the near end's words would be cut as on a delay
++  // found anew.
 +  if (near_talk_delay_changed_) {
 +    near_talk_delay_changed_ = false;
 +    if (!external_delay || !delay_known_ ||
