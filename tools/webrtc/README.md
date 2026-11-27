@@ -441,7 +441,11 @@ On a Mac, with the Objective-C SDK of webrtc-sdk moved to M158 (`patches/apple`)
     restart for other devices; a device's restart after a change is a plain restart and
     the change is not taken again at the next unmute; a change and a restart marked while
     recording is stopped, with a block recorded before the unmute's start returns, still
-    give the restart for other devices.
+    give the restart for other devices;
+28. the test of WebRTC's patch 0018 for Windows (`test/playout_form_factor.test.cc`, Windows
+    only): with a fake endpoint, headphones and a headset play to headphones and other form
+    factors, no value or no store do not, and the answer follows the endpoint's form factor
+    and state until playout stops.
 
 webrtc-sdk/webrtc's m150 branch carries much more (Apple audio engine, Android, H.265,
 per-track audio processing options, the frame cryptor for end-to-end encryption of

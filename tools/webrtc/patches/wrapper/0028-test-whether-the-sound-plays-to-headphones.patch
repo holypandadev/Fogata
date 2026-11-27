@@ -1,0 +1,342 @@
+Test whether the sound plays to headphones
+
+WebRTC patch 0018 (the audio device modules) has the Core Audio module tell
+PlayoutToHeadphones from the playout endpoint's form factor.
+test/playout_form_factor.test.cc (Windows only) drives
+AudioDeviceWindowsCore::DeviceStateListener with a fake endpoint and property store, so no
+audio device is needed: headphones and a headset play to headphones; speakers, line level,
+a handset, S/PDIF, a display, an unknown or unlisted form factor do not, nor does a store
+that gives no value (VT_EMPTY), another type (VT_I4), a failure or no store at all. The
+answer follows the endpoint when it says another form factor (its id compared without
+case) and when its state changes (unplugged, disabled or not present give no; active again
+reads it anew); another key or another endpoint reads nothing, and nothing is read once
+playout stops, which sets no. The listener holds the endpoint only while playing and lets
+the store go after each read. A state change also counts as a change of devices (patch
+0011); the tests that read that count take it from their start.
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 5b362a9..982b220 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -458,6 +458,9 @@ if (rtc_include_tests) {
+         "../modules/audio_device:audio_device_impl",
+         "../rtc_base/win:scoped_com_initializer",
+       ]
++      # Whether the sound plays to headphones (WebRTC patch 0018).
++      sources += [ "test/playout_form_factor.test.cc" ]
++      deps += [ "../api/audio:audio_device" ]
+     }
+   }
+ }
+diff --git a/test/playout_form_factor.test.cc b/test/playout_form_factor.test.cc
+new file mode 100644
+index 0000000..4eaaa8b
+--- /dev/null
++++ b/test/playout_form_factor.test.cc
+@@ -0,0 +1,306 @@
++// Windows only: whether the sound plays to headphones, as the Core Audio module reads it
++// (WebRTC patch 0018, PlayoutToHeadphones): the playout endpoint's form factor through its
++// property store, at the start of playout, when the endpoint says its form factor changed,
++// when its state changes and when playout stops. A fake endpoint and property store stand
++// in for the system's, so no audio device is needed.
++
++#include <windows.h>
++
++#include <mmdeviceapi.h>
++#include <propidl.h>
++#include <propsys.h>
++
++#include <atomic>
++#include <cwchar>
++#include <memory>
++
++#include "api/audio/audio_device.h"
++#include "modules/audio_device/win/audio_device_core_win.h"
++#include "test/gtest.h"
++
++namespace {
++
++// PKEY_AudioEndpoint_FormFactor and PKEY_Device_FriendlyName, as mmdeviceapi.h and
++// functiondiscoverykeys_devpkey.h give them.
++const PROPERTYKEY kFormFactorKey = {
++    {0x1da5d803, 0xd492, 0x4edd, {0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e}},
++    0};
++const PROPERTYKEY kFriendlyNameKey = {
++    {0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
++    14};
++
++const wchar_t kEndpointId[] = L"{0.0.0.00000000}.{fogata-test-endpoint}";
++
++// How the store answers for the form factor.
++enum class FormFactorAnswer {
++  kValue,       // S_OK, VT_UI4 with the value
++  kWrongType,   // S_OK, VT_I4 with the value
++  kEmpty,       // S_OK, VT_EMPTY (what a store gives for a key it does not hold)
++  kFailure,     // E_FAIL
++};
++
++class FakePropertyStore : public IPropertyStore {
++ public:
++  FormFactorAnswer answer = FormFactorAnswer::kValue;
++  ULONG form_factor = Speakers;
++
++  ULONG __stdcall AddRef() override { return ++refs_; }
++  ULONG __stdcall Release() override { return --refs_; }
++  HRESULT __stdcall QueryInterface(REFIID iid, void** object) override {
++    if (iid == IID_IUnknown || iid == __uuidof(IPropertyStore)) {
++      *object = static_cast<IPropertyStore*>(this);
++      AddRef();
++      return S_OK;
++    }
++    *object = nullptr;
++    return E_NOINTERFACE;
++  }
++  HRESULT __stdcall GetCount(DWORD* count) override {
++    *count = 0;
++    return S_OK;
++  }
++  HRESULT __stdcall GetAt(DWORD, PROPERTYKEY*) override { return E_INVALIDARG; }
++  HRESULT __stdcall GetValue(REFPROPERTYKEY key, PROPVARIANT* value) override {
++    PropVariantInit(value);
++    if (IsEqualPropertyKey(key, kFriendlyNameKey)) {
++      const wchar_t kName[] = L"Fake endpoint";
++      value->pwszVal = static_cast<LPWSTR>(CoTaskMemAlloc(sizeof(kName)));
++      if (value->pwszVal == nullptr) {
++        return E_OUTOFMEMORY;
++      }
++      wmemcpy(value->pwszVal, kName, sizeof(kName) / sizeof(wchar_t));
++      value->vt = VT_LPWSTR;
++      return S_OK;
++    }
++    if (!IsEqualPropertyKey(key, kFormFactorKey)) {
++      return S_OK;
++    }
++    ++form_factor_reads;
++    switch (answer) {
++      case FormFactorAnswer::kValue:
++        value->vt = VT_UI4;
++        value->ulVal = form_factor;
++        return S_OK;
++      case FormFactorAnswer::kWrongType:
++        value->vt = VT_I4;
++        value->lVal = static_cast<LONG>(form_factor);
++        return S_OK;
++      case FormFactorAnswer::kEmpty:
++        return S_OK;
++      case FormFactorAnswer::kFailure:
++        return E_FAIL;
++    }
++    return E_FAIL;
++  }
++  HRESULT __stdcall SetValue(REFPROPERTYKEY, REFPROPVARIANT) override {
++    return STG_E_ACCESSDENIED;
++  }
++  HRESULT __stdcall Commit() override { return S_OK; }
++
++  int form_factor_reads = 0;
++  ULONG refs() const { return refs_; }
++
++ private:
++  ULONG refs_ = 1;
++};
++
++class FakeEndpoint : public IMMDevice {
++ public:
++  FakePropertyStore store;
++  bool store_opens = true;
++
++  ULONG __stdcall AddRef() override { return ++refs_; }
++  ULONG __stdcall Release() override { return --refs_; }
++  HRESULT __stdcall QueryInterface(REFIID iid, void** object) override {
++    if (iid == IID_IUnknown || iid == __uuidof(IMMDevice)) {
++      *object = static_cast<IMMDevice*>(this);
++      AddRef();
++      return S_OK;
++    }
++    *object = nullptr;
++    return E_NOINTERFACE;
++  }
++  HRESULT __stdcall Activate(REFIID, DWORD, PROPVARIANT*, void** object) override {
++    *object = nullptr;
++    return E_NOINTERFACE;
++  }
++  HRESULT __stdcall OpenPropertyStore(DWORD, IPropertyStore** props) override {
++    if (!store_opens) {
++      *props = nullptr;
++      return E_FAIL;
++    }
++    store.AddRef();
++    *props = &store;
++    return S_OK;
++  }
++  HRESULT __stdcall GetId(LPWSTR* id) override {
++    const size_t size = sizeof(kEndpointId);
++    *id = static_cast<LPWSTR>(CoTaskMemAlloc(size));
++    if (*id == nullptr) {
++      return E_OUTOFMEMORY;
++    }
++    wmemcpy(*id, kEndpointId, size / sizeof(wchar_t));
++    return S_OK;
++  }
++  HRESULT __stdcall GetState(DWORD* state) override {
++    *state = DEVICE_STATE_ACTIVE;
++    return S_OK;
++  }
++
++  ULONG refs() const { return refs_; }
++
++ private:
++  ULONG refs_ = 1;
++};
++
++using Listener = webrtc::AudioDeviceWindowsCore::DeviceStateListener;
++
++bool SoundToHeadphones() {
++  return webrtc::PlayoutToHeadphones().load(std::memory_order_relaxed);
++}
++
++class PlayoutFormFactor : public ::testing::Test {
++ protected:
++  void SetUp() override { webrtc::PlayoutToHeadphones().store(false); }
++  void TearDown() override { webrtc::PlayoutToHeadphones().store(false); }
++
++  // Plays on an endpoint that says `form_factor` after one that said headphones, so that a
++  // false answer is a change, not the starting value.
++  bool PlaysToHeadphones(FakeEndpoint& endpoint) {
++    FakeEndpoint headphones;
++    headphones.store.form_factor = Headphones;
++    auto listener = std::make_unique<Listener>();
++    listener->SetPlayoutEndpoint(&headphones);
++    EXPECT_TRUE(SoundToHeadphones());
++    listener->SetPlayoutEndpoint(&endpoint);
++    const bool result = SoundToHeadphones();
++    listener->SetPlayoutEndpoint(nullptr);
++    return result;
++  }
++};
++
++TEST_F(PlayoutFormFactor, HeadphonesAndHeadsetsPlayToHeadphones) {
++  for (ULONG factor : {static_cast<ULONG>(Headphones), static_cast<ULONG>(Headset)}) {
++    FakeEndpoint endpoint;
++    endpoint.store.form_factor = factor;
++    auto listener = std::make_unique<Listener>();
++    listener->SetPlayoutEndpoint(&endpoint);
++    EXPECT_TRUE(SoundToHeadphones()) << "form factor " << factor;
++    EXPECT_EQ(endpoint.store.form_factor_reads, 1);
++    listener->SetPlayoutEndpoint(nullptr);
++    EXPECT_FALSE(SoundToHeadphones());
++  }
++}
++
++TEST_F(PlayoutFormFactor, OtherFormFactorsDoNot) {
++  for (ULONG factor :
++       {static_cast<ULONG>(Speakers), static_cast<ULONG>(LineLevel),
++        static_cast<ULONG>(Handset), static_cast<ULONG>(SPDIF),
++        static_cast<ULONG>(DigitalAudioDisplayDevice),
++        static_cast<ULONG>(UnknownFormFactor), static_cast<ULONG>(RemoteNetworkDevice),
++        static_cast<ULONG>(77)}) {
++    FakeEndpoint endpoint;
++    endpoint.store.form_factor = factor;
++    EXPECT_FALSE(PlaysToHeadphones(endpoint)) << "form factor " << factor;
++  }
++}
++
++TEST_F(PlayoutFormFactor, NoFormFactorDoesNot) {
++  for (FormFactorAnswer answer :
++       {FormFactorAnswer::kEmpty, FormFactorAnswer::kFailure, FormFactorAnswer::kWrongType}) {
++    FakeEndpoint endpoint;
++    endpoint.store.form_factor = Headphones;
++    endpoint.store.answer = answer;
++    EXPECT_FALSE(PlaysToHeadphones(endpoint)) << "answer " << static_cast<int>(answer);
++  }
++  FakeEndpoint no_store;
++  no_store.store.form_factor = Headphones;
++  no_store.store_opens = false;
++  EXPECT_FALSE(PlaysToHeadphones(no_store));
++}
++
++TEST_F(PlayoutFormFactor, FollowsTheEndpointsFormFactor) {
++  FakeEndpoint endpoint;
++  auto listener = std::make_unique<Listener>();
++  listener->SetPlayoutEndpoint(&endpoint);
++  EXPECT_FALSE(SoundToHeadphones());
++
++  // A jack's driver: the same endpoint now says headphones, then speakers again.
++  endpoint.store.form_factor = Headphones;
++  listener->OnPropertyValueChanged(kEndpointId, kFormFactorKey);
++  EXPECT_TRUE(SoundToHeadphones());
++  endpoint.store.form_factor = Speakers;
++  listener->OnPropertyValueChanged(kEndpointId, kFormFactorKey);
++  EXPECT_FALSE(SoundToHeadphones());
++
++  // The id compares without case, as Windows' ids do.
++  endpoint.store.form_factor = Headset;
++  listener->OnPropertyValueChanged(L"{0.0.0.00000000}.{FOGATA-TEST-ENDPOINT}",
++                                   kFormFactorKey);
++  EXPECT_TRUE(SoundToHeadphones());
++
++  // Another key, or another endpoint, reads nothing.
++  const int reads = endpoint.store.form_factor_reads;
++  endpoint.store.form_factor = Speakers;
++  listener->OnPropertyValueChanged(kEndpointId, kFriendlyNameKey);
++  listener->OnPropertyValueChanged(L"{0.0.0.00000000}.{another}", kFormFactorKey);
++  listener->OnPropertyValueChanged(nullptr, kFormFactorKey);
++  EXPECT_EQ(endpoint.store.form_factor_reads, reads);
++  EXPECT_TRUE(SoundToHeadphones());
++
++  listener->SetPlayoutEndpoint(nullptr);
++  EXPECT_FALSE(SoundToHeadphones());
++  // Once playout stopped, the endpoint's changes say nothing.
++  endpoint.store.form_factor = Headphones;
++  listener->OnPropertyValueChanged(kEndpointId, kFormFactorKey);
++  EXPECT_FALSE(SoundToHeadphones());
++}
++
++TEST_F(PlayoutFormFactor, FollowsTheEndpointsState) {
++  FakeEndpoint endpoint;
++  endpoint.store.form_factor = Headphones;
++  auto listener = std::make_unique<Listener>();
++  listener->SetPlayoutEndpoint(&endpoint);
++  ASSERT_TRUE(SoundToHeadphones());
++
++  for (DWORD state : {static_cast<DWORD>(DEVICE_STATE_UNPLUGGED),
++                      static_cast<DWORD>(DEVICE_STATE_DISABLED),
++                      static_cast<DWORD>(DEVICE_STATE_NOTPRESENT)}) {
++    listener->OnDeviceStateChanged(kEndpointId, state);
++    EXPECT_FALSE(SoundToHeadphones()) << "state " << state;
++    listener->OnDeviceStateChanged(kEndpointId, DEVICE_STATE_ACTIVE);
++    EXPECT_TRUE(SoundToHeadphones()) << "active after state " << state;
++  }
++
++  // Active again with speakers on that endpoint: read again.
++  listener->OnDeviceStateChanged(kEndpointId, DEVICE_STATE_UNPLUGGED);
++  endpoint.store.form_factor = Speakers;
++  listener->OnDeviceStateChanged(kEndpointId, DEVICE_STATE_ACTIVE);
++  EXPECT_FALSE(SoundToHeadphones());
++
++  // Another endpoint's state changes nothing.
++  endpoint.store.form_factor = Headphones;
++  listener->OnDeviceStateChanged(kEndpointId, DEVICE_STATE_ACTIVE);
++  ASSERT_TRUE(SoundToHeadphones());
++  listener->OnDeviceStateChanged(L"{0.0.0.00000000}.{another}", DEVICE_STATE_UNPLUGGED);
++  EXPECT_TRUE(SoundToHeadphones());
++  listener->SetPlayoutEndpoint(nullptr);
++}
++
++TEST_F(PlayoutFormFactor, HoldsTheEndpointOnlyWhilePlaying) {
++  FakeEndpoint first;
++  FakeEndpoint second;
++  {
++    auto listener = std::make_unique<Listener>();
++    listener->SetPlayoutEndpoint(&first);
++    EXPECT_EQ(first.refs(), 2u);
++    EXPECT_EQ(first.store.refs(), 1u);  // the store is let go after each read
++    listener->SetPlayoutEndpoint(&second);
++    EXPECT_EQ(first.refs(), 1u);
++    EXPECT_EQ(second.refs(), 2u);
++  }
++  // A listener ended while playing lets go of its endpoint too.
++  EXPECT_EQ(second.refs(), 1u);
++}
++
++}  // namespace
