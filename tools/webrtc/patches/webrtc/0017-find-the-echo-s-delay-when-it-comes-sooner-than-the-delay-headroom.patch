@@ -1,0 +1,166 @@
+Find the echo's delay when it comes sooner than the delay headroom, and move to it only when the filter cannot reach the echo
+
+With the headroom of 512 samples that patch 0019 of the wrapper sets (8 blocks), an echo
+whose delay in the audio processing is shorter than about 34 ms gives lags that the delay
+histogram takes as 0 (the lag less the headroom, clamped at 0), and the aggregator of the
+highest peak never chooses 0: its 250 slots start filled with lag 0 while its histogram
+starts empty, so bin 0 starts 250 down and never reaches the thresholds. No delay is ever
+found, and the echo controller stays where its reset put it (with a reported delay R, R/4
+- 2 blocks; without one, 5 blocks). When the echo comes before that, out of the linear
+filter's reach, the filter never becomes usable: the transparent mode takes it for a
+headset after about 8 s and lets the echo through at 0 dB for the rest of the call.
+Measured in the AEC3 simulator (M158 with main's patches, 16 kHz, echo of speech at 0 dB):
+with a reported delay of 30 ms and an echo of 5 to 11 ms, 50 ms and 5 to 30 ms, or none
+and 5 to 10 ms; through a room's response at 50 ms and 5 to 10 ms, -7 to -10 dB.
+
+The aggregator now also follows the lags shorter than the headroom. When it finds no
+delay and its latest 125 lags all came that short and within 2 of each other, it gives a
+delay of 0. The controller moves the buffer to it only when the last such lag puts the
+echo before where the buffer stands; where the filter still reaches the echo, the buffer
+stays and the filter keeps what it learned. The aggregator's own histogram is left as it
+is: letting its bin 0 win (the slots not yet written marked as such, as the pre-echo
+aggregator does) also took the short lags that music gives now and then, and moved the
+buffer with music on speakers (one half second up to 24 dB more echo); so did 25 or 50
+lags in a row.
+
+Simulator, same cases: the echo is cancelled to -57 dB all the call (room: -43 to -45 dB,
+as with longer delays). Identical: echo of 20 to 400 ms, the start of a call with music or
+speech on speakers (echo -10 to -30 dB, also with the near end talking) or on a headset,
+double talk with music or speech (16 seeds each). The unmute series (48 seeds, echo of 30
+ms with no reported delay, and 60 ms reported 50) changes in 5 seeds, each with less echo.
+After an unmute (2 s muted) with an echo of 5 to 20 ms and a reported 30 to 50 ms, the
+echo after the first second goes from -15 to +6 dB to -25 to -37 dB; the first second, while
+the buffer moves, is at -6 to -11 dB (before: 0 dB with a single echo, -12 to -43 dB with
+a room's). Through a room's response, 2 runs of 48 (reported 30 ms, echo 15 and 20 ms) that
+were cancelled before now have one burst at -13 and -17 dB.
+
+diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator.h b/modules/audio_processing/aec3/echo_path_delay_estimator.h
+--- a/modules/audio_processing/aec3/echo_path_delay_estimator.h
++++ b/modules/audio_processing/aec3/echo_path_delay_estimator.h
+@@ -54,6 +54,16 @@
+                                         down_sampling_factor_);
+   }
+ 
++  // Fogata: whether the last delay estimated was 0 found from lags shorter
++  // than the headroom, and the last such lag, in samples.
++  bool ShortDelayFound() const {
++    return matched_filter_lag_aggregator_.ShortDelayFound();
++  }
++  int LastShortDelay() const {
++    return matched_filter_lag_aggregator_.LastShortLag() *
++           static_cast<int>(down_sampling_factor_);
++  }
++
+   // Returns the level of detected clockdrift.
+   ClockdriftDetector::Level Clockdrift() const {
+     return clockdrift_detector_.ClockdriftLevel();
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+@@ -11,6 +11,7 @@
+ 
+ #include <algorithm>
+ #include <cstddef>
++#include <cstdlib>
+ #include <iterator>
+ #include <memory>
+ #include <optional>
+@@ -62,6 +63,8 @@
+ 
+ void MatchedFilterLagAggregator::Reset(bool hard_reset) {
+   highest_peak_aggregator_.Reset();
++  steady_short_lags_ = 0;
++  short_delay_found_ = false;
+   if (pre_echo_lag_aggregator_ != nullptr) {
+     pre_echo_lag_aggregator_->Reset();
+   }
+@@ -78,7 +81,18 @@
+         std::max(0, static_cast<int>(lag_estimate->pre_echo_lag) - headroom_));
+   }
+ 
++  short_delay_found_ = false;
+   if (lag_estimate) {
++    const int lag = static_cast<int>(lag_estimate->lag);
++    if (lag <= headroom_) {
++      steady_short_lags_ =
++          std::abs(lag - last_short_lag_) <= kShortLagSpread
++              ? std::min(steady_short_lags_ + 1, kSteadyShortLags)
++              : 1;
++      last_short_lag_ = lag;
++    } else {
++      steady_short_lags_ = 0;
++    }
+     highest_peak_aggregator_.Aggregate(
+         std::max(0, static_cast<int>(lag_estimate->lag) - headroom_));
+     std::span<const int> histogram = highest_peak_aggregator_.histogram();
+@@ -98,6 +112,16 @@
+     }
+   }
+ 
++  // Fogata: an echo sooner than the headroom gives lags that the histogram
++  // takes as 0, and its bin 0 never wins (its slots not yet written count as
++  // lag 0 and take from it). When nothing else is found and the latest 125
++  // lags all came that short and within 2 of each other, the delay is 0; fewer
++  // let the lags that music gives now and then move the buffer.
++  if (steady_short_lags_ >= kSteadyShortLags) {
++    short_delay_found_ = true;
++    return DelayEstimate(DelayEstimate::Quality::kCoarse, 0);
++  }
++
+   return std::nullopt;
+ }
+ 
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.h b/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.h
+@@ -51,6 +51,11 @@
+   // Returns whether a reliable delay estimate has been found.
+   bool ReliableDelayFound() const { return significant_candidate_found_; }
+ 
++  // Fogata: whether the last delay aggregated was 0 found from lags shorter
++  // than the headroom, and the last such lag, in down-sampled samples.
++  bool ShortDelayFound() const { return short_delay_found_; }
++  int LastShortLag() const { return last_short_lag_; }
++
+   // Returns the delay candidate that is computed by looking at the highest peak
+   // on the matched filters.
+   int GetDelayAtHighestPeak() const {
+@@ -94,6 +99,11 @@
+   bool significant_candidate_found_ = false;
+   const EchoCanceller3Config::Delay::DelaySelectionThresholds thresholds_;
+   const int headroom_;
++  static constexpr int kShortLagSpread = 2;
++  static constexpr int kSteadyShortLags = 125;
++  int last_short_lag_ = 0;
++  int steady_short_lags_ = 0;
++  bool short_delay_found_ = false;
+   HighestPeakAggregator highest_peak_aggregator_;
+   std::unique_ptr<PreEchoLagAggregator> pre_echo_lag_aggregator_;
+ };
+diff --git a/modules/audio_processing/aec3/render_delay_controller.cc b/modules/audio_processing/aec3/render_delay_controller.cc
+--- a/modules/audio_processing/aec3/render_delay_controller.cc
++++ b/modules/audio_processing/aec3/render_delay_controller.cc
+@@ -110,12 +110,22 @@
+ 
+ std::optional<DelayEstimate> RenderDelayControllerImpl::GetDelay(
+     const DownsampledRenderBuffer& render_buffer,
+-    size_t /* render_delay_buffer_delay */,
++    size_t render_delay_buffer_delay,
+     const Block& capture) {
+   ++capture_call_counter_;
+ 
+   auto delay_samples = delay_estimator_.EstimateDelay(render_buffer, capture);
+ 
++  // Fogata: a delay of 0 found from lags shorter than the headroom moves the
++  // buffer only when the echo comes before where the buffer stands now, out of
++  // the linear filter's reach; where the filter still reaches it, the buffer
++  // stays and the filter keeps what it learnt.
++  if (delay_samples && delay_estimator_.ShortDelayFound() &&
++      delay_estimator_.LastShortDelay() / static_cast<int>(kBlockSize) >=
++          static_cast<int>(render_delay_buffer_delay)) {
++    delay_samples = std::nullopt;
++  }
++
+   if (delay_samples) {
+     delay_samples_ = delay_samples;
+   }
