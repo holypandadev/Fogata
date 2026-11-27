@@ -1,0 +1,326 @@
+Decide sooner that the capture has no echo when the sound plays to headphones and nothing shows an echo path
+
+With a headset and the far end talking from the start of a call, AEC3 has no echo path to
+learn and takes the strong render for echo it cannot yet cancel: the near voice comes out
+suppressed by more than 6 dB for about 5 s, the last loss near 7.5 s, until the legacy
+transparent mode (5 s without a sane filter, 6 s of strong render) takes the capture for a
+headset's. Measured in the AEC3 simulator (M158 with main's patches and 0017, 16 kHz,
+far speech or music, near speech, room noise at -76 and -52 dBFS).
+
+Waiting less for everyone lets echo through on speakers: 3 s instead of 5 and 6 passes
+quiet music's echo (-30 dB, 300 ms) in the seconds between two changes of its delay, up to
+18 dB more in one half second. Within AEC3 alone, the start of a call with a headset and
+near speech cannot be told from double talk from the start over a weak echo (-20 to -30
+dB) whose delay is not yet found: the same filter convergence, no delay, and a bound on
+the echo path's gain that room noise raises to about -35 dB.
+
+So the audio device module now says whether the sound plays to headphones or a headset
+(PlayoutToHeadphones, next to the count of patch 0011), and the legacy transparent mode
+waits 3 s instead of 5 and 6 only while it does and nothing shows an echo path: no delay
+found for the echo since the last reset, the filters converged in no more than 25 blocks,
+and the least ratio of the capture to the render a lag before, over 4 blocks, below -35 dB
+at every lag up to 512 ms. A delay found, more convergence or a larger ratio keep the usual
+wait. The mode logs when it turns on or off.
+
+Simulator: with the sound to headphones, the near voice is suppressed 2.0 s instead of 5.0
+(last loss at 3.5 s, not 7.5), also with room noise at -52 dBFS; with a quiet far end 0.5
+to 1.5 s instead of 2 to 4.5. Without it everything is identical: the start of a call with
+music or speech on speakers or a headset, quiet music, double talk from the start, echo of
+5 to 30 ms with 0017, echo that appears 2 to 7 s into the call, the unmute series. With it
+and an echo (headphones that leak, or speakers named as headphones): echo of -25 to -40 dB
+is identical, -45 and -50 dB 2 to 5 dB more in one half second where it already passed;
+double talk from the start with music at -30 dB and 200 ms lets the echo through from 2.5
+s instead of 3 in one of two seeds.
+
+diff --git a/api/audio/audio_device.h b/api/audio/audio_device.h
+index eae43a1..7a57a50 100644
+--- a/api/audio/audio_device.h
++++ b/api/audio/audio_device.h
+@@ -49,6 +49,17 @@ inline void MarkAudioDevicesChanged() {
+   AudioDevicesChangedCount().fetch_add(1, std::memory_order_relaxed);
+ }
+ 
++// Fogata: whether the sound plays to headphones or a headset, as the system
++// names the playout device (its port or form factor), so that no echo path is
++// to be expected. The audio device module sets it whenever playout starts on a
++// device or the device changes, from any thread; false when the system doesn't
++// say. The echo controller reads it to decide sooner that a capture without any
++// sign of echo has none (its transparent mode).
++inline std::atomic<bool>& PlayoutToHeadphones() {
++  static std::atomic<bool> headphones{false};
++  return headphones;
++}
++
+ class AudioDeviceModule : public RefCountInterface {
+  public:
+   enum AudioLayer {
+diff --git a/modules/audio_processing/aec3/BUILD.gn b/modules/audio_processing/aec3/BUILD.gn
+index 22b5419..e6ce2fe 100644
+--- a/modules/audio_processing/aec3/BUILD.gn
++++ b/modules/audio_processing/aec3/BUILD.gn
+@@ -145,6 +145,7 @@ rtc_library("aec3") {
+     "..:high_pass_filter",
+     "../../../api:field_trials_view",
+     "../../../api/audio:aec3_config",
++    "../../../api/audio:audio_device",
+     "../../../api/audio:echo_control",
+     "../../../api/audio:neural_residual_echo_estimator_api",
+     "../../../api/environment",
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+index cf50821..62e8449 100644
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -38,6 +38,26 @@
+ namespace webrtc {
+ namespace {
+ 
++// Fogata: the energy of a render block, all channels (transparent mode).
++float BlockEnergy(const Block& block) {
++  float energy = 0.f;
++  for (int ch = 0; ch < block.NumChannels(); ++ch) {
++    energy += std::inner_product(block.begin(/*block=*/0, ch),
++                                 block.end(/*block=*/0, ch),
++                                 block.begin(/*block=*/0, ch), 0.f);
++  }
++  return energy;
++}
++
++// Fogata: the capture's energy in its loudest channel (transparent mode).
++float MaxCaptureEnergy(std::span<const SubtractorOutput> subtractor_output) {
++  float energy = 0.f;
++  for (const auto& output : subtractor_output) {
++    energy = std::max(energy, output.y2);
++  }
++  return energy;
++}
++
+ bool SubtractorAnalyzerResetAtEchoPathChange(
+     const FieldTrialsView& field_trials) {
+   return !field_trials.IsEnabled(
+@@ -272,7 +292,9 @@ void AecState::Update(
+     transparent_state_->Update(
+         delay_state_.MinDirectPathFilterDelay(), any_filter_consistent,
+         any_filter_converged, any_coarse_filter_converged, all_filters_diverged,
+-        active_render, SaturatedCapture());
++        active_render, SaturatedCapture(), external_delay.has_value(),
++        BlockEnergy(render_buffer.GetBlock(0)),
++        MaxCaptureEnergy(subtractor_output));
+   }
+ 
+   // Analyze the quality of the filter.
+diff --git a/modules/audio_processing/aec3/transparent_mode.cc b/modules/audio_processing/aec3/transparent_mode.cc
+index 84316ac..52c2eaa 100644
+--- a/modules/audio_processing/aec3/transparent_mode.cc
++++ b/modules/audio_processing/aec3/transparent_mode.cc
+@@ -10,9 +10,13 @@
+ 
+ #include "modules/audio_processing/aec3/transparent_mode.h"
+ 
++#include <algorithm>
++#include <array>
+ #include <cstddef>
++#include <limits>
+ #include <memory>
+ 
++#include "api/audio/audio_device.h"
+ #include "api/audio/echo_canceller3_config.h"
+ #include "api/environment/environment.h"
+ #include "api/field_trials_view.h"
+@@ -27,6 +31,20 @@ constexpr size_t kBlocksSinceConvergencedFilterInit = 10000;
+ constexpr size_t kBlocksSinceConsistentEstimateInit = 10000;
+ constexpr float kInitialTransparentStateProbability = 0.2f;
+ 
++// Fogata: while the sound plays to headphones and nothing shows an echo path,
++// the legacy classifier waits 3 s, not 5 s for a sane filter and 6 s of render,
++// before it takes the capture for a headset's. Nothing shows an echo path while
++// no delay was found for the echo, the filters converged in no more than a few
++// blocks, and the echo path's gain is bounded below -35 dB at every lag.
++constexpr size_t kMaxConvergedBlocksWithoutEcho = 25;
++constexpr size_t kBlocksBeforeSaneFilterWithoutEcho = 3 * kNumBlocksPerSecond;
++constexpr size_t kRenderBlocksToConvergeWithoutEcho = 3 * kNumBlocksPerSecond;
++constexpr float kMaxEchoGainWithoutEcho = 3.1623e-4f;  // -35 dB.
++// The bound is kept for lags up to 512 ms after the aligned render, over sums
++// of 4 blocks.
++constexpr int kGainBoundLags = 128;
++constexpr int kGainBoundBlocks = 4;
++
+ bool ActivateTransparentModeHmm(const FieldTrialsView& field_trials) {
+   return field_trials.IsEnabled("WebRTC-Aec3TransparentModeHmm");
+ }
+@@ -53,7 +71,10 @@ class TransparentModeImpl : public TransparentMode {
+               bool any_coarse_filter_converged,
+               bool /* all_filters_diverged */,
+               bool active_render,
+-              bool /* saturated_capture */) override {
++              bool /* saturated_capture */,
++              bool /* echo_delay_found */,
++              float /* render_energy */,
++              float /* capture_energy */) override {
+     // The classifier is implemented as a Hidden Markov Model (HMM) with two
+     // hidden states: "normal" and "transparent". The estimated probabilities of
+     // the two states are updated by observing filter convergence during active
+@@ -131,7 +152,13 @@ class LegacyTransparentModeImpl : public TransparentMode {
+       : linear_and_stable_echo_path_(
+             config.echo_removal_control.linear_and_stable_echo_path),
+         active_blocks_since_sane_filter_(kBlocksSinceConsistentEstimateInit),
+-        non_converged_sequence_size_(kBlocksSinceConvergencedFilterInit) {}
++        non_converged_sequence_size_(kBlocksSinceConvergencedFilterInit),
++        active_render_energy_(kGainBoundBlocks *
++                              config.render_levels.active_render_limit *
++                              config.render_levels.active_render_limit *
++                              kFftLengthBy2) {
++    ResetEchoEvidence();
++  }
+ 
+   bool Active() const override { return transparency_activated_; }
+ 
+@@ -139,6 +166,7 @@ class LegacyTransparentModeImpl : public TransparentMode {
+     non_converged_sequence_size_ = kBlocksSinceConvergencedFilterInit;
+     diverged_sequence_size_ = 0;
+     strong_not_saturated_render_blocks_ = 0;
++    ResetEchoEvidence();
+     if (linear_and_stable_echo_path_) {
+       recent_convergence_during_activity_ = false;
+     }
+@@ -150,11 +178,28 @@ class LegacyTransparentModeImpl : public TransparentMode {
+               bool /* any_coarse_filter_converged */,
+               bool all_filters_diverged,
+               bool active_render,
+-              bool saturated_capture) override {
++              bool saturated_capture,
++              bool echo_delay_found,
++              float render_energy,
++              float capture_energy) override {
+     ++capture_block_counter_;
+     strong_not_saturated_render_blocks_ +=
+         active_render && !saturated_capture ? 1 : 0;
+ 
++    echo_delay_found_ = echo_delay_found_ || echo_delay_found;
++    if (any_filter_converged &&
++        converged_blocks_since_reset_ <= kMaxConvergedBlocksWithoutEcho) {
++      ++converged_blocks_since_reset_;
++    }
++    if (!saturated_capture) {
++      UpdateGainBounds(render_energy, capture_energy);
++    }
++    const bool no_echo_seen =
++        PlayoutToHeadphones().load(std::memory_order_relaxed) &&
++        !echo_delay_found_ &&
++        converged_blocks_since_reset_ <= kMaxConvergedBlocksWithoutEcho &&
++        max_gain_bound_ < kMaxEchoGainWithoutEcho;
++
+     if (any_filter_consistent && filter_delay_blocks < 5) {
+       sane_filter_observed_ = true;
+       active_blocks_since_sane_filter_ = 0;
+@@ -165,7 +210,9 @@ class LegacyTransparentModeImpl : public TransparentMode {
+     bool sane_filter_recently_seen;
+     if (!sane_filter_observed_) {
+       sane_filter_recently_seen =
+-          capture_block_counter_ <= 5 * kNumBlocksPerSecond;
++          capture_block_counter_ <= (no_echo_seen
++                                         ? kBlocksBeforeSaneFilterWithoutEcho
++                                         : 5 * kNumBlocksPerSecond);
+     } else {
+       sane_filter_recently_seen =
+           active_blocks_since_sane_filter_ <= 30 * kNumBlocksPerSecond;
+@@ -202,6 +249,7 @@ class LegacyTransparentModeImpl : public TransparentMode {
+       finite_erl_recently_detected_ = true;
+     }
+ 
++    const bool was_activated = transparency_activated_;
+     if (finite_erl_recently_detected_) {
+       transparency_activated_ = false;
+     } else if (sane_filter_recently_seen &&
+@@ -209,12 +257,61 @@ class LegacyTransparentModeImpl : public TransparentMode {
+       transparency_activated_ = false;
+     } else {
+       const bool filter_should_have_converged =
+-          strong_not_saturated_render_blocks_ > 6 * kNumBlocksPerSecond;
++          strong_not_saturated_render_blocks_ >
++          (no_echo_seen ? kRenderBlocksToConvergeWithoutEcho
++                        : 6 * kNumBlocksPerSecond);
+       transparency_activated_ = filter_should_have_converged;
+     }
++    if (transparency_activated_ != was_activated) {
++      RTC_LOG(LS_INFO) << "AEC3 transparent mode "
++                       << (transparency_activated_ ? "on" : "off") << " after "
++                       << capture_block_counter_ / kNumBlocksPerSecond
++                       << " s, playout to headphones: "
++                       << PlayoutToHeadphones().load(std::memory_order_relaxed)
++                       << ", no echo seen: " << no_echo_seen;
++    }
+   }
+ 
+  private:
++  void ResetEchoEvidence() {
++    echo_delay_found_ = false;
++    converged_blocks_since_reset_ = 0;
++    render_energies_.fill(0.f);
++    capture_energies_.fill(0.f);
++    gain_bounds_.fill(std::numeric_limits<float>::max());
++    max_gain_bound_ = std::numeric_limits<float>::max();
++  }
++
++  // The capture holds at least the echo, so the least ratio seen between the
++  // capture and the render a lag before bounds the echo path's gain at that
++  // lag; sums over a few blocks take in how one block's echo spreads.
++  void UpdateGainBounds(float render_energy, float capture_energy) {
++    std::copy_backward(render_energies_.begin(), render_energies_.end() - 1,
++                       render_energies_.end());
++    render_energies_[0] = render_energy;
++    std::copy_backward(capture_energies_.begin(), capture_energies_.end() - 1,
++                       capture_energies_.end());
++    capture_energies_[0] = capture_energy;
++    float capture_sum = 0.f;
++    for (float energy : capture_energies_) {
++      capture_sum += energy;
++    }
++    float render_sum = 0.f;
++    for (int k = 0; k < kGainBoundBlocks - 1; ++k) {
++      render_sum += render_energies_[k];
++    }
++    max_gain_bound_ = 0.f;
++    for (int lag = 0; lag < kGainBoundLags; ++lag) {
++      render_sum += render_energies_[lag + kGainBoundBlocks - 1];
++      if (render_sum > active_render_energy_) {
++        gain_bounds_[lag] =
++            std::min(gain_bounds_[lag], capture_sum / render_sum);
++      }
++      max_gain_bound_ = std::max(max_gain_bound_, gain_bounds_[lag]);
++      render_sum -= render_energies_[lag];
++    }
++  }
++
+   const bool linear_and_stable_echo_path_;
+   size_t capture_block_counter_ = 0;
+   bool transparency_activated_ = false;
+@@ -227,6 +324,13 @@ class LegacyTransparentModeImpl : public TransparentMode {
+   size_t num_converged_blocks_ = 0;
+   bool recent_convergence_during_activity_ = false;
+   size_t strong_not_saturated_render_blocks_ = 0;
++  bool echo_delay_found_ = false;
++  size_t converged_blocks_since_reset_ = 0;
++  const float active_render_energy_;
++  std::array<float, kGainBoundLags + kGainBoundBlocks - 1> render_energies_;
++  std::array<float, kGainBoundBlocks> capture_energies_;
++  std::array<float, kGainBoundLags> gain_bounds_;
++  float max_gain_bound_;
+ };
+ 
+ std::unique_ptr<TransparentMode> TransparentMode::Create(
+diff --git a/modules/audio_processing/aec3/transparent_mode.h b/modules/audio_processing/aec3/transparent_mode.h
+index 1caa16a..f9ae592 100644
+--- a/modules/audio_processing/aec3/transparent_mode.h
++++ b/modules/audio_processing/aec3/transparent_mode.h
+@@ -41,7 +41,10 @@ class TransparentMode {
+                       bool any_coarse_filter_converged,
+                       bool all_filters_diverged,
+                       bool active_render,
+-                      bool saturated_capture) = 0;
++                      bool saturated_capture,
++                      bool echo_delay_found,
++                      float render_energy,
++                      float capture_energy) = 0;
+ };
+ 
+ }  // namespace webrtc
