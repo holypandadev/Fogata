@@ -16,3 +16,5 @@ After: a manager's device raises its groups to five like any other level: once e
 - `cargo fmt --check` and `cargo clippy -D warnings` on fogata-state, fogata-net, fogata-core and the CLI (all targets): clean.
 - fogata-state, fogata-net, fogata-core and the CLI: 1,170 passed, none failed.
 - Network lab, run locally: `group-move` passes with both removals. B and C follow the move, all three hold the same new log of 1,138 bytes against 613 KB in the old one, and the messages after the move reach the others.
+
+CI on this commit: CI (Linux, macOS, Windows and the Linux checks), call checks, the whole network lab (with `group-move` removing both), the Flatpak drop and the lab checks all pass.
