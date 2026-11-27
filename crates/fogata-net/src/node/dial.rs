@@ -69,9 +69,11 @@ impl Node {
             {
                 self.explicit_peers.insert(peer, now);
             }
+            // With the behaviours' addresses too: see `dial_candidate`.
             self.dial_opts(
                 DialOpts::peer_id(peer)
                     .addresses(addrs)
+                    .extend_addresses_through_behaviour()
                     .condition(PeerCondition::DisconnectedAndNotDialing)
                     .build(),
             );
@@ -113,8 +115,12 @@ impl Node {
         };
         let opts = match addrs {
             Some(addrs) => {
+                // The behaviours' own addresses too: a friend's sealed local addresses
+                // (`strangers`) are opened there, and without them a dial at a public address
+                // shared with this device (the same router) can never connect.
                 let opts = DialOpts::peer_id(peer)
                     .addresses(addrs)
+                    .extend_addresses_through_behaviour()
                     .condition(condition);
                 if as_listener {
                     opts.override_role().allocate_new_port()
