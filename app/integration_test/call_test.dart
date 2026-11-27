@@ -188,7 +188,14 @@ void _log(String line) => File('$_dir/$_role.log').writeAsStringSync(
 Future<void> _wait(WidgetTester tester, Duration d) async {
   final end = DateTime.now().add(d);
   while (DateTime.now().isBefore(end)) {
-    await Future<void>.delayed(const Duration(milliseconds: 50));
+    // The last step waits only what is left, so a short wait (a mute of 0.19 s) ends
+    // on time and not up to 50 ms late.
+    final left = end.difference(DateTime.now());
+    await Future<void>.delayed(
+      left < const Duration(milliseconds: 50)
+          ? left
+          : const Duration(milliseconds: 50),
+    );
     await tester.pump();
   }
 }
@@ -5509,10 +5516,11 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
   if (_copies != 2 && _copies != 3) {
     throw StateError('the unmute check takes two or three copies');
   }
-  final offs = (_env['FOGATA_TEST_UNMUTE_OFFS'] ?? '2 10 60')
+  // In seconds, decimals allowed ("0.19 0.21 0.31"); kept in milliseconds.
+  final offsMs = (_env['FOGATA_TEST_UNMUTE_OFFS'] ?? '2 10 60')
       .split(' ')
       .where((s) => s.isNotEmpty)
-      .map(int.parse)
+      .map((s) => (double.parse(s) * 1000).round())
       .toList();
   final on = int.tryParse(_env['FOGATA_TEST_UNMUTE_ON'] ?? '') ?? 10;
   final settle = int.tryParse(_env['FOGATA_TEST_UNMUTE_SETTLE'] ?? '') ?? 10;
@@ -5521,7 +5529,9 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
   final rejoin = int.tryParse(_env['FOGATA_TEST_UNMUTE_REJOIN'] ?? '');
   if (_role != 'a') {
     final total =
-        settle + offs.fold<int>(0, (a, b) => a + b) + offs.length * on;
+        settle +
+        (offsMs.fold<int>(0, (a, b) => a + b) / 1000).ceil() +
+        offsMs.length * on;
     // From a alone: in a call of three the other listener says nothing.
     await _until(
       tester,
@@ -5544,12 +5554,12 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
   _mark('connected');
   await _wait(tester, Duration(seconds: settle));
   _mark('settled');
-  for (var n = 1; n <= offs.length; n++) {
+  for (var n = 1; n <= offsMs.length; n++) {
     _mark('mute-$n');
     if (n == rejoin) {
       final group = state.callState.call!.group;
       await state.leaveRoom();
-      await _wait(tester, Duration(seconds: offs[n - 1]));
+      await _wait(tester, Duration(milliseconds: offsMs[n - 1]));
       _mark('unmute-$n');
       await state.openRoom(group);
       await _until(
@@ -5574,7 +5584,7 @@ Future<void> _unmute(WidgetTester tester, AppState state) async {
     if (state.callState.call!.mic) {
       throw StateError('the microphone did not turn off');
     }
-    await _wait(tester, Duration(seconds: offs[n - 1]));
+    await _wait(tester, Duration(milliseconds: offsMs[n - 1]));
     _mark('unmute-$n');
     await state.setMic(true);
     if (!state.callState.call!.mic) {

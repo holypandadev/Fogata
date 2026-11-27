@@ -12,29 +12,29 @@ switching profile as recording stops and starts, its sink and source removed and
 
 Now, while AEC3 is in its transparent mode, the microphone stays open through the first
 moments of a mute, up to a cap: FOGATA_A1_HOLD_MS, an environment variable read once when
-the AudioState is made (std::getenv; rtc_base has no helper for it), in milliseconds
-rounded up to 10 ms; unset, 0 or not a positive number: no hold at all, as without this
-patch. A lab knob, to try 200 to 300 ms. When the last sending stream goes in a call that
-goes on playing (the same test as 0010's stopped_in_call_), and the audio processing says
-its echo controller was transparent after the last recorded frame, AudioState does not
-stop recording and marks it held ("recording held" in the log). The audio transport
-already processes what is recorded with no stream, in the last streams' format (patch
-0010), and sends it nowhere (AudioTransportImpl; a transport given to the factory, patch
-0002, has to do the same); AEC3 goes on hearing the room. The hold ends, and recording
-stops as before (stopped_in_call_ stays true, so the unmute is 0010's), as soon as the
-echo controller is no longer transparent (an echo path found: speakers; or the controller
-made anew), logged "held recording stopped (not transparent) N ms", or once the recorded
-frames processed since the hold began reach the cap, logged "held recording stopped (cap)
-N ms", N being those frames times 10 ms. It ends too, as stopped_in_call_ does, when a
-stream received comes or goes, playout or recording is turned off, or the call ends; and
-at a change of audio devices (AudioDevicesChangedCount moved), after which the unmute
-takes the devices as changed (patch 0016's restart for other devices, forgetting the
-transparent mode) even when a device's own restart while held handled the change (patch
-0014's realign keeps the transparent mode, which a headset taken off must not). These log
-"held recording stopped (<why>) N ms", or "ended" where recording goes on or the caller
-stopped it. At an unmute with recording held nothing is started: the echo controller is
-restarted for recording as at any unmute (RestartEchoControllerForRecording, or
-RestartEchoControllerForOtherDevices after a change), and the hold is cleared ("held
+the AudioState is made (std::getenv; rtc_base has no helper for it), in milliseconds;
+unset, 0 or not a positive number: no hold at all, as without this patch. A lab knob, to
+try 200 to 300 ms. When the last sending stream goes in a call that goes on playing (the
+same test as 0010's stopped_in_call_), and the audio processing says its echo controller
+was transparent after the last recorded frame, AudioState does not stop recording and
+marks it held ("recording held" in the log). The audio transport already processes what
+is recorded with no stream, in the last streams' format (patch 0010), and sends it nowhere
+(AudioTransportImpl; a transport given to the factory, patch 0002, has to do the same);
+AEC3 goes on hearing the room. The hold ends, and recording stops as before
+(stopped_in_call_ true, so the unmute is 0010's), as soon as the echo controller is no
+longer transparent (an echo path found: speakers; or the controller made anew), logged
+"held recording stopped (not transparent) N ms", or FOGATA_A1_HOLD_MS after the hold
+began, logged "held recording stopped (cap) N ms", N being the time since the hold began
+(TimeMillis). It ends too, as stopped_in_call_ does, when a stream received comes or goes,
+playout or recording is turned off, or the call ends; and at a change of audio devices
+(AudioDevicesChangedCount moved), after which the unmute takes the devices as changed
+(patch 0016's restart for other devices, forgetting the transparent mode) even when a
+device's own restart while held handled the change (patch 0014's realign keeps the
+transparent mode, which a headset taken off must not). These log "held recording stopped
+(<why>) N ms", or "ended" where recording goes on or the caller stopped it; one stop and
+one log per hold. At an unmute with recording held nothing is started: the echo
+controller is restarted for recording as at any unmute (RestartEchoControllerForRecording,
+or RestartEchoControllerForOtherDevices after a change), and the hold is cleared ("held
 recording ended (the microphone turned on again) N ms"). A device that stopped recording
 by itself while held is started as usual.
 
@@ -42,37 +42,39 @@ How AEC3 tells it: EchoControl::TransparentModeActive (false unless overridden),
 EchoCanceller3 answers from its block processor, its echo remover and AecState's transparent
 mode; AudioProcessingImpl stores it in an atomic after each ProcessStream, with its capture
 lock held, processed or not (false with no echo controller, and false again when the
-controller is made anew), then adds one to an atomic count of recorded frames.
-AudioProcessing::EchoControllerTransparent and AudioProcessing::ProcessedCaptureFrames (0
-unless overridden) read them from any thread. AEC3 keeps updating its transparent mode
-while the processing's output is unused (patch 0008: nothing sends).
+controller is made anew), and AudioProcessing::EchoControllerTransparent reads it from any
+thread. AEC3 keeps updating its transparent mode while the processing's output is unused
+(patch 0008: nothing sends).
 
-Threads: AudioState reads the atomics on the worker thread, where it makes every other
-call to the audio device module, at the mute (where it notes the frame count) and then
-every 10 ms while recording is held (a repeating task, stopped when the hold ends), and
-stops recording there. The cap is counted in frames the audio processing was given, not
-in time on the worker, and decided at the next check after the count reaches it: within
-one check, 10 ms (and the worker's own delay), past the cap. Nothing is added to the
-capture path but the atomics' stores: a hook in AudioTransportImpl would miss the
-transport the wrapper gives the factory (patch 0002), and would have to post to the worker
-anyway, with a safety flag for AudioState going away. Recording stops up to 10 ms (and
-the worker's own delay) after AEC3 leaves its transparent mode; what is recorded meanwhile
-is processed and dropped as any frame with no stream. There is no hold without a task
-queue on the calling thread.
+Threads: everything about the hold is on the worker thread, where AudioState makes every
+other call to the audio device module. At the mute it posts two delayed tasks there for
+the hold, which carries an id moved on at each hold's start and end: a check every 10 ms
+(it reads the atomic and the count of device changes, and stops recording there) and the
+cap after FOGATA_A1_HOLD_MS. Each does nothing unless its id is the hold's, the hold goes
+on and nothing sends; the unmute and every other end of the hold move the id on, so a task
+already posted finds the hold over, whichever runs first on the worker: an unmute just
+before the cap keeps recording and the cap does nothing; the cap just before the unmute
+stops recording and the unmute starts it as 0010's. Tasks run only while the AudioState
+lives (SafeTask, a PendingTaskSafetyFlag). The cap is time on the worker, not recorded
+frames: it ends the hold even when the device delivers nothing, up to the worker's own
+delay late. Nothing is added to the capture path but the atomic's store: a hook in
+AudioTransportImpl would miss the transport the wrapper gives the factory (patch 0002),
+and would have to post to the worker anyway. Recording stops up to 10 ms (and the worker's
+own delay) after AEC3 leaves its transparent mode; what is recorded meanwhile is processed
+and dropped as any frame with no stream. There is no hold without a task queue on the
+calling thread.
 
 The cost: with a headset the microphone stays open for up to the cap after the mute while
 AEC3 is in transparent mode: the system shows it in use, the device records and the audio
 processing runs for nothing sent, until the hold ends; with speakers (no transparent mode)
-recording stops at the mute as before. If something processing what is recorded stopped
-calling ProcessStream while recording is held, the count stops with it and so does the
-hold's cap, until one of the other ends above.
+recording stops at the mute as before.
 
 Measured: not yet.
 
 diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
 --- a/api/audio/audio_processing.h
 +++ b/api/audio/audio_processing.h
-@@ -542,6 +542,19 @@
+@@ -542,6 +542,13 @@
      RestartEchoControllerForRecording();
    }
  
@@ -82,12 +84,6 @@ diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
 +  // with no echo controller. Written at each ProcessStream, read from any
 +  // thread without a lock.
 +  virtual bool EchoControllerTransparent() const { return false; }
-+
-+  // Fogata, patch 0017: how many recorded frames (10 ms each) ProcessStream
-+  // has been given since this was made, processed or not; counted after
-+  // EchoControllerTransparent is written for each, read from any thread
-+  // without a lock. 0 if not counted.
-+  virtual uint64_t ProcessedCaptureFrames() const { return 0; }
 +
    // Set to true when the output of AudioProcessing will be muted or in some
    // other way not used. Ideally, the captured audio would still be processed,
@@ -118,17 +114,29 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
  #include <utility>
  #include <vector>
  
-@@ -34,9 +35,36 @@
+@@ -22,6 +23,7 @@
+ #include "api/make_ref_counted.h"
+ #include "api/scoped_refptr.h"
+ #include "api/sequence_checker.h"
++#include "api/task_queue/pending_task_safety_flag.h"
+ #include "api/task_queue/task_queue_base.h"
+ #include "api/units/time_delta.h"
+ #include "audio/audio_send_stream.h"
+@@ -31,12 +33,39 @@
+ #include "rtc_base/checks.h"
+ #include "rtc_base/logging.h"
+ #include "rtc_base/task_utils/repeating_task.h"
++#include "rtc_base/time_utils.h"
  
  namespace webrtc {
  namespace internal {
 +namespace {
 +
-+// Fogata, patch 0017: a lab knob. The cap on a recording kept through a mute,
-+// FOGATA_A1_HOLD_MS, in recorded frames of 10 ms (rounded up); 0 when unset, 0
-+// or not a positive number of milliseconds: no hold at all, as without this
-+// patch.
-+uint64_t ReadHoldCapFrames() {
++// Fogata, patch 0017: a lab knob. How long a recording may be kept through a
++// mute, FOGATA_A1_HOLD_MS, in milliseconds (std::getenv: rtc_base has no
++// helper for it); 0 when unset, 0 or not a positive number of milliseconds: no
++// hold at all, as without this patch.
++int64_t ReadHoldMs() {
 +  const char* value = std::getenv("FOGATA_A1_HOLD_MS");
 +  if (value == nullptr || *value == '\0') {
 +    return 0;
@@ -140,29 +148,27 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
 +                        << " is not a positive number of ms: no hold";
 +    return 0;
 +  }
-+  const uint64_t frames = (static_cast<uint64_t>(ms) + 9) / 10;
 +  RTC_LOG(LS_INFO) << "AudioState: FOGATA_A1_HOLD_MS=" << ms
-+                   << ": recording kept through a mute for up to "
-+                   << frames * 10 << " ms";
-+  return frames;
++                   << ": recording kept through a mute for up to " << ms
++                   << " ms";
++  return ms;
 +}
 +
 +}  // namespace
  
  AudioState::AudioState(const AudioState::Config& config)
      : config_(config),
-+      hold_cap_frames_(ReadHoldCapFrames()),
++      hold_ms_(ReadHoldMs()),
        audio_transport_(
            config_.audio_transport_factory
                ? config_.audio_transport_factory->Create(
-@@ -56,6 +84,10 @@
+@@ -56,6 +85,9 @@
    RTC_DCHECK(receiving_streams_.empty());
    RTC_DCHECK(sending_streams_.empty());
    RTC_DCHECK(!null_audio_poller_.Running());
 +  // Fogata, patch 0017: a hold needs a stream received, and the last one going
-+  // ended it; stopped all the same, as its check refers to this.
++  // ended it. Its tasks still posted do nothing (hold_safety_).
 +  RTC_DCHECK(!recording_held_);
-+  recording_hold_check_.Stop();
  }
  
  AudioProcessing* AudioState::audio_processing() {
@@ -171,7 +177,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
      config_.audio_device_module->StopPlayout();
      stopped_in_call_ = false;
 +    // Fogata, patch 0017: nor is a recording kept through the mute.
-+    EndRecordingHold(/*stop_recording=*/true, "playout turned off");
++    EndRecordingHold("playout turned off", /*stop_recording=*/true);
    }
    playout_enabled_ = enabled;
    UpdateNullAudioPollerState();
@@ -180,7 +186,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    // Fogata: another one heard is not the call recording stopped in (patch 0010).
    stopped_in_call_ = false;
 +  // Fogata, patch 0017: nor is a recording kept through the mute.
-+  EndRecordingHold(/*stop_recording=*/true, "a stream received added");
++  EndRecordingHold("a stream received added", /*stop_recording=*/true);
    if (!config_.audio_mixer->AddSource(stream->source())) {
      RTC_DLOG(LS_ERROR) << "Failed to add source to mixer.";
    }
@@ -189,7 +195,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    // or the call ended (patch 0010).
    stopped_in_call_ = false;
 +  // Fogata, patch 0017: nor is a recording kept through the mute.
-+  EndRecordingHold(/*stop_recording=*/true, "a stream received removed");
++  EndRecordingHold("a stream received removed", /*stop_recording=*/true);
    if (receiving_streams_.empty()) {
      config_.audio_device_module->StopPlayout();
    }
@@ -198,40 +204,45 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
      adm->StopRecording();
      stopped_in_call_ = false;
 +    // Fogata, patch 0017: a recording kept through the mute is stopped above.
-+    EndRecordingHold(/*stop_recording=*/false, "recording turned off");
++    EndRecordingHold("recording turned off", /*stop_recording=*/false);
    }
    recording_enabled_ = enabled;
  }
-@@ -149,6 +189,14 @@
+@@ -149,6 +189,19 @@
                                    int sample_rate_hz,
                                    size_t num_channels) {
    RTC_DCHECK_RUN_ON(&worker_thread_checker_);
 +  // Fogata, patch 0017: a recording kept through the mute ends with the first
 +  // stream sending again, however the device is started below (one that stopped
-+  // by itself and fails to start again leaves no hold behind).
-+  const bool held = recording_held_ && sending_streams_.empty() &&
-+                    config_.audio_device_module->Recording();
-+  if (sending_streams_.empty() && recording_held_ && !held) {
-+    EndRecordingHold(/*stop_recording=*/false, "the device stopped by itself");
++  // by itself, started as usual, and fails to start again leaves no hold
++  // behind). Moving hold_id_ on (EndRecordingHold) makes the hold's tasks
++  // still posted do nothing: they run on this thread, before this or after.
++  bool kept = false;
++  if (recording_held_) {
++    RTC_DCHECK(sending_streams_.empty());
++    kept = config_.audio_device_module->Recording();
++    EndRecordingHold(kept ? "the microphone turned on again"
++                          : "the device stopped by itself",
++                     /*stop_recording=*/false);
 +  }
    auto& properties = sending_streams_[stream];
    properties.sample_rate_hz = sample_rate_hz;
    properties.num_channels = num_channels;
-@@ -157,7 +205,12 @@
+@@ -157,7 +210,12 @@
    // Make sure recording is initialized; start recording if enabled.
    auto* adm = config_.audio_device_module.get();
    if (recording_enabled_) {
 -    if (!adm->Recording()) {
-+    if (held) {
++    if (kept) {
 +      // Fogata, patch 0017: the microphone turned on again while recording was
 +      // kept through the mute: nothing to start, the echo controller is
 +      // restarted for recording as at any unmute (StartRecordingForCall).
-+      StartRecordingForCall();
++      StartRecordingForCall(/*recording_kept=*/true);
 +    } else if (!adm->Recording()) {
        if (adm->InitRecording() == 0) {
          StartRecordingForCall();
        } else {
-@@ -172,16 +225,34 @@
+@@ -172,16 +230,34 @@
    auto count = sending_streams_.erase(stream);
    RTC_DCHECK_EQ(1, count);
    if (sending_streams_.empty()) {
@@ -252,11 +263,11 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
 +    // microphone's first words are not held down while it starts again. The
 +    // audio transport still processes what is recorded with no stream, in the
 +    // last streams' format (patch 0010), and sends it nowhere. Stopped as below
-+    // once it is no longer transparent, or after FOGATA_A1_HOLD_MS of recorded
-+    // frames (CheckRecordingHold).
++    // once it is no longer transparent, or after FOGATA_A1_HOLD_MS
++    // (PollRecordingHold, CapRecordingHold). Not at all with no hold set, nor
++    // with no task queue here to post them on.
 +    AudioProcessing* apm = config_.audio_processing.get();
-+    // Not at all with no cap set (FOGATA_A1_HOLD_MS).
-+    if (hold_cap_frames_ > 0 && in_call && recording_enabled_ && apm &&
++    if (hold_ms_ > 0 && in_call && recording_enabled_ && apm &&
 +        TaskQueueBase::Current() && apm->EchoControllerTransparent() &&
 +        config_.audio_device_module->Recording()) {
 +      HoldRecording();
@@ -274,25 +285,31 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    }
    UpdateAudioTransportWithSendingStreams();
  }
-@@ -250,15 +321,28 @@
+@@ -239,7 +315,7 @@
+ // echo controller for recording, which keeps what it learned of the room (with a
+ // headset, that there is no echo). A call's start makes it anew as above: between
+ // calls the room and the devices may have changed.
+-void AudioState::StartRecordingForCall() {
++void AudioState::StartRecordingForCall(bool recording_kept) {
+   // Fogata, patch 0011: and with the same devices: any change of them seen since
+   // recording last started (MarkAudioDevicesChanged) may have changed the room (a
+   // headset taken off for speakers), and makes it anew.
+@@ -250,15 +326,25 @@
    // realign; if it comes first, it takes the counts as seen.
    const uint64_t devices = AudioDevicesChangedCount().load();
    const uint64_t handled = AudioDevicesHandledCount().load();
 -  if (config_.audio_device_module->StartRecording() != 0) {
-+  // Fogata, patch 0017: recording kept through the mute goes on as it is; the
-+  // echo controller is restarted below as at any unmute. A device that stopped
-+  // recording by itself meanwhile is started as usual.
-+  const bool held =
-+      recording_held_ && config_.audio_device_module->Recording();
-+  EndRecordingHold(/*stop_recording=*/false, "the microphone turned on again");
-+  if (!held && config_.audio_device_module->StartRecording() != 0) {
++  // Fogata, patch 0017: recording kept through the mute (`recording_kept`,
++  // the hold ended by AddSendingStream) goes on as it is; the echo controller
++  // is restarted below as at any unmute. A change of devices during the last
++  // hold, noted when it ended (EndRecordingHold), counts once recording runs.
++  RTC_DCHECK(!recording_held_);
++  if (!recording_kept && config_.audio_device_module->StartRecording() != 0) {
      return;
    }
    const bool same_call = stopped_in_call_;
    stopped_in_call_ = false;
-+  // A change marked after the hold's last check counts as one too.
-+  const bool devices_changed_in_hold =
-+      devices_changed_in_hold_ || (held && devices != devices_at_hold_);
++  const bool devices_changed_in_hold = devices_changed_in_hold_;
 +  devices_changed_in_hold_ = false;
    // Fogata, patch 0016: a change a device's own restart already handled while
    // recording ran (patch 0014) is not taken again: the echo controller has heard
@@ -305,79 +322,109 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
    devices_seen_ = devices;
    if (!config_.audio_processing) {
      return;
-@@ -278,6 +362,77 @@
+@@ -278,6 +364,107 @@
    }
  }
  
 +// Fogata, patch 0017: begins keeping recording through a mute
-+// (RemoveSendingStream). The check runs on this thread, where every other call
-+// to the audio device module is made, every 10 ms (a recorded frame): it only
-+// reads the audio processing's atomics, written by the capture thread after
-+// each frame, and the count of device changes. Nothing is added to the capture
-+// path.
++// (RemoveSendingStream). Everything about the hold is done on this thread,
++// where every other call to the audio device module is made: the checks only
++// read the audio processing's atomic, written by the capture thread after each
++// frame, and the count of device changes. Nothing is added to the capture path.
++// The cap is time on this thread's clock, not recorded frames: it ends the hold
++// even when the device delivers nothing.
 +void AudioState::HoldRecording() {
 +  RTC_DCHECK(!recording_held_);
-+  RTC_DCHECK(config_.audio_processing);
-+  recording_hold_check_.Stop();
++  RTC_DCHECK_GT(hold_ms_, 0);
 +  recording_held_ = true;
++  const uint64_t id = ++hold_id_;
++  hold_start_ms_ = TimeMillis();
 +  devices_at_hold_ = AudioDevicesChangedCount().load();
-+  frames_at_hold_ = config_.audio_processing->ProcessedCaptureFrames();
-+  RTC_LOG(LS_INFO) << "AudioState: recording held";
-+  recording_hold_check_ = RepeatingTaskHandle::DelayedStart(
-+      TaskQueueBase::Current(), TimeDelta::Millis(10), [this] {
-+        RTC_DCHECK_RUN_ON(&worker_thread_checker_);
-+        CheckRecordingHold();
-+        return TimeDelta::Millis(10);
-+      });
++  RTC_LOG(LS_INFO) << "AudioState: recording held: the echo controller is "
++                      "transparent; for up to "
++                   << hold_ms_ << " ms";
++  PostRecordingHoldPoll(id);
++  TaskQueueBase::Current()->PostDelayedTask(
++      SafeTask(hold_safety_.flag(),
++               [this, id] {
++                 RTC_DCHECK_RUN_ON(&worker_thread_checker_);
++                 CapRecordingHold(id);
++               }),
++      TimeDelta::Millis(hold_ms_));
 +}
 +
-+// Fogata, patch 0017: a recording kept through the mute stops, as recording
-+// stopped at the mute before (stopped_in_call_ stays true), once the echo
-+// controller is no longer transparent (an echo path found: speakers; or the
-+// controller made anew), or once the frames recorded since the hold began reach
-+// the cap (FOGATA_A1_HOLD_MS): checked every 10 ms here, so the stop comes
-+// within one check of the cap reached (and the worker's own delay). A change of
-+// audio devices stops it too, and the unmute then takes the devices as changed
-+// (patch 0016).
-+void AudioState::CheckRecordingHold() {
-+  if (!recording_held_) {
++void AudioState::PostRecordingHoldPoll(uint64_t id) {
++  TaskQueueBase::Current()->PostDelayedTask(
++      SafeTask(hold_safety_.flag(),
++               [this, id] {
++                 RTC_DCHECK_RUN_ON(&worker_thread_checker_);
++                 PollRecordingHold(id);
++               }),
++      TimeDelta::Millis(10));
++}
++
++// The hold `id` is the one going on, with nothing sending.
++bool AudioState::RecordingHoldGoesOn(uint64_t id) const {
++  return id == hold_id_ && recording_held_ && sending_streams_.empty();
++}
++
++// Fogata, patch 0017: every 10 ms (a recorded frame) while recording is held:
++// it stops, as recording stopped at the mute before, once the echo controller
++// is no longer transparent (an echo path found: speakers; or the controller
++// made anew) or the audio devices change, after which the unmute takes the
++// devices as changed (patch 0016).
++void AudioState::PollRecordingHold(uint64_t id) {
++  if (!RecordingHoldGoesOn(id)) {
 +    return;
 +  }
 +  if (AudioDevicesChangedCount().load() != devices_at_hold_) {
-+    devices_changed_in_hold_ = true;
-+    EndRecordingHold(/*stop_recording=*/true, "audio devices changed");
++    StopHeldRecording("audio devices changed");
 +    return;
 +  }
-+  if (!config_.audio_processing->EchoControllerTransparent()) {
-+    EndRecordingHold(/*stop_recording=*/true, "not transparent");
++  if (!config_.audio_processing ||
++      !config_.audio_processing->EchoControllerTransparent()) {
++    StopHeldRecording("not transparent");
 +    return;
 +  }
-+  if (FramesHeld() >= hold_cap_frames_) {
-+    EndRecordingHold(/*stop_recording=*/true, "cap");
++  PostRecordingHoldPoll(id);
++}
++
++// Fogata, patch 0017: FOGATA_A1_HOLD_MS after the hold began.
++void AudioState::CapRecordingHold(uint64_t id) {
++  if (!RecordingHoldGoesOn(id)) {
++    return;
 +  }
++  StopHeldRecording("cap");
 +}
 +
-+uint64_t AudioState::FramesHeld() const {
-+  // A hold needs the audio processing (RemoveSendingStream), which config_
-+  // keeps.
-+  return config_.audio_processing->ProcessedCaptureFrames() - frames_at_hold_;
++// Fogata, patch 0017: recording stops as at the mute without a hold
++// (RemoveSendingStream): the unmute starts it again in the same call.
++void AudioState::StopHeldRecording(const char* why) {
++  RTC_DCHECK(recording_held_);
++  EndRecordingHold(why, /*stop_recording=*/true);
++  stopped_in_call_ = true;
 +}
 +
-+// Logs "held recording stopped (<why>) N ms", or "ended" when recording goes on
-+// (the unmute) or was stopped by the caller, N being the recorded frames
-+// counted since the hold began, 10 ms each.
-+void AudioState::EndRecordingHold(bool stop_recording, const char* why) {
++// Fogata, patch 0017: ends the hold, once, and logs it: its tasks still posted
++// do nothing (hold_id_ moved on). Recording stops here when `stop_recording`;
++// otherwise the caller stops it or keeps it. A change of audio devices since
++// the hold began, even one marked after its last poll, counts at the next
++// start of recording in the call (StartRecordingForCall).
++void AudioState::EndRecordingHold(const char* why, bool stop_recording) {
 +  if (!recording_held_) {
 +    return;
 +  }
 +  recording_held_ = false;
-+  recording_hold_check_.Stop();
-+  RTC_LOG(LS_INFO) << "AudioState: held recording "
-+                   << (stop_recording ? "stopped" : "ended") << " (" << why
-+                   << ") " << FramesHeld() * 10 << " ms";
++  ++hold_id_;
++  if (AudioDevicesChangedCount().load() != devices_at_hold_) {
++    devices_changed_in_hold_ = true;
++  }
 +  if (stop_recording) {
 +    config_.audio_device_module->StopRecording();
 +  }
++  RTC_LOG(LS_INFO) << "AudioState: held recording "
++                   << (stop_recording ? "stopped" : "ended") << " (" << why
++                   << ") " << TimeMillis() - hold_start_ms_ << " ms";
 +}
 +
  void AudioState::UpdateNullAudioPollerState() {
@@ -386,7 +433,7 @@ diff --git a/audio/audio_state.cc b/audio/audio_state.cc
 diff --git a/audio/audio_state.h b/audio/audio_state.h
 --- a/audio/audio_state.h
 +++ b/audio/audio_state.h
-@@ -12,6 +12,7 @@
+@@ -12,10 +12,12 @@
  #define AUDIO_AUDIO_STATE_H_
  
  #include <cstddef>
@@ -394,51 +441,67 @@ diff --git a/audio/audio_state.h b/audio/audio_state.h
  
  #include "api/audio/audio_device.h"
  #include "api/audio/audio_processing.h"
-@@ -70,10 +71,26 @@
+ #include "api/sequence_checker.h"
++#include "api/task_queue/pending_task_safety_flag.h"
+ #include "audio/audio_transport_impl.h"
+ #include "call/audio_state.h"
+ #include "rtc_base/checks.h"
+@@ -69,7 +71,28 @@
+   void UpdateNullAudioPollerState() RTC_RUN_ON(&worker_thread_checker_);
    // Fogata: starts the audio device's recording, and once it records makes the
    // echo controller anew, or restarts it in the call it stopped in (patch 0010).
-   void StartRecordingForCall() RTC_RUN_ON(&worker_thread_checker_);
-+  // Fogata, patch 0017: the microphone turned off in a call while the echo
-+  // controller is transparent keeps recording (RemoveSendingStream), and a
-+  // check every 10 ms (CheckRecordingHold) stops it once the echo controller
-+  // is no longer transparent, the frames recorded since reach the cap
-+  // (FOGATA_A1_HOLD_MS) or the audio devices change. EndRecordingHold ends the
-+  // hold, stopping the audio device's recording when `stop_recording`.
-+  void HoldRecording() RTC_RUN_ON(&worker_thread_checker_);
-+  void CheckRecordingHold() RTC_RUN_ON(&worker_thread_checker_);
-+  void EndRecordingHold(bool stop_recording, const char* why)
+-  void StartRecordingForCall() RTC_RUN_ON(&worker_thread_checker_);
++  // Fogata, patch 0017: or, `recording_kept` through a mute, only restarts the
++  // echo controller.
++  void StartRecordingForCall(bool recording_kept = false)
 +      RTC_RUN_ON(&worker_thread_checker_);
-+  // The recorded frames the audio processing counted since the hold began.
-+  uint64_t FramesHeld() const RTC_RUN_ON(&worker_thread_checker_);
++  // Fogata, patch 0017: the microphone turned off in a call while the echo
++  // controller is transparent keeps recording for up to `hold_ms_`
++  // (RemoveSendingStream). Posted on this thread: PollRecordingHold every
++  // 10 ms, which stops it once the echo controller is no longer transparent or
++  // the audio devices change, and CapRecordingHold after `hold_ms_`, which
++  // stops it then; each does nothing unless its `id` is the hold's and the hold
++  // goes on. StopHeldRecording stops the audio device's recording as at the
++  // mute (stopped_in_call_); EndRecordingHold ends the hold, stopping the audio
++  // device's recording when `stop_recording`.
++  void HoldRecording() RTC_RUN_ON(&worker_thread_checker_);
++  void PostRecordingHoldPoll(uint64_t id) RTC_RUN_ON(&worker_thread_checker_);
++  void PollRecordingHold(uint64_t id) RTC_RUN_ON(&worker_thread_checker_);
++  void CapRecordingHold(uint64_t id) RTC_RUN_ON(&worker_thread_checker_);
++  bool RecordingHoldGoesOn(uint64_t id) const
++      RTC_RUN_ON(&worker_thread_checker_);
++  void StopHeldRecording(const char* why) RTC_RUN_ON(&worker_thread_checker_);
++  void EndRecordingHold(const char* why, bool stop_recording)
++      RTC_RUN_ON(&worker_thread_checker_);
  
    RTC_NO_UNIQUE_ADDRESS SequenceChecker worker_thread_checker_{
        SequenceChecker::kDetached};
-   const AudioState::Config config_;
-+  // Fogata, patch 0017: the longest a recording is kept through a mute, in
-+  // recorded frames of 10 ms: FOGATA_A1_HOLD_MS rounded up to 10 ms, read once
-+  // when this is made; 0 (unset, 0 or not a positive number): no hold at all.
-+  const uint64_t hold_cap_frames_;
-   bool recording_enabled_ RTC_GUARDED_BY(&worker_thread_checker_) = true;
-   bool playout_enabled_ RTC_GUARDED_BY(&worker_thread_checker_) = true;
-   // Fogata: recording stopped while streams were received and played, and they
-@@ -81,6 +98,20 @@
+@@ -81,6 +104,28 @@
    bool stopped_in_call_ RTC_GUARDED_BY(&worker_thread_checker_) = false;
    // Fogata: AudioDevicesChangedCount() when recording last started (patch 0011).
    uint64_t devices_seen_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
-+  // Fogata, patch 0017: recording goes on through the microphone turned off in
-+  // the call (stopped_in_call_ is true meanwhile), for as long as the echo
-+  // controller is transparent; the unmute then takes it as it is.
++  // Fogata, patch 0017: how long recording may go on through a mute, in ms:
++  // FOGATA_A1_HOLD_MS, read once here; 0 (unset, 0 or not a positive number):
++  // no hold at all.
++  const int64_t hold_ms_;
++  // Recording goes on through the microphone turned off in the call
++  // (stopped_in_call_ is true meanwhile) while the echo controller is
++  // transparent, for up to `hold_ms_`; the unmute then takes it as it is.
 +  bool recording_held_ RTC_GUARDED_BY(&worker_thread_checker_) = false;
++  // Moved on at each hold's start and end: a task posted for a hold that is
++  // over does nothing.
++  uint64_t hold_id_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
++  // TimeMillis() when the hold began.
++  int64_t hold_start_ms_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
 +  // AudioDevicesChangedCount() when the hold began.
 +  uint64_t devices_at_hold_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
-+  // AudioProcessing::ProcessedCaptureFrames() when the hold began.
-+  uint64_t frames_at_hold_ RTC_GUARDED_BY(&worker_thread_checker_) = 0;
-+  // The hold ended for a change of audio devices: the next start of recording
-+  // in the call takes the devices as changed (patch 0016's restart for other
-+  // devices), even if a device's own restart while held handled the change.
++  // The audio devices changed during the last hold: the next start of
++  // recording in the call takes them as changed (patch 0016's restart for
++  // other devices), even if a device's own restart while held handled the
++  // change.
 +  bool devices_changed_in_hold_ RTC_GUARDED_BY(&worker_thread_checker_) = false;
-+  RepeatingTaskHandle recording_hold_check_
-+      RTC_GUARDED_BY(&worker_thread_checker_);
++  // Tasks posted for a hold run only while this AudioState lives.
++  ScopedTaskSafetyDetached hold_safety_;
  
    // Transports mixed audio from the mixer to the audio device and
    // recorded audio to the sending streams.
@@ -560,7 +623,7 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
    if (submodule_states_.CaptureMultiBandProcessingPresent() ||
        submodule_states_.CaptureFullBandProcessingActive()) {
      if (capture_.capture_fullband_audio) {
-@@ -1973,8 +1979,31 @@
+@@ -1973,8 +1979,24 @@
    InitializeEchoController();
  }
  
@@ -572,17 +635,10 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
 +      submodules_.echo_controller &&
 +          submodules_.echo_controller->TransparentModeActive(),
 +      std::memory_order_relaxed);
-+  // The audio state's hold counts these against its cap (FOGATA_A1_HOLD_MS);
-+  // the release orders the store above before it.
-+  processed_capture_frames_.fetch_add(1, std::memory_order_release);
 +}
 +
 +bool AudioProcessingImpl::EchoControllerTransparent() const {
 +  return echo_controller_transparent_.load(std::memory_order_relaxed);
-+}
-+
-+uint64_t AudioProcessingImpl::ProcessedCaptureFrames() const {
-+  return processed_capture_frames_.load(std::memory_order_acquire);
 +}
 +
  void AudioProcessingImpl::InitializeEchoController() {
@@ -595,26 +651,23 @@ diff --git a/modules/audio_processing/audio_processing_impl.cc b/modules/audio_p
 diff --git a/modules/audio_processing/audio_processing_impl.h b/modules/audio_processing/audio_processing_impl.h
 --- a/modules/audio_processing/audio_processing_impl.h
 +++ b/modules/audio_processing/audio_processing_impl.h
-@@ -96,6 +96,8 @@
+@@ -96,6 +96,7 @@
    void RestartEchoController() override;
    void RestartEchoControllerForRecording() override;
    void RestartEchoControllerForOtherDevices() override;
 +  bool EchoControllerTransparent() const override;
-+  uint64_t ProcessedCaptureFrames() const override;
  
    // Capture-side exclusive methods possibly running APM in a
    // multi-threaded manner. Acquire the capture lock.
-@@ -173,6 +175,14 @@
+@@ -173,6 +174,12 @@
    std::atomic<uint64_t> device_restarts_seen_{AudioDeviceRestartsCount().load()};
    std::atomic<uint64_t> devices_seen_{AudioDevicesChangedCount().load()};
  
 +  // Fogata, patch 0017: stores whether the echo controller is in its
-+  // transparent mode, after each recorded frame (EchoControllerTransparent),
-+  // and counts the frame (ProcessedCaptureFrames).
++  // transparent mode, after each recorded frame (EchoControllerTransparent).
 +  void UpdateEchoControllerTransparent()
 +      RTC_EXCLUSIVE_LOCKS_REQUIRED(mutex_capture_);
 +  std::atomic<bool> echo_controller_transparent_{false};
-+  std::atomic<uint64_t> processed_capture_frames_{0};
 +
    // TODO(peah): These friend classes should be removed as soon as the new
    // parameter setting scheme allows.
