@@ -1,0 +1,764 @@
+Let the search for the echo's delay learn in the near end's pauses when talk there keeps it from finding a weak echo
+
+With the near end talking from the start of a call (speech with short pauses) over an echo of
+speech some 15 to 25 dB under the far end, the matched filters that search for the delay never
+match the capture well enough to count (error near 0.7 of the capture, the threshold is 0.2):
+the near end's talk, louder than the echo, keeps pulling them off it, and their peak jumps
+around. No delay is found, the transparent mode takes the call for a headset after about 6 s,
+and the echo goes through at 0 dB in the near end's pauses for as long as both keep talking.
+Measured in the AEC3 simulator (M158 with main's patches and 0017 and 0018 of this series, 16
+kHz): echo of 200 ms at -15 to -25 dB, near end at two levels, 3 seeds each: in 11 of 18 runs
+the echo in the pauses from 8 to 20 s stays within 6 dB of what comes in (median -2.5 dB).
+Given the right delay from outside, the same runs reach -5 to -25 dB.
+
+A second search, with its own matched filters and lag aggregator, now runs beside the usual
+one until the usual one finds a delay, and its delay is used only while the usual one has
+none. Once the usual search finds a delay, its delay is the one used from then on, as without
+this, even when it differs or is lost later, and the second search stops. The usual search
+itself is left as it was: holding its own filters back delayed by up to 2.8 s a delay it
+found on its own with recorded speech at both ends, and its wrong delays were taken up later.
+
+When no delay has been found after 5 s of render and its filters matched the capture fewer
+than 50 times by then, the second search adapts only on updates whose capture, against the
+loudest render within its reach, is no more than 6 dB above the lowest fifth of that ratio
+over the last 2 s: the near end's pauses. Render too weak for the filters to adapt on (their
+own threshold per sample, over the 4 loudest sub-blocks in reach) and digital silence at the
+capture (a muted microphone) are left out of those ratios. It holds only while the capture of
+those 2 s shows pauses (more than 10 dB between its lowest and highest fifths), and not while
+the capture's level in dB follows the render's (correlation 0.86 or more at some lag within
+reach, checked every 0.5 s): the capture is then echo, not talk. While it holds, a peak within
+32 taps of a filter's start or 64 of its end does not count: with recorded speech those gave
+delays some 100 ms off.
+
+A delay from the second search starts the echo removal while the near end keeps talking, with a
+linear filter that knows nothing yet, and the suppressor would cut the near end's words almost
+whole for about half a second. After such a delay, and only on updates where the capture is the
+near end's talk (the same ratio, more than 6 dB above its lowest fifth), the suppressor's gain
+stays at 1 for half a second, comes down to 0.5 over the next half second, and stays at no less
+than 0.5 for 16 s more; in the pauses it is as before. A change of the delay by up to 2 blocks,
+as the search gives while it settles, leaves that floor as it is; a larger change, a delay from
+the usual search, or its loss end it.
+
+Simulator, same runs: within 6 dB in 4 of 18 runs (median -11 dB). Far end 6 and 16 dB quieter:
+3 and 8 of 24 runs instead of 10 and 13, no 1 s window of the echo in a pause 3 dB higher.
+Recorded speech at both ends (the far end, and the near end played backwards at another speed),
+the near end talking all of 30 s, echo -20 to -35 dB at 120 and 200 ms, 20 seeds: a delay is
+found in 147 of 160 runs instead of 110; the echo in the pauses is -13.3 dB on average instead
+of -12.0, 271 windows of 1 s lower by more than 3 dB and 2 higher, one of them from -13.3 to
+-9.0 dB (the right delay in both, found 7 s sooner here); the near end loses the same on
+average (-4.6 dB), 11 windows better by more than 3 dB and 4 worse, words that start after a
+pause where the usual search has no delay yet and nothing is removed. Same with the near end
+quiet after 24 s and 12 s more of echo alone: one more window from -14.9 to -9.5 dB, where the
+usual search takes a wrong delay at 26 s for half a second, as it does without this.
+Main against itself with recorded speech changes no window when room noise moves by 0.02 %.
+Double talk from the start over quiet music (-20 to -25 dB at 60 to 200 ms, music 12 dB lower
+too, 96 runs): 3 runs differ, one window of the echo in a pause from -13 to -4 dB; main
+against itself with 0.02 % more room noise changes 83 runs and 6 windows that way.
+With an echo of 60 ms at -20 dB in double talk from the start, which main finds late or not at
+all in half the seeds, the near end over 6 to 40 s is 0.5 dB louder on average than with main;
+in 3 of its 408 windows of 1 s it loses 3.5 to 5.6 dB against main, and 16 windows gain that
+much. Over a grid of double talk from the start (speech and music, -10 to -30 dB, 60 and 200
+ms, 3 near levels, 2 seeds), windows of the echo in a pause are only lower (18 by more than 3
+dB), the near end the same.
+Identical: the start of a call with music or speech on speakers or a headset, double talk over
+music, double talk where a delay is found by 5 s, an echo shorter than the headroom with 0017,
+a headset's leak, a near end that clips the microphone or talks only in the first 2.5 s over an
+echo of -25 to -40 dB, with and without 0018's sound to headphones, the unmute series, and an
+echo that appears 4 to 7 s into a call with a steady tone at the near end.
+
+Until the usual search finds a delay, the matched filters run twice, but not while the sound
+plays to headphones (0018's signal): no echo is to be expected there, and in such a call the
+usual search may find none at all. With the signal on, everything above is as without this,
+and the second search's delay is used only once its filters have held back, so that one that
+starts late, when the sound stops playing to headphones, does not stand in for the usual one.
+Sound to headphones switching in a call (plug, unplug, a wrong report and a late one, with and
+without the signal; 480 runs): with the signal identical; without it 7 runs differ, the echo 4
+to 8 dB lower in 3 windows and never more than 3 dB higher.
+
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -14,6 +14,7 @@
+ #include <array>
+ #include <atomic>
+ #include <cmath>
++#include <cstdlib>
+ #include <cstddef>
+ #include <numeric>
+ #include <optional>
+@@ -181,6 +182,12 @@ void AecState::HandleEchoPathChange(
+   // TODO(peah): Refine the reset scheme according to the type of gain and
+   // delay adjustment.
+ 
++  // Fogata: the suppressor's floor for the near end's talk ends at any later
++  // change of the delay but a small one (see Update).
++  if (echo_path_variability.delay_change !=
++      EchoPathVariability::DelayAdjustment::kNone) {
++    near_talk_delay_changed_ = true;
++  }
+   if (echo_path_variability.delay_change !=
+       EchoPathVariability::DelayAdjustment::kNone) {
+     full_reset();
+@@ -203,6 +210,35 @@ void AecState::Update(
+     std::span<const SubtractorOutput> subtractor_output) {
+   RTC_DCHECK_EQ(num_capture_channels_, Y2.size());
+   RTC_DCHECK_EQ(num_capture_channels_, subtractor_output.size());
++  // Fogata: a delay found in the near end's talk starts the echo removal with
++  // a filter that knows nothing yet, and the suppressor takes the near end's
++  // words for echo; it eases in on them (NearTalkGainFloor), not in its pauses.
++  // It ends at any later change of the delay (HandleEchoPathChange) and when
++  // the delay is lost. A change of up to 2 blocks, that the search gives as it
++  // settles, leaves it as it is: the filter starts again, and the near end's
++  // words would be cut as on a delay found anew.
++  if (near_talk_delay_changed_) {
++    near_talk_delay_changed_ = false;
++    if (!external_delay || !delay_known_ ||
++        !external_delay->found_in_near_talk ||
++        std::abs(static_cast<int>(external_delay->delay) - last_delay_) >
++            kNearTalkSmallDelayChange) {
++      near_talk_ramp_blocks_ = 0;
++    }
++  }
++  if (external_delay && !delay_known_ && external_delay->found_in_near_talk) {
++    near_talk_ramp_blocks_ =
++        kNearTalkFullBlocks + kNearTalkRampBlocks + kNearTalkTailBlocks;
++  } else if (!external_delay) {
++    near_talk_ramp_blocks_ = 0;
++  } else if (near_talk_ramp_blocks_ > 0) {
++    --near_talk_ramp_blocks_;
++  }
++  delay_known_ = external_delay.has_value();
++  if (external_delay) {
++    last_delay_ = static_cast<int>(external_delay->delay);
++  }
++  near_talk_now_ = external_delay && external_delay->near_talk_now;
+   RTC_DCHECK_EQ(num_capture_channels_,
+                 adaptive_filter_frequency_responses.size());
+   RTC_DCHECK_EQ(num_capture_channels_,
+diff --git a/modules/audio_processing/aec3/aec_state.h b/modules/audio_processing/aec3/aec_state.h
+--- a/modules/audio_processing/aec3/aec_state.h
++++ b/modules/audio_processing/aec3/aec_state.h
+@@ -118,6 +118,26 @@ class AecState {
+     return transparent_state_ && transparent_state_->Active();
+   }
+ 
++  // Fogata: the least gain the suppressor may give, while the near end talks,
++  // after the delay was found in that talk: 1 for half a second, then down to
++  // 0.5 over the next half second, 0.5 for the next 16 s, and 0 after that or
++  // in the near end's pauses.
++  float NearTalkGainFloor() const {
++    const int b = near_talk_ramp_blocks_;
++    if (b <= 0 || !near_talk_now_) {
++      return 0.f;
++    }
++    if (b <= kNearTalkTailBlocks) {
++      return kNearTalkTailFloor;
++    }
++    if (b >= kNearTalkTailBlocks + kNearTalkRampBlocks) {
++      return 1.f;
++    }
++    const float r =
++        static_cast<float>(b - kNearTalkTailBlocks) / kNearTalkRampBlocks;
++    return kNearTalkTailFloor + r * (1.f - kNearTalkTailFloor);
++  }
++
+   // Takes appropriate action at an echo path change.
+   void HandleEchoPathChange(const EchoPathVariability& echo_path_variability);
+ 
+@@ -235,6 +255,16 @@ class AecState {
+ 
+   // Classifier for toggling transparent mode when there is no echo.
+   std::unique_ptr<TransparentMode> transparent_state_;
++  static constexpr int kNearTalkFullBlocks = 125;
++  static constexpr int kNearTalkRampBlocks = 125;
++  static constexpr int kNearTalkTailBlocks = 4000;
++  static constexpr float kNearTalkTailFloor = 0.5f;
++  static constexpr int kNearTalkSmallDelayChange = 2;
++  bool delay_known_ = false;
++  bool near_talk_delay_changed_ = false;
++  int last_delay_ = 0;
++  int near_talk_ramp_blocks_ = 0;
++  bool near_talk_now_ = false;
+ 
+   // Class for analyzing how well the linear filter is, and can be expected to,
+   // perform on the current signals. The purpose of this is for using to
+diff --git a/modules/audio_processing/aec3/delay_estimate.h b/modules/audio_processing/aec3/delay_estimate.h
+--- a/modules/audio_processing/aec3/delay_estimate.h
++++ b/modules/audio_processing/aec3/delay_estimate.h
+@@ -24,6 +24,12 @@ struct DelayEstimate {
+ 
+   Quality quality;
+   size_t delay;
++  // Fogata: the delay was found after the search held its filters back for
++  // the near end's talk (MatchedFilter::NearTalkHeld).
++  bool found_in_near_talk = false;
++  // Fogata: the capture is the near end's talk now
++  // (MatchedFilter::NearTalkNow).
++  bool near_talk_now = false;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator.cc b/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+--- a/modules/audio_processing/aec3/echo_path_delay_estimator.cc
++++ b/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+@@ -10,10 +10,12 @@
+ #include "modules/audio_processing/aec3/echo_path_delay_estimator.h"
+ 
+ #include <array>
++#include <atomic>
+ #include <cstddef>
+ #include <optional>
+ #include <span>
+ 
++#include "api/audio/audio_device.h"
+ #include "api/audio/echo_canceller3_config.h"
+ #include "modules/audio_processing/aec3/aec3_common.h"
+ #include "modules/audio_processing/aec3/block.h"
+@@ -52,8 +54,26 @@ EchoPathDelayEstimator::EchoPathDelayEstimator(
+           config.delay.detect_pre_echo),
+       matched_filter_lag_aggregator_(data_dumper_,
+                                      matched_filter_.GetMaxFilterLag(),
+-                                     config.delay) {
++                                     config.delay),
++      held_filter_(
++          data_dumper_,
++          DetectOptimization(),
++          sub_block_size_,
++          kMatchedFilterWindowSizeSubBlocks,
++          config.delay.num_filters,
++          kMatchedFilterAlignmentShiftSizeSubBlocks,
++          config.delay.down_sampling_factor == 8
++              ? config.render_levels.poor_excitation_render_limit_ds8
++              : config.render_levels.poor_excitation_render_limit,
++          config.delay.delay_estimate_smoothing,
++          config.delay.delay_estimate_smoothing_delay_found,
++          config.delay.delay_candidate_detection_threshold,
++          config.delay.detect_pre_echo),
++      held_aggregator_(data_dumper_,
++                       held_filter_.GetMaxFilterLag(),
++                       config.delay) {
+   RTC_DCHECK(data_dumper);
++  matched_filter_.SetNearTalkHold(false);
+   RTC_DCHECK(down_sampling_factor_ > 0);
+ }
+ 
+@@ -117,7 +137,52 @@ std::optional<DelayEstimate> EchoPathDelayEstimator::EstimateDelay(
+     Reset(false, false);
+   }
+ 
+-  return aggregated_matched_filter_lag;
++  // Fogata: until the search above finds a delay, the search that holds for
++  // the near end's talk runs beside it, and its delay is used. Not while the
++  // sound plays to headphones: no echo is to be expected, and it would only
++  // double the cost of the search for all of such a call.
++  std::optional<DelayEstimate> held_lag;
++  if (!main_delay_found_ &&
++      !PlayoutToHeadphones().load(std::memory_order_relaxed)) {
++    held_filter_.Update(render_buffer, downsampled_capture,
++                        held_aggregator_.ReliableDelayFound());
++    held_lag = held_aggregator_.Aggregate(held_filter_.GetBestLagEstimate());
++    if (held_lag) {
++      held_lag->delay *= down_sampling_factor_;
++    }
++    if (held_old_lag_ && held_lag && held_old_lag_->delay == held_lag->delay) {
++      ++held_consistent_counter_;
++    } else {
++      held_consistent_counter_ = 0;
++    }
++    held_old_lag_ = held_lag;
++    if (held_consistent_counter_ > kNumBlocksPerSecondBy2) {
++      held_filter_.Reset(/*full_reset=*/false);
++      held_old_lag_ = std::nullopt;
++      held_consistent_counter_ = 0;
++    }
++  }
++  if (aggregated_matched_filter_lag) {
++    main_delay_found_ = true;
++  }
++  last_from_held_ = false;
++  if (main_delay_found_) {
++    if (aggregated_matched_filter_lag) {
++      delay_from_held_ = false;
++    }
++    return aggregated_matched_filter_lag;
++  }
++  // Until its filters have held back, the second search adapts as the usual
++  // one and has nothing to add (it lags it when it starts later, as after the
++  // sound has played to headphones).
++  if (!held_filter_.NearTalkHeld()) {
++    return std::nullopt;
++  }
++  if (held_lag) {
++    delay_from_held_ = true;
++    last_from_held_ = true;
++  }
++  return held_lag;
+ }
+ 
+ void EchoPathDelayEstimator::Reset(bool reset_lag_aggregator,
+@@ -128,5 +193,14 @@ void EchoPathDelayEstimator::Reset(bool reset_lag_aggregator,
+   matched_filter_.Reset(/*full_reset=*/reset_lag_aggregator);
+   old_aggregated_lag_ = std::nullopt;
+   consistent_estimate_counter_ = 0;
++  if (reset_lag_aggregator) {
++    held_aggregator_.Reset(reset_delay_confidence);
++    held_filter_.Reset(/*full_reset=*/true);
++    held_old_lag_ = std::nullopt;
++    held_consistent_counter_ = 0;
++    main_delay_found_ = false;
++    delay_from_held_ = false;
++    last_from_held_ = false;
++  }
+ }
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator.h b/modules/audio_processing/aec3/echo_path_delay_estimator.h
+--- a/modules/audio_processing/aec3/echo_path_delay_estimator.h
++++ b/modules/audio_processing/aec3/echo_path_delay_estimator.h
+@@ -48,6 +48,16 @@ class EchoPathDelayEstimator {
+       const DownsampledRenderBuffer& render_buffer,
+       const Block& capture);
+ 
++  // Fogata: whether the search held its filters back for the near end's talk
++  // since it was last reset, and whether the capture is that talk now.
++  // Both are false unless the delay in use came from the search that holds.
++  bool NearTalkHeld() const {
++    return delay_from_held_ && held_filter_.NearTalkHeld();
++  }
++  bool NearTalkNow() const {
++    return delay_from_held_ && held_filter_.NearTalkNow();
++  }
++
+   // Log delay estimator properties.
+   void LogDelayEstimationProperties(int sample_rate_hz, size_t shift) const {
+     matched_filter_.LogFilterProperties(sample_rate_hz, shift,
+@@ -57,10 +67,12 @@ class EchoPathDelayEstimator {
+   // Fogata: whether the last delay estimated was 0 found from lags shorter
+   // than the headroom, and the last such lag, in samples.
+   bool ShortDelayFound() const {
+-    return matched_filter_lag_aggregator_.ShortDelayFound();
++    return (last_from_held_ ? held_aggregator_ : matched_filter_lag_aggregator_)
++        .ShortDelayFound();
+   }
+   int LastShortDelay() const {
+-    return matched_filter_lag_aggregator_.LastShortLag() *
++    return (last_from_held_ ? held_aggregator_ : matched_filter_lag_aggregator_)
++               .LastShortLag() *
+            static_cast<int>(down_sampling_factor_);
+   }
+ 
+@@ -80,6 +92,17 @@ class EchoPathDelayEstimator {
+   std::optional<DelayEstimate> old_aggregated_lag_;
+   size_t consistent_estimate_counter_ = 0;
+   ClockdriftDetector clockdrift_detector_;
++  // Fogata: a second search, whose filters hold back for the near end's talk
++  // over a weak echo. The search above never holds, as without this, and its
++  // delay is always the one used once it has found one; the second search
++  // runs, and its delay is used, only until then.
++  MatchedFilter held_filter_;
++  MatchedFilterLagAggregator held_aggregator_;
++  std::optional<DelayEstimate> held_old_lag_;
++  size_t held_consistent_counter_ = 0;
++  bool main_delay_found_ = false;
++  bool delay_from_held_ = false;
++  bool last_from_held_ = false;
+ 
+   // Internal reset method with more granularity.
+   void Reset(bool reset_lag_aggregator, bool reset_delay_confidence);
+diff --git a/modules/audio_processing/aec3/matched_filter.cc b/modules/audio_processing/aec3/matched_filter.cc
+--- a/modules/audio_processing/aec3/matched_filter.cc
++++ b/modules/audio_processing/aec3/matched_filter.cc
+@@ -22,8 +22,10 @@
+ #include <emmintrin.h>
+ #endif
+ #include <algorithm>
++#include <cmath>
+ #include <cstddef>
+ #include <initializer_list>
++#include <limits>
+ #include <optional>
+ #include <span>
+ 
+@@ -42,6 +44,33 @@ namespace {
+ // equal to 4.
+ constexpr int kAccumulatedErrorSubSampleRate = 4;
+ 
++// Fogata: when no delay has been found after 5 s of render and the filters
++// matched the capture fewer than 50 times by then, they adapt, until a delay is
++// found, only on updates whose capture is no more than 6 dB above the lowest
++// fifth of the capture to render ratios of the last 2 s, so that talk at the
++// near end, louder than a weak echo, does not keep them from finding the echo.
++// Digital silence (a muted microphone) is left out of those ratios. They hold
++// only while the capture of those 2 s shows pauses (more than 10 dB between its
++// lowest and highest fifths); a steady sound at the near end has none to learn
++// in. Nor while the capture of those 2 s follows the render at some lag within
++// the filters' reach (a correlation of their energies, in dB, of 0.86 or more):
++// it is then echo, not talk at the near end.
++constexpr int kNearTalkHoldUpdates = 1250;
++constexpr size_t kNearTalkRatios = 500;
++constexpr size_t kNearTalkMinRatios = 100;
++constexpr size_t kNearTalkLowRatioPeriod = 25;
++constexpr float kNearTalkRatioFactor = 3.981f;
++constexpr int kNearTalkMaxReliableUpdates = 50;
++constexpr float kNearTalkSilentCapture = 64.f;
++constexpr float kNearTalkPauseSpread = 10.f;
++constexpr float kNearTalkEchoCorrelation = 0.86f;
++constexpr size_t kNearTalkEchoCheckPeriod = 125;
++// Once held, a filter's peak counts only this far from its start and end: with
++// few updates in the pauses and a weak echo, a peak at the very edge of a
++// filter wins against the echo's and gives a delay some 100 ms off.
++constexpr size_t kNearTalkHeldStartTaps = 32;
++constexpr size_t kNearTalkHeldEndTaps = 64;
++
+ void UpdateAccumulatedError(
+     const std::span<const float> instantaneous_accumulated_error,
+     const std::span<float> accumulated_error,
+@@ -612,7 +641,13 @@ MatchedFilter::MatchedFilter(ApmDataDumper* data_dumper,
+       smoothing_fast_(smoothing_fast),
+       smoothing_slow_(smoothing_slow),
+       matching_filter_threshold_(matching_filter_threshold),
+-      detect_pre_echo_(detect_pre_echo) {
++      detect_pre_echo_(detect_pre_echo),
++      render_sub_block_energies_(GetMaxFilterLag() / sub_block_size_ + 4, 0.f),
++      capture_to_render_ratios_(kNearTalkRatios, 0.f),
++      ratio_scratch_(kNearTalkRatios, 0.f),
++      capture_energies_(kNearTalkRatios, 0.f),
++      capture_levels_(kNearTalkRatios, 0.f),
++      render_levels_(kNearTalkRatios + render_sub_block_energies_.size(), 0.f) {
+   RTC_DCHECK(data_dumper);
+   RTC_DCHECK_LT(0, window_size_sub_blocks);
+   RTC_DCHECK((kBlockSize % sub_block_size) == 0);
+@@ -643,7 +678,19 @@ void MatchedFilter::Reset(bool full_reset) {
+ 
+   winner_lag_ = std::nullopt;
+   reported_lag_estimate_ = std::nullopt;
++  updates_with_render_ = 0;
++  reliable_updates_ = 0;
++  near_talk_hold_ = false;
++  near_talk_held_ = false;
++  near_talk_now_ = false;
++  capture_follows_render_ = false;
++  render_followed_checked_ = false;
+   if (full_reset) {
++    num_ratios_ = 0;
++    capture_has_pauses_ = false;
++    ratio_index_ = 0;
++    low_ratio_ = 0.f;
++    num_levels_ = 0;
+     for (auto& e : accumulated_error_) {
+       std::fill(e.begin(), e.end(), 1.0f);
+     }
+@@ -651,6 +698,163 @@ void MatchedFilter::Reset(bool full_reset) {
+   }
+ }
+ 
++bool MatchedFilter::NearTalkHoldsAdaptation(
++    const DownsampledRenderBuffer& render_buffer,
++    std::span<const float> capture,
++    bool delay_found,
++    float x2_sum_threshold) {
++  float render_energy = 0.f;
++  for (size_t k = 0; k < sub_block_size_; ++k) {
++    const float x =
++        render_buffer
++            .buffer[(render_buffer.read + k) % render_buffer.buffer.size()];
++    render_energy += x * x;
++  }
++  render_sub_block_energies_[render_energy_index_] = render_energy;
++  render_energy_index_ =
++      (render_energy_index_ + 1) % render_sub_block_energies_.size();
++
++  float capture_energy = 0.f;
++  for (float y : capture) {
++    capture_energy += y * y;
++  }
++  capture_sub_block_energies_[capture_energy_index_] = capture_energy;
++  capture_energy_index_ =
++      (capture_energy_index_ + 1) % capture_sub_block_energies_.size();
++  float capture_sum = 0.f;
++  for (float e : capture_sub_block_energies_) {
++    capture_sum += e;
++  }
++
++  // Levels, in dB, of the last 4 sub-blocks of render and capture.
++  const size_t num_render_energies = render_sub_block_energies_.size();
++  float recent_render = 0.f;
++  for (size_t k = 1; k <= 4; ++k) {
++    recent_render += render_sub_block_energies_[(render_energy_index_ +
++                                                 num_render_energies - k) %
++                                                num_render_energies];
++  }
++  render_levels_[num_levels_ % render_levels_.size()] =
++      std::log10(recent_render + 1.f);
++  capture_levels_[num_levels_ % capture_levels_.size()] =
++      std::log10(capture_sum + 1.f);
++  ++num_levels_;
++
++  // The loudest render of 4 sub-blocks within the filters' reach.
++  const size_t num_energies = render_sub_block_energies_.size();
++  float max_render_sum = 0.f;
++  for (size_t k = 0; k + 3 < num_energies; ++k) {
++    max_render_sum =
++        std::max(max_render_sum, render_sub_block_energies_[k] +
++                                     render_sub_block_energies_[k + 1] +
++                                     render_sub_block_energies_[k + 2] +
++                                     render_sub_block_energies_[k + 3]);
++  }
++  // Leave out render too weak to adapt on (the filters' threshold, over their
++  // length, taken over 4 sub-blocks) and a capture that is digital silence (a
++  // muted microphone), which carry nothing of the echo.
++  if (max_render_sum * filters_[0].size() <=
++          x2_sum_threshold * 4.f * sub_block_size_ ||
++      capture_sum <= kNearTalkSilentCapture) {
++    near_talk_now_ = false;
++    return false;
++  }
++
++  if (updates_with_render_ <= kNearTalkHoldUpdates) {
++    ++updates_with_render_;
++    // Hold only when the filters have almost never matched the capture by
++    // then; where they match it often, the delay is on its way.
++    near_talk_hold_ = updates_with_render_ > kNearTalkHoldUpdates &&
++                      reliable_updates_ < kNearTalkMaxReliableUpdates;
++  }
++  const float ratio = capture_sum / max_render_sum;
++  capture_to_render_ratios_[ratio_index_] = ratio;
++  capture_energies_[ratio_index_] = capture_sum;
++  ratio_index_ = (ratio_index_ + 1) % kNearTalkRatios;
++  num_ratios_ = std::min(num_ratios_ + 1, kNearTalkRatios);
++  if (num_ratios_ >= kNearTalkMinRatios &&
++      ratio_index_ % kNearTalkLowRatioPeriod == 0) {
++    std::copy(capture_to_render_ratios_.begin(),
++              capture_to_render_ratios_.begin() + num_ratios_,
++              ratio_scratch_.begin());
++    const auto low = ratio_scratch_.begin() + num_ratios_ / 5;
++    std::nth_element(ratio_scratch_.begin(), low,
++                     ratio_scratch_.begin() + num_ratios_);
++    low_ratio_ = *low;
++    capture_has_pauses_ = CaptureHasPauses();
++  }
++  if (near_talk_hold_ && !delay_found &&
++      (!render_followed_checked_ ||
++       ratio_index_ % kNearTalkEchoCheckPeriod == 0)) {
++    capture_follows_render_ = CaptureFollowsRender();
++    render_followed_checked_ = true;
++  }
++
++  near_talk_now_ = near_talk_hold_ && capture_has_pauses_ &&
++                   !capture_follows_render_ &&
++                   num_ratios_ >= kNearTalkMinRatios &&
++                   ratio > kNearTalkRatioFactor * low_ratio_;
++  const bool hold = !delay_found && near_talk_now_;
++  near_talk_held_ = near_talk_held_ || hold;
++  return hold;
++}
++
++bool MatchedFilter::CaptureHasPauses() {
++  if (num_ratios_ < kNearTalkMinRatios) {
++    return false;
++  }
++  std::copy(capture_energies_.begin(), capture_energies_.begin() + num_ratios_,
++            ratio_scratch_.begin());
++  const auto end = ratio_scratch_.begin() + num_ratios_;
++  const auto low = ratio_scratch_.begin() + num_ratios_ / 5;
++  const auto high = ratio_scratch_.begin() + num_ratios_ * 4 / 5;
++  std::nth_element(ratio_scratch_.begin(), low, end);
++  const float low_capture = *low;
++  std::nth_element(ratio_scratch_.begin(), high, end);
++  return *high > kNearTalkPauseSpread * low_capture;
++}
++
++bool MatchedFilter::CaptureFollowsRender() const {
++  const size_t window = capture_levels_.size();
++  const size_t num_render_levels = render_levels_.size();
++  if (num_levels_ < num_render_levels) {
++    return false;
++  }
++  const size_t start = num_levels_ - window;
++  double sum_c = 0.0;
++  double sum_cc = 0.0;
++  for (size_t k = 0; k < window; ++k) {
++    const double c = capture_levels_[(start + k) % window];
++    sum_c += c;
++    sum_cc += c * c;
++  }
++  const double var_c = sum_cc - sum_c * sum_c / window;
++  if (var_c <= 0.0) {
++    return false;
++  }
++  const double min_correlation2 =
++      kNearTalkEchoCorrelation * kNearTalkEchoCorrelation;
++  for (size_t lag = 0; lag + window <= num_render_levels; ++lag) {
++    double sum_r = 0.0;
++    double sum_rr = 0.0;
++    double sum_cr = 0.0;
++    for (size_t k = 0; k < window; ++k) {
++      const double c = capture_levels_[(start + k) % window];
++      const double r = render_levels_[(start + k - lag) % num_render_levels];
++      sum_r += r;
++      sum_rr += r * r;
++      sum_cr += c * r;
++    }
++    const double var_r = sum_rr - sum_r * sum_r / window;
++    const double cov = sum_cr - sum_c * sum_r / window;
++    if (var_r > 0.0 && cov > 0.0 &&
++        cov * cov >= min_correlation2 * var_c * var_r) {
++      return true;
++    }
++  }
++  return false;
++}
++
+ void MatchedFilter::Update(const DownsampledRenderBuffer& render_buffer,
+                            std::span<const float> capture,
+                            bool use_slow_smoothing) {
+@@ -660,8 +864,13 @@ void MatchedFilter::Update(const DownsampledRenderBuffer& render_buffer,
+   const float smoothing =
+       use_slow_smoothing ? smoothing_slow_ : smoothing_fast_;
+ 
+-  const float x2_sum_threshold =
++  float x2_sum_threshold =
+       filters_[0].size() * excitation_limit_ * excitation_limit_;
++  if (near_talk_hold_enabled_ &&
++      NearTalkHoldsAdaptation(render_buffer, capture, use_slow_smoothing,
++                              x2_sum_threshold)) {
++    x2_sum_threshold = std::numeric_limits<float>::max();
++  }
+ 
+   // Compute anchor for the matched filter error.
+   float error_sum_anchor = 0.0f;
+@@ -722,7 +931,9 @@ void MatchedFilter::Update(const DownsampledRenderBuffer& render_buffer,
+     // is detected as the peak of the matched filter.
+     const size_t lag_estimate = MaxSquarePeakIndex(filters_[n]);
+     const bool reliable =
+-        lag_estimate > 2 && lag_estimate < (filters_[n].size() - 10) &&
++        lag_estimate > (near_talk_held_ ? kNearTalkHeldStartTaps : 2) &&
++        lag_estimate < (filters_[n].size() -
++                        (near_talk_held_ ? kNearTalkHeldEndTaps : 10)) &&
+         error_sum < matching_filter_threshold_ * error_sum_anchor;
+ 
+     // Find the best estimate
+@@ -746,6 +957,9 @@ void MatchedFilter::Update(const DownsampledRenderBuffer& render_buffer,
+ 
+   if (winner_index != -1) {
+     RTC_DCHECK(winner_lag_.has_value());
++    if (reliable_updates_ < kNearTalkMaxReliableUpdates) {
++      ++reliable_updates_;
++    }
+     reported_lag_estimate_ =
+         LagEstimate(winner_lag_.value(), /*pre_echo_lag=*/winner_lag_.value());
+     if (detect_pre_echo_ && last_detected_best_lag_filter_ == winner_index) {
+diff --git a/modules/audio_processing/aec3/matched_filter.h b/modules/audio_processing/aec3/matched_filter.h
+--- a/modules/audio_processing/aec3/matched_filter.h
++++ b/modules/audio_processing/aec3/matched_filter.h
+@@ -13,6 +13,7 @@
+ 
+ #include <stddef.h>
+ 
++#include <array>
+ #include <optional>
+ #include <span>
+ #include <vector>
+@@ -132,6 +133,14 @@ class MatchedFilter {
+     return reported_lag_estimate_;
+   }
+ 
++  // Fogata: whether the filters have been held back for the near end's talk
++  // since the last reset, and whether the capture is that talk now.
++  bool NearTalkHeld() const { return near_talk_held_; }
++  bool NearTalkNow() const { return near_talk_now_; }
++
++  // Fogata: whether these filters hold back for the near end's talk at all.
++  void SetNearTalkHold(bool enabled) { near_talk_hold_enabled_ = enabled; }
++
+   // Returns the maximum filter lag.
+   size_t GetMaxFilterLag() const {
+     return filters_.size() * filter_intra_lag_shift_ + filters_[0].size();
+@@ -145,6 +154,18 @@ class MatchedFilter {
+  private:
+   void Dump();
+ 
++  // Fogata: whether this update should leave the filters as they are, because
++  // the capture holds much more than the render can explain (talk at the near
++  // end) while no delay has been found.
++  bool NearTalkHoldsAdaptation(const DownsampledRenderBuffer& render_buffer,
++                               std::span<const float> capture,
++                               bool delay_found,
++                               float x2_sum_threshold);
++  // Fogata: whether the capture of the last 2 s rose and fell by more than
++  // 10 dB between its lowest and highest fifths: talk with pauses.
++  bool CaptureHasPauses();
++  bool CaptureFollowsRender() const;
++
+   ApmDataDumper* const data_dumper_;
+   const Aec3Optimization optimization_;
+   const size_t sub_block_size_;
+@@ -163,6 +184,28 @@ class MatchedFilter {
+   const float smoothing_slow_;
+   const float matching_filter_threshold_;
+   const bool detect_pre_echo_;
++  std::vector<float> render_sub_block_energies_;
++  size_t render_energy_index_ = 0;
++  std::array<float, 4> capture_sub_block_energies_ = {};
++  size_t capture_energy_index_ = 0;
++  std::vector<float> capture_to_render_ratios_;
++  std::vector<float> ratio_scratch_;
++  size_t ratio_index_ = 0;
++  size_t num_ratios_ = 0;
++  float low_ratio_ = 0.f;
++  std::vector<float> capture_energies_;
++  int updates_with_render_ = 0;
++  int reliable_updates_ = 0;
++  bool near_talk_hold_ = false;
++  bool near_talk_held_ = false;
++  bool near_talk_now_ = false;
++  bool capture_has_pauses_ = false;
++  std::vector<float> capture_levels_;
++  std::vector<float> render_levels_;
++  size_t num_levels_ = 0;
++  bool capture_follows_render_ = false;
++  bool render_followed_checked_ = false;
++  bool near_talk_hold_enabled_ = true;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/render_delay_controller.cc b/modules/audio_processing/aec3/render_delay_controller.cc
+--- a/modules/audio_processing/aec3/render_delay_controller.cc
++++ b/modules/audio_processing/aec3/render_delay_controller.cc
+@@ -138,6 +138,11 @@ std::optional<DelayEstimate> RenderDelayControllerImpl::GetDelay(
+     delay_ = ComputeBufferDelay(
+         delay_, use_hysteresis ? hysteresis_limit_blocks_ : 0, *delay_samples_);
+     last_delay_estimate_quality_ = delay_->quality;
++    delay_->found_in_near_talk = delay_estimator_.NearTalkHeld();
++  }
++
++  if (delay_) {
++    delay_->near_talk_now = delay_estimator_.NearTalkNow();
+   }
+ 
+   metrics_.Update(delay_samples_ ? std::optional<size_t>(delay_samples_->delay)
+diff --git a/modules/audio_processing/aec3/suppression_gain.cc b/modules/audio_processing/aec3/suppression_gain.cc
+--- a/modules/audio_processing/aec3/suppression_gain.cc
++++ b/modules/audio_processing/aec3/suppression_gain.cc
+@@ -422,6 +422,14 @@ void SuppressionGain::GetGain(
+                 nearend_spectrum, residual_echo_spectrum,
+                 comfort_noise_spectrum, clock_drift, low_band_gain);
+ 
++  // Fogata: ease the suppressor in on a delay found in the near end's talk.
++  const float gain_floor = aec_state.NearTalkGainFloor();
++  if (gain_floor > 0.f) {
++    for (float& g : *low_band_gain) {
++      g = std::max(g, gain_floor);
++    }
++  }
++
+   // Compute the gain for the upper bands.
+   const std::optional<int> narrow_peak_band =
+       render_signal_analyzer.NarrowPeakBand();
+@@ -429,6 +437,7 @@ void SuppressionGain::GetGain(
+   *high_bands_gain = UpperBandsGain(
+       suppressor_config, echo_spectrum, comfort_noise_spectrum,
+       narrow_peak_band, aec_state.SaturatedEcho(), render, *low_band_gain);
++  *high_bands_gain = std::max(*high_bands_gain, gain_floor);
+ 
+   data_dumper_->DumpRaw("aec3_dominant_nearend",
+                         dominant_nearend_detector_->IsNearendState());
