@@ -21,8 +21,9 @@ engine device leave it false.
   changes nothing. Two more symbols are loaded: pa_get_library_version and
   pa_proplist_gets.
 - Windows Core Audio (AudioDeviceWindowsCore): at a start of playout, the render
-  endpoint's form factor (PKEY_AudioEndpoint_FormFactor): Headphones or Headset is true,
-  anything else or nothing false. It is read again when that endpoint says its form
+  endpoint's form factor (PKEY_AudioEndpoint_FormFactor, defined in the module since no
+  library of Windows' SDK holds it): Headphones or Headset is true, anything else or
+  nothing false. It is read again when that endpoint says its form
   factor changed, and the value is false while the endpoint is not active (unplugged or
   disabled) and read again when it is active again. A change of the default output is
   not followed: the module's playout stays on the endpoint it was opened on (patch
@@ -274,7 +275,7 @@ index 62840c9..b8655b5 100644
    X(pa_stream_connect_record)              \
    X(pa_stream_disconnect)                  \
 diff --git a/modules/audio_device/win/audio_device_core_win.cc b/modules/audio_device/win/audio_device_core_win.cc
-index 2cd79ee..76f945b 100644
+index 2cd79ee..e21d12b 100644
 --- a/modules/audio_device/win/audio_device_core_win.cc
 +++ b/modules/audio_device/win/audio_device_core_win.cc
 @@ -26,6 +26,7 @@
@@ -285,7 +286,22 @@ index 2cd79ee..76f945b 100644
  
  #include "api/make_ref_counted.h"
  #include "rtc_base/checks.h"
-@@ -161,6 +162,46 @@ class MediaBufferImpl final : public IMediaBuffer {
+@@ -71,6 +72,14 @@
+ #define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+ #endif
+ 
++// Fogata: PKEY_AudioEndpoint_FormFactor as mmdeviceapi.h gives it. No library
++// of Windows' SDK defines that key (Uuid.Lib holds PKEY_Device_FriendlyName but
++// not the endpoint keys), and <initguid.h> cannot define it here: the header
++// above includes mmdeviceapi.h first.
++const PROPERTYKEY kAudioEndpointFormFactorKey = {
++    {0x1da5d803, 0xd492, 0x4edd, {0x8c, 0x23, 0xe0, 0xc0, 0xff, 0xee, 0x7f, 0x0e}},
++    0};
++
+ typedef struct tagTHREADNAME_INFO {
+   DWORD dwType;      // must be 0x1000
+   LPCSTR szName;     // pointer to name (in user addr space)
+@@ -161,6 +170,46 @@ class MediaBufferImpl final : public IMediaBuffer {
    const DWORD _maxLength;
    LONG _refCount;
  };
@@ -307,7 +323,7 @@ index 2cd79ee..76f945b 100644
 +      name = ToUtf8(value.pwszVal);
 +    }
 +    PropVariantClear(&value);
-+    if (SUCCEEDED(props->GetValue(PKEY_AudioEndpoint_FormFactor, &value)) &&
++    if (SUCCEEDED(props->GetValue(kAudioEndpointFormFactorKey, &value)) &&
 +        value.vt == VT_UI4) {
 +      const ULONG factor = value.ulVal;
 +      headphones = factor == static_cast<ULONG>(Headphones) ||
@@ -332,7 +348,7 @@ index 2cd79ee..76f945b 100644
  }  // namespace
  
  // ============================================================================
-@@ -623,6 +664,12 @@ int32_t AudioDeviceWindowsCore::Terminate() {
+@@ -623,6 +672,12 @@ int32_t AudioDeviceWindowsCore::Terminate() {
    _playing = false;
    _recording = false;
  
@@ -345,7 +361,7 @@ index 2cd79ee..76f945b 100644
    SAFE_RELEASE(_ptrRenderCollection);
    SAFE_RELEASE(_ptrCaptureCollection);
    SAFE_RELEASE(_ptrDeviceOut);
-@@ -2551,6 +2598,13 @@ int32_t AudioDeviceWindowsCore::StartPlayout() {
+@@ -2551,6 +2606,13 @@ int32_t AudioDeviceWindowsCore::StartPlayout() {
    _playing = true;
    RTC_LOG(LS_VERBOSE) << "rendering audio stream has now started...";
  
@@ -359,7 +375,7 @@ index 2cd79ee..76f945b 100644
    return 0;
  }
  
-@@ -2563,6 +2617,9 @@ int32_t AudioDeviceWindowsCore::StopPlayout() {
+@@ -2563,6 +2625,9 @@ int32_t AudioDeviceWindowsCore::StopPlayout() {
      return 0;
    }
  
@@ -369,7 +385,7 @@ index 2cd79ee..76f945b 100644
    {
      MutexLock lockScoped(&mutex_);
  
-@@ -3980,10 +4037,54 @@ void AudioDeviceWindowsCore::DeviceStateListener::SetObserver(AudioDeviceObserve
+@@ -3980,10 +4045,54 @@ void AudioDeviceWindowsCore::DeviceStateListener::SetObserver(AudioDeviceObserve
    callback_ = observer;
  }
  
@@ -424,13 +440,13 @@ index 2cd79ee..76f945b 100644
    if(callback_) callback_->OnDevicesUpdated();
    return S_OK;
  }
-@@ -4008,6 +4109,15 @@ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDefaultDeviceChanged(EDat
+@@ -4008,6 +4117,15 @@ HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnDefaultDeviceChanged(EDat
  
  HRESULT AudioDeviceWindowsCore::DeviceStateListener::OnPropertyValueChanged(LPCWSTR pwstrDeviceId, const PROPERTYKEY key) {
    //RTC_DLOG(LS_INFO) << "AudioDeviceWindowsCore::OnPropertyValueChanged => " << pwstrDeviceId;
 +  // Fogata: the playout's endpoint says another form factor (a jack's driver
 +  // telling headphones from speakers on one endpoint).
-+  if (IsEqualPropertyKey(key, PKEY_AudioEndpoint_FormFactor)) {
++  if (IsEqualPropertyKey(key, kAudioEndpointFormFactorKey)) {
 +    MutexLock lock(&playout_mutex_);
 +    if (playout_endpoint_ != nullptr && pwstrDeviceId != nullptr &&
 +        _wcsicmp(pwstrDeviceId, playout_endpoint_id_.c_str()) == 0) {
