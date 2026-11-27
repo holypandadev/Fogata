@@ -71,9 +71,11 @@ recording stops at the mute as before.
 
 Measured: not yet.
 
-Unit tests (AudioStateRecordingHoldTest, simulated clock): the cap stops the recording once,
-exactly at FOGATA_A1_HOLD_MS; an unmute during the hold keeps it recording; the hold ends at the
-next 10 ms poll once the echo controller is no longer transparent.
+Unit tests (AudioStateRecordingHoldTest, simulated clock, the device stopped on the worker
+always): the cap stops the recording once, exactly at FOGATA_A1_HOLD_MS; a stale cap does not cut
+a hold started again; an unmute during the hold keeps it recording; each other end of a hold (the
+next 10 ms poll once the echo controller is not transparent or the devices changed, recording or
+playout off, a received stream removed or added) stops it exactly once.
 
 diff --git a/api/audio/audio_processing.h b/api/audio/audio_processing.h
 index a915dd1..2aa4c2d 100644
@@ -110,10 +112,16 @@ index 5d2ba0c..953b3b1 100644
  };
  
 diff --git a/audio/BUILD.gn b/audio/BUILD.gn
-index 068bc6d..f7d9b00 100644
+index 068bc6d..ff07b87 100644
 --- a/audio/BUILD.gn
 +++ b/audio/BUILD.gn
-@@ -276,6 +276,8 @@ if (rtc_include_tests) {
+@@ -271,11 +271,14 @@ if (rtc_include_tests) {
+       "../api:make_ref_counted",
+       "../api:ref_count",
+       "../api:scoped_refptr",
++      "../api/audio:audio_device",
+       "../api/audio:audio_frame_api",
+       "../api/audio:audio_frame_processor",
        "../api/audio:audio_mixer_api",
        "../api/task_queue",
        "../api/task_queue/test:mock_task_queue_base",
@@ -122,7 +130,7 @@ index 068bc6d..f7d9b00 100644
        "../call:call_interfaces",
        "../call:mock_call_interfaces",
        "../modules/async_audio_processing",
-@@ -285,6 +287,7 @@ if (rtc_include_tests) {
+@@ -285,6 +288,7 @@ if (rtc_include_tests) {
        "../rtc_base:task_queue_for_test",
        "../rtc_base:threading",
        "../test:test_support",
@@ -535,10 +543,10 @@ index 9dfa35a..d6d2712 100644
    // Transports mixed audio from the mixer to the audio device and
    // recorded audio to the sending streams.
 diff --git a/audio/audio_state_unittest.cc b/audio/audio_state_unittest.cc
-index 7b6f9f5..7c641c0 100644
+index 7b6f9f5..576e9b5 100644
 --- a/audio/audio_state_unittest.cc
 +++ b/audio/audio_state_unittest.cc
-@@ -16,6 +16,7 @@
+@@ -16,11 +16,13 @@
  #include <cstdlib>
  #include <memory>
  #include <numbers>
@@ -546,7 +554,13 @@ index 7b6f9f5..7c641c0 100644
  #include <utility>
  #include <vector>
  
-@@ -31,6 +32,8 @@
+ #include "absl/functional/any_invocable.h"
+ #include "absl/strings/string_view.h"
++#include "api/audio/audio_device.h"
+ #include "api/audio/audio_frame.h"
+ #include "api/audio/audio_frame_processor.h"
+ #include "api/audio/audio_mixer.h"
+@@ -31,6 +33,8 @@
  #include "api/task_queue/task_queue_base.h"
  #include "api/task_queue/task_queue_factory.h"
  #include "api/task_queue/test/mock_task_queue_base.h"
@@ -555,7 +569,7 @@ index 7b6f9f5..7c641c0 100644
  #include "call/audio_state.h"
  #include "call/test/mock_audio_receive_stream.h"
  #include "call/test/mock_audio_send_stream.h"
-@@ -42,6 +45,7 @@
+@@ -42,6 +46,7 @@
  #include "rtc_base/thread.h"
  #include "test/gmock.h"
  #include "test/gtest.h"
@@ -563,7 +577,7 @@ index 7b6f9f5..7c641c0 100644
  
  namespace webrtc {
  namespace test {
-@@ -560,5 +564,154 @@ INSTANTIATE_TEST_SUITE_P(AudioStateTest,
+@@ -560,5 +565,266 @@ INSTANTIATE_TEST_SUITE_P(AudioStateTest,
                                  ConfigHelper::Params({false, true}),
                                  ConfigHelper::Params({true, true})));
  
@@ -575,6 +589,41 @@ index 7b6f9f5..7c641c0 100644
 + public:
 +  bool EchoControllerTransparent() const override { return transparent; }
 +  bool transparent = false;
++};
++
++// Fogata: sets an environment variable for its scope (setenv is not in the
++// Windows CRT), then restores it as it was.
++class ScopedEnvironmentVariable {
++ public:
++  ScopedEnvironmentVariable(const char* name, const char* value)
++      : name_(name) {
++    const char* old = std::getenv(name);
++    had_old_ = old != nullptr;
++    if (had_old_) {
++      old_ = old;
++    }
++    Set(value);
++  }
++  ~ScopedEnvironmentVariable() { Set(had_old_ ? old_.c_str() : nullptr); }
++
++ private:
++  // nullptr unsets it.
++  void Set(const char* value) {
++#if defined(_WIN32)
++    // An empty value removes it.
++    _putenv_s(name_, value ? value : "");
++#else
++    if (value) {
++      setenv(name_, value, /*overwrite=*/1);
++    } else {
++      unsetenv(name_);
++    }
++#endif
++  }
++
++  const char* const name_;
++  bool had_old_ = false;
++  std::string old_;
 +};
 +
 +class AudioStateRecordingHoldTest : public ::testing::Test {
@@ -595,22 +644,26 @@ index 7b6f9f5..7c641c0 100644
 +      return 0;
 +    });
 +    ON_CALL(*adm_, StopRecording()).WillByDefault([this] {
++      // Every call to the audio device is made on the worker.
++      EXPECT_EQ(TaskQueueBase::Current(), worker_.get());
 +      ++stops_;
 +      recording_ = false;
 +      return 0;
 +    });
 +    ON_CALL(*adm_, Recording()).WillByDefault([this] { return recording_; });
-+    // Read once, as the AudioState is made.
-+    const char* old = std::getenv("FOGATA_A1_HOLD_MS");
-+    const bool had_old = old != nullptr;
-+    const std::string old_value = had_old ? old : "";
-+    setenv("FOGATA_A1_HOLD_MS", "200", /*overwrite=*/1);
-+    audio_state_ = make_ref_counted<internal::AudioState>(helper_.config());
-+    if (had_old) {
-+      setenv("FOGATA_A1_HOLD_MS", old_value.c_str(), /*overwrite=*/1);
-+    } else {
-+      unsetenv("FOGATA_A1_HOLD_MS");
++    // Played while playout is off (the NullAudioPoller): a silent frame.
++    for (auto* stream : {&receive_stream_, &other_receive_stream_}) {
++      ON_CALL(*stream, GetAudioFrameWithInfo)
++          .WillByDefault([](int sample_rate_hz, AudioFrame* audio_frame) {
++            audio_frame->sample_rate_hz_ = sample_rate_hz;
++            audio_frame->samples_per_channel_ = sample_rate_hz / 100;
++            audio_frame->num_channels_ = kNumberOfChannels;
++            return AudioMixer::Source::AudioFrameInfo::kNormal;
++          });
 +    }
++    // Read once, as the AudioState is made.
++    ScopedEnvironmentVariable hold_ms("FOGATA_A1_HOLD_MS", "200");
++    audio_state_ = make_ref_counted<internal::AudioState>(helper_.config());
 +  }
 +
 +  ~AudioStateRecordingHoldTest() override {
@@ -619,7 +672,12 @@ index 7b6f9f5..7c641c0 100644
 +      if (sending_) {
 +        audio_state_->RemoveSendingStream(&send_stream_);
 +      }
-+      audio_state_->RemoveReceivingStream(&receive_stream_);
++      if (receiving_) {
++        audio_state_->RemoveReceivingStream(&receive_stream_);
++      }
++      if (other_receiving_) {
++        audio_state_->RemoveReceivingStream(&other_receive_stream_);
++      }
 +      audio_state_ = nullptr;
 +    });
 +  }
@@ -639,14 +697,19 @@ index 7b6f9f5..7c641c0 100644
 +      audio_state_->AddSendingStream(&send_stream_, kSampleRate,
 +                                     kNumberOfChannels);
 +    });
++    receiving_ = true;
 +    sending_ = true;
 +    ASSERT_EQ(starts_, 1);
 +    ASSERT_TRUE(recording_);
 +    apm_->transparent = true;
-+    OnWorker([this] { audio_state_->RemoveSendingStream(&send_stream_); });
-+    sending_ = false;
++    Mute();
 +    ASSERT_EQ(stops_, 0) << "the mute stopped recording: no hold";
 +    ASSERT_TRUE(recording_);
++  }
++
++  void Mute() {
++    OnWorker([this] { audio_state_->RemoveSendingStream(&send_stream_); });
++    sending_ = false;
 +  }
 +
 +  void Unmute() {
@@ -657,15 +720,27 @@ index 7b6f9f5..7c641c0 100644
 +    sending_ = true;
 +  }
 +
++  // Exactly one StopRecording by now, and none from the hold's tasks later.
++  void ExpectStoppedOnce() {
++    EXPECT_EQ(stops_, 1);
++    EXPECT_FALSE(recording_);
++    AdvanceMs(1000);
++    EXPECT_EQ(stops_, 1);
++    EXPECT_EQ(starts_, 1);
++  }
++
 +  GlobalSimulatedTimeController time_;
 +  std::unique_ptr<TaskQueueBase, TaskQueueDeleter> worker_;
 +  ConfigHelper helper_;
 +  scoped_refptr<NiceMock<TransparentAudioProcessing>> apm_;
 +  MockAudioDeviceModule* adm_ = nullptr;
-+  MockAudioReceiveStream receive_stream_;
++  NiceMock<MockAudioReceiveStream> receive_stream_;
++  NiceMock<MockAudioReceiveStream> other_receive_stream_;
 +  MockAudioSendStream send_stream_;
 +  scoped_refptr<internal::AudioState> audio_state_;
 +  bool sending_ = false;
++  bool receiving_ = false;
++  bool other_receiving_ = false;
 +  bool recording_ = false;
 +  int starts_ = 0;
 +  int stops_ = 0;
@@ -677,11 +752,7 @@ index 7b6f9f5..7c641c0 100644
 +  EXPECT_EQ(stops_, 0);
 +  EXPECT_TRUE(recording_);
 +  AdvanceMs(1);
-+  EXPECT_EQ(stops_, 1);
-+  EXPECT_FALSE(recording_);
-+  AdvanceMs(1000);
-+  EXPECT_EQ(stops_, 1);
-+  EXPECT_EQ(starts_, 1);
++  ExpectStoppedOnce();
 +}
 +
 +TEST_F(AudioStateRecordingHoldTest, UnmuteDuringHoldKeepsRecording) {
@@ -702,6 +773,23 @@ index 7b6f9f5..7c641c0 100644
 +  EXPECT_TRUE(recording_);
 +}
 +
++TEST_F(AudioStateRecordingHoldTest, StaleCapDoesNotCutTheNextHold) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(150);
++  Unmute();
++  AdvanceMs(30);
++  // At 180 ms: a second hold, capped at 380 ms.
++  Mute();
++  ASSERT_EQ(stops_, 0) << "the second mute stopped recording: no hold";
++  ASSERT_TRUE(recording_);
++  // The first hold's cap, at 200 ms, does nothing.
++  AdvanceMs(199);
++  EXPECT_EQ(stops_, 0);
++  EXPECT_TRUE(recording_);
++  AdvanceMs(1);
++  ExpectStoppedOnce();
++}
++
 +TEST_F(AudioStateRecordingHoldTest, PollStopsRecordingWhenNotTransparent) {
 +  StartCallAndMuteTransparent();
 +  AdvanceMs(50);
@@ -709,11 +797,49 @@ index 7b6f9f5..7c641c0 100644
 +  apm_->transparent = false;
 +  // The next poll, 10 ms at most.
 +  AdvanceMs(10);
-+  EXPECT_EQ(stops_, 1);
-+  EXPECT_FALSE(recording_);
-+  AdvanceMs(1000);
-+  EXPECT_EQ(stops_, 1);
-+  EXPECT_EQ(starts_, 1);
++  ExpectStoppedOnce();
++}
++
++TEST_F(AudioStateRecordingHoldTest, PollStopsRecordingWhenDevicesChange) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(50);
++  ASSERT_EQ(stops_, 0);
++  MarkAudioDevicesChanged();
++  // The next poll, 10 ms at most.
++  AdvanceMs(10);
++  ExpectStoppedOnce();
++}
++
++TEST_F(AudioStateRecordingHoldTest, RecordingOffDuringHoldStopsOnce) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(50);
++  OnWorker([this] { audio_state_->SetRecording(false); });
++  ExpectStoppedOnce();
++}
++
++TEST_F(AudioStateRecordingHoldTest, PlayoutOffDuringHoldStopsOnce) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(50);
++  OnWorker([this] { audio_state_->SetPlayout(false); });
++  ExpectStoppedOnce();
++}
++
++TEST_F(AudioStateRecordingHoldTest, StreamReceivedRemovedDuringHoldStopsOnce) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(50);
++  OnWorker([this] { audio_state_->RemoveReceivingStream(&receive_stream_); });
++  receiving_ = false;
++  ExpectStoppedOnce();
++}
++
++TEST_F(AudioStateRecordingHoldTest, StreamReceivedAddedDuringHoldStopsOnce) {
++  StartCallAndMuteTransparent();
++  AdvanceMs(50);
++  OnWorker([this] {
++    audio_state_->AddReceivingStream(&other_receive_stream_);
++  });
++  other_receiving_ = true;
++  ExpectStoppedOnce();
 +}
 +
  }  // namespace test
