@@ -712,18 +712,65 @@ mod tests {
         node.shutdown().await.unwrap();
     }
 
-    /// A record that failed on its way may have got there, only its answer lost: it is not
-    /// sent again unasked, however often the copy it would send fails too, and goes again
-    /// only to a member whose roster names another record, never to one whose roster names
-    /// it.
+    /// A record that failed on its way to a member (its connection closed, no answer in
+    /// time) goes again at the next check of the links, unasked, 2 s after the failure and
+    /// 4 s after the next, and not a third time: past those, only a roster that names
+    /// another record sends it. It does not go to a member that is gone, nor once answered.
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_record_that_may_have_got_there_goes_again_only_to_a_member_without_it() {
+    async fn a_record_that_failed_outright_goes_again_soon_unasked_twice() {
+        let (node, group) = lone_member();
+        let found = inspect(&node, move |n| {
+            let bea = with_records(n, group);
+            n.send_banner_to(group, &[bea]);
+            n.send_picture_to(group, &[bea]);
+            let second = Duration::from_secs(1);
+            let mut seen = Vec::new();
+            // The wait after each failure: 2 s, then 4 s.
+            for wait in [2, 4] {
+                lose_records(n, bea);
+                // Not before its time.
+                records_age(n, group, bea, second * (wait - 1));
+                n.send_lost_records();
+                seen.push(records_to(n, bea));
+                records_age(n, group, bea, second);
+                n.send_lost_records();
+                seen.push(records_to(n, bea));
+            }
+            // The third failure in a row: not again unasked, however long it waits.
+            lose_records(n, bea);
+            records_age(n, group, bea, Duration::from_secs(60));
+            n.send_lost_records();
+            seen.push(records_to(n, bea));
+            // At the member's roster, as before.
+            roster_of(n, group, bea, false);
+            seen.push(records_to(n, bea));
+            // A member that is gone is not sent it.
+            lose_records(n, bea);
+            n.groups.get_mut(&group).unwrap().members.remove(&bea);
+            records_age(n, group, bea, Duration::from_secs(60));
+            n.send_lost_records();
+            seen.push(records_to(n, bea));
+            seen
+        })
+        .await;
+        let (none, both) = ((0, 0), (1, 1));
+        assert_eq!(found, vec![none, both, none, both, none, both, none]);
+        node.shutdown().await.unwrap();
+    }
+
+    /// A record that failed on its way may have got there, only its answer lost: it is
+    /// sent again unasked only a couple of times (`RECORD_LOST_UNASKED`), however often
+    /// the copy it would send fails too, and after that goes again only to a member whose
+    /// roster names another record, never to one whose roster names it.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_record_that_may_have_got_there_goes_again_unasked_only_twice() {
         let (node, group) = lone_member();
         let found = inspect(&node, move |n| {
             let (bea, cai) = (with_records(n, group), with_records(n, group));
             n.send_banner_to(group, &[bea, cai]);
             n.send_picture_to(group, &[bea, cai]);
-            // Bea took both, and each answer was lost; the links are checked every 2 s.
+            // Bea took both, and each answer was lost; the links are checked every 2 s. The
+            // two unasked tries each is allowed are all that go.
             let mut copies = (0, 0);
             for _ in 0..30 {
                 lose_records(n, bea);
@@ -735,7 +782,8 @@ mod tests {
             // Its roster names both: nothing goes.
             roster_of(n, group, bea, true);
             let bea_roster = records_to(n, bea);
-            // Cai lacks both: they go at its roster.
+            // Cai lacks both: they go unasked at the next check, and its roster adds no
+            // copy while they are on their way.
             lose_records(n, cai);
             records_age(n, group, cai, Duration::from_secs(20));
             n.send_lost_records();
@@ -744,7 +792,7 @@ mod tests {
             (copies, bea_roster, unasked, records_to(n, cai))
         })
         .await;
-        assert_eq!(found, ((0, 0), (0, 0), (0, 0), (1, 1)));
+        assert_eq!(found, ((2, 2), (0, 0), (1, 1), (1, 1)));
         node.shutdown().await.unwrap();
     }
 
@@ -966,7 +1014,8 @@ mod tests {
 
     /// A record whose dial failed never left: it goes again unasked as one dropped before
     /// it left, a little later, not held back as one that may have got there. One whose
-    /// connection closed on its way still waits for the member's roster.
+    /// connection closed on its way goes again unasked too, after the same wait (at most
+    /// twice; see `a_record_that_failed_outright_goes_again_soon_unasked_twice`).
     #[tokio::test(flavor = "multi_thread")]
     async fn a_record_whose_dial_failed_goes_again_as_one_that_never_left() {
         let (node, group) = lone_member();
@@ -1004,7 +1053,7 @@ mod tests {
         })
         .await;
         let (unsent, lost) = (((0, 1), (0, 1)), ((1, 0), (1, 0)));
-        assert_eq!(found, ((unsent, lost), (1, 1), (0, 0)));
+        assert_eq!(found, ((unsent, lost), (1, 1), (1, 1)));
         node.shutdown().await.unwrap();
     }
 }
