@@ -1,0 +1,72 @@
+From 9001852b0cddc0f6bcca7795c55b6ef91bee8406 Mon Sep 17 00:00:00 2001
+From: Holy Panda <239265931+holypandadev@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 16:45:00 +0000
+Subject: [PATCH] kept filters: keep an output back at a moved delay in its own
+ slot
+
+When the filters of an output that comes back further off than the lags of
+the tests are not taken back, no slot was set for it and its filters were
+kept in the slot kept least recently, which can be the other output's. They
+are now kept in the slot whose filters match the ones in use where each is
+aligned to its delay, the nearest such slot.
+---
+ .../audio_processing/aec3/block_processor.cc  | 36 ++++++++++++++-----
+ 1 file changed, 28 insertions(+), 8 deletions(-)
+
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index 5354c68..d1fde7a 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -210,14 +210,14 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+     // The filters in use, if they have converged, are kept with the delay they
+     // are aligned to, in the slot of the output in use (whose filters were
+     // taken back for it, or match them at a delay within the lags of the tests:
+-    // its delay may have moved a little) or else in the slot kept least
+-    // recently, and the filters of the other slots are tested at their delay:
+-    // the output used before the current one comes back at a switch to the
+-    // other output and back, or from a headset, whose filters are not kept. The
+-    // filters just kept are tested too, once the old output's echo is over: a
+-    // restart can keep the output, and two outputs whose filters match share a
+-    // slot. When more than one slot fits, those of the other slots are taken
+-    // back.
++    // its delay may have moved a little; or match them where each is aligned:
++    // its delay moved further) or else in the slot kept least recently, and the
++    // filters of the other slots are tested at their delay: the output used
++    // before the current one comes back at a switch to the other output and
++    // back, or from a headset, whose filters are not kept. The filters just
++    // kept are tested too, once the old output's echo is over: a restart can
++    // keep the output, and two outputs whose filters match share a slot. When
++    // more than one slot fits, those of the other slots are taken back.
+     just_kept_filters_slot_.reset();
+     if (aligned_delay_ && echo_remover_->FilterConvergenceSeen()) {
+       size_t slot = (last_kept_filters_slot_ + 1) % kept_filters_delays_.size();
+@@ -237,6 +237,26 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+             slot_blocks = std::abs(blocks);
+           }
+         }
++        // An output back further off than that, whose filters were not taken
++        // back, is still the output of the slot whose filters match the ones
++        // in use where each is aligned (its delay moved): they are kept there,
++        // the nearest such slot, not in the slot of another output.
++        if (slot_blocks > EchoRemover::kKeptFiltersMaxLagBlocks) {
++          std::optional<int> moved_blocks;
++          for (size_t k = 0; k < kept_filters_delays_.size(); ++k) {
++            if (!kept_filters_delays_[k]) {
++              continue;
++            }
++            const int blocks =
++                std::abs(static_cast<int>(*aligned_delay_) -
++                         static_cast<int>(*kept_filters_delays_[k]));
++            if ((!moved_blocks || blocks < *moved_blocks) &&
++                echo_remover_->KeptFiltersMatch(k, 0)) {
++              slot = k;
++              moved_blocks = blocks;
++            }
++          }
++        }
+       }
+       echo_remover_->KeepFilters(slot);
+       kept_filters_delays_[slot] = aligned_delay_;
+-- 
+2.43.0
+
