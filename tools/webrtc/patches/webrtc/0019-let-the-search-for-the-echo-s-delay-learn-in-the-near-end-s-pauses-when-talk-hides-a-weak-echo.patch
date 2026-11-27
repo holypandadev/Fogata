@@ -76,11 +76,10 @@ plays to headphones (0018's signal): no echo is to be expected there, and in suc
 usual search may find none at all. With the signal on, everything above is as without this,
 and the second search's delay is used only once its filters have held back, so that one that
 starts late, when the sound stops playing to headphones, does not stand in for the usual one.
-The suppressor's floor also goes at once while the signal is on, even with the second search's
-delay in use: the near end's talk is not reported then. When the signal goes off, the second
-search goes on from where it stopped (if the usual one has still found no delay), and the floor
-comes back on the near end's talk for whatever is left of its 17 s from when the delay was found;
-a change of the delay meanwhile ends it, as at any other time.
+The suppressor's floor also goes at once and for good when the signal comes on, even with the
+second search's delay in use: the delay is then no longer reported as found in the near end's
+talk, and that ends the floor as a delay from the usual search does. When the signal goes off,
+the second search goes on from where it stopped (if the usual one has still found no delay).
 Sound to headphones switching in a call (plug, unplug, a wrong report and a late one, with and
 without the signal; 480 runs): with the signal identical; without it 7 runs differ, the echo 4
 to 8 dB lower in 3 windows and never more than 3 dB higher.
@@ -98,7 +97,7 @@ index 1a5f75c..e2085c6 100644
        "../../../rtc_base:random",
        "../../../rtc_base:stringutils",
 diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
-index 62e8449..ec35fb0 100644
+index 62e8449..12e2d8a 100644
 --- a/modules/audio_processing/aec3/aec_state.cc
 +++ b/modules/audio_processing/aec3/aec_state.cc
 @@ -14,6 +14,7 @@
@@ -122,7 +121,7 @@ index 62e8449..ec35fb0 100644
    if (echo_path_variability.delay_change !=
        EchoPathVariability::DelayAdjustment::kNone) {
      full_reset();
-@@ -203,6 +210,35 @@ void AecState::Update(
+@@ -203,6 +210,39 @@ void AecState::Update(
      std::span<const SubtractorOutput> subtractor_output) {
    RTC_DCHECK_EQ(num_capture_channels_, Y2.size());
    RTC_DCHECK_EQ(num_capture_channels_, subtractor_output.size());
@@ -145,7 +144,11 @@ index 62e8449..ec35fb0 100644
 +  if (external_delay && !delay_known_ && external_delay->found_in_near_talk) {
 +    near_talk_ramp_blocks_ =
 +        kNearTalkFullBlocks + kNearTalkRampBlocks + kNearTalkTailBlocks;
-+  } else if (!external_delay) {
++  } else if (!external_delay || !external_delay->found_in_near_talk) {
++    // Fogata: also when the delay in use is no longer one found in the near
++    // end's talk: from the usual search, or while the sound plays to
++    // headphones (EchoPathDelayEstimator::NearTalkHeld), where the floor goes
++    // at once and for good, as without it.
 +    near_talk_ramp_blocks_ = 0;
 +  } else if (near_talk_ramp_blocks_ > 0) {
 +    --near_talk_ramp_blocks_;
@@ -206,6 +209,77 @@ index 17649bf..9ec6f57 100644
  
    // Class for analyzing how well the linear filter is, and can be expected to,
    // perform on the current signals. The purpose of this is for using to
+diff --git a/modules/audio_processing/aec3/aec_state_unittest.cc b/modules/audio_processing/aec3/aec_state_unittest.cc
+index 807c45c..5c57f42 100644
+--- a/modules/audio_processing/aec3/aec_state_unittest.cc
++++ b/modules/audio_processing/aec3/aec_state_unittest.cc
+@@ -308,4 +308,66 @@ TEST(AecState, ConvergedFilterDelay) {
+   }
+ }
+ 
++// Fogata: the suppressor's floor for the near end's talk, after a delay found
++// in that talk, ends for good once the delay in use is no longer reported as
++// found there (as while the sound plays to headphones), even when it is
++// reported so again later.
++TEST(AecState, NearTalkGainFloorEndsForGoodWhenNoLongerFoundInNearTalk) {
++  constexpr size_t kNumCaptureChannels = 1;
++  EchoCanceller3Config config;
++  AecState state(CreateTestEnvironment(), config, kNumCaptureChannels);
++  std::unique_ptr<RenderDelayBuffer> render_delay_buffer(
++      RenderDelayBuffer::Create(config, 48000, 1));
++  std::vector<std::array<float, kFftLengthBy2Plus1>> E2_refined(
++      kNumCaptureChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> Y2(kNumCaptureChannels);
++  std::vector<SubtractorOutput> subtractor_output(kNumCaptureChannels);
++  for (auto& output : subtractor_output) {
++    output.Reset();
++  }
++  std::array<float, kBlockSize> y;
++  y.fill(0.f);
++  std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>
++      frequency_response(
++          kNumCaptureChannels,
++          std::vector<std::array<float, kFftLengthBy2Plus1>>(
++              config.filter.refined.length_blocks));
++  for (auto& v_ch : frequency_response) {
++    for (auto& v : v_ch) {
++      v.fill(0.f);
++    }
++  }
++  std::vector<std::vector<float>> impulse_response(
++      kNumCaptureChannels,
++      std::vector<float>(
++          GetTimeDomainLength(config.filter.refined.length_blocks), 0.f));
++
++  auto update = [&](bool found_in_near_talk) {
++    DelayEstimate delay(DelayEstimate::Quality::kRefined, 50);
++    delay.found_in_near_talk = found_in_near_talk;
++    delay.near_talk_now = true;
++    std::optional<DelayEstimate> delay_estimate = delay;
++    subtractor_output[0].ComputeMetrics(y);
++    state.Update(delay_estimate, frequency_response, impulse_response,
++                 *render_delay_buffer->GetRenderBuffer(), E2_refined, Y2,
++                 subtractor_output);
++  };
++
++  // A delay found in the near end's talk: the floor is on while it talks.
++  for (int k = 0; k < 10; ++k) {
++    update(/*found_in_near_talk=*/true);
++  }
++  EXPECT_GT(state.NearTalkGainFloor(), 0.f);
++
++  // No longer reported as found in that talk (headphones): gone at once.
++  update(/*found_in_near_talk=*/false);
++  EXPECT_EQ(state.NearTalkGainFloor(), 0.f);
++
++  // Reported so again, at the same delay: it does not come back.
++  for (int k = 0; k < 10; ++k) {
++    update(/*found_in_near_talk=*/true);
++    EXPECT_EQ(state.NearTalkGainFloor(), 0.f);
++  }
++}
++
+ }  // namespace webrtc
 diff --git a/modules/audio_processing/aec3/delay_estimate.h b/modules/audio_processing/aec3/delay_estimate.h
 index 2ba03fd..b5f199e 100644
 --- a/modules/audio_processing/aec3/delay_estimate.h
@@ -404,7 +478,7 @@ index 33df130..7ffb4a1 100644
    // Internal reset method with more granularity.
    void Reset(bool reset_lag_aggregator, bool reset_delay_confidence);
 diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator_unittest.cc b/modules/audio_processing/aec3/echo_path_delay_estimator_unittest.cc
-index 1fbac76..90a4181 100644
+index 1fbac76..e0d2027 100644
 --- a/modules/audio_processing/aec3/echo_path_delay_estimator_unittest.cc
 +++ b/modules/audio_processing/aec3/echo_path_delay_estimator_unittest.cc
 @@ -11,12 +11,15 @@
@@ -529,7 +603,7 @@ index 1fbac76..90a4181 100644
  }  // namespace
  
  class EchoPathDelayEstimatorMultiChannel
-@@ -164,6 +266,72 @@ TEST(EchoPathDelayEstimator, NoDelayEstimatesForLowLevelRenderSignals) {
+@@ -164,6 +266,73 @@ TEST(EchoPathDelayEstimator, NoDelayEstimatesForLowLevelRenderSignals) {
    }
  }
  
@@ -571,7 +645,8 @@ index 1fbac76..90a4181 100644
 +
 +// Fogata: while the sound plays to headphones no echo is to be expected, and
 +// the near end's talk is no longer reported for the second search's delay in
-+// use (the suppressor's floor goes at once); it is again once it stops.
++// use, so the suppressor's floor goes at once and for good (AecState); the
++// talk is reported again once it stops.
 +TEST(EchoPathDelayEstimator, HeadphonesEndNearTalkAtOnce) {
 +  ScopedPlayoutToHeadphones headphones(false);
 +  NearTalkCall call;
