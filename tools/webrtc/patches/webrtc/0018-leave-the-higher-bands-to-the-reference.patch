@@ -1,0 +1,62 @@
+Leave the higher bands to the reference
+
+The higher bands have no linear filter, so the improved filters take no echo away
+there. Yet they took the improved suppressor's gain whenever its error in the low
+bands was well below the reference's, or about the same and its gain the larger.
+In music that gain is often far larger (its lower residual echo estimate takes the
+nearend for dominant), and the echo above 8 kHz passed at that gain. They now take
+the reference's gain and comfort noise, as AEC3 has them.
+
+Measured in an AEC3-only simulation at 32 kHz (two bands; 40 runs per case, music
+and speech, echo alone and with nearend speech): before, music's echo above 8 kHz
+was more than 3 dB louder than before the improved filters in 48 of 3,040
+windows, up to 28.9 dB; now the higher bands are the same as AEC3's to the sample.
+The low bands do not change, nor does anything at 16 kHz.
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -65,8 +65,6 @@
+ // Where both leave about the same error, the improved output is at most this
+ // many times more powerful than the reference's.
+ constexpr float kMaxPowerOverReference = 4.f;
+-// Bins summed to choose the gain of the higher bands.
+-constexpr size_t kReferenceLowBandBins = 16;
+ 
+ // Maximum number of channels for which the capture channel data is stored on
+ // the stack. If the number of channels are larger than this, they are stored
+@@ -734,30 +732,14 @@
+           }
+         }
+       }
+-      float e_low = 0.f;
+-      float e_reference_low = 0.f;
+-      for (size_t k = 1; k < kReferenceLowBandBins; ++k) {
+-        e_low += error_smoothed_[k];
+-        e_reference_low += reference_error_smoothed_[k];
+-      }
+-      bool reference_high_bands;
+-      if (reference_only || e_low > kMoreErrorThanReference * e_reference_low) {
+-        reference_high_bands = true;
+-      } else if (e_low > kLessErrorThanReference * e_reference_low) {
+-        reference_high_bands = reference_high_bands_gain > high_bands_gain;
+-      } else {
+-        reference_high_bands = false;
+-      }
+-      if (reference_high_bands) {
+-        high_bands_gain = reference_high_bands_gain;
+-      }
++      // The improved filters take no echo away in the higher bands, which have
++      // no linear filter: these take the reference's gain and comfort noise,
++      // as AEC3 has them.
+       G = G_out;
+       suppression_filter_.ApplyGain(
+           comfort_noise_out,
+-          reference_high_bands
+-              ? std::span<const FftData>(reference_high_band_comfort_noise)
+-              : std::span<const FftData>(high_band_comfort_noise),
+-          G, high_bands_gain, Y_out, y);
++          std::span<const FftData>(reference_high_band_comfort_noise), G,
++          reference_high_bands_gain, Y_out, y);
+     }
+ 
+   } else {
