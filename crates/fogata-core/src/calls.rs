@@ -545,7 +545,18 @@ impl Core {
             Ok(()) => send(&self.inner, friend, group, signal).await,
             Err(e) => Err(e),
         };
-        if let Err(e) = rung {
+        // A friend already in the call's room when this device came in (a call it went back
+        // to) answered it by being there (see `on_joined`): the ring not sent does not end it.
+        let in_room = || {
+            self.inner
+                .lock()
+                .calls
+                .get(&group)
+                .is_some_and(|c| c.phase == CallPhase::Connected)
+        };
+        if let Err(e) = rung
+            && !in_room()
+        {
             finish(&self.inner, group, CallEnd::Unreachable).await;
             let_go(&self.inner, group).await;
             return Err(e);
@@ -1689,24 +1700,43 @@ async fn people_in_room(inner: &Inner, group: GroupId) -> Vec<DevicePublicKey> {
 }
 
 /// Someone came into the call's room as `nick`: no longer away, nor waited for, nor rung.
-/// Those who left hear that the call goes on.
+/// Those who left hear that the call goes on. The friend this device rings comes into the
+/// room only by answering, so that counts as the answer: its `Accept` may never arrive (the
+/// friend's application closed right after answering), and the call would otherwise ring
+/// on with the friend in it, and never count it gone.
 pub(crate) async fn on_joined(
     inner: &Arc<Inner>,
     group: GroupId,
     device: DevicePublicKey,
     nick: &str,
 ) {
-    let changed = inner.lock().calls.get_mut(&group).is_some_and(|c| {
-        c.seen.insert(device);
-        if !nick.is_empty() && c.log.shared_state().creator == Some(device) {
-            c.starter_nick = Some(nick.to_owned());
+    let (changed, accepted) = {
+        let mut state = inner.lock();
+        let accepted = state
+            .calls
+            .get(&group)
+            .is_some_and(|c| c.outgoing && c.phase == CallPhase::Ringing && c.with == device);
+        if accepted {
+            answered(&mut state, group);
         }
-        c.heard = true;
-        let away = c.left.remove(&device).is_some();
-        let rung = c.adding.remove(&device).is_some();
-        away || rung || c.alone_since.is_some()
-    });
-    if changed {
+        let changed = state.calls.get_mut(&group).is_some_and(|c| {
+            c.seen.insert(device);
+            if !nick.is_empty() && c.log.shared_state().creator == Some(device) {
+                c.starter_nick = Some(nick.to_owned());
+            }
+            c.heard = true;
+            let away = c.left.remove(&device).is_some();
+            let rung = c.adding.remove(&device).is_some();
+            away || rung || c.alone_since.is_some()
+        });
+        (changed, accepted)
+    };
+    if accepted {
+        tell_capable(inner, group, device).await;
+        inner.emit(CoreEvent::CallAccepted { group });
+        inner.emit(CoreEvent::CallsChanged);
+    }
+    if changed || accepted {
         check_alone(inner, group).await;
         tell_going(inner, group, &[]).await;
     }
@@ -3771,6 +3801,35 @@ mod tests {
         let answered = rung_back_meanwhile(&ana, bea.me(), group, "letting go");
         ana.end_call(group).await.unwrap();
         back_in(&ana, group, &answered).await;
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The friend rung comes into the call's room, and its answer is lost (its application
+    /// closed right after answering): the call counts as answered all the same, and once the
+    /// friend leaves, this device waits in it alone.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_friend_rung_who_comes_into_the_room_has_answered() {
+        let base = std::env::temp_dir().join(format!("fogata-call-joined-{}", std::process::id()));
+        let (ana, bea) = ana_alone(&base);
+        let mut log = GroupLog::create(&ana.inner.identity, "Call", now_ms()).unwrap();
+        log.add(&ana.inner.identity, bea.public_key(), "Bea", now_ms())
+            .unwrap();
+        let group = log.group_id();
+        ana.inner.lock().calls.insert(
+            group,
+            CallEntry::new(bea.public_key(), true, CallPhase::Ringing, log),
+        );
+        on_joined(&ana.inner, group, bea.public_key(), "Bea").await;
+        let phase = ana.inner.lock().calls.get(&group).map(|c| c.phase);
+        assert_eq!(phase, Some(CallPhase::Connected));
+        on_left(&ana.inner, group, bea.public_key()).await;
+        let alone = ana
+            .inner
+            .lock()
+            .calls
+            .get(&group)
+            .map(|c| c.alone_since.is_some());
+        assert_eq!(alone, Some(true));
         let _ = std::fs::remove_dir_all(&base);
     }
 
