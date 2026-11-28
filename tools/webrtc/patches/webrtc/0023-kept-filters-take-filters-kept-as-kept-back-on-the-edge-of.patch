@@ -1,0 +1,70 @@
+From 983651ddaa4aa000dbe66789ceefe62f67e24685 Mon Sep 17 00:00:00 2001
+From: Holy Panda <239265931+holypandadev@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 02:01:59 +0000
+Subject: [PATCH] kept filters: take filters kept as kept back on the edge of
+ two blocks at the delay found
+
+Filters taken back further than the lags of the tests from the delay they
+were kept at stay in their slot as kept, at that delay. When their output
+comes back after the render moved to the delay found since the restart, they
+can fit three quarters of a block after the delay below it (or a quarter
+before the delay above): both keep their start. They are now taken back at
+the delay found, so the render does not move a block away from it and is not
+realigned later, which started the filters anew.
+---
+ .../audio_processing/aec3/block_processor.cc   | 18 ++++++++++++++++++
+ 1 file changed, 18 insertions(+)
+
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index 3d3a2d9..98241df 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -92,6 +92,9 @@ class BlockProcessorImpl final : public BlockProcessor {
+   std::array<std::optional<size_t>, EchoRemover::kKeptFiltersSlots>
+       kept_filters_delays_;
+   size_t last_kept_filters_slot_ = 0;
++  // Whether the filters of each slot were taken back further than the lags of
++  // the tests from the delay they were kept at: the slot keeps them as kept.
++  std::array<bool, EchoRemover::kKeptFiltersSlots> kept_filters_lent_ = {};
+   // The slot kept at the last restart, if any: its filters are taken back
+   // only when those of no other slot fit.
+   std::optional<size_t> just_kept_filters_slot_;
+@@ -284,6 +287,7 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+       }
+       echo_remover_->KeepFilters(slot);
+       kept_filters_delays_[slot] = aligned_delay_;
++      kept_filters_lent_[slot] = false;
+       last_kept_filters_slot_ = slot;
+       just_kept_filters_slot_ = slot;
+     }
+@@ -405,6 +409,18 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+           ++delay;
+           shift -= kBlock;
+         }
++        // Filters a slot keeps as kept, at the delay they were kept at, that
++        // fit on the edge of two blocks are taken back at the delay found
++        // since the restart, if it is one of the two: the render stays there.
++        if (kept_filters_lent_[*slot] && detected_delay_) {
++          if (shift == 3 * kBlock / 4 && delay + 1 == *detected_delay_) {
++            ++delay;
++            shift -= kBlock;
++          } else if (shift == -kBlock / 4 && delay == *detected_delay_ + 1) {
++            --delay;
++            shift += kBlock;
++          }
++        }
+         const size_t delay_before = render_buffer_->Delay();
+         const bool delay_change = render_buffer_->AlignFromDelay(delay);
+         // A delay beyond the buffer is aligned to its end (also when the
+@@ -453,6 +469,8 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+           taken_back_delay_ = delay;
+           if (shift_slot) {
+             kept_filters_delays_[*slot] = delay;
++          } else {
++            kept_filters_lent_[*slot] = true;
+           }
+           output_filters_slot_ = *slot;
+           blocks_to_end_kept_filters_retests_ = 0;
+-- 
+2.43.0
+

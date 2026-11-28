@@ -1,0 +1,73 @@
+From beb43c5ec1fc344f2eb55a22b18231c214a19a49 Mon Sep 17 00:00:00 2001
+From: Holy Panda <239265931+holypandadev@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 18:23:05 +0000
+Subject: [PATCH] kept filters: keep filters taken back far off in an empty
+ slot first
+
+Filters just kept that fit at a delay further off than the lags of the
+tests are taken back as they were kept, and their slot keeps them at the
+delay they were kept at. The output that took them can be another output
+whose echo matches, so at the next restart its filters were kept over
+them, and the output they were kept for lost them. They are now kept in
+the slot of the output at its delay, if any, else in an empty slot, and
+only else in the slot they were taken back from.
+---
+ .../audio_processing/aec3/block_processor.cc  | 28 +++++++++++++++++--
+ 1 file changed, 26 insertions(+), 2 deletions(-)
+
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index d1fde7a..3d3a2d9 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -221,7 +221,17 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+     just_kept_filters_slot_.reset();
+     if (aligned_delay_ && echo_remover_->FilterConvergenceSeen()) {
+       size_t slot = (last_kept_filters_slot_ + 1) % kept_filters_delays_.size();
+-      if (output_filters_slot_) {
++      // Filters taken back at a delay further off than the lags of the tests
++      // from the one their slot keeps them at can be those of another output
++      // whose echo matches: that slot is the output's only when no slot is
++      // empty, and the output's own slot at its delay comes first.
++      const bool output_slot_off =
++          output_filters_slot_ && kept_filters_delays_[*output_filters_slot_] &&
++          std::abs(static_cast<int>(*aligned_delay_) -
++                   static_cast<int>(
++                       *kept_filters_delays_[*output_filters_slot_])) >
++              EchoRemover::kKeptFiltersMaxLagBlocks;
++      if (output_filters_slot_ && !output_slot_off) {
+         slot = *output_filters_slot_;
+       } else {
+         int slot_blocks = EchoRemover::kKeptFiltersMaxLagBlocks + 1;
+@@ -241,7 +251,8 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+         // back, is still the output of the slot whose filters match the ones
+         // in use where each is aligned (its delay moved): they are kept there,
+         // the nearest such slot, not in the slot of another output.
+-        if (slot_blocks > EchoRemover::kKeptFiltersMaxLagBlocks) {
++        if (slot_blocks > EchoRemover::kKeptFiltersMaxLagBlocks &&
++            !output_slot_off) {
+           std::optional<int> moved_blocks;
+           for (size_t k = 0; k < kept_filters_delays_.size(); ++k) {
+             if (!kept_filters_delays_[k]) {
+@@ -257,6 +268,19 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+             }
+           }
+         }
++        // Filters taken back further off are kept in an empty slot, if any,
++        // so that those taken back stay as they were kept; else in the slot
++        // they were taken back from.
++        if (slot_blocks > EchoRemover::kKeptFiltersMaxLagBlocks &&
++            output_slot_off) {
++          slot = *output_filters_slot_;
++          for (size_t k = 0; k < kept_filters_delays_.size(); ++k) {
++            if (!kept_filters_delays_[k]) {
++              slot = k;
++              break;
++            }
++          }
++        }
+       }
+       echo_remover_->KeepFilters(slot);
+       kept_filters_delays_[slot] = aligned_delay_;
+-- 
+2.43.0
+
