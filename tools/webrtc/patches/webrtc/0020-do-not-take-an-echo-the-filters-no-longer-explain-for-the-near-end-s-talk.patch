@@ -1,0 +1,212 @@
+Do not take an echo the filters no longer explain for the near end's talk
+
+When the echo path changes in a call (another output, an echo 30 ms nearer or
+farther), the filters no longer fit it and the refined filter adds energy instead
+of removing it, while the residual echo estimate, scaled by an ERLE learnt before
+the change, falls far below the echo left in the near end signal. The dominant
+near end detector then takes that echo for the near end's talk, the suppressor
+goes transparent for some 300 ms, and the echo goes through. With patch 0019 the
+echo of 2 ms is cancelled well (ERLE some 17 dB, where main does not reach it),
+so after a change to 30 ms this happened more often than with main.
+
+The suppressor now gets whether the refined filter adds energy on all capture
+channels. When it does and the linear echo estimate says more echo than the near
+end holds in the detector's bands (1 to 15), in a share of the latest blocks of
+0.15 or more (a mean with a rate of 1/16; three such blocks in a row), the
+detector is fed the near end as the echo, which neither starts nor ends its
+near end state. In double talk this comes in single blocks and changes nothing.
+
+Tried and dropped: holding the detector for 50 blocks once both filters diverge
+(words -0.85 dB); a correlation gate between the error and the echo estimate
+(words -0.26 to -0.57 dB); ending the near end state at once on such blocks
+(words -0.13 to -0.41 dB); the same gate without the share (words -0.06 dB).
+
+Simulator (AEC3 alone, 16 kHz, headroom 512, speech-like ends, room responses,
+the same seeds), against this branch with 0019 and against main:
+- a change of output in a call, 30 to 2 ms and back (72 runs): runs with 1 dB or
+  more of echo than main 14 before, 6 now (main against itself with dither: 9);
+  echo 3.9 dB below main on average (before 0.3); 22 runs with less echo than
+  before, none with more; words unchanged;
+- a change in a call, 2 to 180 ms (54 runs): 11 runs with less echo, none more;
+- a change between a short and a long echo (60/10, 50/5, 40/8, 100/10 ms both
+  ways, 96 runs): 3 runs with less echo, none more;
+- unmute after a change of output, short echo (192 and 96 runs), normal delays
+  (84 runs), unmute grids: echo unchanged; of over 9,000 words, 2 lose 3 dB or
+  more (both at an echo of -6 dB, in double talk right after the restart), no
+  other word moves by 1 dB.
+Unit tests: the near end is found while the refined filter adds no energy; an
+echo the filters no longer explain, block after block, is not taken for it;
+single such blocks leave the detection as it is; it comes back afterwards.
+
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+index 29d8140..d3339d4 100644
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -524,6 +524,14 @@ void EchoRemoverImpl::ProcessCapture(
+     const bool config_changed = (ml_ree_is_active != ml_ree_was_active_);
+     ml_ree_was_active_ = ml_ree_is_active;
+ 
++    // Fogata: tell the suppressor whether the refined filter adds energy.
++    bool refined_filter_adds_energy = true;
++    for (const auto& output : subtractor_output) {
++      refined_filter_adds_energy =
++          refined_filter_adds_energy && output.e2_refined > output.y2;
++    }
++    suppression_gain_.SetRefinedFilterAddsEnergy(refined_filter_adds_energy);
++
+     // Compute preferred gains.
+     float high_bands_gain;
+     suppression_gain_.GetGain(active_suppressor_config, config_changed,
+diff --git a/modules/audio_processing/aec3/suppression_gain.cc b/modules/audio_processing/aec3/suppression_gain.cc
+index fe9c46e..606731f 100644
+--- a/modules/audio_processing/aec3/suppression_gain.cc
++++ b/modules/audio_processing/aec3/suppression_gain.cc
+@@ -412,9 +412,41 @@ void SuppressionGain::GetGain(
+           ? residual_echo_spectrum_unbounded
+           : residual_echo_spectrum;
+ 
++  // Fogata: when the echo path changes in a call, the filters no longer fit
++  // it and the refined filter adds energy, while the residual echo estimate,
++  // scaled by an ERLE learnt before the change, falls far below the echo left
++  // in the nearend signal. The dominant nearend detector then takes that echo
++  // for the nearend's talk and lets it through. When the refined filter adds
++  // energy and the linear echo estimate says more echo than the nearend holds
++  // in the detector's bands, in a good share of the latest blocks (in double
++  // talk this comes in single blocks), the echo is not counted as nearend: an
++  // echo as strong as the nearend neither starts nor ends the nearend state.
++  bool unexplained_echo = false;
++  if (refined_filter_adds_energy_) {
++    for (size_t ch = 0; ch < nearend_spectrum.size(); ++ch) {
++      const float echo_sum = std::accumulate(echo_spectrum[ch].begin() + 1,
++                                             echo_spectrum[ch].begin() + 16, 0.f);
++      const float nearend_sum =
++          std::accumulate(nearend_spectrum[ch].begin() + 1,
++                          nearend_spectrum[ch].begin() + 16, 0.f);
++      unexplained_echo = unexplained_echo || echo_sum > nearend_sum;
++    }
++  }
++  constexpr float kUnexplainedEchoShareRate = 1.f / 16.f;
++  constexpr float kUnexplainedEchoShareThreshold = 0.15f;
++  unexplained_echo_share_ +=
++      ((unexplained_echo ? 1.f : 0.f) - unexplained_echo_share_) *
++      kUnexplainedEchoShareRate;
++
+   // Update the nearend state selection.
+-  dominant_nearend_detector_->Update(nearend_spectrum, echo,
+-                                     comfort_noise_spectrum, initial_state_);
++  if (unexplained_echo &&
++      unexplained_echo_share_ >= kUnexplainedEchoShareThreshold) {
++    dominant_nearend_detector_->Update(nearend_spectrum, nearend_spectrum,
++                                       comfort_noise_spectrum, initial_state_);
++  } else {
++    dominant_nearend_detector_->Update(nearend_spectrum, echo,
++                                       comfort_noise_spectrum, initial_state_);
++  }
+ 
+   // Compute gain for the lower band.
+   bool low_noise_render = low_render_detector_.Detect(render);
+diff --git a/modules/audio_processing/aec3/suppression_gain.h b/modules/audio_processing/aec3/suppression_gain.h
+index 6d09207..540d732 100644
+--- a/modules/audio_processing/aec3/suppression_gain.h
++++ b/modules/audio_processing/aec3/suppression_gain.h
+@@ -67,6 +67,12 @@ class SuppressionGain {
+   // Toggles the usage of the initial state.
+   void SetInitialState(bool state);
+ 
++  // Fogata: sets whether the refined filter's output now holds more energy than
++  // the capture signal does, on all capture channels.
++  void SetRefinedFilterAddsEnergy(bool adds_energy) {
++    refined_filter_adds_energy_ = adds_energy;
++  }
++
+  private:
+   FRIEND_TEST_ALL_PREFIXES(SuppressionGainTest, UpdateStateDependingOnConfig);
+ 
+@@ -148,6 +154,10 @@ class SuppressionGain {
+   GainParameters nearend_params_;
+   GainParameters normal_params_;
+   std::unique_ptr<NearendDetector> dominant_nearend_detector_;
++  bool refined_filter_adds_energy_ = false;
++  // Fogata: share of the latest blocks where the linear echo estimate said
++  // more echo than the nearend held while the refined filter added energy.
++  float unexplained_echo_share_ = 0.f;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/suppression_gain_unittest.cc b/modules/audio_processing/aec3/suppression_gain_unittest.cc
+index 0b00ded..cff81cc 100644
+--- a/modules/audio_processing/aec3/suppression_gain_unittest.cc
++++ b/modules/audio_processing/aec3/suppression_gain_unittest.cc
+@@ -191,4 +191,72 @@ TEST(SuppressionGainTest, UpdateStateDependingOnConfig) {
+   EXPECT_EQ(suppression_gain.normal_params_.max_dec_factor_lf, 0.3f);
+ }
+ 
++namespace {
++
++// Runs `num_blocks` blocks of a strong nearend (E2) with a weak residual echo
++// estimate, a linear echo estimate (S2) above the nearend, and the refined
++// filter adding energy in the blocks `adds_energy` says, and returns whether
++// the suppressor ends in the dominant nearend state.
++bool EndsInNearendState(int num_blocks,
++                        bool (*adds_energy)(int block)) {
++  constexpr size_t kNumRenderChannels = 1;
++  constexpr size_t kNumCaptureChannels = 1;
++  constexpr int kSampleRateHz = 16000;
++  constexpr size_t kNumBands = NumBandsForRate(kSampleRateHz);
++  EchoCanceller3Config config;
++  SuppressionGain suppression_gain(config, DetectOptimization(), kSampleRateHz,
++                                   kNumCaptureChannels);
++  RenderSignalAnalyzer analyzer(config);
++  AecState aec_state(CreateTestEnvironment(), config, kNumCaptureChannels);
++  Block x(kNumBands, kNumRenderChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> E2(kNumCaptureChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> S2(kNumCaptureChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> R2(kNumCaptureChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> R2_unbounded(
++      kNumCaptureChannels);
++  std::vector<std::array<float, kFftLengthBy2Plus1>> N2(kNumCaptureChannels);
++  E2[0].fill(100.f);
++  S2[0].fill(1000.f);
++  R2[0].fill(0.1f);
++  R2_unbounded[0].fill(0.1f);
++  N2[0].fill(0.f);
++  float high_bands_gain;
++  std::array<float, kFftLengthBy2Plus1> g;
++  for (int k = 0; k < num_blocks; ++k) {
++    suppression_gain.SetRefinedFilterAddsEnergy(adds_energy(k));
++    suppression_gain.GetGain(config.suppressor, /*config_changed=*/false, E2,
++                             S2, R2, R2_unbounded, N2, analyzer, aec_state, x,
++                             /*clock_drift=*/false, &high_bands_gain, &g);
++  }
++  return suppression_gain.IsDominantNearend();
++}
++
++}  // namespace
++
++// Verifies that a strong signal over a weak residual echo estimate is taken for
++// the nearend's talk while the refined filter does not add energy.
++TEST(SuppressionGainTest, NearendDetectedWhileTheRefinedFilterAddsNoEnergy) {
++  EXPECT_TRUE(EndsInNearendState(100, [](int) { return false; }));
++}
++
++// Verifies that the echo left when the refined filter adds energy and the
++// linear echo estimate says more echo than the nearend holds, block after
++// block as after a change of the echo path, is not taken for the nearend.
++TEST(SuppressionGainTest, UnexplainedEchoAfterAnEchoPathChangeIsNoNearend) {
++  EXPECT_FALSE(EndsInNearendState(100, [](int) { return true; }));
++}
++
++// Verifies that single blocks where the refined filter adds energy, as in
++// double talk, leave the nearend detection as it is.
++TEST(SuppressionGainTest, SingleBlocksOfUnexplainedEchoKeepTheNearend) {
++  EXPECT_TRUE(EndsInNearendState(100, [](int k) { return k % 10 == 0; }));
++}
++
++// Verifies that the nearend state ends once the echo is unexplained for long
++// and comes back once the refined filter no longer adds energy.
++TEST(SuppressionGainTest, NearendDetectionComesBackAfterUnexplainedEcho) {
++  EXPECT_TRUE(
++      EndsInNearendState(300, [](int k) { return k >= 100 && k < 200; }));
++}
++
+ }  // namespace webrtc
