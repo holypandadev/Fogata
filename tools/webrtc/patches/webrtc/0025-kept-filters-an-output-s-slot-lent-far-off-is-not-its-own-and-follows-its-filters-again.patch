@@ -1,0 +1,219 @@
+From c2685c01db3f26503536717cfe6e84936d87aa4c Mon Sep 17 00:00:00 2001
+From: Holy Panda <239265931+holypandadev@users.noreply.github.com>
+Date: Sat, 28 Nov 2026 03:48:34 +0000
+Subject: [PATCH] kept filters: an output's slot lent far off is not its own,
+ and follows its filters again when taken back at their delay
+
+Which slot keeps the filters in use at a restart now depends on whether the
+output's slot keeps its filters as kept, not on how far the delay found is
+from it: an output whose render was aligned anew 3 blocks off keeps its
+filters in its own slot, and an output whose lent slot comes back within the
+lags of the tests no longer writes over it. A slot taken back within the lags
+follows its filters again and is no longer lent.
+---
+ .../audio_processing/aec3/block_processor.cc  |  27 ++--
+ .../aec3/block_processor_unittest.cc          | 127 ++++++++++++++++++
+ 2 files changed, 140 insertions(+), 14 deletions(-)
+
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+index 98241df..f219b7c 100644
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -224,22 +224,20 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+     just_kept_filters_slot_.reset();
+     if (aligned_delay_ && echo_remover_->FilterConvergenceSeen()) {
+       size_t slot = (last_kept_filters_slot_ + 1) % kept_filters_delays_.size();
+-      // Filters taken back at a delay further off than the lags of the tests
+-      // from the one their slot keeps them at can be those of another output
+-      // whose echo matches: that slot is the output's only when no slot is
+-      // empty, and the output's own slot at its delay comes first.
+-      const bool output_slot_off =
+-          output_filters_slot_ && kept_filters_delays_[*output_filters_slot_] &&
+-          std::abs(static_cast<int>(*aligned_delay_) -
+-                   static_cast<int>(
+-                       *kept_filters_delays_[*output_filters_slot_])) >
+-              EchoRemover::kKeptFiltersMaxLagBlocks;
+-      if (output_filters_slot_ && !output_slot_off) {
++      // Filters taken back further than the lags of the tests from the delay
++      // they were kept at, which their slot keeps as kept, can be those of
++      // another output whose echo matches: that slot is the output's only
++      // when no slot is empty, and an output's own slot at its delay comes
++      // first.
++      const bool output_slot_lent =
++          output_filters_slot_ && kept_filters_lent_[*output_filters_slot_];
++      if (output_filters_slot_ && !output_slot_lent) {
+         slot = *output_filters_slot_;
+       } else {
+         int slot_blocks = EchoRemover::kKeptFiltersMaxLagBlocks + 1;
+         for (size_t k = 0; k < kept_filters_delays_.size(); ++k) {
+-          if (!kept_filters_delays_[k]) {
++          if (!kept_filters_delays_[k] ||
++              (output_slot_lent && k == *output_filters_slot_)) {
+             continue;
+           }
+           const int blocks = static_cast<int>(*aligned_delay_) -
+@@ -255,7 +253,7 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+         // in use where each is aligned (its delay moved): they are kept there,
+         // the nearest such slot, not in the slot of another output.
+         if (slot_blocks > EchoRemover::kKeptFiltersMaxLagBlocks &&
+-            !output_slot_off) {
++            !output_slot_lent) {
+           std::optional<int> moved_blocks;
+           for (size_t k = 0; k < kept_filters_delays_.size(); ++k) {
+             if (!kept_filters_delays_[k]) {
+@@ -275,7 +273,7 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+         // so that those taken back stay as they were kept; else in the slot
+         // they were taken back from.
+         if (slot_blocks > EchoRemover::kKeptFiltersMaxLagBlocks &&
+-            output_slot_off) {
++            output_slot_lent) {
+           slot = *output_filters_slot_;
+           for (size_t k = 0; k < kept_filters_delays_.size(); ++k) {
+             if (!kept_filters_delays_[k]) {
+@@ -469,6 +467,7 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+           taken_back_delay_ = delay;
+           if (shift_slot) {
+             kept_filters_delays_[*slot] = delay;
++            kept_filters_lent_[*slot] = false;
+           } else {
+             kept_filters_lent_[*slot] = true;
+           }
+diff --git a/modules/audio_processing/aec3/block_processor_unittest.cc b/modules/audio_processing/aec3/block_processor_unittest.cc
+index 6819cf0..c22a30b 100644
+--- a/modules/audio_processing/aec3/block_processor_unittest.cc
++++ b/modules/audio_processing/aec3/block_processor_unittest.cc
+@@ -855,4 +855,131 @@ TEST(BlockProcessor, KeptFiltersTakenBackFarOffComeBackAtTheDelayFound) {
+   }
+ }
+ 
++// Fogata: output A's filters are kept at 10 blocks and taken back 20 samples
++// later, within the lags of the tests (their slot follows them). The echo then
++// moves 3 blocks later and the render is aligned there anew. At the next
++// restart the filters in use are still A's: they are kept in A's slot, not in
++// the empty one, and A is in one slot only.
++TEST(BlockProcessor, KeptFiltersOfAnOutputRealignedFarOffAreKeptInItsSlot) {
++  constexpr int kOutputA = 1;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  processor.SetOutput(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  processor.Restart(kOutputA, 10 * kBlock + 20, 10);
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  const size_t slot_a = echo_remover.keeps()[0];
++  ASSERT_EQ(1u, echo_remover.take_backs().size());
++  ASSERT_EQ(slot_a, echo_remover.take_backs()[0].slot);
++  ASSERT_TRUE(echo_remover.take_backs()[0].shift_slot);
++
++  // The echo moves 3 blocks later: once the delay is no longer held, the
++  // render is aligned to it anew.
++  const int delay_changes_before = echo_remover.delay_changes();
++  processor.SetOutput(kOutputA, 13 * kBlock, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(13u, processor.world().delay);
++  ASSERT_LT(delay_changes_before, echo_remover.delay_changes());
++
++  processor.Restart(kOutputA, 13 * kBlock, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(2u, echo_remover.keeps().size());
++  EXPECT_EQ(slot_a, echo_remover.keeps()[1]);
++  EXPECT_FALSE(echo_remover.slot(1 - slot_a));
++}
++
++// Fogata: A's filters, kept at 10 blocks, are taken back 3 blocks and 20
++// samples later, their slot keeping them as kept. The render then moves back
++// to 11, within the lags of the tests of the delay they were kept at. At the
++// next restart the filters in use are still kept in the empty slot: A's slot
++// is not written over.
++TEST(BlockProcessor, KeptFiltersTakenBackFarOffStayInTheirSlotBackNearThem) {
++  constexpr int kOutputA = 1;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  processor.SetOutput(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  processor.Restart(kOutputA, 13 * kBlock + 20, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  const size_t slot_a = echo_remover.keeps()[0];
++  ASSERT_EQ(1u, echo_remover.take_backs().size());
++  ASSERT_FALSE(echo_remover.take_backs()[0].shift_slot);
++
++  processor.SetOutput(kOutputA, 11 * kBlock, 11);
++  processor.Run(kBlocks);
++  ASSERT_EQ(11u, processor.world().delay);
++
++  processor.Restart(kOutputA, 11 * kBlock, 11);
++  processor.Run(kBlocks);
++  ASSERT_EQ(2u, echo_remover.keeps().size());
++  EXPECT_NE(slot_a, echo_remover.keeps()[1]);
++  ASSERT_TRUE(echo_remover.slot(slot_a));
++  EXPECT_EQ(0, echo_remover.slot(slot_a)->echo_samples);
++}
++
++// Fogata: A's filters, taken back far off with their slot keeping them as
++// kept, are taken back again at the delay they were kept at: the slot follows
++// them and is A's again. When the echo then moves 3 blocks later and the
++// render is aligned there anew, the filters in use are kept in A's slot at the
++// next restart, not in the slot of the filters A used far off.
++TEST(BlockProcessor, KeptFiltersTakenBackAgainAtTheirDelayAreTheOutputsAgain) {
++  constexpr int kOutputA = 1;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  processor.SetOutput(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  processor.Restart(kOutputA, 13 * kBlock + 20, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  const size_t slot_a = echo_remover.keeps()[0];
++  ASSERT_EQ(1u, echo_remover.take_backs().size());
++  ASSERT_FALSE(echo_remover.take_backs()[0].shift_slot);
++
++  processor.Restart(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  ASSERT_EQ(2u, echo_remover.keeps().size());
++  const size_t slot_far = echo_remover.keeps()[1];
++  ASSERT_NE(slot_a, slot_far);
++  ASSERT_EQ(2u, echo_remover.take_backs().size());
++  ASSERT_EQ(slot_a, echo_remover.take_backs()[1].slot);
++  ASSERT_TRUE(echo_remover.take_backs()[1].shift_slot);
++
++  processor.SetOutput(kOutputA, 13 * kBlock, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(13u, processor.world().delay);
++
++  processor.Restart(kOutputA, 13 * kBlock, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(3u, echo_remover.keeps().size());
++  EXPECT_EQ(slot_a, echo_remover.keeps()[2]);
++}
++
++// Fogata: filters their slot follows (not taken back far off) that fit on the
++// edge of two blocks are taken back at the delay of their test: the delay
++// found does not decide (see KeptFiltersTakenBackFarOffComeBackAtTheDelayFound).
++TEST(BlockProcessor, KeptFiltersOnTheEdgeAreTakenBackAtTheDelayOfTheirTest) {
++  constexpr int kOutputA = 1;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  processor.SetOutput(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  processor.Restart(kOutputA, 10 * kBlock + 3 * kBlock / 4, 11);
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  ASSERT_EQ(1u, echo_remover.take_backs().size());
++  EXPECT_EQ(echo_remover.keeps()[0], echo_remover.take_backs()[0].slot);
++  EXPECT_EQ(3 * kBlock / 4, echo_remover.take_backs()[0].shift_samples);
++  EXPECT_EQ(10u, processor.world().delay);
++}
++
+ }  // namespace webrtc
+-- 
+2.43.0
+
