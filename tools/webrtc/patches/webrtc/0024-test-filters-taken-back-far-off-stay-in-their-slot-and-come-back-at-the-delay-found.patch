@@ -1,0 +1,109 @@
+From 8dce7b22c71e74ea06e4a0671b7ccf992d8f1537 Mon Sep 17 00:00:00 2001
+From: Holy Panda <239265931+holypandadev@users.noreply.github.com>
+Date: Fri, 27 Nov 2026 23:36:08 -0400
+Subject: [PATCH] test: filters taken back far off stay in their slot and come
+ back at the delay found
+
+Output A comes back further off than the lags of the tests and its filters are taken back as kept. At the next restart the filters in use go to an empty slot, not over the slot they were taken back from; when A comes back with its filters fitting on the edge of two blocks next to the delay found, they are taken back at the delay found.
+---
+ .../aec3/block_processor_unittest.cc          | 86 ++++++++++++++++++-
+ 1 file changed, 85 insertions(+), 1 deletion(-)
+
+diff --git a/modules/audio_processing/aec3/block_processor_unittest.cc b/modules/audio_processing/aec3/block_processor_unittest.cc
+index 1111a0e..6819cf0 100644
+--- a/modules/audio_processing/aec3/block_processor_unittest.cc
++++ b/modules/audio_processing/aec3/block_processor_unittest.cc
+@@ -771,4 +771,88 @@ TEST(BlockProcessor, KeptFiltersBeyondTheirShiftAreNotTakenBack) {
+   EXPECT_EQ(1, echo_remover.delay_changes() - delay_changes_before);
+ }
+ 
+-}  // namespace webrtc
+\ No newline at end of file
++// Fogata: output A's filters are kept at 10 blocks, and an output whose echo
++// matches them 3 blocks and 20 samples later takes them back there (more than
++// the lags of the tests off: their slot keeps them as kept, at 10). At the next
++// restart the filters in use are kept in the empty slot, not over A's, which
++// are then taken back as they were kept when A comes back at 10.
++TEST(BlockProcessor, KeptFiltersTakenBackFarOffStayInTheirSlot) {
++  constexpr int kOutputA = 1;
++  constexpr int kBlocks = 600;
++  KeptFiltersBlockProcessor processor;
++  const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++  processor.SetOutput(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++
++  // The output 3 blocks and 20 samples later: A's filters, kept with one slot
++  // left empty, do not fit at 10, are tested again at 13 and taken back there,
++  // their slot keeping them as kept.
++  processor.Restart(kOutputA, 13 * kBlock + 20, 13);
++  processor.Run(kBlocks);
++  ASSERT_EQ(1u, echo_remover.keeps().size());
++  const size_t slot_a = echo_remover.keeps()[0];
++  ASSERT_EQ(1u, echo_remover.take_backs().size());
++  ASSERT_EQ(slot_a, echo_remover.take_backs()[0].slot);
++  ASSERT_EQ(20, echo_remover.take_backs()[0].shift_samples);
++  ASSERT_FALSE(echo_remover.take_backs()[0].shift_slot);
++
++  // A at 10: the filters in use are kept in the empty slot, and A's, intact at
++  // their delay, are taken back with no shift.
++  processor.Restart(kOutputA, 10 * kBlock, 10);
++  processor.Run(kBlocks);
++  ASSERT_EQ(2u, echo_remover.keeps().size());
++  EXPECT_NE(slot_a, echo_remover.keeps()[1]);
++  ASSERT_TRUE(echo_remover.slot(slot_a));
++  EXPECT_EQ(kOutputA, echo_remover.slot(slot_a)->output);
++  EXPECT_EQ(0, echo_remover.slot(slot_a)->echo_samples);
++  EXPECT_TRUE(processor.TestedAtTheirDelay(slot_a, 10));
++  ASSERT_EQ(2u, echo_remover.take_backs().size());
++  EXPECT_EQ(slot_a, echo_remover.take_backs()[1].slot);
++  EXPECT_EQ(0, echo_remover.take_backs()[1].shift_samples);
++  EXPECT_EQ(10u, processor.world().delay);
++}
++
++// Fogata: as above, A's filters are kept at 10 blocks and taken back 3 blocks
++// and 20 samples later, their slot keeping them as kept. A then comes back
++// three quarters of a block after 10, found at 11, or a quarter of a block
++// before 10, found at 9: the filters fit at 10 on the edge of two blocks, and
++// are taken back at the delay found, where the render already is, rather than
++// moving it a block away from the delay the estimator finds.
++TEST(BlockProcessor, KeptFiltersTakenBackFarOffComeBackAtTheDelayFound) {
++  constexpr int kOutputA = 1;
++  constexpr int kBlocks = 600;
++  struct Case {
++    int echo_samples;
++    size_t found_delay;
++    int shift_samples;
++  };
++  for (const Case& c : {Case{10 * kBlock + 3 * kBlock / 4, 11, -kBlock / 4},
++                        Case{10 * kBlock - kBlock / 4, 9, 3 * kBlock / 4}}) {
++    SCOPED_TRACE(c.echo_samples);
++    KeptFiltersBlockProcessor processor;
++    const FakeKeptFiltersEchoRemover& echo_remover = processor.echo_remover();
++
++    processor.SetOutput(kOutputA, 10 * kBlock, 10);
++    processor.Run(kBlocks);
++    processor.Restart(kOutputA, 13 * kBlock + 20, 13);
++    processor.Run(kBlocks);
++    ASSERT_EQ(1u, echo_remover.keeps().size());
++    const size_t slot_a = echo_remover.keeps()[0];
++    ASSERT_EQ(1u, echo_remover.take_backs().size());
++    ASSERT_FALSE(echo_remover.take_backs()[0].shift_slot);
++
++    // A comes back: its filters, tested at 10, fit on the edge of 10 and of
++    // the delay found, and are taken back at the delay found.
++    processor.Restart(kOutputA, c.echo_samples, c.found_delay);
++    processor.Run(kBlocks);
++    ASSERT_EQ(2u, echo_remover.take_backs().size());
++    EXPECT_EQ(slot_a, echo_remover.take_backs()[1].slot);
++    EXPECT_EQ(c.shift_samples, echo_remover.take_backs()[1].shift_samples);
++    EXPECT_EQ(c.found_delay, processor.world().delay);
++    EXPECT_EQ(std::optional<size_t>(c.found_delay),
++              processor.world().requested_delay);
++  }
++}
++
++}  // namespace webrtc
+-- 
+2.53.0
+
