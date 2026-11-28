@@ -1,0 +1,713 @@
+Move the echo canceller's filters with the buffer when it goes to an echo sooner than the headroom
+
+Patch 0017 moves the render buffer to delay 0 once 125 lags in a row put the echo sooner
+than the delay headroom and before where the buffer stands. Each such move was taken as a
+new delay: the echo remover started its filters, ERLE and initial state over
+(kNewDetectedDelay), although the echo path had not changed, only where the buffer
+stands in front of it. And the estimate of 0 counted as a steady estimate, so the
+estimator reset itself every half second while the short lags went on. After an unmute
+(the recording restarted, which puts the buffer back where its reset puts it) the buffer
+moved again, the filters started over again, and the words after the unmute went out
+weaker than with main: in the simulator, with an echo of 2 to 30 ms, 1.6 to 1.9 dB on
+average over 288 runs, a third of the words 1 dB or more and one in six 3 dB or more.
+
+A move for lags sooner than the headroom now moves both filters (and the filter
+analyzer's view of them) by the blocks the buffer moved, instead of starting them over;
+what they learnt of the echo stays where the echo is. When the buffer later leaves that
+delay without a delay found (a reset at a restart of the recording, a flush, an
+underrun), the filters are moved back with it. The buffer goes to one block before the
+echo (the last short lag, in blocks, less one), not to 0, so that the filters keep as
+much of the echo's start as they can, and never above where it stood before the first
+such move. A delay from short lags neither counts as a steady estimate nor resets the
+estimator, so the histogram goes on and still finds an echo the buffer can reach.
+AecState does not take that delay as an external delay: the buffer then stands at the
+echo itself, not the headroom before it, so the filter's own delay is used.
+
+Making the filters longer (8 blocks more, as the headroom) brought the words back to main
+too, but a change of output in a call to a nearer echo (30 to 2 ms) then let through 6 dB
+more echo, as the longer filter lowers the reverberation's estimate; keeping that
+estimate on the filter's usual length lost the words again (-0.36 dB). Dropped.
+
+Simulator (M158 with this branch's patches, AEC3 alone at 16 kHz, headroom 512, speech-
+like far and near ends, room responses; the same seeds for main, this branch before and
+after), against main, words in dB (mean over all words) and echo after the unmute or the
+change (runs with 1 dB or more of it than main):
+- unmute 6 s after a change of output, echo 2 to 30 ms (288 runs, 5184 words): words -1.90
+  and -1.58 before, -0.16 and -0.11 now; more echo in 49 runs before, 2 now (up to 1.8 dB);
+- normal delays (20 to 200 ms, 84 runs): as main (before: -0.03 dB, 3 runs with more echo);
+- a change of output without mute or restart (96 runs): words -0.27, less echo in 70 runs,
+  more in none;
+- a change of output in a call, echo 2 to 180 ms (54 runs): words -0.09, more echo in 9
+  (before: 6); 30 to 2 ms and back (72 runs): words -0.35, more echo in 14, less in 22.
+  With main's code run twice the same way (dither), the last grid moves in 9 runs and
+  words by 0.01 dB: most of these 14 are noise, the rest are the nearer echo now within
+  the filter's reach, cancelled as AEC3 cancels any echo it reaches.
+Unit tests: a filter's partitions moved both ways, the ones left behind cleared; a move
+to an echo sooner than the headroom shifts the filters instead of starting them again,
+shifts them back when the buffer leaves that delay without a new delay found, and any
+other new delay still starts them again.
+
+diff --git a/modules/audio_processing/aec3/adaptive_fir_filter.cc b/modules/audio_processing/aec3/adaptive_fir_filter.cc
+--- a/modules/audio_processing/aec3/adaptive_fir_filter.cc
++++ b/modules/audio_processing/aec3/adaptive_fir_filter.cc
+@@ -527,6 +527,31 @@ void AdaptiveFirFilter::SetSizePartitions(size_t size, bool immediate_effect) {
+   }
+ }
+ 
++void AdaptiveFirFilter::ShiftPartitions(int k) {
++  const int num_partitions = static_cast<int>(max_size_partitions_);
++  if (k > 0) {
++    for (int p = num_partitions - 1; p >= 0; --p) {
++      for (size_t ch = 0; ch < num_render_channels_; ++ch) {
++        if (p >= k) {
++          H_[p][ch] = H_[p - k][ch];
++        } else {
++          H_[p][ch].Clear();
++        }
++      }
++    }
++  } else if (k < 0) {
++    for (int p = 0; p < num_partitions; ++p) {
++      for (size_t ch = 0; ch < num_render_channels_; ++ch) {
++        if (p - k < num_partitions) {
++          H_[p][ch] = H_[p - k][ch];
++        } else {
++          H_[p][ch].Clear();
++        }
++      }
++    }
++  }
++}
++
+ void AdaptiveFirFilter::UpdateSize() {
+   RTC_DCHECK_GE(size_change_duration_blocks_, size_change_counter_);
+   size_t old_size_partitions_ = current_size_partitions_;
+diff --git a/modules/audio_processing/aec3/adaptive_fir_filter.h b/modules/audio_processing/aec3/adaptive_fir_filter.h
+--- a/modules/audio_processing/aec3/adaptive_fir_filter.h
++++ b/modules/audio_processing/aec3/adaptive_fir_filter.h
+@@ -131,6 +131,11 @@ class AdaptiveFirFilter {
+   // Sets the filter size.
+   void SetSizePartitions(size_t size, bool immediate_effect);
+ 
++  // Moves the filter `k` partitions later (earlier when `k` is negative), as
++  // when the render buffer's delay went `k` blocks down (or up). The
++  // partitions left behind start from zero.
++  void ShiftPartitions(int k);
++
+   // Computes the frequency responses for the filter partitions.
+   void ComputeFrequencyResponse(
+       std::vector<std::array<float, kFftLengthBy2Plus1>>* H2) const;
+diff --git a/modules/audio_processing/aec3/adaptive_fir_filter_unittest.cc b/modules/audio_processing/aec3/adaptive_fir_filter_unittest.cc
+--- a/modules/audio_processing/aec3/adaptive_fir_filter_unittest.cc
++++ b/modules/audio_processing/aec3/adaptive_fir_filter_unittest.cc
+@@ -443,6 +443,56 @@ TEST(AdaptiveFirFilterTest, FilterSize) {
+   }
+ }
+ 
++// Verifies that shifting the partitions moves each one by the number of blocks
++// given, later or sooner, and clears the partitions that nothing moves into.
++TEST(AdaptiveFirFilterTest, ShiftPartitions) {
++  ApmDataDumper data_dumper(42);
++  constexpr size_t kNumPartitions = 6;
++  constexpr size_t kNumRenderChannels = 2;
++  AdaptiveFirFilter filter(kNumPartitions, kNumPartitions, 250,
++                           kNumRenderChannels, DetectOptimization(),
++                           &data_dumper);
++  std::vector<std::vector<FftData>> H(
++      kNumPartitions, std::vector<FftData>(kNumRenderChannels));
++  for (size_t p = 0; p < kNumPartitions; ++p) {
++    for (size_t ch = 0; ch < kNumRenderChannels; ++ch) {
++      H[p][ch].re.fill(1.f + p + 10.f * ch);
++      H[p][ch].im.fill(-1.f - p - 10.f * ch);
++    }
++  }
++  const auto expect_partition = [&](size_t p, std::optional<size_t> from) {
++    for (size_t ch = 0; ch < kNumRenderChannels; ++ch) {
++      const FftData& h = filter.GetFilter()[p][ch];
++      const float re = from ? 1.f + *from + 10.f * ch : 0.f;
++      const float im = from ? -1.f - *from - 10.f * ch : 0.f;
++      for (size_t k = 0; k < kFftLengthBy2Plus1; ++k) {
++        EXPECT_EQ(re, h.re[k]);
++        EXPECT_EQ(im, h.im[k]);
++      }
++    }
++  };
++
++  filter.SetFilter(kNumPartitions, H);
++  filter.ShiftPartitions(2);
++  for (size_t p = 0; p < kNumPartitions; ++p) {
++    expect_partition(p, p >= 2 ? std::optional<size_t>(p - 2) : std::nullopt);
++  }
++
++  filter.SetFilter(kNumPartitions, H);
++  filter.ShiftPartitions(-3);
++  for (size_t p = 0; p < kNumPartitions; ++p) {
++    expect_partition(p, p + 3 < kNumPartitions
++                            ? std::optional<size_t>(p + 3)
++                            : std::nullopt);
++  }
++
++  filter.SetFilter(kNumPartitions, H);
++  filter.ShiftPartitions(0);
++  for (size_t p = 0; p < kNumPartitions; ++p) {
++    expect_partition(p, p);
++  }
++}
++
+ class AdaptiveFirFilterMultiChannel
+     : public ::testing::Test,
+       public ::testing::WithParamInterface<std::tuple<size_t, size_t>> {};
+diff --git a/modules/audio_processing/aec3/aec_state.cc b/modules/audio_processing/aec3/aec_state.cc
+--- a/modules/audio_processing/aec3/aec_state.cc
++++ b/modules/audio_processing/aec3/aec_state.cc
+@@ -387,8 +387,16 @@ void AecState::FilterDelay::Update(
+     const std::optional<DelayEstimate>& external_delay,
+     size_t blocks_with_proper_filter_adaptation) {
+   // Update the delay based on the external delay.
++  // A delay found among echoes sooner than the delay headroom puts the render
++  // buffer at the echo itself, not the headroom before it, so the headroom is
++  // no guess for where the filter has the echo: the filter's own delay is used,
++  // as without an external delay.
+   if (external_delay) {
+-    external_delay_ = external_delay;
++    if (external_delay->from_short_lags) {
++      external_delay_ = std::nullopt;
++    } else {
++      external_delay_ = external_delay;
++    }
+   }
+ 
+   // Override the estimated delay if it is not certain that the filter has had
+diff --git a/modules/audio_processing/aec3/aec_state.h b/modules/audio_processing/aec3/aec_state.h
+--- a/modules/audio_processing/aec3/aec_state.h
++++ b/modules/audio_processing/aec3/aec_state.h
+@@ -121,6 +121,10 @@ class AecState {
+   // Takes appropriate action at an echo path change.
+   void HandleEchoPathChange(const EchoPathVariability& echo_path_variability);
+ 
++  // Moves what is known of the linear filters `k` blocks later (earlier when
++  // `k` is negative), as they were moved (see Subtractor::ShiftFilters).
++  void ShiftFilters(int k) { filter_analyzer_.Shift(k); }
++
+   // Returns the decay factor for the echo reverberation. The parameter `mild`
+   // indicates which exponential decay to return. The default one or a milder
+   // one that can be used during nearend regions.
+diff --git a/modules/audio_processing/aec3/block_processor.cc b/modules/audio_processing/aec3/block_processor.cc
+--- a/modules/audio_processing/aec3/block_processor.cc
++++ b/modules/audio_processing/aec3/block_processor.cc
+@@ -82,6 +82,9 @@ class BlockProcessorImpl final : public BlockProcessor {
+   RenderDelayBuffer::BufferingEvent render_event_;
+   size_t capture_call_counter_ = 0;
+   std::optional<DelayEstimate> estimated_delay_;
++  // The render buffer's delay after its last move to an echo sooner than the
++  // delay headroom, while the buffer stays there.
++  std::optional<size_t> short_lag_buffer_delay_;
+ };
+ 
+ std::atomic<int> BlockProcessorImpl::instance_count_(0);
+@@ -181,6 +184,19 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+                         1);
+ 
+   bool has_delay_estimator = !config_.delay.use_external_delay_estimator;
++
++  // Fogata: when the render buffer left the delay it moved to for an echo
++  // sooner than the delay headroom without a new delay found (a reset at a
++  // restart of the recording, a flush or an underrun), the filters are moved
++  // as the buffer was, as the echo path is not known to have changed and
++  // resets clear nothing of the filters.
++  if (short_lag_buffer_delay_ &&
++      render_buffer_->Delay() != *short_lag_buffer_delay_) {
++    echo_remover_->ShiftFilters(static_cast<int>(*short_lag_buffer_delay_) -
++                                static_cast<int>(render_buffer_->Delay()));
++    short_lag_buffer_delay_ = std::nullopt;
++  }
++
+   if (has_delay_estimator) {
+     RTC_DCHECK(delay_controller_);
+     // Compute and apply the render delay required to achieve proper signal
+@@ -189,6 +205,7 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+         render_buffer_->GetDownsampledRenderBuffer(), render_buffer_->Delay(),
+         *capture_block);
+ 
++    const size_t buffer_delay_before = render_buffer_->Delay();
+     if (estimated_delay_) {
+       bool delay_change =
+           render_buffer_->AlignFromDelay(estimated_delay_->delay);
+@@ -197,8 +214,18 @@ void BlockProcessorImpl::ProcessCapture(bool echo_path_gain_change,
+             config_.delay.log_warning_on_delay_changes ? LS_WARNING : LS_INFO;
+         RTC_LOG_V(log_level) << "Delay changed to " << estimated_delay_->delay
+                              << " at block " << capture_call_counter_;
+-        echo_path_variability.delay_change =
+-            EchoPathVariability::DelayAdjustment::kNewDetectedDelay;
++        // Fogata: a move to an echo sooner than the delay headroom keeps the
++        // echo path as it is: the filters are moved with the buffer instead of
++        // starting again.
++        if (delay_controller_->DelayFromShortLags()) {
++          echo_remover_->ShiftFilters(static_cast<int>(buffer_delay_before) -
++                                      static_cast<int>(render_buffer_->Delay()));
++          short_lag_buffer_delay_ = render_buffer_->Delay();
++        } else {
++          short_lag_buffer_delay_ = std::nullopt;
++          echo_path_variability.delay_change =
++              EchoPathVariability::DelayAdjustment::kNewDetectedDelay;
++        }
+       }
+     }
+ 
+diff --git a/modules/audio_processing/aec3/block_processor_unittest.cc b/modules/audio_processing/aec3/block_processor_unittest.cc
+--- a/modules/audio_processing/aec3/block_processor_unittest.cc
++++ b/modules/audio_processing/aec3/block_processor_unittest.cc
+@@ -16,6 +16,7 @@
+ #include <span>
+ #include <string>
+ #include <utility>
++#include <vector>
+ 
+ #include "api/audio/echo_canceller3_config.h"
+ #include "api/environment/environment.h"
+@@ -358,4 +359,99 @@ TEST(BlockProcessor, ExternalDelayAppliedCorrectlyWithInitialCaptureCalls) {
+   block_processor->ProcessCapture(false, false, nullptr, &capture_block);
+ }
+ 
+-}  // namespace webrtc
+\ No newline at end of file
++// Verifies that a move of the render buffer to an echo sooner than the delay
++// headroom shifts the filters instead of starting them again, that they are
++// shifted back when the buffer then leaves that delay without a new delay
++// found, and that any other move still starts the filters again.
++TEST(BlockProcessor, ShortLagMovesShiftTheFilters) {
++  constexpr int kSampleRateHz = 16000;
++  auto render_delay_buffer_mock =
++      std::make_unique<NiceMock<test::MockRenderDelayBuffer>>(kSampleRateHz,
++                                                              1);
++  auto render_delay_controller_mock =
++      std::make_unique<NiceMock<test::MockRenderDelayController>>();
++  auto echo_remover_mock = std::make_unique<NiceMock<test::MockEchoRemover>>();
++
++  size_t buffer_delay = 3;
++  std::optional<DelayEstimate> delay;
++  bool from_short_lags = false;
++  ON_CALL(*render_delay_buffer_mock, Insert(_))
++      .WillByDefault(Return(RenderDelayBuffer::BufferingEvent::kNone));
++  ON_CALL(*render_delay_buffer_mock, PrepareCaptureProcessing())
++      .WillByDefault(Return(RenderDelayBuffer::BufferingEvent::kNone));
++  ON_CALL(*render_delay_buffer_mock, Delay()).WillByDefault([&] {
++    return buffer_delay;
++  });
++  ON_CALL(*render_delay_buffer_mock, AlignFromDelay(_))
++      .WillByDefault([&](size_t new_delay) {
++        const bool change = new_delay != buffer_delay;
++        buffer_delay = new_delay;
++        return change;
++      });
++  ON_CALL(*render_delay_controller_mock, GetDelay(_, _, _))
++      .WillByDefault([&] { return delay; });
++  ON_CALL(*render_delay_controller_mock, DelayFromShortLags())
++      .WillByDefault([&] { return from_short_lags; });
++
++  std::vector<int> shifts;
++  std::vector<EchoPathVariability::DelayAdjustment> delay_changes;
++  ON_CALL(*echo_remover_mock, ShiftFilters(_)).WillByDefault([&](int k) {
++    shifts.push_back(k);
++  });
++  ON_CALL(*echo_remover_mock, ProcessCapture(_, _, _, _, _, _))
++      .WillByDefault([&](EchoPathVariability echo_path_variability, bool,
++                         const std::optional<DelayEstimate>&, RenderBuffer*,
++                         Block*, Block*) {
++        delay_changes.push_back(echo_path_variability.delay_change);
++      });
++
++  std::unique_ptr<BlockProcessor> block_processor(BlockProcessor::Create(
++      EchoCanceller3Config(), kSampleRateHz, 1, 1,
++      std::move(render_delay_buffer_mock),
++      std::move(render_delay_controller_mock), std::move(echo_remover_mock)));
++  Block render_block(NumBandsForRate(kSampleRateHz), 1);
++  Block capture_block(NumBandsForRate(kSampleRateHz), 1);
++  const auto process = [&] {
++    block_processor->BufferRender(render_block);
++    block_processor->ProcessCapture(false, false, nullptr, &capture_block);
++  };
++  using DelayAdjustment = EchoPathVariability::DelayAdjustment;
++
++  // The buffer stays where it is.
++  delay = DelayEstimate(DelayEstimate::Quality::kRefined, 3);
++  process();
++  EXPECT_TRUE(shifts.empty());
++  EXPECT_EQ(DelayAdjustment::kNone, delay_changes.back());
++
++  // A move to an echo sooner than the headroom shifts the filters by as many
++  // blocks as the buffer went down, and does not start them again.
++  delay = DelayEstimate(DelayEstimate::Quality::kCoarse, 1);
++  from_short_lags = true;
++  process();
++  EXPECT_EQ(std::vector<int>({2}), shifts);
++  EXPECT_EQ(DelayAdjustment::kNone, delay_changes.back());
++
++  // While the buffer stays there, nothing more is shifted.
++  delay = std::nullopt;
++  from_short_lags = false;
++  process();
++  EXPECT_EQ(std::vector<int>({2}), shifts);
++
++  // The buffer leaving that delay without a new delay found (as at a reset)
++  // shifts the filters back.
++  buffer_delay = 3;
++  process();
++  EXPECT_EQ(std::vector<int>({2, -2}), shifts);
++  EXPECT_EQ(DelayAdjustment::kNone, delay_changes.back());
++  buffer_delay = 4;
++  process();
++  EXPECT_EQ(std::vector<int>({2, -2}), shifts);
++
++  // Any other new delay starts the filters again and shifts nothing.
++  delay = DelayEstimate(DelayEstimate::Quality::kRefined, 6);
++  process();
++  EXPECT_EQ(std::vector<int>({2, -2}), shifts);
++  EXPECT_EQ(DelayAdjustment::kNewDetectedDelay, delay_changes.back());
++}
++
++}  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/delay_estimate.h b/modules/audio_processing/aec3/delay_estimate.h
+--- a/modules/audio_processing/aec3/delay_estimate.h
++++ b/modules/audio_processing/aec3/delay_estimate.h
+@@ -24,6 +24,10 @@ struct DelayEstimate {
+ 
+   Quality quality;
+   size_t delay;
++  // Set when the delay was found among echoes sooner than the delay headroom:
++  // the render buffer then stands just before the echo itself, not the
++  // headroom before it.
++  bool from_short_lags = false;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/echo_path_delay_estimator.cc b/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+--- a/modules/audio_processing/aec3/echo_path_delay_estimator.cc
++++ b/modules/audio_processing/aec3/echo_path_delay_estimator.cc
+@@ -105,6 +105,17 @@ std::optional<DelayEstimate> EchoPathDelayEstimator::EstimateDelay(
+     aggregated_matched_filter_lag->delay *= down_sampling_factor_;
+   }
+ 
++  // Fogata: a delay of 0 found from lags shorter than the headroom does not
++  // come from the histogram, so it neither counts as a steady estimate nor
++  // resets the estimator every half second; the histogram goes on and still
++  // finds an echo that the buffer can reach.
++  if (aggregated_matched_filter_lag &&
++      matched_filter_lag_aggregator_.ShortDelayFound()) {
++    consistent_estimate_counter_ = 0;
++    old_aggregated_lag_ = std::nullopt;
++    return aggregated_matched_filter_lag;
++  }
++
+   if (old_aggregated_lag_ && aggregated_matched_filter_lag &&
+       old_aggregated_lag_->delay == aggregated_matched_filter_lag->delay) {
+     ++consistent_estimate_counter_;
+diff --git a/modules/audio_processing/aec3/echo_remover.cc b/modules/audio_processing/aec3/echo_remover.cc
+--- a/modules/audio_processing/aec3/echo_remover.cc
++++ b/modules/audio_processing/aec3/echo_remover.cc
+@@ -181,6 +181,11 @@ class EchoRemoverImpl final : public EchoRemover {
+     capture_output_used_ = capture_output_used;
+   }
+ 
++  void ShiftFilters(int k) override {
++    subtractor_.ShiftFilters(k);
++    aec_state_.ShiftFilters(k);
++  }
++
+  private:
+   static std::atomic<int> instance_count_;
+   const EchoCanceller3Config config_;
+diff --git a/modules/audio_processing/aec3/echo_remover.h b/modules/audio_processing/aec3/echo_remover.h
+--- a/modules/audio_processing/aec3/echo_remover.h
++++ b/modules/audio_processing/aec3/echo_remover.h
+@@ -61,6 +61,11 @@ class EchoRemover {
+   // resulting output is anyway not used, for instance when the endpoint is
+   // muted.
+   virtual void SetCaptureOutputUsage(bool capture_output_used) = 0;
++
++  // Moves the linear filters, and what is known of them, `k` blocks later
++  // (earlier when `k` is negative), as the render buffer's delay went `k`
++  // blocks down (or up) without a change of the echo path.
++  virtual void ShiftFilters(int k) = 0;
+ };
+ 
+ }  // namespace webrtc
+diff --git a/modules/audio_processing/aec3/filter_analyzer.cc b/modules/audio_processing/aec3/filter_analyzer.cc
+--- a/modules/audio_processing/aec3/filter_analyzer.cc
++++ b/modules/audio_processing/aec3/filter_analyzer.cc
+@@ -15,6 +15,7 @@
+ #include <atomic>
+ #include <cmath>
+ #include <cstddef>
++#include <cstdlib>
+ #include <numeric>
+ #include <span>
+ #include <vector>
+@@ -68,6 +69,32 @@ FilterAnalyzer::FilterAnalyzer(const EchoCanceller3Config& config,
+ 
+ FilterAnalyzer::~FilterAnalyzer() = default;
+ 
++void FilterAnalyzer::Shift(int k) {
++  const int shift = k * static_cast<int>(kBlockSize);
++  const size_t m = static_cast<size_t>(std::abs(shift));
++  for (size_t ch = 0; ch < h_highpass_.size(); ++ch) {
++    std::vector<float>& h = h_highpass_[ch];
++    if (m >= h.size()) {
++      std::fill(h.begin(), h.end(), 0.f);
++    } else if (shift > 0) {
++      std::copy_backward(h.begin(), h.end() - m, h.end());
++      std::fill(h.begin(), h.begin() + m, 0.f);
++    } else if (shift < 0) {
++      std::copy(h.begin() + m, h.end(), h.begin());
++      std::fill(h.end() - m, h.end(), 0.f);
++    }
++    FilterAnalysisState& st = filter_analysis_states_[ch];
++    const int peak = static_cast<int>(st.peak_index) + shift;
++    st.peak_index = h.empty() ? 0
++                              : static_cast<size_t>(std::clamp(
++                                    peak, 0, static_cast<int>(h.size()) - 1));
++    filter_delays_blocks_[ch] = st.peak_index >> kBlockSizeLog2;
++    st.consistent_filter_detector.Shift(k);
++  }
++  min_filter_delay_blocks_ = *std::min_element(filter_delays_blocks_.begin(),
++                                               filter_delays_blocks_.end());
++}
++
+ void FilterAnalyzer::Reset() {
+   blocks_since_reset_ = 0;
+   ResetRegion();
+@@ -213,6 +240,14 @@ FilterAnalyzer::ConsistentFilterDetector::ConsistentFilterDetector(
+   Reset();
+ }
+ 
++void FilterAnalyzer::ConsistentFilterDetector::Shift(int k) {
++  if (consistent_delay_reference_ >= 0) {
++    consistent_delay_reference_ = consistent_delay_reference_ + k >= 0
++                                      ? consistent_delay_reference_ + k
++                                      : -10;
++  }
++}
++
+ void FilterAnalyzer::ConsistentFilterDetector::Reset() {
+   significant_peak_ = false;
+   filter_floor_accum_ = 0.f;
+diff --git a/modules/audio_processing/aec3/filter_analyzer.h b/modules/audio_processing/aec3/filter_analyzer.h
+--- a/modules/audio_processing/aec3/filter_analyzer.h
++++ b/modules/audio_processing/aec3/filter_analyzer.h
+@@ -39,6 +39,11 @@ class FilterAnalyzer {
+   // Resets the analysis.
+   void Reset();
+ 
++  // Moves the analysis `k` blocks later (earlier when `k` is negative), as the
++  // linear filters were moved when the render buffer's delay went `k` blocks
++  // down (or up).
++  void Shift(int k);
++
+   // Updates the estimates with new input data.
+   void Update(std::span<const std::vector<float>> filters_time_domain,
+               const RenderBuffer& render_buffer,
+@@ -90,6 +95,8 @@ class FilterAnalyzer {
+    public:
+     explicit ConsistentFilterDetector(const EchoCanceller3Config& config);
+     void Reset();
++    // Moves the delay that the filter's shape kept `k` blocks later.
++    void Shift(int k);
+     bool Detect(std::span<const float> filter_to_analyze,
+                 const FilterRegion& region,
+                 const Block& x_block,
+diff --git a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+--- a/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
++++ b/modules/audio_processing/aec3/matched_filter_lag_aggregator.cc
+@@ -119,7 +119,9 @@ std::optional<DelayEstimate> MatchedFilterLagAggregator::Aggregate(
+   // let the lags that music gives now and then move the buffer.
+   if (steady_short_lags_ >= kSteadyShortLags) {
+     short_delay_found_ = true;
+-    return DelayEstimate(DelayEstimate::Quality::kCoarse, 0);
++    DelayEstimate estimate(DelayEstimate::Quality::kCoarse, 0);
++    estimate.from_short_lags = true;
++    return estimate;
+   }
+ 
+   return std::nullopt;
+diff --git a/modules/audio_processing/aec3/mock/mock_echo_remover.h b/modules/audio_processing/aec3/mock/mock_echo_remover.h
+--- a/modules/audio_processing/aec3/mock/mock_echo_remover.h
++++ b/modules/audio_processing/aec3/mock/mock_echo_remover.h
+@@ -50,6 +50,7 @@ class MockEchoRemover : public EchoRemover {
+               SetCaptureOutputUsage,
+               (bool capture_output_used),
+               (override));
++  MOCK_METHOD(void, ShiftFilters, (int k), (override));
+ };
+ 
+ }  // namespace test
+diff --git a/modules/audio_processing/aec3/mock/mock_render_delay_controller.h b/modules/audio_processing/aec3/mock/mock_render_delay_controller.h
+--- a/modules/audio_processing/aec3/mock/mock_render_delay_controller.h
++++ b/modules/audio_processing/aec3/mock/mock_render_delay_controller.h
+@@ -37,6 +37,7 @@ class MockRenderDelayController : public RenderDelayController {
+                const Block& capture),
+               (override));
+   MOCK_METHOD(bool, HasClockdrift, (), (const, override));
++  MOCK_METHOD(bool, DelayFromShortLags, (), (const, override));
+ };
+ 
+ }  // namespace test
+diff --git a/modules/audio_processing/aec3/render_delay_controller.cc b/modules/audio_processing/aec3/render_delay_controller.cc
+--- a/modules/audio_processing/aec3/render_delay_controller.cc
++++ b/modules/audio_processing/aec3/render_delay_controller.cc
+@@ -9,6 +9,7 @@
+  */
+ #include "modules/audio_processing/aec3/render_delay_controller.h"
+ 
++#include <algorithm>
+ #include <atomic>
+ #include <cstddef>
+ #include <memory>
+@@ -48,6 +49,7 @@ class RenderDelayControllerImpl final : public RenderDelayController {
+       size_t render_delay_buffer_delay,
+       const Block& capture) override;
+   bool HasClockdrift() const override;
++  bool DelayFromShortLags() const override { return delay_from_short_lags_; }
+ 
+  private:
+   static std::atomic<int> instance_count_;
+@@ -57,6 +59,10 @@ class RenderDelayControllerImpl final : public RenderDelayController {
+   EchoPathDelayEstimator delay_estimator_;
+   RenderDelayControllerMetrics metrics_;
+   std::optional<DelayEstimate> delay_samples_;
++  bool delay_from_short_lags_ = false;
++  // The buffer's delay before its first move to an echo sooner than the
++  // headroom; such moves never take the buffer above it.
++  std::optional<size_t> buffer_delay_before_short_moves_;
+   size_t capture_call_counter_ = 0;
+   DelayEstimate::Quality last_delay_estimate_quality_;
+ };
+@@ -100,6 +106,8 @@ RenderDelayControllerImpl::~RenderDelayControllerImpl() = default;
+ void RenderDelayControllerImpl::Reset(bool reset_delay_confidence) {
+   delay_ = std::nullopt;
+   delay_samples_ = std::nullopt;
++  delay_from_short_lags_ = false;
++  buffer_delay_before_short_moves_ = std::nullopt;
+   delay_estimator_.Reset(reset_delay_confidence);
+   if (reset_delay_confidence) {
+     last_delay_estimate_quality_ = DelayEstimate::Quality::kCoarse;
+@@ -116,14 +124,30 @@ std::optional<DelayEstimate> RenderDelayControllerImpl::GetDelay(
+ 
+   auto delay_samples = delay_estimator_.EstimateDelay(render_buffer, capture);
+ 
+-  // Fogata: a delay of 0 found from lags shorter than the headroom moves the
++  // Fogata: a delay found from lags shorter than the headroom moves the
+   // buffer only when the echo comes before where the buffer stands now, out of
+   // the linear filter's reach; where the filter still reaches it, the buffer
+-  // stays and the filter keeps what it learnt.
+-  if (delay_samples && delay_estimator_.ShortDelayFound() &&
+-      delay_estimator_.LastShortDelay() / static_cast<int>(kBlockSize) >=
+-          static_cast<int>(render_delay_buffer_delay)) {
+-    delay_samples = std::nullopt;
++  // stays and the filter keeps what it learnt. The buffer goes to one block
++  // before the echo, not to 0, so that the filter keeps as much of the echo's
++  // tail as it can, and never above where it stood before the first such move.
++  delay_from_short_lags_ = false;
++  if (delay_samples && delay_estimator_.ShortDelayFound()) {
++    const int short_delay_blocks =
++        delay_estimator_.LastShortDelay() / static_cast<int>(kBlockSize);
++    const int buffer_delay_blocks = static_cast<int>(render_delay_buffer_delay);
++    if (short_delay_blocks < buffer_delay_blocks) {
++      if (!buffer_delay_before_short_moves_) {
++        buffer_delay_before_short_moves_ = render_delay_buffer_delay;
++      }
++      const int target_blocks =
++          std::min(std::max(short_delay_blocks - 1, 0),
++                   static_cast<int>(*buffer_delay_before_short_moves_));
++      delay_samples->delay = static_cast<size_t>(target_blocks) * kBlockSize;
++      delay_samples->from_short_lags = true;
++      delay_from_short_lags_ = true;
++    } else {
++      delay_samples = std::nullopt;
++    }
+   }
+ 
+   if (delay_samples) {
+diff --git a/modules/audio_processing/aec3/render_delay_controller.h b/modules/audio_processing/aec3/render_delay_controller.h
+--- a/modules/audio_processing/aec3/render_delay_controller.h
++++ b/modules/audio_processing/aec3/render_delay_controller.h
+@@ -44,6 +44,11 @@ class RenderDelayController {
+ 
+   // Returns true if clockdrift has been detected.
+   virtual bool HasClockdrift() const = 0;
++
++  // Returns true when the delay that GetDelay last returned is a move of the
++  // render buffer to an echo sooner than the delay headroom: the echo path
++  // stays as it was.
++  virtual bool DelayFromShortLags() const = 0;
+ };
+ }  // namespace webrtc
+ 
+diff --git a/modules/audio_processing/aec3/subtractor.cc b/modules/audio_processing/aec3/subtractor.cc
+--- a/modules/audio_processing/aec3/subtractor.cc
++++ b/modules/audio_processing/aec3/subtractor.cc
+@@ -13,6 +13,7 @@
+ #include <algorithm>
+ #include <array>
+ #include <cstddef>
++#include <cstdlib>
+ #include <memory>
+ #include <span>
+ #include <vector>
+@@ -40,6 +41,21 @@ namespace webrtc {
+ 
+ namespace {
+ 
++// Moves `x` by `samples` (later when positive), the samples left behind
++// starting from zero.
++void ShiftSamples(int samples, std::vector<float>& x) {
++  const size_t m = static_cast<size_t>(std::abs(samples));
++  if (m >= x.size()) {
++    std::fill(x.begin(), x.end(), 0.f);
++  } else if (samples > 0) {
++    std::copy_backward(x.begin(), x.end() - m, x.end());
++    std::fill(x.begin(), x.begin() + m, 0.f);
++  } else if (samples < 0) {
++    std::copy(x.begin() + m, x.end(), x.begin());
++    std::fill(x.end() - m, x.end(), 0.f);
++  }
++}
++
+ void PredictionError(const Aec3Fft& fft,
+                      const FftData& S,
+                      std::span<const float> y,
+@@ -145,6 +161,19 @@ Subtractor::Subtractor(const Environment& env,
+ 
+ Subtractor::~Subtractor() = default;
+ 
++void Subtractor::ShiftFilters(int k) {
++  for (size_t ch = 0; ch < num_capture_channels_; ++ch) {
++    refined_filters_[ch]->ShiftPartitions(k);
++    coarse_filter_[ch]->ShiftPartitions(k);
++    ShiftSamples(k * static_cast<int>(kBlockSize),
++                 refined_impulse_responses_[ch]);
++    if (ch < coarse_impulse_responses_.size()) {
++      ShiftSamples(k * static_cast<int>(kBlockSize),
++                   coarse_impulse_responses_[ch]);
++    }
++  }
++}
++
+ void Subtractor::HandleEchoPathChange(
+     const EchoPathVariability& echo_path_variability) {
+   const auto full_reset = [&]() {
+diff --git a/modules/audio_processing/aec3/subtractor.h b/modules/audio_processing/aec3/subtractor.h
+--- a/modules/audio_processing/aec3/subtractor.h
++++ b/modules/audio_processing/aec3/subtractor.h
+@@ -61,6 +61,12 @@ class Subtractor {
+   // Exits the initial state.
+   void ExitInitialState();
+ 
++  // Moves the linear filters `k` blocks later (earlier when `k` is negative),
++  // as the render buffer's delay went `k` blocks down (or up) to follow an echo
++  // sooner than the delay headroom, so that the filters keep what they learnt
++  // of the echo.
++  void ShiftFilters(int k);
++
+   // Returns the block-wise frequency responses for the refined adaptive
+   // filters.
+   const std::vector<std::vector<std::array<float, kFftLengthBy2Plus1>>>&
